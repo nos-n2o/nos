@@ -469,6 +469,7 @@ mod tests {
                 .collect()
         };
         DOC.lines()
+            .take_while(|l| !l.starts_with("## ")) // the phase table precedes every section
             .filter(|l| l.starts_with("| `"))
             .map(|l| {
                 let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();

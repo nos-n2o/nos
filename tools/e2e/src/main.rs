@@ -15,6 +15,7 @@ mod consts;
 mod docker;
 mod logd_mem;
 mod logs;
+mod modules;
 mod phases;
 mod rest;
 mod router;
@@ -73,6 +74,7 @@ async fn main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("[nos-e2e] {cmd}: FAILED: {e:#}");
+            modules::report_missing(&cmd);
             ExitCode::FAILURE
         }
     }
