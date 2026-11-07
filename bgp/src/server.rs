@@ -56,7 +56,7 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         | BgpRequest::GetFlowspecRoutesPage { .. }
         | BgpRequest::GetVpnRoutesPage { .. }
         | BgpRequest::GetRpkiSummary
-        | BgpRequest::ShowBmp => {
+        | BgpRequest::ShowBmp { .. } => {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_)
@@ -214,12 +214,13 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
                     break;
                 }
             }
-            BgpRequest::ShowBmp => {
-                if writer
-                    .send(BgpEvent::BmpStatus(sessions.bmp_status()))
-                    .await
-                    .is_err()
-                {
+            BgpRequest::ShowBmp { instance: asked } => {
+                let event = if asked == *instance {
+                    BgpEvent::BmpStatus(sessions.bmp_status())
+                } else {
+                    BgpEvent::Error(format!("this is bgp instance {instance}, not {asked}"))
+                };
+                if writer.send(event).await.is_err() {
                     break;
                 }
             }

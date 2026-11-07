@@ -178,7 +178,7 @@ fn lab() -> Lab {
                         next: None,
                     },
                     BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
-                    BgpRequest::ShowBmp => BgpEvent::BmpStatus(Vec::new()),
+                    BgpRequest::ShowBmp { .. } => BgpEvent::BmpStatus(Vec::new()),
                     BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
                         routes: Vec::new(),
                         next: None,

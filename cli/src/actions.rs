@@ -1198,7 +1198,9 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
         )
         .await
         {
-            Ok(Some(bgp_socket)) => match bgp_client::get_bmp_status(&bgp_socket).await {
+            Ok(Some(bgp_socket)) => match bgp_client::get_bmp_status(&bgp_socket, &instance.name)
+                .await
+            {
                 Ok(stations) => println!("{}", format::render_bgp_bmp(&instance.name, &stations)),
                 Err(e) => eprintln!("error: {e}"),
             },

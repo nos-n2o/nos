@@ -400,7 +400,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                             next: None,
                         },
                         BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
-                        BgpRequest::ShowBmp => BgpEvent::BmpStatus(Vec::new()),
+                        BgpRequest::ShowBmp { .. } => BgpEvent::BmpStatus(Vec::new()),
                         BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
                             routes: vec![nos_proto::BgpRouteSummary {
                                 prefix: "192.0.2.0/24".into(),

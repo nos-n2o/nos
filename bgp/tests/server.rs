@@ -88,7 +88,9 @@ async fn only_people_get_the_show_queries_answered() {
                     after: None,
                     limit: 10,
                 },
-                5 => BgpRequest::ShowBmp,
+                5 => BgpRequest::ShowBmp {
+                    instance: "r1".into(),
+                },
                 _ => BgpRequest::GetRpkiSummary,
             };
             w.send(req).await.unwrap();
@@ -514,4 +516,17 @@ async fn vpn_export_past_max_frame_is_staged_until_the_closing_full() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(sessions.vpn_local_len().await, usize::from(N));
+}
+
+/// #864: `show bgp bmp` asked of the wrong instance's daemon is an error.
+#[tokio::test]
+async fn show_bmp_for_another_instance_is_an_error() {
+    let (_tmp, path, _server) = start();
+    let (mut r, mut w) = connect_as(&path, Role::User).await;
+    w.send(BgpRequest::ShowBmp {
+        instance: "other".into(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(next_event(&mut r).await, Some(BgpEvent::Error(_))));
 }

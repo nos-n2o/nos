@@ -573,10 +573,12 @@ pub enum BgpRequest {
         limit: u32,
     },
     /// One-shot: every configured `bmp-station`'s connection state and frame
-    /// counters (`show bgp bmp`, #864); answered by `BgpEvent::BmpStatus`. No
-    /// instance field: one `nos-bgpd` serves one instance (like
-    /// `GetRpkiSummary`), the client picks the daemon.
-    ShowBmp,
+    /// counters (`show bgp bmp`, #864); answered by `BgpEvent::BmpStatus`
+    /// (or `BgpEvent::Error` when `instance` is not this daemon's).
+    ShowBmp {
+        /// The BGP instance asked; a daemon of another instance refuses.
+        instance: String,
+    },
 }
 
 /// Most routes `nos-bgpd` returns in one page of any paged query, and the
