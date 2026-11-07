@@ -1429,8 +1429,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             concat!(
                 "`bmp-station <name>`, then `address <ip>` and `port <n>` on it (both required): the \
              instance's nos-bgpd dials the station inside the instance's VRF and sends \
-             Initiation, a Peer Up per Established peer, Peer Down and Termination. Route \
-             monitoring is not exported yet.",
+             Initiation, a Peer Up per Established peer, Route Monitoring (see `monitor`), \
+             Peer Down and Termination. Statistics Reports are not exported yet.",
                 " ",
                 "Stop exporting to this BMP station.",
             ),
@@ -1965,6 +1965,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::SwitchingProfileMemberStpPriority => (
             "Set the spanning-tree port priority.",
             "A multiple of 16 from 0 to 240. Unset: the port profile's, else 128.",
+        ),
+        Topic::BgpInstanceBmpStationMonitor => (
+            "Choose which policy view the BMP station gets as Route Monitoring.",
+            concat!(
+                "`post-policy` (routes after the import policy), `pre-policy` (routes as received, \
+             before the policy) or `both` (default). Only IPv4 and IPv6 unicast are monitored for \
+             now. The initial pre-policy dump needs `soft-reconfiguration inbound` on the \
+             peer-group; without it the station only gets pre-policy changes from then on. \
+             Changing it restarts the station and re-dumps.",
+                " ",
+                "Reset the view to `both`.",
+            ),
         ),
     };
     CommandDoc {

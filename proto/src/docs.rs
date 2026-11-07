@@ -577,6 +577,8 @@ topics! {
     BgpPeerGroupGracefulShutdownReceiveDisabled,
     /// `BgpPeerGroup.blackhole`
     BgpPeerGroupBlackhole,
+    /// `BmpStation.monitor`
+    BgpInstanceBmpStationMonitor,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

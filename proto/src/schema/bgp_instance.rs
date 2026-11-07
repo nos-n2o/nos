@@ -211,6 +211,24 @@ pub struct BmpStation {
     /// the commit refuses).
     #[cli(topic = BgpInstanceBmpStationPort)]
     pub port: u16,
+    /// Which policy view of the Adj-RIB-In the station gets as Route
+    /// Monitoring (#864). Appended last: postcard is positional.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceBmpStationMonitor)]
+    pub monitor: BmpMonitor,
+}
+
+/// The policy view a `bmp-station` monitors (RFC 7854 section 5).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum BmpMonitor {
+    /// Only routes after the import policy (what the Adj-RIB-In holds).
+    PostPolicy,
+    /// Only routes as received, before the import policy.
+    PrePolicy,
+    /// Both views.
+    #[default]
+    Both,
 }
 
 impl Default for BmpStation {
@@ -219,6 +237,7 @@ impl Default for BmpStation {
             name: String::new(),
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 0,
+            monitor: BmpMonitor::default(),
         }
     }
 }
@@ -1019,6 +1038,7 @@ mod tests {
             name: n.into(),
             address: a.parse().unwrap(),
             port,
+            ..Default::default()
         };
         assert!(check(vec![
             st("a", "192.0.2.1", 5000),
