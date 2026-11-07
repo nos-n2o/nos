@@ -180,6 +180,25 @@ pub async fn for_each_routes_page(
     .await
 }
 
+/// Every configured BMP station's status.
+pub async fn get_bmp_status(
+    bgp_socket: &Path,
+    instance: &str,
+) -> Result<Vec<nos_proto::BmpStationStatus>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer
+        .send(BgpRequest::ShowBmp {
+            instance: instance.to_string(),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::BmpStatus(stations))) => Ok(stations),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
 /// Every configured RPKI cache's RTR session.
 pub async fn get_rpki_summary(
     bgp_socket: &Path,

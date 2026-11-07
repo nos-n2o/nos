@@ -7,9 +7,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio::net::tcp::OwnedWriteHalf;
 use tracing::info;
 
-use super::{frame, lock, now, send, Hub, PeerUpInfo, Scope, StationCfg};
+use super::{frame, lock, now, send, Hub, PeerUpInfo, Scope, Shared, StationCfg};
 
-const TYPE_STATS: u8 = 1;
+pub(super) const TYPE_STATS: u8 = 1;
 
 /// One statistic of a Statistics Report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,7 @@ pub fn stats_report(scope: &Scope, p: &PeerUpInfo, stats: &[Stat], ts: Duration)
 pub(super) async fn send_reports(
     hub: &Hub,
     cfg: &StationCfg,
+    shared: &Shared,
     scope: &Scope,
     wr: &mut OwnedWriteHalf,
 ) -> bool {
@@ -76,7 +77,7 @@ pub(super) async fn send_reports(
             .collect()
     };
     for (p, s) in &reports {
-        if !send(wr, &stats_report(scope, p, s, now())).await {
+        if !send(wr, shared, &stats_report(scope, p, s, now())).await {
             return false;
         }
         info!(peer = %p.peer, stats = s.len(), station = %cfg.name, "bmp statistics sent");

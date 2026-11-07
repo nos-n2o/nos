@@ -178,6 +178,7 @@ fn lab() -> Lab {
                         next: None,
                     },
                     BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
+                    BgpRequest::ShowBmp { .. } => BgpEvent::BmpStatus(Vec::new()),
                     BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
                         routes: Vec::new(),
                         next: None,
@@ -280,6 +281,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bgp flowspec",
             "show bgp flowspec",
             "show bgp rpki",
+            "show bgp bmp",
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",

@@ -400,6 +400,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                             next: None,
                         },
                         BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
+                        BgpRequest::ShowBmp { .. } => BgpEvent::BmpStatus(Vec::new()),
                         BgpRequest::GetRoutesPage { .. } => BgpEvent::RoutesPage {
                             routes: vec![nos_proto::BgpRouteSummary {
                                 prefix: "192.0.2.0/24".into(),
@@ -512,6 +513,7 @@ const QUERIES: &[&str] = &[
     "show bgp evpn",
     "show bgp flowspec",
     "show bgp rpki",
+    "show bgp bmp",
     "show bgp vpnv4",
     "show bgp vpnv6 rd 65001:1",
     "show ospf neigh",
@@ -598,6 +600,7 @@ async fn configd_is_down_for_every_operational_command() {
             "show bgp flowspec",
             "show bgp flowspec",
             "show bgp rpki",
+            "show bgp bmp",
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",
@@ -900,6 +903,7 @@ async fn no_protocol_instances_are_configured() {
             "show bgp flowspec",
             "show bgp flowspec",
             "show bgp rpki",
+            "show bgp bmp",
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",

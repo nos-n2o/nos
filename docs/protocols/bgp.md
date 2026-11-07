@@ -971,7 +971,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Customer"' \
 
 `nos-bgpd` can stream monitoring data to a BMP station (collector): Initiation, Peer Up, Route Monitoring of the Adj-RIB-In (every family but RT-Constraint, #864), Peer Down and Termination.
 
-Not yet exported: RT-Constraint routes (post-policy and dump), Adj-RIB-Out (#867) and `show bgp bmp`.
+Not yet exported: RT-Constraint routes (post-policy and dump), Adj-RIB-Out (#867).
 
 - Configure: `edit bgp instance r1`, then `set bmp-station col1 address 192.0.2.50 port 5000`. The port is mandatory (BMP has no default port): a station without one is refused at commit, as are port 0, an unspecified address and a duplicate name. Several stations are allowed; each gets the same stream.
 - The router dials the station (the station listens), inside the instance's VRF, like peers and RPKI caches. Nothing is dialled until the VRF is resolved.
@@ -992,7 +992,12 @@ Not yet exported: RT-Constraint routes (post-policy and dump), Adj-RIB-Out (#867
   - Counters (reset when the session comes up, gone with it): rejected by inbound policy (type 0, per prefix, also EVPN, Flowspec and VPN), duplicate advertisements (1), withdraws of a path not held (2), updates dropped for a `CLUSTER_LIST` loop (3), an `AS_PATH` loop (4), our own `ORIGINATOR_ID` (5), an `AS_CONFED` loop (6), updates (11) and prefixes (12) treated as withdraw (RFC 7606 parse errors, an unusable next hop, a stray confederation segment).
   - Gauges: Adj-RIB-In routes, all families (7); Loc-RIB routes (8); Adj-RIB-In per negotiated AFI/SAFI (9); Loc-RIB per IPv4/IPv6 unicast (10).
   - Not sent: type 13 (duplicate update messages) and the Adj-RIB-Out gauges (#867).
-- Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. `bmp statistics sent` marks each report. There is no `show bgp bmp` yet.
+- Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. `bmp statistics sent` marks each report. 
+- `show bgp bmp` (`GET /v1/bgp/bmp`) shows each station per instance:
+  - State: `Connecting`, `Connected` or `Backoff` (waiting out the reconnect delay), plus `last-error` after a failed dial or lost connection.
+  - Settings: the monitored view and the statistics interval.
+  - Counts: monitored peers, messages sent by type (initiation, peer-up, peer-down, route-monitoring pre and post, end-of-rib, stats, termination), queue overflows and reconnect attempts (dials after the first).
+  - The counters survive reconnects but restart with the station, so a change to the station's settings resets them.
 
 ### RPKI origin validation (RFC 6811, RFC 8210)
 

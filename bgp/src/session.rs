@@ -685,6 +685,11 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
+    /// Every `bmp-station`'s status, for `show bgp bmp`.
+    pub fn bmp_status(&self) -> Vec<nos_proto::BmpStationStatus> {
+        self.bgp_rib.bmp().station_status()
+    }
+
     /// Applies one redistribution update pushed by `nos-ribd`, for
     /// `server.rs`'s fire-and-forget `BgpRequest::RedistributeRoutes` handler.
     pub async fn apply_redistribute_update(&self, update: nos_proto::RedistributeUpdate) {

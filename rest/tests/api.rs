@@ -1091,6 +1091,9 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let (s, v) = send(app, Method::GET, "/v1/bgp/rpki", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
+    let (s, v) = send(app, Method::GET, "/v1/bgp/bmp", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
     assert_eq!(
         send(app, Method::GET, "/v1/ospf/neighbors", None).await.1,
         json!([])
@@ -2555,6 +2558,7 @@ async fn show_routes_and_listener_never_fetch_the_config() {
     for uri in [
         "/v1/bgp/summary",
         "/v1/bgp/rpki",
+        "/v1/bgp/bmp",
         "/v1/bgp/evpn",
         "/v1/ospf/neighbors",
         "/v1/ospf/database",
@@ -2564,7 +2568,7 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         let (s, _) = send(&app, Method::GET, uri, None).await;
         assert_eq!(s, StatusCode::OK, "{uri}");
     }
-    assert_eq!(lists.load(Ordering::SeqCst), 7);
+    assert_eq!(lists.load(Ordering::SeqCst), 8);
     assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");

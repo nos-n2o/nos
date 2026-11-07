@@ -89,6 +89,8 @@ pub enum Command {
     ShowBgpFlowspec,
     /// `show bgp rpki` — every configured BGP instance's RPKI cache sessions.
     ShowBgpRpki,
+    /// `show bgp bmp` — every configured BGP instance's BMP station status.
+    ShowBgpBmp,
     /// `show bgp vpnv4|vpnv6 [rd <rd>]` — every VPN path of `family` received
     /// by every configured BGP instance, optionally of one RD only.
     ShowBgpVpn {
@@ -592,6 +594,7 @@ mod tests {
             Command::ShowBgpFlowspec
         );
         assert_eq!(Command::parse("show bgp rpki"), Command::ShowBgpRpki);
+        assert_eq!(Command::parse("show bgp bmp"), Command::ShowBgpBmp);
         assert_eq!(Command::parse("show bgp routes"), Command::ShowBgpRoutes);
         assert_eq!(
             Command::parse("show bgp vpnv6"),

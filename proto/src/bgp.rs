@@ -572,6 +572,13 @@ pub enum BgpRequest {
         /// Most paths wanted.
         limit: u32,
     },
+    /// One-shot: every configured `bmp-station`'s connection state and frame
+    /// counters (`show bgp bmp`, #864); answered by `BgpEvent::BmpStatus`
+    /// (or `BgpEvent::Error` when `instance` is not this daemon's).
+    ShowBmp {
+        /// The BGP instance asked; a daemon of another instance refuses.
+        instance: String,
+    },
 }
 
 /// Most routes `nos-bgpd` returns in one page of any paged query, and the
@@ -726,6 +733,75 @@ pub enum BgpEvent {
         /// Per-family counts of the finished pass.
         families: Vec<FamilyReeval>,
     },
+    /// Reply to `ShowBmp`: one entry per configured `bmp-station`.
+    BmpStatus(Vec<BmpStationStatus>),
+}
+
+/// Connection state of one `bmp-station`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BmpStationState {
+    /// Dialing the collector.
+    #[default]
+    Connecting,
+    /// The TCP session is up.
+    Connected,
+    /// Waiting out the reconnect delay after a failure.
+    Backoff,
+}
+
+/// BMP messages sent to one station, by type, since its task started.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BmpFrameCounts {
+    /// Initiation.
+    pub initiation: u64,
+    /// Peer Up.
+    pub peer_up: u64,
+    /// Peer Down.
+    pub peer_down: u64,
+    /// Route Monitoring, pre-policy.
+    pub route_monitoring_pre: u64,
+    /// Route Monitoring, post-policy.
+    pub route_monitoring_post: u64,
+    /// End-of-RIB markers (a Route Monitoring message with no routes), either
+    /// stream; not counted in the two fields above.
+    pub end_of_rib: u64,
+    /// Statistics Report.
+    pub stats: u64,
+    /// Termination.
+    pub termination: u64,
+}
+
+/// One `bmp-station`'s status, for `show bgp bmp`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BmpStationStatus {
+    /// The `bmp-station` name.
+    pub name: String,
+    /// The collector's address.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub address: IpAddr,
+    /// The collector's TCP port.
+    pub port: u16,
+    /// Connection state.
+    pub state: BmpStationState,
+    /// Unix seconds the current connection came up; `None` unless connected.
+    pub connected_since: Option<u64>,
+    /// The policy view this station gets.
+    pub monitor: crate::BmpMonitor,
+    /// Seconds between Statistics Reports; `None` = none.
+    pub statistics_interval: Option<u32>,
+    /// Established peers reported to the station.
+    pub peers_monitored: u32,
+    /// Messages sent, by type.
+    pub frames_sent: BmpFrameCounts,
+    /// Queue overflows (each one resynchronised the station).
+    pub overflows: u64,
+    /// Dial attempts after the first (a lost or failed connection retried).
+    pub reconnects: u64,
+    /// Why the last dial or session failed.
+    pub last_error: Option<String>,
 }
 
 /// Address family of a soft-reconfiguration re-evaluation. Variants are only

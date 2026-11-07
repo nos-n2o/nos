@@ -436,6 +436,8 @@ pub type BgpFlowspecReport = Vec<InstanceReport<BgpFlowspecPage>>;
 pub type BgpVpnReport = Vec<InstanceReport<BgpVpnPage>>;
 pub type BgpRoutesReport = Vec<InstanceReport<BgpRoutesPage>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
+/// `GET /v1/bgp/bmp`.
+pub type BgpBmpReport = Vec<InstanceReport<Vec<nos_proto::BmpStationStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
@@ -516,7 +518,7 @@ async fn per_instance<Req, Ev, T>(
     d: &Daemons,
     names: Vec<String>,
     service: impl Fn(String) -> ServiceRef,
-    request: impl Fn() -> Req,
+    request: impl Fn(&str) -> Req,
     extract: impl Fn(Ev) -> Option<T>,
 ) -> Vec<InstanceReport<T>>
 where
@@ -526,7 +528,7 @@ where
     let mut out = Vec::new();
     for instance in names {
         let reply = d
-            .service::<_, Ev>(service(instance.clone()), request())
+            .service::<_, Ev>(service(instance.clone()), request(&instance))
             .await;
         let (result, error) = match reply {
             Ok(ev) => match extract(ev) {
@@ -556,7 +558,7 @@ pub async fn bgp_summary(State(d): State<Daemons>) -> ApiResult<Json<BgpSummaryR
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetSummary,
+            |_| BgpRequest::GetSummary,
             |e| match e {
                 BgpEvent::Summary(v) => Some(v),
                 _ => None,
@@ -633,7 +635,7 @@ pub async fn bgp_evpn(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetEvpnRoutesPage {
+            |_| BgpRequest::GetEvpnRoutesPage {
                 after: after.clone(),
                 limit,
             },
@@ -664,7 +666,7 @@ pub async fn bgp_flowspec(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetFlowspecRoutesPage {
+            |_| BgpRequest::GetFlowspecRoutesPage {
                 after: after.clone(),
                 limit,
             },
@@ -731,7 +733,7 @@ async fn bgp_vpn(
             d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetVpnRoutesPage {
+            |_| BgpRequest::GetVpnRoutesPage {
                 family,
                 rd: q.rd.clone(),
                 after,
@@ -779,7 +781,7 @@ pub async fn bgp_routes(
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetRoutesPage { after, limit },
+            |_| BgpRequest::GetRoutesPage { after, limit },
             |e| match e {
                 BgpEvent::RoutesPage { routes, next } => Some(BgpRoutesPage {
                     items: routes,
@@ -803,9 +805,29 @@ pub async fn bgp_rpki(State(d): State<Daemons>) -> ApiResult<Json<BgpRpkiReport>
             &d,
             names,
             ServiceRef::BgpInstance,
-            || BgpRequest::GetRpkiSummary,
+            |_| BgpRequest::GetRpkiSummary,
             |e| match e {
                 BgpEvent::RpkiSummary(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/bgp/bmp", tag = "show", summary = "BMP station connections and frame counters (RFC 7854), per instance", responses((status = 200, body = BgpBmpReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_bmp(State(d): State<Daemons>) -> ApiResult<Json<BgpBmpReport>> {
+    let names = d.bgp_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::BgpInstance,
+            |i| BgpRequest::ShowBmp {
+                instance: i.to_string(),
+            },
+            |e| match e {
+                BgpEvent::BmpStatus(v) => Some(v),
                 _ => None,
             },
         )
@@ -821,7 +843,7 @@ pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeig
             &d,
             names,
             ServiceRef::OspfInstance,
-            || OspfRequest::GetNeighbors,
+            |_| OspfRequest::GetNeighbors,
             |e| match e {
                 OspfEvent::Neighbors(v) => Some(v),
                 OspfEvent::Database(_) => None,
@@ -839,7 +861,7 @@ pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatab
             &d,
             names,
             ServiceRef::OspfInstance,
-            || OspfRequest::GetDatabase,
+            |_| OspfRequest::GetDatabase,
             |e| match e {
                 OspfEvent::Database(v) => Some(v),
                 OspfEvent::Neighbors(_) => None,
@@ -857,7 +879,7 @@ pub async fn ospfv3_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3
             &d,
             names,
             ServiceRef::Ospfv3Instance,
-            || Ospfv3Request::GetNeighbors,
+            |_| Ospfv3Request::GetNeighbors,
             |e| match e {
                 Ospfv3Event::Neighbors(v) => Some(v),
                 Ospfv3Event::Database(_) => None,
@@ -875,7 +897,7 @@ pub async fn ospfv3_database(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3D
             &d,
             names,
             ServiceRef::Ospfv3Instance,
-            || Ospfv3Request::GetDatabase,
+            |_| Ospfv3Request::GetDatabase,
             |e| match e {
                 Ospfv3Event::Database(v) => Some(v),
                 Ospfv3Event::Neighbors(_) => None,
