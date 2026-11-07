@@ -1892,6 +1892,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
+                ..Default::default()
             })
         }
         OutboundUpdate::Announce(route) => {
@@ -1905,6 +1906,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 attributes: Some(advertised_attributes(route, next_hop, Vec::new())),
                 mp_reach: Vec::new(),
                 mp_unreach: Vec::new(),
+                ..Default::default()
             })
         }
         // RFC 8955 section 4: no next hop (`encode_mp_reach` writes length 0).
@@ -1930,6 +1932,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
+            ..Default::default()
         }),
         OutboundUpdate::WithdrawFlowspec(family, nlri) => {
             BgpMessage::Update(message::UpdateMessage {
@@ -1949,6 +1952,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     vpn: Vec::new(),
                     rtc: Vec::new(),
                 }],
+                ..Default::default()
             })
         }
         OutboundUpdate::AnnounceRtc(a) => {
@@ -1975,6 +1979,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     rtc: vec![key],
                 }],
                 mp_unreach: Vec::new(),
+                ..Default::default()
             })
         }
         OutboundUpdate::WithdrawRtc(key) => BgpMessage::Update(message::UpdateMessage {
@@ -1994,6 +1999,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 vpn: Vec::new(),
                 rtc: vec![key],
             }],
+            ..Default::default()
         }),
         OutboundUpdate::AnnounceVpn(v) => {
             let ((rd, prefix), labels) = (v.key, v.labels);
@@ -2020,6 +2026,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
+                ..Default::default()
             })
         }
         OutboundUpdate::WithdrawVpn((rd, prefix)) => BgpMessage::Update(message::UpdateMessage {
@@ -2043,6 +2050,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 }],
                 rtc: Vec::new(),
             }],
+            ..Default::default()
         }),
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
             let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
@@ -2063,6 +2071,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     vpn: Vec::new(),
                     rtc: Vec::new(),
                 }],
+                ..Default::default()
             })
         }
         OutboundUpdate::EndOfRib(family) => {
@@ -2110,6 +2119,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 rtc: Vec::new(),
             }],
             mp_unreach: Vec::new(),
+            ..Default::default()
         }),
         OutboundUpdate::WithdrawEvpn(nlri) => BgpMessage::Update(message::UpdateMessage {
             withdrawn_routes: Vec::new(),
@@ -2128,6 +2138,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],
+            ..Default::default()
         }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {
             let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
@@ -2139,6 +2150,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 attributes: None,
                 mp_reach: Vec::new(),
                 mp_unreach: Vec::new(),
+                ..Default::default()
             })
         }
     }

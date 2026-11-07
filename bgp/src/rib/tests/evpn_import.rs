@@ -39,9 +39,13 @@ fn accepts_and_rejects_by_route_target() {
             .len(),
         1
     );
-    assert!(evpn_import(Some(&rt_script(false)), evpn_nlri(1))
-        .evpn_push_snapshot()
-        .is_empty());
+    let rejected = evpn_import(Some(&rt_script(false)), evpn_nlri(1));
+    assert!(rejected.evpn_push_snapshot().is_empty());
+    assert_eq!(
+        rejected.peer_stats(addr("10.0.0.1")).rejected,
+        1,
+        "BMP stat 0"
+    );
 }
 
 #[test]

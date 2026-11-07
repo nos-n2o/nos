@@ -32,6 +32,7 @@ mod propagation;
 mod retain;
 mod rpl_path;
 mod rtc;
+mod stats;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {
@@ -207,6 +208,7 @@ fn ebgp_update(nlri: Vec<&str>, as_path: Vec<u32>, next_hop: &str) -> UpdateMess
         }),
         mp_reach: vec![],
         mp_unreach: vec![],
+        ..Default::default()
     }
 }
 
@@ -219,6 +221,7 @@ fn empty_update() -> UpdateMessage {
         attributes: None,
         mp_reach: vec![],
         mp_unreach: vec![],
+        ..Default::default()
     }
 }
 

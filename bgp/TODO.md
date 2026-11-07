@@ -49,7 +49,7 @@ of re-auditing the codebase. Update this file as items are implemented.
 
 ## Not implemented (confirmed zero hits)
 
-- **Messages/monitoring**: BMP Statistics, Adj-RIB-Out and `show bgp bmp` (#864, #867); Initiation, Peer Up/Down, Termination (#878) and Route Monitoring for every family (#864) are done.
+- **Messages/monitoring**: Adj-RIB-Out and `show bgp bmp` (#864, #867); Initiation, Peer Up/Down, Termination (#878), Route Monitoring for every family and Statistics Reports (#864; no type 13) are done.
 - **Attributes**: ATOMIC_AGGREGATE, AGGREGATOR, COMMUNITIES, EXTENDED
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).

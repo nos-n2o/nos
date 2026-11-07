@@ -13,6 +13,12 @@ use crate::consts::*;
 use crate::router::{log, strings, A, B};
 use crate::world::World;
 
+/// GoBMP's JSON for a Statistics Report (`"msg_type":1`, recorded from the
+/// real collector): the rejected-prefix counter at 1 (the one rejection of
+/// router-a's route) and one route held in the Adj-RIB-In after the revert.
+const STATS_REJECTED: &str = "\"prefixes_rejected_inbound\":1";
+const STATS_ADJ_RIB_IN: &str = "\"ads_rib_in\":1";
+
 /// How often the collector's log is re-read while waiting.
 const POLL: Duration = Duration::from_millis(500);
 
@@ -177,6 +183,8 @@ async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<(
         &station,
         "--bmp-monitor",
         "both",
+        "--bmp-statistics-interval",
+        "5",
         "--soft-reconfiguration-inbound",
     ]));
     let file = super::bgp::policy_file(
@@ -234,6 +242,16 @@ async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<(
     log("route monitoring: reverting the policy re-admits the retained route post-policy");
     b.provision_flags(&b_flags).await?;
     wait_route(w, true, "add", 0).await?;
+
+    log("statistics: a report for router-a's peer counts the rejected prefix and the held route");
+    b.wait(&format!("bmp statistics sent peer={IP_A}")).await?;
+    let stats = [
+        "\"msg_type\":1".to_string(),
+        format!("\"remote_ip\":\"{IP_A}\""),
+        STATS_REJECTED.to_string(),
+        STATS_ADJ_RIB_IN.to_string(),
+    ];
+    wait_collector(w, &stats.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
 
     log("route monitoring: router-a withdraws the prefix, both views delete it");
     let mut gone = a_flags.to_vec();

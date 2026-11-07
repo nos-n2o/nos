@@ -363,6 +363,7 @@ fn import_policy_reject_drops_a_held_route_and_rts_never_gate_storage() {
     .unwrap();
     rib.handle_update(addr(SRC), false, v4("2.2.2.2"), &u, &reject);
     assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 0);
+    assert_eq!(rib.peer_stats(addr(SRC)).rejected, 1, "BMP stat 0");
     assert_eq!(
         vpns(&mut rx[1]),
         vec![OutboundUpdate::WithdrawVpn(key(RD1, P))]

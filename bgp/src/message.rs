@@ -554,6 +554,10 @@ pub struct UpdateMessage {
     pub attributes: Option<PathAttributes>,
     pub mp_reach: Vec<MpReachNlri>,
     pub mp_unreach: Vec<MpUnreachNlri>,
+    /// RFC 7606 treat-as-withdraw done by `parse_update`: how many announced
+    /// prefixes it moved into the withdrawn lists (0 = not treated). Never
+    /// on the wire; BMP statistics types 11/12 read it (#864).
+    pub treat_as_withdraw_prefixes: u32,
 }
 
 /// A decoded BGP message.
@@ -859,6 +863,7 @@ fn split_update(
         attributes: None,
         mp_reach: vec![],
         mp_unreach: vec![],
+        ..Default::default()
     };
     match field {
         SplitField::Withdrawn => {
@@ -2260,6 +2265,7 @@ fn parse_update(
         attributes,
         mp_reach: parsed.mp_reach,
         mp_unreach: parsed.mp_unreach,
+        treat_as_withdraw_prefixes: 0,
     };
     // RFC 7606 §2 treat-as-withdraw: the announced routes are handled as if
     // listed as withdrawn (legacy NLRI -> Withdrawn Routes, each MP_REACH
@@ -2268,6 +2274,13 @@ fn parse_update(
         warn!(
             "malformed UPDATE path attributes: treating announced routes as withdrawn (RFC 7606)"
         );
+        let count = update.nlri.len()
+            + update
+                .mp_reach
+                .iter()
+                .map(|m| m.nlri.len() + m.evpn.len() + m.flowspec.len() + m.vpn.len() + m.rtc.len())
+                .sum::<usize>();
+        update.treat_as_withdraw_prefixes = u32::try_from(count).unwrap_or(u32::MAX);
         update.withdrawn_routes.append(&mut update.nlri);
         update.withdrawn_path_ids.append(&mut update.nlri_path_ids);
         let reach = std::mem::take(&mut update.mp_reach);
@@ -2674,6 +2687,7 @@ mod tests {
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
+            ..Default::default()
         }
     }
 
@@ -3431,6 +3445,7 @@ mod tests {
             attributes: None,
             mp_reach: vec![],
             mp_unreach: vec![],
+            ..Default::default()
         }
     }
 
@@ -4225,6 +4240,10 @@ mod tests {
                 u.mp_unreach[0].withdrawn,
                 vec!["2001:db8:1::/48".parse().unwrap()]
             );
+            assert_eq!(
+                u.treat_as_withdraw_prefixes, 2,
+                "one legacy + one MP prefix"
+            );
         }
     }
 
@@ -4876,6 +4895,7 @@ mod shutdown_message_tests {
                 vpn: vec![],
                 rtc,
             }],
+            ..Default::default()
         };
         let mut out = Vec::new();
         split_update(&update, false, 1000, &mut out).unwrap();

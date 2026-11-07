@@ -1,6 +1,8 @@
 //! Adj-RIB-In: per-peer path tables, UPDATE handling and withdrawal.
 //! Moved verbatim out of `rib.rs`.
 
+use super::stats::bump;
+use super::PeerStats;
 use super::{
     apply_policy, debug, family_index, info, message, otc_leak, ov_state, warn, AddressFamily, Arc,
     BgpRib, CompiledPolicy, Damping, EvpnNlri, EvpnRoute, FlowspecKey, FlowspecRoute, GsKnobs,
@@ -101,6 +103,7 @@ pub(super) fn learn_evpn(
     communities: &[u32],
     gs: Option<GsKnobs>,
     bmp: Option<&crate::bmp::Hub>,
+    stats: &mut PeerStats,
 ) {
     // RFC 8326, eBGP only (`gs` is `None` for iBGP/confed), before policy.
     let mut communities = communities.to_vec();
@@ -121,6 +124,7 @@ pub(super) fn learn_evpn(
         if let Some((policy, peer_as, ibgp)) = ctx
             && evpn_rejected(policy, &route, from, peer_as, ibgp)
         {
+            bump(&mut stats.rejected, 1);
             if table.remove(&nlri.route_key()).is_some()
                 && let Some(h) = bmp
             {
@@ -170,6 +174,7 @@ pub(super) fn learn_flowspec(
     mut retain: Option<&mut HashMap<FlowspecKey, FlowspecRoute>>,
     mp: &message::MpReachNlri,
     rx: &FlowRx<'_>,
+    stats: &mut PeerStats,
 ) -> Vec<FlowspecKey> {
     let (from, family) = (rx.from, rx.family);
     let mut keys = Vec::with_capacity(mp.flowspec.len());
@@ -192,6 +197,7 @@ pub(super) fn learn_flowspec(
         if let Some((policy, peer_as, confed)) = rx.import
             && !super::flowspec_out::import_flow(policy, &mut route, from, peer_as, confed)
         {
+            bump(&mut stats.rejected, 1);
             if table.remove(&k).is_some()
                 && let Some(h) = rx.bmp
             {
@@ -338,7 +344,7 @@ pub(super) fn announced_paths(update: &UpdateMessage) -> Vec<(IpNet, u32)> {
 // ponytail: damping stays keyed by (peer, prefix), so a flap of any one
 // ADD-PATH path penalises the prefix from that peer; key it by path id too
 // if per-path damping is ever needed.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::single_match_else)]
 pub(super) fn learn_prefix(
     table: &mut PeerTable,
     counts: &mut PathCounts,
@@ -351,6 +357,7 @@ pub(super) fn learn_prefix(
     retain: Option<&mut super::retain::RetainSlot<'_>>,
     blackhole: Option<&[nos_rpl::PrefixListEntry]>,
     bmp: Option<&crate::bmp::Hub>,
+    stats: &mut PeerStats,
 ) {
     let from = peer.addr;
     // Soft reconfiguration inbound: keep the pre-policy candidate.
@@ -377,6 +384,7 @@ pub(super) fn learn_prefix(
                 } == *old;
                 unchanged = same;
                 if same {
+                    bump(&mut stats.dup_adv, 1);
                     // Keep the age: `received_at` is part of `PartialEq`, so a
                     // fresh one would make every identical re-announcement
                     // look changed downstream and be re-propagated (#160).
@@ -403,6 +411,7 @@ pub(super) fn learn_prefix(
             put_path(table, counts, prefix, id, route);
         }
         None => {
+            bump(&mut stats.rejected, 1);
             if take_path(table, counts, prefix, id).is_some() {
                 damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
                 if let Some(h) = bmp {
@@ -429,6 +438,7 @@ impl BgpRib {
     /// peer-group's resolved import policy (`deny-all` by default — see root
     /// `CLAUDE.md`'s "Default-deny rollout impact"): a rejected prefix is
     /// treated like an explicit withdrawal rather than inserted.
+    #[allow(clippy::too_many_lines, reason = "one linear pass per UPDATE")]
     pub fn handle_update(
         &mut self,
         from: IpAddr,
@@ -450,6 +460,11 @@ impl BgpRib {
                 .map(|u| u.withdrawn.len())
                 .sum::<usize>();
         let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
+        if update.treat_as_withdraw_prefixes != 0 {
+            let s = self.stats_mut(from);
+            bump(&mut s.tw_updates, 1);
+            bump(&mut s.tw_prefixes, update.treat_as_withdraw_prefixes);
+        }
 
         let announced = self.apply_withdrawals(from, update, &mut touched);
 
@@ -483,11 +498,13 @@ impl BgpRib {
             // segment, or our member AS in a confederation segment.
             // Vendor `local-as`: it counts as ours on this peer's routes only.
             let local_as = self.local_as_peers.get(&from).copied();
-            let looped = attrs
+            let as_loop = attrs
                 .as_path
                 .contains(self.confed_id.unwrap_or(self.local_asn))
-                || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn))
                 || local_as.is_some_and(|l| attrs.as_path.contains(l.asn));
+            let confed_loop =
+                self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn);
+            let looped = as_loop || confed_loop;
             // RFC 4271 §6.3 / §5.1.3: an unusable NEXT_HOP (legacy attribute
             // or any MP_REACH batch) makes the whole UPDATE a withdraw.
             let own = self.peer_outboxes.get(&from).and_then(|o| o.local_addr);
@@ -518,6 +535,14 @@ impl BgpRib {
                 && self.first_as_peers.contains(&from)
                 && !matches!(attrs.as_path.segments().next(),
                     Some((SegKind::Sequence, s)) if s[0] == peer_as);
+            if bad_next_hop.is_some() || stray_confed {
+                let s = self.stats_mut(from);
+                bump(&mut s.tw_updates, 1);
+                bump(
+                    &mut s.tw_prefixes,
+                    u32::try_from(announced.len()).unwrap_or(u32::MAX),
+                );
+            }
             if let Some(next_hop) = bad_next_hop {
                 warn!(
                     peer = %from, next_hop = %next_hop,
@@ -539,6 +564,13 @@ impl BgpRib {
                 }
                 self.withdraw_announced(from, update, &announced, &mut touched);
             } else if looped {
+                let s = self.stats_mut(from);
+                if as_loop {
+                    bump(&mut s.as_loop, 1);
+                }
+                if confed_loop {
+                    bump(&mut s.confed_loop, 1);
+                }
                 // RFC 4271 §9.1.2: a looped route is unfeasible, so it
                 // replaces (implicitly withdraws) an earlier one.
                 warn!(
@@ -558,12 +590,14 @@ impl BgpRib {
                 );
                 self.withdraw_announced(from, update, &announced, &mut touched);
             } else if attrs.cluster_list.contains(&self.cluster_id) {
+                bump(&mut self.stats_mut(from).cluster_loop, 1);
                 warn!(
                     peer = %from, cluster_list = ?attrs.cluster_list,
                     "dropping bgp update: cluster_list already contains our own cluster-id (rfc 4456 reflection loop prevention)"
                 );
                 self.withdraw_announced(from, update, &announced, &mut touched);
             } else if attrs.originator_id == Some(self.local_router_id) {
+                bump(&mut self.stats_mut(from).originator, 1);
                 warn!(
                     peer = %from, originator_id = ?attrs.originator_id,
                     "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
@@ -681,7 +715,9 @@ impl BgpRib {
             }
         }
         for &(prefix, id) in &withdrawn {
-            if self.remove_path(from, prefix, id).is_some() {
+            if self.remove_path(from, prefix, id).is_none() {
+                bump(&mut self.stats_mut(from).dup_withdraw, 1);
+            } else {
                 debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
                 touched.insert(prefix);
                 self.damping
@@ -718,6 +754,7 @@ impl BgpRib {
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
         let mut retain = self.retained.slot(from);
+        let stats = self.peer_stats.entry(from).or_default();
         let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let blackhole = self.blackhole_peers.get(&from).cloned();
         // This UPDATE adds at most this many entries — reserving
@@ -798,6 +835,7 @@ impl BgpRib {
                 retain.as_mut(),
                 blackhole.as_deref().map(Vec::as_slice),
                 bmp,
+                stats,
             );
         }
         for mp in &update.mp_reach {
@@ -819,6 +857,7 @@ impl BgpRib {
                     retain.as_mut(),
                     blackhole.as_deref().map(Vec::as_slice),
                     bmp,
+                    stats,
                 );
             }
             if !mp.evpn.is_empty() {
@@ -837,6 +876,7 @@ impl BgpRib {
                     (!remote_is_ibgp && !from_confed)
                         .then(|| self.gs_peers.get(&from).copied().unwrap_or_default()),
                     bmp,
+                    stats,
                 );
                 evpn_recheck.extend(
                     mp.evpn
@@ -873,6 +913,7 @@ impl BgpRib {
                         retain.as_mut().map(|r| &mut *r.flow),
                         mp,
                         &rx,
+                        stats,
                     ));
                 }
             }

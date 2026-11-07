@@ -143,6 +143,7 @@ fn update(asn: u32, prefixes: &[&str]) -> UpdateMessage {
         attributes: Some(path_attrs(asn)),
         mp_reach: vec![],
         mp_unreach: vec![],
+        ..Default::default()
     }
 }
 
@@ -1691,6 +1692,7 @@ async fn a_legacy_session_sends_plain_nlri_and_withdraws() {
             attributes: None,
             mp_reach: vec![],
             mp_unreach: vec![],
+            ..Default::default()
         },
         &Arc::new(nos_rpl::ACCEPT_ALL.clone()),
     );

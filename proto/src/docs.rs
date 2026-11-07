@@ -579,6 +579,8 @@ topics! {
     BgpPeerGroupBlackhole,
     /// `BmpStation.monitor`
     BgpInstanceBmpStationMonitor,
+    /// `BmpStation.statistics_interval`
+    BgpInstanceBmpStationStatisticsInterval,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

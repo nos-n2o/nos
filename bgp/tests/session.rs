@@ -620,6 +620,7 @@ fn station(port: u16) -> nos_proto::BmpStation {
         address: IpAddr::V4(A),
         port,
         monitor: nos_proto::BmpMonitor::Both,
+        statistics_interval: None,
     }
 }
 
@@ -687,6 +688,7 @@ async fn bmp_queue_overflow_resyncs_the_station() {
         table: None,
         scope: nos_bgp::bmp::Scope::default(),
         monitor: nos_proto::BmpMonitor::Both,
+        statistics_interval: None,
     }])
     .await;
     let (mut c, _) = collector.accept().await.unwrap();
@@ -951,6 +953,66 @@ async fn bmp_dump_covers_evpn_and_its_end_of_rib() {
             "{msg:?}"
         );
         seen[usize::from(is_post)] = true;
+    }
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}
+
+/// A Statistics Report body as `(stat type, value octets)`, past the 42-byte
+/// per-peer header and the count.
+fn stat_entries(body: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    let count = u32::from_be_bytes(body[42..46].try_into().unwrap());
+    let mut rest = &body[46..];
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let t = u16::from_be_bytes([rest[0], rest[1]]);
+        let len = usize::from(u16::from_be_bytes([rest[2], rest[3]]));
+        out.push((t, rest[4..4 + len].to_vec()));
+        rest = &rest[4 + len..];
+    }
+    assert_eq!(rest.len(), 0);
+    out
+}
+
+/// #864: a station with `statistics-interval` gets one Statistics Report per
+/// Established peer per interval: the inbound-policy reject counter and the
+/// Adj-RIB-In gauges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_statistics_report_every_interval() {
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    let route = RedistributedRoute {
+        prefix: "198.51.100.0/24".parse().unwrap(),
+        gateway: "10.0.0.9".parse().unwrap(),
+    };
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![route]))
+        .await;
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    let mut deny = unicast_only(peer(A, B, 65001));
+    deny.import_policy = Arc::new(nos_rpl::DENY_ALL.clone());
+    b.apply(vec![deny]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    let mut st = station(port);
+    st.statistics_interval = Some(1);
+    b.manager
+        .set_bmp_stations(&[st], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    for _ in 0..2 {
+        let body = loop {
+            let (t, body) = bmp_frame(&mut c).await;
+            if t == 1 {
+                break body;
+            }
+        };
+        assert_eq!(body[1] & 0x40, 0, "L flag clear");
+        let stats = stat_entries(&body);
+        let val = |t: u16| stats.iter().find(|s| s.0 == t).map(|s| s.1.clone());
+        assert_eq!(val(0), Some(1u32.to_be_bytes().to_vec()), "rejected");
+        assert_eq!(val(7), Some(0u64.to_be_bytes().to_vec()), "Adj-RIB-In");
+        assert!(stats.iter().any(|s| s.0 == 9 && s.1.len() == 11));
     }
     a.manager.shutdown().await;
     b.manager.shutdown().await;
