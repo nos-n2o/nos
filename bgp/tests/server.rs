@@ -70,7 +70,7 @@ fn is_person(role: Role) -> bool {
 async fn only_people_get_the_show_queries_answered() {
     let (_tmp, path, _server) = start();
     for role in Role::ALL {
-        for query in 0..5 {
+        for query in 0..6 {
             let (mut r, mut w) = connect_as(&path, role).await;
             let req = match query {
                 0 => BgpRequest::GetSummary,
@@ -88,6 +88,7 @@ async fn only_people_get_the_show_queries_answered() {
                     after: None,
                     limit: 10,
                 },
+                5 => BgpRequest::ShowBmp,
                 _ => BgpRequest::GetRpkiSummary,
             };
             w.send(req).await.unwrap();
@@ -102,6 +103,7 @@ async fn only_people_get_the_show_queries_answered() {
                     routes.is_empty() && next.is_none()
                 }
                 Some(BgpEvent::RpkiSummary(v)) if query == 2 => v.is_empty(),
+                Some(BgpEvent::BmpStatus(v)) if query == 5 => v.is_empty(),
                 Some(BgpEvent::FlowspecRoutesPage { routes, next }) if query == 3 => {
                     routes.is_empty() && next.is_none()
                 }

@@ -651,6 +651,12 @@ async fn bmp_station_gets_initiation_peer_up_peer_down_and_a_replay() {
     let (mut c, _) = collector.accept().await.unwrap();
     assert_eq!(bmp_frame(&mut c).await.0, 4);
     assert_eq!(bmp_frame(&mut c).await.0, 3, "replayed Peer Up");
+    // `show bgp bmp` (#864): connected after one redial, first session frames counted.
+    let st = &a.manager.bmp_status()[0];
+    assert_eq!(st.state, nos_proto::BmpStationState::Connected);
+    assert_eq!(st.peers_monitored, 1);
+    assert!(st.reconnects >= 1 && st.connected_since.is_some());
+    assert!(st.frames_sent.initiation >= 1 && st.frames_sent.peer_up >= 1);
 
     // Removing the peer from a's config ends the session: Peer Down.
     a.apply(vec![]).await;
