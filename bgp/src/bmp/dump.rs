@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::monitor::{end_of_rib, route_monitoring};
 use super::DUMP_CHUNK;
-use super::{drain, now, send, stream, Ended, Hub, PeerUpInfo, Scope, Shared, StationCfg};
+use super::{drain, now, send, send_as, stream, Ended, Hub, PeerUpInfo, Scope, Shared, StationCfg};
 use crate::rib::SharedRib;
 
 /// Dumps every peer in `peers`; `Some` ends the session.
@@ -67,7 +67,7 @@ async fn one_stream(
                 .bmp_updates(peer, post, chunk, &info.add_path_afis);
             for update in &updates {
                 for f in route_monitoring(scope, info, post, update, now()) {
-                    if !send(wr, &f).await {
+                    if !send(wr, shared, &f).await {
                         return Some(Ended::Lost);
                     }
                     routes += 1;
@@ -89,7 +89,7 @@ async fn one_stream(
         return None;
     }
     for (afi, safi) in families {
-        if !send(wr, &end_of_rib(scope, info, post, afi, safi)).await {
+        if !send_as(wr, shared, &end_of_rib(scope, info, post, afi, safi), true).await {
             return Some(Ended::Lost);
         }
     }

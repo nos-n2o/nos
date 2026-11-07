@@ -1485,6 +1485,70 @@
         },
         "type": "object"
       },
+      "BmpFrameCounts": {
+        "description": "BMP messages sent to one station, by type, since its task started.",
+        "properties": {
+          "end_of_rib": {
+            "description": "End-of-RIB markers (a Route Monitoring message with no routes), either\nstream; not counted in the two fields above.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "initiation": {
+            "description": "Initiation.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "peer_down": {
+            "description": "Peer Down.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "peer_up": {
+            "description": "Peer Up.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_monitoring_post": {
+            "description": "Route Monitoring, post-policy.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_monitoring_pre": {
+            "description": "Route Monitoring, pre-policy.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stats": {
+            "description": "Statistics Report.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "termination": {
+            "description": "Termination.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "initiation",
+          "peer_up",
+          "peer_down",
+          "route_monitoring_pre",
+          "route_monitoring_post",
+          "end_of_rib",
+          "stats",
+          "termination"
+        ],
+        "type": "object"
+      },
       "BmpMonitor": {
         "description": "The policy view a `bmp-station` monitors (RFC 7854 section 5).",
         "enum": [
@@ -1531,6 +1595,15 @@
           "port"
         ],
         "type": "object"
+      },
+      "BmpStationState": {
+        "description": "Connection state of one `bmp-station`.",
+        "enum": [
+          "Connecting",
+          "Connected",
+          "Backoff"
+        ],
+        "type": "string"
       },
       "BroadcastDomain": {
         "description": "A named L2 broadcast domain. `SwitchingProfile` references it for L2\nmembership; `addresses`/`routing_table` independently make the domain's\nown bridge device an SVI (switch virtual interface) — a routed L3\nattachment point for the domain as a whole, the same flat shape as a\nloopback `Interface`'s L3 config (no VLAN/tag concept applies to a\ndomain's own bridge, so there's nothing for per-tag addressing to buy\nit). The bridge device and whatever interfaces are enslaved into it as L2\nmembers are separate Linux links, so there is no conflict between this\nand any member's own VRF assignment.",
@@ -6778,6 +6851,37 @@
           }
         },
         "summary": "Every BFD session, or those to one peer",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/bgp/bmp": {
+      "get": {
+        "operationId": "bgp_bmp",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "BMP station connections and frame counters (RFC 7854), per instance",
         "tags": [
           "show"
         ]

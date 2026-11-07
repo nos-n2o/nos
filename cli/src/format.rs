@@ -1407,6 +1407,45 @@ pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) ->
     lines.join("\n")
 }
 
+/// One BGP instance's BMP stations, two lines each — `show bgp bmp`.
+pub fn render_bgp_bmp(instance: &str, stations: &[nos_proto::BmpStationStatus]) -> String {
+    if stations.is_empty() {
+        return format!("bgp instance {instance}: no bmp stations");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for s in stations {
+        let f = &s.frames_sent;
+        lines.push(format!(
+            "  {} {}:{} {:?} monitor {:?} statistics {} peers {} overflows {} reconnects {}{}",
+            s.name,
+            s.address,
+            s.port,
+            s.state,
+            s.monitor,
+            s.statistics_interval
+                .map_or_else(|| "-".to_string(), |i| format!("{i}s")),
+            s.peers_monitored,
+            s.overflows,
+            s.reconnects,
+            s.last_error
+                .as_ref()
+                .map_or_else(String::new, |e| format!(" last-error \"{e}\"")),
+        ));
+        lines.push(format!(
+            "    sent: initiation {} peer-up {} peer-down {} route-monitoring pre {} post {} end-of-rib {} stats {} termination {}",
+            f.initiation,
+            f.peer_up,
+            f.peer_down,
+            f.route_monitoring_pre,
+            f.route_monitoring_post,
+            f.end_of_rib,
+            f.stats,
+            f.termination,
+        ));
+    }
+    lines.join("\n")
+}
+
 fn render_ospf_neighbor_state(state: OspfNeighborState) -> &'static str {
     match state {
         OspfNeighborState::Down => "Down",
@@ -2362,6 +2401,35 @@ mod tests {
             "bgp instance r1:\n  192.0.2.5 port 323 preference 1 Established (in use) version 1 \
              session 7 serial 42 vrps 3 updated 5s ago auth yes"
         );
+    }
+
+    #[test]
+    fn render_bgp_bmp_lists_two_lines_per_station() {
+        use nos_proto::{BmpFrameCounts, BmpMonitor, BmpStationState, BmpStationStatus};
+        assert_eq!(
+            render_bgp_bmp("r1", &[]),
+            "bgp instance r1: no bmp stations"
+        );
+        let s = BmpStationStatus {
+            name: "c1".into(),
+            address: "192.0.2.9".parse().unwrap(),
+            port: 11019,
+            state: BmpStationState::Backoff,
+            connected_since: None,
+            monitor: BmpMonitor::Both,
+            statistics_interval: Some(60),
+            peers_monitored: 2,
+            frames_sent: BmpFrameCounts {
+                route_monitoring_pre: 4,
+                ..Default::default()
+            },
+            overflows: 1,
+            reconnects: 3,
+            last_error: Some("refused".into()),
+        };
+        let out = render_bgp_bmp("r1", &[s]);
+        assert!(out.contains("c1 192.0.2.9:11019 Backoff monitor Both statistics 60s peers 2 overflows 1 reconnects 3 last-error \"refused\""));
+        assert!(out.contains("route-monitoring pre 4 post 0 end-of-rib 0"));
     }
 
     #[test]

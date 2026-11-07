@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::bail;
+use reqwest::Method;
 
 use crate::consts::*;
 use crate::router::{log, strings, A, B};
@@ -142,6 +143,18 @@ pub async fn bmp(w: &mut World) -> anyhow::Result<()> {
     route_monitoring(w, &a_flags).await
 }
 
+/// The first station of `r`'s `GET /v1/bgp/bmp` (#864).
+async fn bmp_status(r: &crate::router::Router) -> anyhow::Result<serde_json::Value> {
+    let body = r.rest_expect(Method::GET, "/v1/bgp/bmp", None, 200).await?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let st = v[0]["result"][0].clone();
+    if st.is_object() {
+        Ok(st)
+    } else {
+        bail!("GET /v1/bgp/bmp has no station: {body}")
+    }
+}
+
 /// Needles of a unicast prefix line of the collector for the redistributed
 /// prefix (GoBMP's JSON keys, recorded from the real collector).
 fn route_line(post: bool, action: &str) -> Vec<String> {
@@ -237,6 +250,18 @@ async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<(
     wait_collector(w, &eor, 0).await?;
     if count_route(&collector_log(w).await?, true, "add") != 0 {
         bail!("a rejected prefix reached the new collector post-policy");
+    }
+
+    log("show bgp bmp: the dump left the station connected with its counters set");
+    let st = bmp_status(b).await?;
+    let sent = |k: &str| st["frames_sent"][k].as_u64().unwrap_or(0);
+    if st["state"] != "Connected"
+        || sent("initiation") == 0
+        || sent("peer_up") == 0
+        || sent("route_monitoring_pre") == 0
+        || sent("end_of_rib") == 0
+    {
+        bail!("GET /v1/bgp/bmp does not show a dumped, connected station: {st}");
     }
 
     log("route monitoring: reverting the policy re-admits the retained route post-policy");
@@ -381,5 +406,22 @@ async fn other_families(w: &mut World) -> anyhow::Result<()> {
     for n in [evpn(true, "del"), vpn(true, "del")] {
         wait_collector(w, &n.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
     }
-    Ok(())
+
+    log("show bgp bmp: with the collector gone the station backs off and redials");
+    w.dock.container_remove(BMP_COLLECTOR).await;
+    let a = w.a()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let st = bmp_status(a).await?;
+        if st["state"] == "Backoff"
+            && st["reconnects"].as_u64().unwrap_or(0) >= 1
+            && st["last_error"].is_string()
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("the station never showed backoff with a redial: {st}");
+        }
+        tokio::time::sleep(POLL).await;
+    }
 }

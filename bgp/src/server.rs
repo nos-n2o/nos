@@ -55,7 +55,8 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         | BgpRequest::GetEvpnRoutesPage { .. }
         | BgpRequest::GetFlowspecRoutesPage { .. }
         | BgpRequest::GetVpnRoutesPage { .. }
-        | BgpRequest::GetRpkiSummary => {
+        | BgpRequest::GetRpkiSummary
+        | BgpRequest::ShowBmp => {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_)
@@ -210,6 +211,15 @@ async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Ctx) {
             BgpRequest::GetRpkiSummary => {
                 let event = BgpEvent::RpkiSummary(sessions.rpki_summaries().await);
                 if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::ShowBmp => {
+                if writer
+                    .send(BgpEvent::BmpStatus(sessions.bmp_status()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }

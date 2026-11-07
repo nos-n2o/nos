@@ -267,6 +267,7 @@ pub async fn handle_action(
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpFlowspec
         | Resolved::ShowBgpRpki
+        | Resolved::ShowBgpBmp
         | Resolved::ShowBgpVpn { .. }
         | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
@@ -396,6 +397,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowBgpRpki => {
             show_bgp_rpki(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBgpBmp => {
+            show_bgp_bmp(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpVpn { family, rd } => {
@@ -1165,6 +1170,36 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_rpki_summary(&bgp_socket).await {
                 Ok(caches) => println!("{}", format::render_bgp_rpki(&instance.name, &caches)),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show bgp bmp` — same shape as `show_bgp_evpn`.
+async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    if cfg.bgp_instances.is_empty() {
+        println!("no bgp instances configured");
+        return;
+    }
+    for instance in &cfg.bgp_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(bgp_socket)) => match bgp_client::get_bmp_status(&bgp_socket).await {
+                Ok(stations) => println!("{}", format::render_bgp_bmp(&instance.name, &stations)),
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),

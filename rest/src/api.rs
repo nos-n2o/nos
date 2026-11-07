@@ -81,6 +81,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::bgp_vpnv4))
         .routes(routes!(show::bgp_vpnv6))
         .routes(routes!(show::bgp_rpki))
+        .routes(routes!(show::bgp_bmp))
         .routes(routes!(show::ospf_neighbors))
         .routes(routes!(show::ospf_database))
         .routes(routes!(show::ospfv3_neighbors))

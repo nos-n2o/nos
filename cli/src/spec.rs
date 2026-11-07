@@ -736,6 +736,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowBgpRpki),
+    cmd!(["show" "bgp" "bmp"],
+        Doc::Local {
+            summary: "Show every BGP instance's BMP station connections (RFC 7854).",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for its bmp-stations: connection state (connecting, \
+                     connected, backoff), the monitored policy view, statistics interval, \
+                     monitored peers, messages sent by type, queue overflows, reconnect \
+                     attempts and the last error. An instance whose nos-bgpd isn't running \
+                     is reported individually rather than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpBmp),
     cmd!(["show" "bgp" "routes"],
         Doc::Local {
             summary: "Show every BGP instance's IPv4/IPv6 unicast routes with their RPKI validation state.",

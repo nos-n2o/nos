@@ -29,7 +29,7 @@ use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
 use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnRoute};
 use crate::vpn::VpnKey;
 use ipnet::IpNet;
-use nos_proto::BmpMonitor;
+use nos_proto::{BmpFrameCounts, BmpMonitor, BmpStationState, BmpStationStatus};
 
 /// BMP version 3 (RFC 7854 section 4.1).
 pub const BMP_VERSION: u8 = 3;
@@ -47,6 +47,7 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(120);
 /// Prefixes the initial dump reads per RIB lock hold (#864).
 pub const DUMP_CHUNK: usize = 1000;
 
+const TYPE_ROUTE_MONITORING: u8 = 0;
 const TYPE_PEER_DOWN: u8 = 2;
 const TYPE_PEER_UP: u8 = 3;
 const TYPE_INITIATION: u8 = 4;
@@ -310,10 +311,53 @@ struct Queue {
     stopping: bool,
 }
 
+/// What `show bgp bmp` reports for one station; survives reconnects.
+#[derive(Default)]
+struct Counters {
+    state: BmpStationState,
+    since: Option<u64>,
+    frames: BmpFrameCounts,
+    overflows: u64,
+    dials: u64,
+    last_error: Option<String>,
+}
+
 #[derive(Default)]
 struct Shared {
     q: Mutex<Queue>,
     wake: Notify,
+    stats: Mutex<Counters>,
+}
+
+impl Shared {
+    /// Counts one sent frame by its BMP type (common header byte 5); an
+    /// End-of-RIB is a Route Monitoring message the caller flags.
+    fn count(&self, f: &[u8], eor: bool) {
+        let mut c = lock(&self.stats);
+        let n = &mut c.frames;
+        match f.get(5) {
+            Some(&TYPE_ROUTE_MONITORING) if eor => n.end_of_rib += 1,
+            Some(&TYPE_ROUTE_MONITORING) if f.get(7).is_some_and(|b| b & FLAG_L != 0) => {
+                n.route_monitoring_post += 1;
+            }
+            Some(&TYPE_ROUTE_MONITORING) => n.route_monitoring_pre += 1,
+            Some(&stats::TYPE_STATS) => n.stats += 1,
+            Some(&TYPE_PEER_DOWN) => n.peer_down += 1,
+            Some(&TYPE_PEER_UP) => n.peer_up += 1,
+            Some(&TYPE_INITIATION) => n.initiation += 1,
+            Some(&TYPE_TERMINATION) => n.termination += 1,
+            _ => {}
+        }
+    }
+
+    fn set_state(&self, state: BmpStationState, error: Option<String>) {
+        let mut c = lock(&self.stats);
+        c.state = state;
+        c.since = (state == BmpStationState::Connected).then(|| now().as_secs());
+        if error.is_some() {
+            c.last_error = error;
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -560,6 +604,34 @@ impl Hub {
         }
     }
 
+    /// Every station's status, by name (`show bgp bmp`).
+    pub fn station_status(&self) -> Vec<BmpStationStatus> {
+        let st = lock(&self.state);
+        let mut v: Vec<_> = st
+            .stations
+            .values()
+            .map(|s| {
+                let c = lock(&s.shared.stats);
+                BmpStationStatus {
+                    name: s.cfg.name.clone(),
+                    address: s.cfg.addr.ip(),
+                    port: s.cfg.addr.port(),
+                    state: c.state,
+                    connected_since: c.since,
+                    monitor: s.cfg.monitor,
+                    statistics_interval: s.cfg.statistics_interval,
+                    peers_monitored: u32::try_from(st.registry.len()).unwrap_or(u32::MAX),
+                    frames_sent: c.frames,
+                    overflows: c.overflows,
+                    reconnects: c.dials.saturating_sub(1),
+                    last_error: c.last_error.clone(),
+                }
+            })
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    }
+
     /// SIGINT: Termination (reason 0) to every station.
     pub async fn shutdown(self: &Arc<Self>) {
         self.set_stations(Vec::new()).await;
@@ -567,11 +639,20 @@ impl Hub {
 }
 
 /// Sends `bytes`; `false` when the collector stalled or the socket failed.
-async fn send(w: &mut OwnedWriteHalf, bytes: &[u8]) -> bool {
-    matches!(
+async fn send(w: &mut OwnedWriteHalf, shared: &Shared, bytes: &[u8]) -> bool {
+    send_as(w, shared, bytes, false).await
+}
+
+/// [`send`], with `eor` marking an End-of-RIB for the frame counters.
+async fn send_as(w: &mut OwnedWriteHalf, shared: &Shared, bytes: &[u8], eor: bool) -> bool {
+    let ok = matches!(
         tokio::time::timeout(WRITE_TIMEOUT, w.write_all(bytes)).await,
         Ok(Ok(()))
-    )
+    );
+    if ok {
+        shared.count(bytes, eor);
+    }
+    ok
 }
 
 /// Sleeps `d`; `true` when the station was stopped meanwhile.
@@ -600,6 +681,12 @@ async fn run_station(hub: Arc<Hub>, cfg: StationCfg, shared: Arc<Shared>) {
         if shared.stopping() {
             return;
         }
+        {
+            let mut c = lock(&shared.stats);
+            c.dials += 1;
+            c.state = BmpStationState::Connecting;
+            c.since = None;
+        }
         let dial = crate::tcp::connect(cfg.addr, None, cfg.vrf.as_deref(), None, None);
         let stream = match tokio::time::timeout(CONNECT_TIMEOUT, dial).await {
             Ok(Ok(s)) => s,
@@ -609,6 +696,14 @@ async fn run_station(hub: Arc<Hub>, cfg: StationCfg, shared: Arc<Shared>) {
                     |r| r.err().map_or_else(String::new, |e| e.to_string()),
                 );
                 debug!(station = %cfg.name, address = %cfg.addr, %error, "bmp station unreachable");
+                shared.set_state(
+                    BmpStationState::Backoff,
+                    Some(if error.is_empty() {
+                        "connect failed".into()
+                    } else {
+                        error
+                    }),
+                );
                 if pause(&shared, backoff).await {
                     return;
                 }
@@ -618,13 +713,15 @@ async fn run_station(hub: Arc<Hub>, cfg: StationCfg, shared: Arc<Shared>) {
         };
         backoff = BACKOFF_INITIAL;
         info!(station = %cfg.name, address = %cfg.addr, "bmp station connected");
+        shared.set_state(BmpStationState::Connected, None);
         let ended = session(&hub, &cfg, &shared, stream).await;
         lock(&shared.q).connected = false;
         info!(station = %cfg.name, address = %cfg.addr, "bmp station disconnected");
         match ended {
             Ended::Stop => return,
-            Ended::Resync => {}
+            Ended::Resync => shared.set_state(BmpStationState::Connecting, None),
             Ended::Lost => {
+                shared.set_state(BmpStationState::Backoff, Some("connection lost".into()));
                 if pause(&shared, backoff).await {
                     return;
                 }
@@ -654,12 +751,18 @@ async fn session(
     let descr = format!("nos-bgpd {}", nos_proto::version::VERSION);
     let vrf_text = cfg.table.as_ref().map(|t| format!("vrf={t}"));
     let strings: Vec<&str> = vrf_text.iter().map(String::as_str).collect();
-    if !send(&mut wr, &initiation(&descr, &cfg.sys_name, &strings)).await {
+    if !send(
+        &mut wr,
+        shared,
+        &initiation(&descr, &cfg.sys_name, &strings),
+    )
+    .await
+    {
         return Ended::Lost;
     }
     info!(station = %cfg.name, "bmp initiation sent");
     for p in &peers {
-        if !send(&mut wr, &peer_up(&scope, p)).await {
+        if !send(&mut wr, shared, &peer_up(&scope, p)).await {
             return Ended::Lost;
         }
         info!(station = %cfg.name, peer = %p.peer, "bmp peer up sent");
@@ -685,7 +788,7 @@ async fn session(
                     Some(t) => { t.tick().await; }
                     None => std::future::pending().await,
                 }
-            } => if !stats::send_reports(hub, cfg, &scope, &mut wr).await {
+            } => if !stats::send_reports(hub, cfg, shared, &scope, &mut wr).await {
                 return Ended::Lost;
             },
             r = rd.read(&mut buf) => if matches!(r, Ok(0) | Err(_)) {
@@ -719,16 +822,17 @@ async fn drain(wr: &mut OwnedWriteHalf, cfg: &StationCfg, shared: &Shared) -> Op
         };
         match next {
             Next::Stop => {
-                let _ = send(wr, &termination(TERM_ADMIN_CLOSED)).await;
+                let _ = send(wr, shared, &termination(TERM_ADMIN_CLOSED)).await;
                 return Some(Ended::Stop);
             }
             Next::Resync(dropped) => {
+                lock(&shared.stats).overflows += 1;
                 warn!(station = %cfg.name, dropped, "bmp queue overflowed, resynchronising the station");
-                let _ = send(wr, &termination(TERM_OUT_OF_RESOURCES)).await;
+                let _ = send(wr, shared, &termination(TERM_OUT_OF_RESOURCES)).await;
                 return Some(Ended::Resync);
             }
             Next::Frame(f, kind) => {
-                if !send(wr, &f).await {
+                if !send_as(wr, shared, &f, matches!(kind, Kind::Eor(..))).await {
                     return Some(Ended::Lost);
                 }
                 match kind {
@@ -896,6 +1000,43 @@ mod tests {
         assert_eq!(q.frames.len(), QUEUE_CAPACITY);
         assert!(q.resync);
         assert_eq!(q.dropped, 3);
+    }
+
+    #[test]
+    fn frames_are_counted_by_type_and_stream() {
+        let sh = Shared::default();
+        let i = info("192.0.2.1", "192.0.2.2");
+        let sc = Scope::default();
+        sh.count(&initiation("d", "n", &[]), false);
+        sh.count(&peer_up(&sc, &i), false);
+        sh.count(&termination(0), false);
+        sh.count(&monitor::end_of_rib(&sc, &i, true, 1, 1), true);
+        let rm = |post| {
+            let u = UpdateMessage::default();
+            monitor::route_monitoring(&sc, &i, post, &u, Duration::ZERO)
+        };
+        for f in rm(true).iter().chain(&rm(false)).chain(&rm(false)) {
+            sh.count(f, false);
+        }
+        sh.count(&stats::stats_report(&sc, &i, &[], Duration::ZERO), false);
+        let f = lock(&sh.stats).frames;
+        assert_eq!(
+            (
+                f.initiation,
+                f.peer_up,
+                f.termination,
+                f.end_of_rib,
+                f.stats
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!((f.route_monitoring_post, f.route_monitoring_pre), (1, 2));
+    }
+
+    #[test]
+    fn status_lists_stations_by_name() {
+        let hub = Hub::new();
+        assert_eq!(hub.station_status(), [] as [nos_proto::BmpStationStatus; 0]);
     }
 
     #[test]

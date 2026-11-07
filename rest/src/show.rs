@@ -436,6 +436,8 @@ pub type BgpFlowspecReport = Vec<InstanceReport<BgpFlowspecPage>>;
 pub type BgpVpnReport = Vec<InstanceReport<BgpVpnPage>>;
 pub type BgpRoutesReport = Vec<InstanceReport<BgpRoutesPage>>;
 pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
+/// `GET /v1/bgp/bmp`.
+pub type BgpBmpReport = Vec<InstanceReport<Vec<nos_proto::BmpStationStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
@@ -806,6 +808,24 @@ pub async fn bgp_rpki(State(d): State<Daemons>) -> ApiResult<Json<BgpRpkiReport>
             || BgpRequest::GetRpkiSummary,
             |e| match e {
                 BgpEvent::RpkiSummary(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/bgp/bmp", tag = "show", summary = "BMP station connections and frame counters (RFC 7854), per instance", responses((status = 200, body = BgpBmpReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_bmp(State(d): State<Daemons>) -> ApiResult<Json<BgpBmpReport>> {
+    let names = d.bgp_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::BgpInstance,
+            || BgpRequest::ShowBmp,
+            |e| match e {
+                BgpEvent::BmpStatus(v) => Some(v),
                 _ => None,
             },
         )
