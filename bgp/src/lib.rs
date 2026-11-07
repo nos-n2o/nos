@@ -3,6 +3,7 @@
 pub mod acl_push_client;
 pub mod as_path;
 pub mod bfd_client;
+pub mod bmp;
 pub mod collision;
 pub mod damping;
 pub mod evpn;

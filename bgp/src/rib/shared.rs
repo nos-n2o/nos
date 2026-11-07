@@ -22,6 +22,9 @@ use super::BgpRib;
 pub struct SharedRib {
     inner: Mutex<BgpRib>,
     changed: watch::Sender<u64>,
+    /// The BMP exporter's hub (#878): the sessions reach it through the one
+    /// handle they all share.
+    bmp: std::sync::Arc<crate::bmp::Hub>,
 }
 
 impl SharedRib {
@@ -29,7 +32,13 @@ impl SharedRib {
         Self {
             inner: Mutex::new(rib),
             changed: watch::channel(0).0,
+            bmp: crate::bmp::Hub::new(),
         }
+    }
+
+    /// The BMP hub of this instance.
+    pub fn bmp(&self) -> &std::sync::Arc<crate::bmp::Hub> {
+        &self.bmp
     }
 
     pub async fn lock(&self) -> RibGuard<'_> {

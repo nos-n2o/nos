@@ -724,6 +724,39 @@ fn disconnect_kind(outcome: &FsmOutcome, n_exchanged: bool) -> Disconnect {
     }
 }
 
+/// RFC 7854 section 4.9 reason for a session that ended with `outcome`.
+/// ponytail: the NOTIFICATION PDU is rebuilt from code/subcode, so data (an
+/// RFC 9003 shutdown text) is lost for reason 3; carry it in
+/// `FsmOutcome::NotificationReceived` if a collector needs it.
+fn bmp_down_reason(outcome: &FsmOutcome) -> crate::bmp::DownReason {
+    use crate::bmp::DownReason;
+    let pdu = |code: u8, subcode: u8| {
+        crate::bmp::bgp_pdu(BgpMessage::Notification(NotificationMessage {
+            error_code: code,
+            error_subcode: subcode,
+            data: Bytes::new(),
+        }))
+    };
+    match outcome {
+        FsmOutcome::NotificationSent { code, subcode } => {
+            DownReason::LocalNotification(pdu(*code, *subcode))
+        }
+        FsmOutcome::HoldTimerExpired => {
+            DownReason::LocalNotification(pdu(ErrorCode::HoldTimerExpired as u8, 0))
+        }
+        FsmOutcome::CollisionLost => DownReason::LocalNotification(pdu(
+            ErrorCode::Cease as u8,
+            CeaseSubcode::ConnectionCollisionResolution as u8,
+        )),
+        FsmOutcome::NotificationReceived { code, subcode } => {
+            DownReason::RemoteNotification(pdu(*code, *subcode))
+        }
+        FsmOutcome::TcpError | FsmOutcome::PeerClosed | FsmOutcome::GrReplaced => {
+            DownReason::RemoteClosed
+        }
+    }
+}
+
 /// Turns one inbound message into the `Event` to feed `step`, or handles it
 /// here and returns `None`.
 ///
@@ -1585,6 +1618,8 @@ pub async fn run(
     // that differs from this address's own (RFC 8950 cross-family
     // next-hop), which is exactly why this is no longer restricted to IPv4.
     let local_addr = stream.local_addr().ok().map(|addr| addr.ip());
+    let local_port = stream.local_addr().map_or(0, |a| a.port());
+    let remote_port = stream.peer_addr().map_or(0, |a| a.port());
     // Also captured here, for the same reason: `status.fd`, read on demand
     // for a `TCP_AO_INFO` getsockopt once this session reaches `Established`
     // (see `Action::ReportEstablished` below).
@@ -1661,12 +1696,15 @@ pub async fn run(
     // `peer_outbox`, leaving a session that is still up but can never
     // advertise to that peer again.
     let mut registered = false;
+    // The two OPENs, for the BMP Peer Up (#878).
+    let open = build_open_message(&cx, &local, &ctx).await;
+    let sent_open = open.clone();
+    let mut recv_open = None;
 
     // Single exit point: every early-return case below (`break 'session
     // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
     // this block, rather than returning directly.
     let outcome = 'session: {
-        let open = build_open_message(&cx, &local, &ctx).await;
         if writer.send(BgpMessage::Open(open)).await.is_err() {
             break 'session FsmOutcome::TcpError;
         }
@@ -1738,6 +1776,9 @@ pub async fn run(
             };
 
             let is_open_event = matches!(event, Event::OpenReceived(_));
+            if let Event::OpenReceived(o) = &event {
+                recv_open = Some(o.clone());
+            }
             let notification_received = match &event {
                 Event::NotificationReceived(n) => {
                     log_notification(peer.remote_address, n);
@@ -1762,6 +1803,23 @@ pub async fn run(
             let (notification_sent, newly_registered) =
                 run_actions(&cx, &mut reader, &mut writer, &mut timers, &actions).await;
             registered |= newly_registered;
+            if newly_registered
+                && let (Some(State::Established(remote)), Some(sent), Some(recv)) =
+                    (&next_state, Some(sent_open.clone()), recv_open.clone())
+            {
+                bgp_rib.bmp().peer_up(crate::bmp::PeerUpInfo {
+                    peer: peer.remote_address,
+                    asn: remote.asn,
+                    bgp_id: remote.bgp_id,
+                    two_octet_as: !remote.four_octet_as,
+                    local: local_addr.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                    local_port,
+                    remote_port,
+                    sent_open: crate::bmp::bgp_pdu(BgpMessage::Open(sent)),
+                    recv_open: crate::bmp::bgp_pdu(BgpMessage::Open(recv)),
+                    time: crate::bmp::now(),
+                });
+            }
 
             if let Some(s) = next_state {
                 state = s;
@@ -1782,6 +1840,9 @@ pub async fn run(
         // collision loser ending must not clear the winner's.
         slot.set_refresh_caps(false, false);
         let kind = disconnect_kind(&outcome, cx.n_exchanged(&state));
+        bgp_rib
+            .bmp()
+            .peer_down(peer.remote_address, &bmp_down_reason(&outcome));
         bgp_rib
             .lock()
             .await
