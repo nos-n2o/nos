@@ -540,7 +540,7 @@ pub struct MpUnreachNlri {
 /// negotiates MP-BGP at all — IPv4 unicast too (see
 /// `crate::rib::build_advertisement`). `attributes` is `Some` iff `nlri` or
 /// `mp_reach` is non-empty — a pure withdrawal carries no path attributes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateMessage {
     pub withdrawn_routes: Vec<Ipv4Net>,
     /// RFC 7911 ADD-PATH identifiers, aligned by index with

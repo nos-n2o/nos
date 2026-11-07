@@ -2,11 +2,11 @@
 
 BGP-4 implementation for NOS (binary `nos-bgpd`, one process per `BgpInstance`, dynamically spawned by `nos-watchdog` — see `docs/architecture/supervision.md`).
 
-Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (functions, log lines, `ponytail:` ceilings, walk-throughs) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. This file keeps only the rules to respect when editing the crate.
+Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (log lines, `ponytail:` ceilings, walk-throughs) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. Only the editing rules are kept here.
 
 ## Scope
 
-`nos-bgpd` resolves peers and VRF from `nos-configd`, runs the RFC 4271 FSM over VRF-scoped TCP, keeps the RIBs and exchanges routes with `nos-ribd`/`nos-fdbd`. Open work: `bgp/TODO.md`.
+Resolves peers and VRF from `nos-configd`, runs the FSM over VRF-scoped TCP, exchanges routes with `nos-ribd`/`nos-fdbd`. Open work: `bgp/TODO.md`.
 
 ## VRF resolution
 
@@ -18,10 +18,10 @@ Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}
 ## Raw TCP session model
 
 - Per peer, an active retry loop plus one shared passive listener (`0.0.0.0:179` + `[::]:179`), both scoped into the VRF by `SO_BINDTODEVICE` (`tcp.rs`).
-- Skip dialing while `PeerSlot::is_established` (either role), or ticks collide.
-- Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`), each `tcp::connect` bounded by it (#158).
-- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease wait (#444).
-- **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In/`peer_outbox` outlive the session.
+- Skip dialing while `PeerSlot::is_established` (either role).
+- Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`) (#158).
+- Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease (#444).
+- **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In outlives the session.
 
 ## Session authentication
 
@@ -53,7 +53,7 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Damping
 
-Penalty keyed by (peer, prefix) (`damping::Damping`); an identical re-announcement is no change (keeps `received_at`, #160).
+`damping::Damping` is keyed by (peer, prefix); an identical re-announcement is no change (#160).
 
 ## Collision resolution
 
@@ -81,7 +81,7 @@ Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers wh
 
 ## BMP (#878)
 
-`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up at `ReportEstablished`, Peer Down at the `registered` exit and in `reconcile_peers`. Dial only on a `Resolved` VRF. Internals page.
+`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy is the received UPDATE; post-policy is a tap at every Adj-RIB-In mutation (`learn_prefix`, `remove_path`, `settle`), so a new mutation site must tap. Internals page.
 
 ## Graceful restart (#12)
 
@@ -152,4 +152,4 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 | `rib_client.rs`, `interface_client.rs` | One-shot queries (`nos_daemon::ipc::one_shot`) |
 | `rpki/`, `server.rs` | `vrp.rs`/`rtr.rs`; `--listen-socket`, `allowed(role, &request)` with no wildcard arm |
 
-Tests: `bgp/tests/`, `reconcile_tests.rs`/`fsm_tests.rs` (fakes, #344).
+Tests: `bgp/tests/`, `reconcile_tests.rs`, `fsm_tests.rs` (#344).

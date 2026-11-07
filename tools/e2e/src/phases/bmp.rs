@@ -133,5 +133,112 @@ pub async fn bmp(w: &mut World) -> anyhow::Result<()> {
     // The new container's log starts empty: any `add` line is the replay.
     wait_collector(w, &add, 0).await?;
     a.wait_new("bmp station connected", conn_base, 60).await?;
-    Ok(())
+    route_monitoring(w, &a_flags).await
+}
+
+/// Needles of a unicast prefix line of the collector for the redistributed
+/// prefix (GoBMP's JSON keys, recorded from the real collector).
+fn route_line(post: bool, action: &str) -> Vec<String> {
+    vec![
+        format!(
+            "\"prefix\":\"{}\"",
+            REDISTRIBUTE_PREFIX.split('/').next().unwrap_or("")
+        ),
+        format!("\"is_adj_rib_in_post_policy\":{post}"),
+        format!("\"action\":\"{action}\""),
+    ]
+}
+
+fn count_route(log: &str, post: bool, action: &str) -> usize {
+    let n = route_line(post, action);
+    lines_with(log, &n.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+async fn wait_route(w: &World, post: bool, action: &str, baseline: usize) -> anyhow::Result<()> {
+    let n = route_line(post, action);
+    wait_collector(
+        w,
+        &n.iter().map(String::as_str).collect::<Vec<_>>(),
+        baseline,
+    )
+    .await
+}
+
+/// #864: Route Monitoring on router-b (the receiver of router-a's route):
+/// a policy-rejected prefix is pre-policy only, the dump after a collector
+/// restart comes from the retained table, a reverted policy adds the
+/// post-policy view, a withdrawn route is deleted on both views.
+async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<()> {
+    log("route monitoring: router-b rejects the prefix, the collector sees it pre-policy only");
+    let station = format!("{IP_BMP}:{BMP_PORT}");
+    let mut b_flags = B.base_flags();
+    b_flags.extend(strings(&[
+        "--bmp-station",
+        &station,
+        "--bmp-monitor",
+        "both",
+        "--soft-reconfiguration-inbound",
+    ]));
+    let file = super::bgp::policy_file(
+        "bmp-reject",
+        &format!("if this.prefix in {REDISTRIBUTE_PREFIX}:\n    reject\nelse:\n    accept\n"),
+    )?;
+    let mut rejecting = b_flags.clone();
+    rejecting.extend(strings(&[
+        "--policy-name",
+        "bmp-reject",
+        "--policy-source-file",
+        &file,
+        "--import-policy",
+        "bmp-reject",
+    ]));
+    let (a, b) = (w.a()?, w.b()?);
+    // Policy and the soft-reconfiguration flag apply in place: no new session.
+    b.provision_flags(&rejecting).await?;
+    b.wait("bmp station connected").await?;
+    let mut redist = a_flags.to_vec();
+    redist.extend(strings(&super::bgp::redistribute()));
+    a.provision_flags(&redist).await?;
+    b.wait(&format!(
+        "bmp rib dump sent peer={IP_A} stream=post-policy routes=0"
+    ))
+    .await?;
+    wait_route(w, false, "add", 0).await?;
+    let gobmp = collector_log(w).await?;
+    if count_route(&gobmp, true, "add") != 0 {
+        bail!("a rejected prefix reached the collector post-policy:\n{gobmp}");
+    }
+
+    log("route monitoring: the collector restarts, the dump comes from the retained routes");
+    let dump = format!("bmp rib dump sent peer={IP_A} stream=pre-policy routes=1");
+    let dump_base = b.count(&dump);
+    w.dock.container_remove(BMP_COLLECTOR).await;
+    start_collector(w).await?;
+    let b = w.b()?;
+    b.wait_new(&dump, dump_base, 90).await?;
+    b.wait(&format!(
+        "bmp end-of-rib sent peer={IP_A} stream=pre-policy"
+    ))
+    .await?;
+    wait_route(w, false, "add", 0).await?;
+    let eor = [
+        "\"is_eor\":true",
+        &format!("\"peer_ip\":\"{IP_A}\""),
+        "\"is_adj_rib_in_post_policy\":false",
+    ];
+    wait_collector(w, &eor, 0).await?;
+    if count_route(&collector_log(w).await?, true, "add") != 0 {
+        bail!("a rejected prefix reached the new collector post-policy");
+    }
+
+    log("route monitoring: reverting the policy re-admits the retained route post-policy");
+    b.provision_flags(&b_flags).await?;
+    wait_route(w, true, "add", 0).await?;
+
+    log("route monitoring: router-a withdraws the prefix, both views delete it");
+    let mut gone = a_flags.to_vec();
+    gone.extend(strings(&["--remove-static-route", REDISTRIBUTE_PREFIX]));
+    w.a()?.provision_flags(&gone).await?;
+    wait_route(w, true, "del", 0).await?;
+    wait_route(w, false, "del", 0).await
 }

@@ -28,11 +28,13 @@ pub struct SharedRib {
 }
 
 impl SharedRib {
-    pub fn new(rib: BgpRib) -> Self {
+    pub fn new(mut rib: BgpRib) -> Self {
+        let bmp = crate::bmp::Hub::new();
+        rib.set_bmp(bmp.clone());
         Self {
             inner: Mutex::new(rib),
             changed: watch::channel(0).0,
-            bmp: crate::bmp::Hub::new(),
+            bmp,
         }
     }
 

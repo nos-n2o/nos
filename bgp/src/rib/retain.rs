@@ -29,7 +29,7 @@ pub const REEVAL_CHUNK: usize = 5000;
 /// `put_path`/`take_path`, so ADD-PATH ids come for free.
 #[derive(Default)]
 pub(super) struct Retained {
-    tables: HashMap<IpAddr, PeerTable>,
+    pub(super) tables: HashMap<IpAddr, PeerTable>,
     counts: HashMap<IpAddr, PathCounts>,
     enabled: HashSet<IpAddr>,
     /// Families whose enhanced-refresh `EoRR` is still awaited after an
@@ -454,6 +454,7 @@ impl BgpRib {
         let local = self.confed_id.unwrap_or(self.local_asn);
         let adj = self.adj_rib_in.entry(peer).or_default();
         let counts = self.path_counts.entry(peer).or_default();
+        let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let fam = family_index(prefix);
         let mut changed = false;
         for (id, held) in paths {
@@ -467,7 +468,7 @@ impl BgpRib {
             let result = apply_policy(prefix, cand, policy, Some(pp), None);
             stats[fam].0 += 1;
             stats[fam].1 += u32::from(result.is_some());
-            changed |= settle(adj, counts, (peer, prefix, *id), result);
+            changed |= settle(adj, counts, (peer, prefix, *id), result, bmp);
         }
         if changed {
             stats[fam].2 += 1;
@@ -646,9 +647,14 @@ fn settle(
     counts: &mut PathCounts,
     (peer, prefix, id): (IpAddr, IpNet, u32),
     result: Option<RibRoute>,
+    bmp: Option<&crate::bmp::Hub>,
 ) -> bool {
     let Some(mut route) = result else {
-        return take_path(adj, counts, prefix, id).is_some();
+        let gone = take_path(adj, counts, prefix, id).is_some();
+        if let Some(h) = bmp.filter(|_| gone) {
+            h.route_post(peer, prefix, id, None);
+        }
+        return gone;
     };
     if let Some(old) = get_path(adj, prefix, id) {
         route.received_at = old.received_at;
@@ -660,6 +666,9 @@ fn settle(
             peer = %peer, path_id = id,
             "bgp: learned route for {prefix} into adj-rib-in"
         );
+    }
+    if let Some(h) = bmp {
+        h.route_post(peer, prefix, id, Some(&route));
     }
     put_path(adj, counts, prefix, id, route);
     true

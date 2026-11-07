@@ -619,6 +619,7 @@ fn station(port: u16) -> nos_proto::BmpStation {
         name: "bmp-1".into(),
         address: IpAddr::V4(A),
         port,
+        monitor: nos_proto::BmpMonitor::Both,
     }
 }
 
@@ -652,7 +653,13 @@ async fn bmp_station_gets_initiation_peer_up_peer_down_and_a_replay() {
 
     // Removing the peer from a's config ends the session: Peer Down.
     a.apply(vec![]).await;
-    let (t, body) = bmp_frame(&mut c).await;
+    // End-of-RIB markers (#864) may precede it.
+    let (t, body) = loop {
+        let frame = bmp_frame(&mut c).await;
+        if frame.0 != 0 {
+            break frame;
+        }
+    };
     assert_eq!(t, 2, "Peer Down");
     assert_eq!(&body[22..26], &[127, 0, 0, 2]);
 
@@ -679,6 +686,7 @@ async fn bmp_queue_overflow_resyncs_the_station() {
         sys_name: "x".into(),
         table: None,
         scope: nos_bgp::bmp::Scope::default(),
+        monitor: nos_proto::BmpMonitor::Both,
     }])
     .await;
     let (mut c, _) = collector.accept().await.unwrap();
@@ -694,6 +702,7 @@ async fn bmp_queue_overflow_resyncs_the_station() {
         sent_open: bytes::Bytes::new(),
         recv_open: bytes::Bytes::new(),
         time: Duration::ZERO,
+        add_path_afis: std::collections::HashSet::default(),
     };
     // No await between pushes: the station task cannot drain meanwhile.
     for n in 0..QUEUE_CAPACITY + 10 {
@@ -715,4 +724,149 @@ async fn bmp_queue_overflow_resyncs_the_station() {
         assert_eq!(bmp_frame(&mut c).await.0, 3, "replayed registry");
     }
     hub.shutdown().await;
+}
+
+/// One Route Monitoring frame off the fake collector: (L flag, BGP message).
+async fn bmp_route(s: &mut tokio::net::TcpStream) -> (bool, nos_bgp::message::BgpMessage) {
+    use tokio_util::codec::Decoder;
+    let (t, body) = bmp_frame(s).await;
+    assert_eq!(t, 0, "Route Monitoring");
+    let mut b = bytes::BytesMut::from(&body[42..]);
+    let msg = nos_bgp::message::BgpCodec::default()
+        .decode(&mut b)
+        .unwrap()
+        .expect("a whole PDU");
+    (body[1] & 0x40 != 0, msg)
+}
+
+fn unicast_only(p: ResolvedPeer) -> ResolvedPeer {
+    ResolvedPeer {
+        address_families: vec![AddressFamily::Ipv4Unicast],
+        ..p
+    }
+}
+
+/// #864: a station that connects after the routes arrived gets the pre-policy
+/// dump (from the retained routes) and the is_post-policy dump, each closed by an
+/// End-of-RIB; then incremental changes on both streams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_dump_and_incremental_updates_on_both_streams() {
+    use nos_bgp::message::BgpMessage;
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    let route = RedistributedRoute {
+        prefix: "198.51.100.0/24".parse().unwrap(),
+        gateway: "10.0.0.9".parse().unwrap(),
+    };
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![route]))
+        .await;
+    let b_peer = |accept: bool| {
+        let mut p = unicast_only(peer(A, B, 65001));
+        p.soft_reconfiguration_inbound = true;
+        if !accept {
+            p.import_policy = Arc::new(nos_rpl::DENY_ALL.clone());
+        }
+        p
+    };
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    b.apply(vec![b_peer(false)]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    eventually("b retains a's route", || async {
+        matches!(b.manager.soft_in_local(IpAddr::V4(A)).await, Some(Ok(f)) if f[0].retained == 1)
+    })
+    .await;
+
+    b.manager
+        .set_bmp_stations(&[station(port)], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    assert_eq!(bmp_frame(&mut c).await.0, 3);
+    // Pre-policy dump: the rejected route, then End-of-RIB.
+    let (is_post, msg) = bmp_route(&mut c).await;
+    let BgpMessage::Update(upd) = msg else {
+        panic!("{msg:?}")
+    };
+    assert!(!is_post);
+    assert_eq!(upd.nlri, vec!["198.51.100.0/24".parse().unwrap()]);
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(!is_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }));
+    // Post-policy dump: nothing was accepted, just the End-of-RIB.
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(is_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }));
+
+    // Loosening the policy admits the route: is_post-policy only.
+    b.apply(vec![b_peer(true)]).await;
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(
+        is_post && matches!(&msg, BgpMessage::Update(upd) if upd.nlri.len() == 1),
+        "{msg:?}"
+    );
+
+    // A withdraws it: the raw withdraw (pre) and the stored removal (is_post).
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
+        .await;
+    let mut seen = [false; 2];
+    for _ in 0..2 {
+        let (is_post, msg) = bmp_route(&mut c).await;
+        assert!(
+            matches!(&msg, BgpMessage::Update(upd) if upd.withdrawn_routes.len()
+                + upd.mp_unreach.iter().map(|msg| msg.withdrawn.len()).sum::<usize>() == 1),
+            "{msg:?}"
+        );
+        seen[usize::from(is_post)] = true;
+    }
+    assert_eq!(seen, [true, true]);
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}
+
+/// #864: without soft-reconfiguration inbound the pre-policy dump is skipped
+/// (its End-of-RIB is still sent) and the is_post-policy dump is complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_pre_policy_dump_is_skipped_without_retention() {
+    use nos_bgp::message::BgpMessage;
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    b.apply(vec![unicast_only(peer(A, B, 65001))]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    eventually("b learns the route", || async {
+        b.manager
+            .bgp_push_snapshot()
+            .await
+            .1
+            .contains_key(&"198.51.100.0/24".parse().unwrap())
+    })
+    .await;
+    b.manager
+        .set_bmp_stations(&[station(port)], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    assert_eq!(bmp_frame(&mut c).await.0, 3);
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(
+        !is_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }),
+        "pre: only the End-of-RIB"
+    );
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(
+        is_post && matches!(&msg, BgpMessage::Update(upd) if upd.nlri.len() == 1),
+        "{msg:?}"
+    );
+    let (is_post, msg) = bmp_route(&mut c).await;
+    assert!(is_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }));
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
 }
