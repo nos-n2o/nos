@@ -16,13 +16,36 @@ SUDO=
 if ! $SUDO modprobe -a vrf mpls_router mpls_iptunnel 2>/dev/null; then
     $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
 fi
-# vrf..ipip: rtnetlink drivers. cls_flower..sch_ingress: EVPN local bias
-# (nos-fdbd, tc: flower/skbedit mark, fw/gact drop, clsact) and the STP BPDU
-# trap (nos-interfaced: flower + gact drop on ingress). act_sample/psample:
-# ACL `log` (nos-acld, #544); the acl phase's log step cannot pass without them.
-# mpls_router/mpls_iptunnel: the L3VPN data plane (nos-ribd, vpn-dataplane);
-# /proc/sys/net/mpls exists only in netns created after mpls_router loads.
-mods="vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_gact sch_ingress act_sample psample mpls_router mpls_iptunnel"
+# THE module list (#897): `module phases-it-blocks` (`*` = every phase), read
+# by this script and by nos-e2e (tools/e2e/src/modules.rs includes this file to
+# name the missing ones after a failed run), so add a module here only, plus its
+# row in docs/e2e-phases.md. Notes: vrf..ipip are rtnetlink drivers; cls_flower,
+# cls_fw, act_skbedit, act_gact, sch_ingress are EVPN local bias (nos-fdbd) and
+# the STP BPDU trap (nos-interfaced); cls_u32 is the BFD phases' `tc` drop
+# filter; act_sample/psample are ACL `log` (#544); mpls_* is the L3VPN data
+# plane (/proc/sys/net/mpls exists only in netns created after mpls_router
+# loads). #865/#891 add act_mirred etc. below.
+table='
+vrf *
+dummy *
+bonding port-aggregate,lacp,micro-bfd
+vxlan evpn-fdb,evpn-esi,evpn-dataplane,evpn-single-active,evpn-v6,evpn-l3,evpn-l3-chunked
+8021q mtu,switching,svi,routed-subinterface,stp
+bridge evpn-fdb,evpn-esi,evpn-dataplane,evpn-single-active,evpn-v6,evpn-l3,evpn-l3-chunked,switching,svi,stp
+ipip ospf-remote-lfa
+cls_flower acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
+cls_fw evpn-esi,evpn-dataplane,evpn-single-active
+act_skbedit evpn-esi,evpn-dataplane,evpn-single-active
+act_gact acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
+sch_ingress acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
+cls_u32 bfd,bgp-bfd,bfd-unsolicited,bfd-echo,bfd-echo-unaffiliated,micro-bfd,ospf-bfd,ospfv3-bfd
+act_sample acl
+psample acl
+mpls_router vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath
+mpls_iptunnel vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath
+'
+# NOS_E2E_PREFLIGHT_ASSUME_MISSING="m1 m2" pretends those are absent (tests).
+mods=$(echo "$table" | awk 'NF { print $1 }')
 # -a: without it every name after the first is a parameter of the first module.
 # shellcheck disable=SC2086
 $SUDO modprobe -a $mods || true
@@ -30,12 +53,17 @@ $SUDO modprobe -a $mods || true
 # are listed in modules.builtin.
 missing=
 for m in $mods; do
+    case " ${NOS_E2E_PREFLIGHT_ASSUME_MISSING:-} " in *" $m "*) missing="$missing $m"; continue ;; esac
     [ -d "/sys/module/$m" ] && continue
     grep -qE "/$m\.ko" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null && continue
     missing="$missing $m"
 done
 if [ -n "$missing" ]; then
     echo "kernel modules missing on $(uname -r):$missing" >&2
+    for m in $missing; do
+        echo "  $m blocks: $(echo "$table" | awk -v m="$m" '$1 == m { print $2 }')" >&2
+    done
+    echo "modprobe line and /etc/modules-load.d snippet: docs/architecture/e2e-harness.md" >&2
     exit 1
 fi
 lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|ipip|cls_|act_|sch_ingress|psample|mpls' || true

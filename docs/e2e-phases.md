@@ -136,6 +136,30 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `logd-memory` | Logging | logd-memory-lab | - | 20 000 sequential per-route `PUT`s into an uncommitted transaction (one `rest request` log line each): `nos-logd`'s RSS at 20 000 is at most +50% or +50 MB (larger) over 10 000, its idle RSS (30 s later) does not exceed the end-of-load RSS, and the watchdog logged `starting process=nos-logd ... env=MALLOC_ARENA_MAX=1` (its per-process env, #756; `/proc/<pid>/environ` is unreadable across uids). Minutes long. |
 | `config-mem` | Config | config-memory-lab | - | The `mem-wave` load on router-b (default 12 waves x 5500 per-route `PUT`s, one commit each, 66k static routes; `WAVE_COUNT`/`WAVE_ROUTES`/`WAVE_IDLE` override): `nos-configd`'s `VmRSS` after each commit from wave 2 on stays within ±25% of the median of waves 2-4 (a known-creep tolerance for the live-heap growth of #796, which was closed as won't fix, not a flatness proof), `nos-restd`'s within ±25% or +15 MB (15 360 kB) of that median, whichever is wider (#801), the cgroup's sampled `memory.current` stays under 1.5 GiB, neither `nos-configd` nor `nos-restd` changes pid, and the watchdog logged `starting process=nos-configd ... env=MALLOC_ARENA_MAX=1` (#776). Tens of minutes long. |
 
+
+## Kernel modules
+
+The docker host needs these (a container cannot `modprobe`); `make e2e-preflight` checks them all and prints each missing one with the phases it blocks. Load commands, boot-time snippet and how to add one: [e2e-harness.md](architecture/e2e-harness.md#host-kernel-modules). The list is the `table` in `tools/ci/e2e-preflight.sh`; the phase lists are at least what each module blocks, so a group member not named here can still need it through a daemon that is running.
+
+| Module | Used for | Blocks |
+|---|---|---|
+| `vrf` | one VRF per routing table (`nos-ribd`) | every phase |
+| `dummy` | loopback interfaces (`nos-interfaced`) | every phase |
+| `bonding` | `PortAggregate` bonds (`nos-interfaced`) | `port-aggregate`, `lacp`, `micro-bfd` |
+| `vxlan` | VTEP devices (`nos-fdbd`, `nos-ribd` L3 VNI) | the `evpn*` phases |
+| `bridge` | broadcast-domain bridges (`nos-interfaced`, `nos-fdbd`) | the `evpn*` phases, `switching`, `svi`, `stp` |
+| `8021q` | VLAN sub-links | `mtu`, `switching`, `svi`, `routed-subinterface`, `stp` |
+| `ipip` | NBMA IP-in-IP tunnel for remote LFA (`nos-ribd`) | `ospf-remote-lfa` |
+| `cls_flower`, `act_gact`, `sch_ingress` | tc ingress filters: ACL and flowspec (`nos-acld`), EVPN local bias (`nos-fdbd`), STP BPDU trap (`nos-interfaced`) | `acl`, `flowspec-dataplane`, `evpn-esi`, `evpn-dataplane`, `evpn-single-active`, `stp` |
+| `cls_fw`, `act_skbedit` | EVPN local bias mark and drop (`nos-fdbd`) | `evpn-esi`, `evpn-dataplane`, `evpn-single-active` |
+| `cls_u32` | the BFD phases' `tc` u32 filter dropping BFD packets | `bfd`, `bgp-bfd`, `bfd-unsolicited`, `bfd-echo`, `bfd-echo-unaffiliated`, `micro-bfd`, `ospf-bfd`, `ospfv3-bfd` |
+| `act_sample`, `psample` | ACL `log` rules (`nos-acld`, #544) | `acl` |
+| `mpls_router`, `mpls_iptunnel` | L3VPN data plane: pop routes, labelled routes (`nos-ribd`); missing, `nos-ribd` logs `MPLS is not available: load the mpls_router kernel module` | `vpn`, `vpn-export`, `vpn-export-chunked`, `vpn-dataplane`, `vpn-v6`, `vpn-multipath` |
+
+- Pulled in as dependencies, not listed: `ip_tunnel` (by `ipip`), `mpls_gso` (by `mpls_iptunnel`).
+- To come (#865/#891): `act_mirred`. Add its row here and in the script's `table`.
+- A run that fails also prints the missing modules blocking the phases it ran (`nos-e2e`, after `FAILED`): read it before suspecting a regression.
+
 ## BGP
 
 Topology: router-a (AS 65001) and router-b (AS 65002) on one docker network, peered in `rt1`. Self-contained phases add ExaBGP (`router-g`, scripted speakers, `asn4 disable`, API-fed paths), StayRTR, FRR (`router-f`) or a third nos router. `nos-e2e` sets `connect-retry-time` to 3s on every peer-group (the default 120s would stall "established" waits). Phases that change config take a baseline first and wait for a new session rather than a stale log line.
