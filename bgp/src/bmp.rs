@@ -24,6 +24,8 @@ use crate::message::{BgpCodec, BgpMessage};
 pub const BMP_VERSION: u8 = 3;
 /// Frames a station's queue holds before it drops the oldest and resyncs.
 pub const QUEUE_CAPACITY: usize = 1024;
+/// A dial that takes longer than this is retried.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A collector that accepts no bytes for this long is treated as dead.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// First reconnect delay, doubling to [`BACKOFF_MAX`].
@@ -104,7 +106,7 @@ pub struct PeerUpInfo {
     pub asn: u32,
     /// The peer's BGP identifier.
     pub bgp_id: Ipv4Addr,
-    /// A flag: the session uses 2-octet AS_PATH.
+    /// A flag: the session uses 2-octet `AS_PATH`.
     pub two_octet_as: bool,
     /// Our side of the TCP session.
     pub local: IpAddr,
@@ -439,10 +441,14 @@ async fn run_station(hub: Arc<Hub>, cfg: StationCfg, shared: Arc<Shared>) {
         if shared.stopping() {
             return;
         }
-        let stream = match crate::tcp::connect(cfg.addr, None, cfg.vrf.as_deref(), None, None).await
-        {
-            Ok(s) => s,
-            Err(error) => {
+        let dial = crate::tcp::connect(cfg.addr, None, cfg.vrf.as_deref(), None, None);
+        let stream = match tokio::time::timeout(CONNECT_TIMEOUT, dial).await {
+            Ok(Ok(s)) => s,
+            other => {
+                let error = other.map_or_else(
+                    |_| "timed out".to_string(),
+                    |r| r.err().map_or_else(String::new, |e| e.to_string()),
+                );
                 debug!(station = %cfg.name, address = %cfg.addr, %error, "bmp station unreachable");
                 if pause(&shared, backoff).await {
                     return;

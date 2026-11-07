@@ -5,6 +5,7 @@ mod bfd;
 mod bfd_auth;
 mod bfd_echo;
 mod bgp;
+mod bmp;
 mod drivers;
 mod ospf;
 mod pki;
@@ -64,6 +65,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "local-as" => bgp::local_as(w).await,
         "bgp-role" => bgp::bgp_role(w).await,
         "rpki" => bgp::rpki(w).await,
+        "bmp" => bmp::bmp(w).await,
         "evpn" => bgp::evpn(w).await,
         "flowspec" => bgp::flowspec(w).await,
         "vpn" => bgp::vpn(w).await,
@@ -261,6 +263,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "local-as",
             "bgp-role",
             "rpki",
+            "bmp",
             "evpn",
             "flowspec",
             "vpn",
@@ -387,6 +390,7 @@ pub const ALL: &[&str] = &[
     "local-as",
     "bgp-role",
     "rpki",
+    "bmp",
     "ospf",
     "ospf-p2mp",
     "asbr",

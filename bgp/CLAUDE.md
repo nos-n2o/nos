@@ -69,7 +69,7 @@ Counters (`path_counts`) change only in `put_path`/`take_path`, the sole Adj-RIB
 
 ## Route refresh
 
-Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, per session. Peer requests pass `RefreshLimiter` (2, then 1/10s); internal ones bypass. `send_route_refresh` sends nothing without the peer's capability.
+Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, per session. Peer requests pass `RefreshLimiter` (2, then 1/10s). `send_route_refresh` sends nothing without the peer's capability.
 
 ## Soft reconfiguration inbound (#859)
 
@@ -79,6 +79,10 @@ Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale de
 
 Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers whose import policy `reads_validation_state()` are route-refreshed (re-evaluated if retained), 5s after a burst. RFC 8097 wire order (0 valid, 1 not-found, 2 invalid) differs from `nos_rpl::ValidationState`'s discriminants.
 
+## BMP (#878)
+
+`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up at `ReportEstablished`, Peer Down at the `registered` exit and in `reconcile_peers`. Dial only on a `Resolved` VRF. Internals page.
+
 ## Graceful restart (#12)
 
 - Pure decisions in `gr.rs`; F bit from `BgpRib::gr_forwarding`; `peer_disconnected(peer, Disconnect)` with `Transport`/`Graceful`/`Hard` (`fsm::disconnect_kind`).
@@ -87,14 +91,7 @@ Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers wh
 
 ## Confederations, local-as, roles
 
-- `session::PeerKind` (`Internal`/`ConfedExternal`/`External`) drives what each peer sees; `ResolvedPeer::open_as` gives the OPEN AS, `PeerOutbox::prepend_external` (shared by `build_advertisement` and `evpn_out::advertise`) the path prepend.
-
-| Toward | OPEN `My AS` | AS_PATH |
-|---|---|---|
-| `Internal` | member AS | unchanged |
-| `ConfedExternal` | member AS | member AS in an `AS_CONFED_SEQUENCE` |
-| `External` | identifier (or `local-as`) | confed segments stripped, identifier prepended |
-
+- `session::PeerKind` (`Internal`/`ConfedExternal`/`External`) drives what each peer sees; `ResolvedPeer::open_as` gives the OPEN AS, `PeerOutbox::prepend_external` (shared by `build_advertisement` and `evpn_out::advertise`) the path prepend; OPEN/AS_PATH per kind: internals page.
 - Step 6 ranks external > confed-external > internal (`peer_rank`); the RFC 4456 gate stays keyed on `Internal`. RPL sees the flat path (`AsPath::flat`).
 - Validation: `bgp_instance::valid_local_as`/`valid_role`/`valid_route_reflection_and_server`. Roles/OTC (#220, #221): `fsm::negotiate_role`, `otc_leak`.
 

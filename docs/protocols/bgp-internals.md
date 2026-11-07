@@ -158,6 +158,24 @@ A `BgpPeerGroup`'s `maximum_prefix` (`nos_proto::BgpMaximumPrefix`, one `Option<
 - Stale sweeps (RFC 7313 purge, GR) remove the raw copy only for keys that were held; a rejected route the peer silently stops sending after a refresh stays retained until its withdrawal or the session ends (`ponytail`, same as unicast).
 - Verified by `nos-e2e policy` (two nos routers), `soft-reconfig-frr` (FRR with `dont-capability-negotiate`), and, for #866, the `evpn`, `vpn` and `flowspec` phases.
 
+### BMP exporter (RFC 7854, #878)
+
+- Code: `bmp.rs` (pure codec, then `Hub` and the station task). One `Hub` per instance lives in `SharedRib` (`bgp_rib.bmp()`); it is always there and does nothing without stations.
+- Hooks: `fsm::run` calls `Hub::peer_up` when `ReportEstablished` ran (both OPENs re-encoded with `BgpCodec`; ports from the socket; the A flag is `!four_octet_as`) and `Hub::peer_down` at the single exit under the `registered` flag (`bmp_down_reason` maps `FsmOutcome`). `session::reconcile_peers` calls `peer_down(LocalFsm(0))` beside its `peer_disconnected` for aborted sessions. Peer Down only goes out for a peer in the registry, so a collision loser sends none.
+- State: a std mutex over `registry` (Established peers' Peer Up data), the stations, and per station a bounded queue (1024 encoded frames, drop-oldest) with a `Notify`. Pushing never awaits the network. The queue only fills while the station is connected; the connect-time replay (registry snapshot plus queue clear, under both locks) covers anything older.
+- Station task (`run_station`): dial with `tcp::connect` (VRF-scoped, 10 s bound), Initiation, replay, then drain; the same `select!` reads the station socket (EOF or error means reconnect). Writes time out after 30 s. A dropped frame sets `resync`: Termination (reason 2), reconnect, replay. Stop (removal, restart of a changed station, SIGINT): Termination (reason 0).
+- Config: `reconcile::resync` calls `SessionManager::set_bmp_stations` every pass; `Hub::set_stations` restarts only stations whose `StationCfg` (address, VRF, instance, table, peer type) changed. Only a `Resolved` VRF dials.
+- Logs (e2e anchors): `bmp station connected`, `bmp initiation sent`, `bmp peer up sent`, `bmp peer down sent` (with `reason`), `bmp station disconnected`, the overflow `warn!` with the dropped count.
+- `ponytail:` the OPEN and NOTIFICATION PDUs are re-encoded: unknown capabilities and RFC 9003 shutdown text of a received NOTIFICATION are lost; carry the raw frames if a collector needs them. Reason 2 always uses event 0 ("none"), not an RFC 4271 section 8.1 event number.
+- Verified against GoBMP (digest in `consts.rs`): it dumps Peer Up/Down as `msg_type` 10 (`action` add/down, `bmp_reason`), takes the router address from the Peer Up local address, and never prints Initiation or Termination. Not verified against GoBMP: peer type 1 with a distinguisher.
+- Confederation table (moved from `CLAUDE.md`):
+
+| Toward | OPEN `My AS` | AS_PATH |
+|---|---|---|
+| `Internal` | member AS | unchanged |
+| `ConfedExternal` | member AS | member AS in an `AS_CONFED_SEQUENCE` |
+| `External` | identifier (or `local-as`) | confed segments stripped, identifier prepended |
+
 ### RPKI origin validation (RFC 6811, RFC 8210)
 
 `BgpInstance.rpki_caches` (`nos_proto::RpkiCache { address, port (323), preference (0), auth }`, keyed by address; `set bgp instance <i> rpki-cache <addr>` then `port`/`preference`/`md5-password`/`ao-key`) makes this `nos-bgpd` run an RTR client — inside the instance, no separate daemon (owner decision on #17).
