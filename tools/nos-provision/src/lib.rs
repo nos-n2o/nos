@@ -608,6 +608,10 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub bmp_monitor: Option<BmpMonitorArg>,
 
+    /// Seconds between Statistics Reports on every `--bmp-station`.
+    #[arg(long)]
+    pub bmp_statistics_interval: Option<u32>,
+
     /// TCP-MD5 password for every `--rpki-cache` session (RFC 8210 §9).
     #[arg(long)]
     pub rpki_cache_md5_password: Option<String>,
@@ -2938,6 +2942,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 address: station.ip(),
                 port: station.port(),
                 monitor: args.bmp_monitor.map_or_else(Default::default, Into::into),
+                statistics_interval: args.bmp_statistics_interval,
             },
         }));
     }

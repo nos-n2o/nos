@@ -1430,7 +1430,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "`bmp-station <name>`, then `address <ip>` and `port <n>` on it (both required): the \
              instance's nos-bgpd dials the station inside the instance's VRF and sends \
              Initiation, a Peer Up per Established peer, Route Monitoring (see `monitor`), \
-             Peer Down and Termination. Statistics Reports are not exported yet.",
+             Statistics Reports (see `statistics-interval`), Peer Down and Termination.",
                 " ",
                 "Stop exporting to this BMP station.",
             ),
@@ -1965,6 +1965,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::SwitchingProfileMemberStpPriority => (
             "Set the spanning-tree port priority.",
             "A multiple of 16 from 0 to 240. Unset: the port profile's, else 128.",
+        ),
+        Topic::BgpInstanceBmpStationStatisticsInterval => (
+            "Send the BMP station a Statistics Report per peer every N seconds.",
+            concat!(
+                "1 to 86400 seconds. Unset: no Statistics Reports. Changing it restarts the \
+             station and re-dumps.",
+                " ",
+                "Stop sending Statistics Reports.",
+            ),
         ),
         Topic::BgpInstanceBmpStationMonitor => (
             "Choose which policy view the BMP station gets as Route Monitoring.",

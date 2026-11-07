@@ -98,6 +98,7 @@ use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
 use crate::page::Keyed;
 use crate::vpn::VpnKey;
+pub use stats::{LocTotals, PeerStats};
 
 mod adj_in;
 mod aggregate;
@@ -112,6 +113,7 @@ mod retain;
 pub use gr::GsKnobs;
 mod rtc;
 mod shared;
+mod stats;
 mod vpn_import;
 mod vpn_out;
 pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
@@ -748,6 +750,8 @@ pub struct BgpRib {
     /// step at every mutation (`put_path`/`take_path`) so the RFC 4486
     /// maximum-prefix check is O(1) per UPDATE, not a table scan.
     path_counts: HashMap<IpAddr, PathCounts>,
+    /// BMP statistics counters per peer (#864), reset at `peer_established`.
+    peer_stats: HashMap<IpAddr, PeerStats>,
     /// Pre-policy copies for peer-groups with soft reconfiguration inbound.
     retained: retain::Retained,
     /// The BMP hub the post-policy stream is tapped into (#864); `None` in
@@ -939,6 +943,7 @@ impl BgpRib {
             retained: retain::Retained::default(),
             bmp: None,
             path_counts: HashMap::new(),
+            peer_stats: HashMap::new(),
             max_prefix: HashMap::new(),
             max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
@@ -1674,6 +1679,7 @@ impl BgpRib {
     /// before. Called again for a peer already down and retaining (by
     /// `reconcile_peers` after an abort), only a `Hard` end changes anything.
     pub fn peer_disconnected(&mut self, peer: IpAddr, kind: Disconnect) {
+        self.peer_stats.remove(&peer);
         // ponytail: a deferral this ends (its last waiting peer gone hard)
         // is noticed by the next `gr_tick`, up to 5s later.
         if let Some(deferral) = self.deferral.as_mut() {

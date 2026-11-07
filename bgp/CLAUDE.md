@@ -81,7 +81,7 @@ Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers wh
 
 ## BMP (#878)
 
-`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy is the received UPDATE; post-policy is a tap at every Adj-RIB-In mutation, all families (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Internals page.
+`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy is the received UPDATE; post-policy is a tap at every Adj-RIB-In mutation, all families (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Stats: a new drop site bumps `PeerStats`.
 
 ## Graceful restart (#12)
 

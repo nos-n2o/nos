@@ -49,6 +49,7 @@ pub(crate) fn vpn_family(prefix: IpNet) -> AddressFamily {
 /// `this.prefix`; a reject drops a held copy), logging only new or changed
 /// paths, and returns their keys for selection. An unchanged path keeps its
 /// age (decision step 8).
+#[allow(clippy::too_many_arguments)]
 fn learn_batch(
     table: &mut HashMap<VpnKey<IpNet>, VpnRoute>,
     mut retain: Option<&mut HashMap<VpnKey<IpNet>, VpnRoute>>,
@@ -57,6 +58,7 @@ fn learn_batch(
     peer: (IpAddr, u32),
     import_policy: &CompiledPolicy,
     bmp: Option<&crate::bmp::Hub>,
+    stats: &mut super::PeerStats,
 ) -> Vec<VpnKey<IpNet>> {
     let from = peer.0;
     let mut keys = Vec::with_capacity(mp.vpn.len());
@@ -84,6 +86,7 @@ fn learn_batch(
             Some(PolicyPeer::new(peer.0, peer.1)),
             Some(n.rd),
         ) else {
+            super::stats::bump(&mut stats.rejected, 1);
             if table.remove(&k).is_some()
                 && let Some(h) = bmp
             {
@@ -153,6 +156,7 @@ impl BgpRib {
                 peer,
                 import_policy,
                 bmp,
+                self.peer_stats.entry(from).or_default(),
             ));
         }
         for k in keys {

@@ -584,6 +584,7 @@ impl SessionManager {
                     table: table.clone(),
                     scope: crate::bmp::Scope::for_rd(rd),
                     monitor: s.monitor,
+                    statistics_interval: s.statistics_interval,
                 })
                 .collect(),
             None => Vec::new(),
@@ -1985,6 +1986,7 @@ mod tests {
                     .to_vec(),
             }],
             mp_unreach: vec![],
+            ..Default::default()
         };
         m.bgp_rib.lock().await.handle_update(
             peer,
@@ -2112,6 +2114,7 @@ mod tests {
             }),
             mp_reach: vec![mp],
             mp_unreach: vec![],
+            ..Default::default()
         };
         let mp = |afi, safi| crate::message::MpReachNlri {
             afi,

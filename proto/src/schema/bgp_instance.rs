@@ -216,6 +216,11 @@ pub struct BmpStation {
     #[serde(default)]
     #[cli(topic = BgpInstanceBmpStationMonitor)]
     pub monitor: BmpMonitor,
+    /// Seconds between Statistics Reports (RFC 7854 section 4.8); unset =
+    /// none (#864). Appended last: postcard is positional.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceBmpStationStatisticsInterval, words = "statistics-interval")]
+    pub statistics_interval: Option<u32>,
 }
 
 /// The policy view a `bmp-station` monitors (RFC 7854 section 5).
@@ -238,6 +243,7 @@ impl Default for BmpStation {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 0,
             monitor: BmpMonitor::default(),
+            statistics_interval: None,
         }
     }
 }
@@ -252,6 +258,13 @@ fn valid_bmp_stations(stations: &[BmpStation]) -> garde::Result {
         }
         if s.address.is_unspecified() {
             return Err(garde::Error::new("a bmp-station needs a specified address"));
+        }
+        if s.statistics_interval
+            .is_some_and(|n| !(1..=86400).contains(&n))
+        {
+            return Err(garde::Error::new(
+                "a bmp-station statistics-interval is 1 to 86400 seconds",
+            ));
         }
         if stations[..i].iter().any(|o| o.name == s.name) {
             return Err(garde::Error::new("bmp-station names must be unique"));
@@ -1055,6 +1068,11 @@ mod tests {
             "dup"
         );
         assert!(!check(vec![st("a b", "192.0.2.1", 1)]), "charset");
+        for (n, ok) in [(0, false), (1, true), (86400, true), (86401, false)] {
+            let mut s = st("a", "192.0.2.1", 1);
+            s.statistics_interval = Some(n);
+            assert_eq!(check(vec![s]), ok, "interval {n}");
+        }
         assert!(
             serde_json::from_str::<BmpStation>(r#"{"name":"a","address":"192.0.2.1"}"#).is_err()
         );

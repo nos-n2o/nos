@@ -7,6 +7,7 @@
 
 mod dump;
 pub mod monitor;
+pub mod stats;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -273,6 +274,8 @@ pub struct StationCfg {
     pub scope: Scope,
     /// Which policy view this station gets as Route Monitoring.
     pub monitor: BmpMonitor,
+    /// Seconds between Statistics Reports; `None` = none.
+    pub statistics_interval: Option<u32>,
 }
 
 impl StationCfg {
@@ -665,12 +668,26 @@ async fn session(
         return ended;
     }
     let mut buf = [0u8; 512];
+    let mut tick = cfg.statistics_interval.map(|s| {
+        let d = Duration::from_secs(u64::from(s));
+        let mut t = tokio::time::interval_at(Instant::now() + d, d);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        t
+    });
     loop {
         if let Some(ended) = drain(&mut wr, cfg, shared).await {
             return ended;
         }
         tokio::select! {
             () = shared.wake.notified() => {}
+            () = async {
+                match tick.as_mut() {
+                    Some(t) => { t.tick().await; }
+                    None => std::future::pending().await,
+                }
+            } => if !stats::send_reports(hub, cfg, &scope, &mut wr).await {
+                return Ended::Lost;
+            },
             r = rd.read(&mut buf) => if matches!(r, Ok(0) | Err(_)) {
                 return Ended::Lost;
             },

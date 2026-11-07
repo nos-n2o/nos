@@ -348,6 +348,7 @@ fn import_policy_rejects_rewrites_and_purges() {
     );
     assert_eq!(rib.flowspec_routes().len(), 0);
     assert_eq!(flows(&mut ebgp).len(), 0);
+    assert_eq!(rib.peer_stats(addr(SRC)).rejected, 1, "BMP stat 0");
     // Accept with a rewrite: the stored attributes carry it.
     rib.set_peer_flowspec_policies(
         addr(SRC),

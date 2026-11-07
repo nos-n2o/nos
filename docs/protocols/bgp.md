@@ -971,7 +971,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Customer"' \
 
 `nos-bgpd` can stream monitoring data to a BMP station (collector): Initiation, Peer Up, Route Monitoring of the Adj-RIB-In (every family but RT-Constraint, #864), Peer Down and Termination.
 
-Not yet exported: RT-Constraint routes (post-policy and dump), Statistics Reports, Adj-RIB-Out (#867) and `show bgp bmp`.
+Not yet exported: RT-Constraint routes (post-policy and dump), Adj-RIB-Out (#867) and `show bgp bmp`.
 
 - Configure: `edit bgp instance r1`, then `set bmp-station col1 address 192.0.2.50 port 5000`. The port is mandatory (BMP has no default port): a station without one is refused at commit, as are port 0, an unspecified address and a duplicate name. Several stations are allowed; each gets the same stream.
 - The router dials the station (the station listens), inside the instance's VRF, like peers and RPKI caches. Nothing is dialled until the VRF is resolved.
@@ -988,7 +988,11 @@ Not yet exported: RT-Constraint routes (post-policy and dump), Statistics Report
   - EVPN, Flowspec and VPN routes are rebuilt from the stored route. EVPN keeps neither `ORIGIN` nor `AS_PATH`, so its PDU says IGP with an empty path; the VPN codec writes the first label of a stack only.
   - A peer's own End-of-RIB is forwarded on both streams, so a session that comes up after the collector connected gets its markers.
   - PDUs are re-encoded with 4-byte `AS_PATH` (A flag always 0, no `AS4_PATH`); unknown attributes and the RFC 8097 community are not reproduced. A withdraw carries the L flag of the stream it belongs to.
-- Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. There is no `show bgp bmp` yet.
+- Statistics Reports: `set bmp-station col1 statistics-interval 30` (1 to 86400 seconds; unset = none). Every interval the router sends one report per Established peer; a change restarts that station.
+  - Counters (reset when the session comes up, gone with it): rejected by inbound policy (type 0, per prefix, also EVPN, Flowspec and VPN), duplicate advertisements (1), withdraws of a path not held (2), updates dropped for a `CLUSTER_LIST` loop (3), an `AS_PATH` loop (4), our own `ORIGINATOR_ID` (5), an `AS_CONFED` loop (6), updates (11) and prefixes (12) treated as withdraw (RFC 7606 parse errors, an unusable next hop, a stray confederation segment).
+  - Gauges: Adj-RIB-In routes, all families (7); Loc-RIB routes (8); Adj-RIB-In per negotiated AFI/SAFI (9); Loc-RIB per IPv4/IPv6 unicast (10).
+  - Not sent: type 13 (duplicate update messages) and the Adj-RIB-Out gauges (#867).
+- Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. `bmp statistics sent` marks each report. There is no `show bgp bmp` yet.
 
 ### RPKI origin validation (RFC 6811, RFC 8210)
 

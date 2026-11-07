@@ -713,6 +713,7 @@ fn bmp_station_list() {
         "set bgp instance R1 bmp-station s1 address 192.0.2.60",
         "set bgp instance R1 bmp-station s1 port 5000",
         "set bgp instance R1 bmp-station s1 monitor pre-policy",
+        "set bgp instance R1 bmp-station s1 statistics-interval 30",
         "set bgp instance R1 bmp-station s2 address 192.0.2.61",
         "delete bgp instance R1 bmp-station s2",
     ] {
@@ -729,6 +730,7 @@ fn bmp_station_list() {
             address: "192.0.2.60".parse().unwrap(),
             port: 5000,
             monitor: nos_proto::BmpMonitor::PrePolicy,
+            statistics_interval: Some(30),
         }]
     );
 }

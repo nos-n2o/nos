@@ -649,6 +649,7 @@ async fn fake_evpn_peer(
             ],
         }],
         mp_unreach: vec![],
+        ..Default::default()
     };
     let _ = writer.send(BgpMessage::Update(update)).await;
     while reader.next().await.is_some() {}
@@ -835,6 +836,7 @@ async fn fake_refresh_peer(stream: TcpStream, asn: u32, eorr: bool) {
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
+            ..Default::default()
         })
     };
     let marker = |subtype| {

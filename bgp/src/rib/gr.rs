@@ -50,6 +50,7 @@ impl BgpRib {
         tx: OutboxTx,
     ) {
         self.gr_peer_returned(peer);
+        self.peer_stats.insert(peer, super::PeerStats::default());
         let rtc_negotiated = negotiated_afs.contains(&AddressFamily::RtConstraint);
         let remote_asn = self.peer_asns.get(&peer).copied().unwrap_or(0);
         self.peer_outboxes.insert(
