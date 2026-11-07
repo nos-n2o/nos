@@ -1031,6 +1031,7 @@ mod tests {
     /// A `Full` over `MAX_FRAME` is cut so every frame, at the production
     /// budget, still encodes.
     #[test]
+    #[cfg_attr(miri, ignore = "encodes >16 MiB frames, minutes under the interpreter")]
     fn a_vpn_full_over_max_frame_splits_under_it() {
         use tokio_util::codec::Encoder;
         let all: Vec<_> = (0..=255).map(|i| vpn(i, 8000)).collect();
@@ -1051,6 +1052,10 @@ mod tests {
 
     /// A chunk of the widest routes (IPv6 prefix and gateway) fits one frame.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "serialises a full chunk, minutes under the interpreter"
+    )]
     fn a_chunk_of_worst_case_routes_fits_max_frame() {
         let worst = RedistributedRoute {
             prefix: IpNet::new(IpAddr::from(Ipv6Addr::from(u128::MAX)), 128).unwrap(),

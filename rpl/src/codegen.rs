@@ -2454,6 +2454,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "78k-call fan-out, minutes under the interpreter")]
     fn call_fan_out_hits_size_cap() {
         let mut srcs: Vec<(String, String)> = (0..7)
             .map(|i| {

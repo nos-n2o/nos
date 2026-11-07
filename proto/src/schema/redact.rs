@@ -309,6 +309,10 @@ mod tests {
     /// #778: the per-role diff without projections equals the diff of the
     /// projections, for every role and secret edit.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "diffs the full fixture 24 times, 20+ min under the interpreter"
+    )]
     fn the_per_role_diff_matches_the_diff_of_the_projections() {
         let base = fixture();
         let mut cands = vec![Config::default(), base.clone()];

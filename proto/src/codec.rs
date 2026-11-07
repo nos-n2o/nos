@@ -127,6 +127,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "16 MiB frame, minutes under the interpreter")]
     fn at_cap_frame_roundtrips_and_over_cap_encode_fails() {
         // postcard `Vec<u8>` = varint length (4 bytes at this size) + bytes.
         let mut c = IpcCodec::<Vec<u8>>::default();
