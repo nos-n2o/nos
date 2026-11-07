@@ -917,36 +917,41 @@ async fn bmp_dump_covers_evpn_and_its_end_of_rib() {
     let (mut c, _) = collector.accept().await.unwrap();
     assert_eq!(bmp_frame(&mut c).await.0, 4);
     assert_eq!(bmp_frame(&mut c).await.0, 3);
-    for want_post in [false, true] {
+    // The peer's own End-of-RIB may be forwarded as well, at a moment that
+    // depends on timing: collect until the dump is complete, ignoring repeats.
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.len() < 6 {
         let (is_post, msg) = bmp_route(&mut c).await;
-        let BgpMessage::Update(u) = msg else {
-            panic!("{msg:?}")
+        let what = match msg {
+            BgpMessage::Update(u) => {
+                assert_eq!(u.mp_reach[0].evpn.len(), 1);
+                "evpn route".to_string()
+            }
+            BgpMessage::EndOfRib { afi, safi } => format!("eor {afi}/{safi}"),
+            other => panic!("{other:?}"),
         };
-        assert_eq!((is_post, u.mp_reach[0].evpn.len()), (want_post, 1));
-        let (is_post, msg) = bmp_route(&mut c).await;
-        assert!(
-            is_post == want_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }),
-            "{msg:?}"
-        );
-        let (is_post, msg) = bmp_route(&mut c).await;
-        assert!(
-            is_post == want_post && matches!(msg, BgpMessage::EndOfRib { afi: 25, safi: 70 }),
-            "{msg:?}"
-        );
+        seen.insert((is_post, what));
+    }
+    for post in [false, true] {
+        for what in ["evpn route", "eor 1/1", "eor 25/70"] {
+            assert!(seen.contains(&(post, what.to_string())), "{post} {what}");
+        }
     }
     a.manager
         .apply_evpn_local("dom", nos_proto::EvpnUpdate::Remove(key))
         .await;
     let mut seen = [false; 2];
-    for _ in 0..2 {
+    while seen != [true, true] {
         let (is_post, msg) = bmp_route(&mut c).await;
+        if matches!(msg, BgpMessage::EndOfRib { .. }) {
+            continue;
+        }
         assert!(
             matches!(&msg, BgpMessage::Update(u) if u.mp_unreach[0].evpn.len() == 1),
             "{msg:?}"
         );
         seen[usize::from(is_post)] = true;
     }
-    assert_eq!(seen, [true, true]);
     a.manager.shutdown().await;
     b.manager.shutdown().await;
 }
