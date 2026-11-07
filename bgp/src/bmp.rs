@@ -1,12 +1,17 @@
 //! RFC 7854 BMP exporter (#878): `nos-bgpd` dials every configured
 //! `bmp-station` inside the instance's VRF and sends Initiation, a Peer Up per
-//! Established peer, Peer Down and Termination. No Route Monitoring yet
-//! (#864). The codec half is pure; [`Hub`] is the registry + per-station
-//! bounded queues the FSM pushes into without ever awaiting the network.
+//! Established peer, Route Monitoring (IPv4/IPv6 unicast, #864), Peer Down and
+//! Termination. The codec half is pure; [`Hub`] is the registry + per-station
+//! bounded queues the FSM and the RIB push into without ever awaiting the
+//! network.
 
-use std::collections::{HashMap, VecDeque};
+mod dump;
+pub mod monitor;
+
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -18,7 +23,10 @@ use tokio::time::Instant;
 use tokio_util::codec::Encoder;
 use tracing::{debug, info, warn};
 
-use crate::message::{BgpCodec, BgpMessage};
+use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
+use crate::rib::{RibRoute, SharedRib};
+use ipnet::IpNet;
+use nos_proto::BmpMonitor;
 
 /// BMP version 3 (RFC 7854 section 4.1).
 pub const BMP_VERSION: u8 = 3;
@@ -32,6 +40,9 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const BACKOFF_INITIAL: Duration = Duration::from_secs(5);
 /// Longest reconnect delay.
 pub const BACKOFF_MAX: Duration = Duration::from_secs(120);
+
+/// Prefixes the initial dump reads per RIB lock hold (#864).
+pub const DUMP_CHUNK: usize = 1000;
 
 const TYPE_PEER_DOWN: u8 = 2;
 const TYPE_PEER_UP: u8 = 3;
@@ -50,6 +61,8 @@ pub const TERM_OUT_OF_RESOURCES: u16 = 2;
 
 const FLAG_V: u8 = 0x80;
 const FLAG_A: u8 = 0x20;
+/// L: the message is post-policy (RFC 7854 section 4.2).
+const FLAG_L: u8 = 0x40;
 
 /// Peer Down reasons (RFC 7854 section 4.9), with their data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +133,8 @@ pub struct PeerUpInfo {
     pub recv_open: Bytes,
     /// When the session came up.
     pub time: Duration,
+    /// AFIs for which received NLRI carry ADD-PATH identifiers.
+    pub add_path_afis: HashSet<u16>,
 }
 
 /// The current time as a BMP timestamp source.
@@ -167,14 +182,17 @@ fn put_addr(b: &mut BytesMut, addr: IpAddr) {
 
 impl PeerUpInfo {
     /// The 42-byte per-peer header (RFC 7854 section 4.2).
-    fn put_header(&self, b: &mut BytesMut, scope: &Scope, time: Duration) {
+    fn put_header(&self, b: &mut BytesMut, scope: &Scope, time: Duration, a: bool, post: bool) {
         b.put_u8(scope.peer_type);
         let mut flags = 0;
         if self.peer.is_ipv6() {
             flags |= FLAG_V;
         }
-        if self.two_octet_as {
+        if a {
             flags |= FLAG_A;
+        }
+        if post {
+            flags |= FLAG_L;
         }
         b.put_u8(flags);
         b.put_slice(&scope.distinguisher);
@@ -207,7 +225,7 @@ pub fn termination(reason: u16) -> Bytes {
 /// Peer Up (section 4.10).
 pub fn peer_up(scope: &Scope, p: &PeerUpInfo) -> Bytes {
     let mut b = BytesMut::new();
-    p.put_header(&mut b, scope, p.time);
+    p.put_header(&mut b, scope, p.time, p.two_octet_as, false);
     put_addr(&mut b, p.local);
     b.put_u16(p.local_port);
     b.put_u16(p.remote_port);
@@ -219,7 +237,7 @@ pub fn peer_up(scope: &Scope, p: &PeerUpInfo) -> Bytes {
 /// Peer Down (section 4.9).
 pub fn peer_down(scope: &Scope, p: &PeerUpInfo, reason: &DownReason, time: Duration) -> Bytes {
     let mut b = BytesMut::new();
-    p.put_header(&mut b, scope, time);
+    p.put_header(&mut b, scope, time, p.two_octet_as, false);
     b.put_u8(reason.code());
     match reason {
         DownReason::LocalNotification(pdu) | DownReason::RemoteNotification(pdu) => {
@@ -251,12 +269,29 @@ pub struct StationCfg {
     pub table: Option<String>,
     /// Peer type and distinguisher.
     pub scope: Scope,
+    /// Which policy view this station gets as Route Monitoring.
+    pub monitor: BmpMonitor,
+}
+
+impl StationCfg {
+    /// Whether this station wants the post-policy (`true`) or pre-policy view.
+    pub fn wants(&self, post: bool) -> bool {
+        match self.monitor {
+            BmpMonitor::Both => true,
+            BmpMonitor::PostPolicy => post,
+            BmpMonitor::PrePolicy => !post,
+        }
+    }
 }
 
 #[derive(Debug)]
 enum Kind {
     Up(IpAddr),
     Down(IpAddr, u8),
+    /// A Route Monitoring frame: debug-logged by the sender only.
+    Route,
+    /// A per-peer End-of-RIB; `true` = post-policy stream.
+    Eor(IpAddr, bool),
 }
 
 #[derive(Default)]
@@ -307,6 +342,14 @@ impl Shared {
     }
 }
 
+pub(crate) fn stream(post: bool) -> &'static str {
+    if post {
+        "post-policy"
+    } else {
+        "pre-policy"
+    }
+}
+
 struct Station {
     cfg: StationCfg,
     shared: Arc<Shared>,
@@ -324,6 +367,11 @@ struct State {
 #[derive(Default)]
 pub struct Hub {
     state: Mutex<State>,
+    /// Some station wants the pre-/post-policy stream: one atomic check on
+    /// the UPDATE path when no station does.
+    pre_on: AtomicBool,
+    post_on: AtomicBool,
+    rib: Mutex<Weak<SharedRib>>,
 }
 
 impl Hub {
@@ -357,6 +405,86 @@ impl Hub {
         }
     }
 
+    /// Some station wants the post-policy stream (the RIB tap's cheap gate).
+    pub fn post_enabled(&self) -> bool {
+        self.post_on.load(Ordering::Relaxed)
+    }
+
+    /// Points the initial dump at the RIB it reads (a `Weak`: the RIB owns
+    /// this hub).
+    pub fn attach(&self, rib: Weak<SharedRib>) {
+        *lock(&self.rib) = rib;
+    }
+
+    fn rib(&self) -> Option<Arc<SharedRib>> {
+        lock(&self.rib).upgrade()
+    }
+
+    /// Whether `info` is still the registered session of its peer: a dump
+    /// aborts when the peer went down (or came back) meanwhile.
+    fn session_alive(&self, info: &PeerUpInfo) -> bool {
+        lock(&self.state)
+            .registry
+            .get(&info.peer)
+            .is_some_and(|i| i.time == info.time && i.remote_port == info.remote_port)
+    }
+
+    /// Builds one UPDATE for `peer` and queues its Route Monitoring frames on
+    /// every station that wants the stream. A peer not reported up is skipped.
+    fn emit(&self, peer: IpAddr, post: bool, mk: impl FnOnce(&PeerUpInfo) -> UpdateMessage) {
+        let st = lock(&self.state);
+        let Some(info) = st.registry.get(&peer) else {
+            return;
+        };
+        let frames = monitor::route_monitoring(&st.scope, info, post, &mk(info), now());
+        for s in st.stations.values().filter(|s| s.cfg.wants(post)) {
+            for f in &frames {
+                s.shared.push(f.clone(), Kind::Route);
+            }
+        }
+    }
+
+    /// The pre-policy stream: an UPDATE exactly as `peer` sent it, reduced to
+    /// IPv4/IPv6 unicast. Called before the RIB lock is taken.
+    pub fn route_pre(&self, peer: IpAddr, update: &UpdateMessage) {
+        if !self.pre_on.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(u) = monitor::unicast_only(update) {
+            self.emit(peer, false, |_| u);
+        }
+    }
+
+    /// The post-policy stream: path `id` of `prefix` was stored (`Some`) or
+    /// removed (`None`) in `peer`'s Adj-RIB-In. Called from the RIB under its
+    /// lock, only while [`Hub::post_enabled`].
+    pub fn route_post(&self, peer: IpAddr, prefix: IpNet, id: u32, route: Option<&RibRoute>) {
+        self.emit(peer, true, |info| {
+            let add_path = info.add_path_afis.contains(&monitor::afi_of(prefix));
+            match route {
+                Some(r) => monitor::rib_route_to_update(prefix, id, r, add_path),
+                None => monitor::rib_withdraw_to_update(prefix, id, add_path),
+            }
+        });
+    }
+
+    /// `peer` sent its own End-of-RIB: forward it on both streams.
+    pub fn end_of_rib(&self, peer: IpAddr, afi: u16, safi: u8) {
+        if !monitor::is_unicast(afi, safi) {
+            return;
+        }
+        let st = lock(&self.state);
+        let Some(info) = st.registry.get(&peer) else {
+            return;
+        };
+        for post in [false, true] {
+            let f = monitor::end_of_rib(&st.scope, info, post, afi, safi);
+            for s in st.stations.values().filter(|s| s.cfg.wants(post)) {
+                s.shared.push(f.clone(), Kind::Eor(peer, post));
+            }
+        }
+    }
+
     /// Brings the running stations to `want`, restarting only changed ones
     /// (Termination reason 0 for those stopped).
     pub async fn set_stations(self: &Arc<Self>, want: Vec<StationCfg>) {
@@ -366,6 +494,10 @@ impl Hub {
             if let Some(first) = want.first() {
                 st.scope = first.scope;
             }
+            self.pre_on
+                .store(want.iter().any(|c| c.wants(false)), Ordering::Relaxed);
+            self.post_on
+                .store(want.iter().any(|c| c.wants(true)), Ordering::Relaxed);
             let names: Vec<_> = want.iter().map(|c| c.name.clone()).collect();
             let stale: Vec<_> = st
                 .stations
@@ -483,17 +615,14 @@ async fn session(
     let (mut rd, mut wr) = stream.into_split();
     // Snapshot the registry and clear the queue under both locks, so a
     // concurrent peer_up/down lands either in the replay or in the queue.
-    let replay: Vec<(Bytes, IpAddr)> = {
+    let (peers, scope) = {
         let st = lock(&hub.state);
         let mut q = lock(&shared.q);
         q.frames.clear();
         q.resync = false;
         q.dropped = 0;
         q.connected = true;
-        st.registry
-            .values()
-            .map(|i| (peer_up(&st.scope, i), i.peer))
-            .collect()
+        (st.registry.values().cloned().collect::<Vec<_>>(), st.scope)
     };
     let descr = format!("nos-bgpd {}", nos_proto::version::VERSION);
     let vrf_text = cfg.table.as_ref().map(|t| format!("vrf={t}"));
@@ -502,13 +631,32 @@ async fn session(
         return Ended::Lost;
     }
     info!(station = %cfg.name, "bmp initiation sent");
-    for (f, peer) in replay {
-        if !send(&mut wr, &f).await {
+    for p in &peers {
+        if !send(&mut wr, &peer_up(&scope, p)).await {
             return Ended::Lost;
         }
-        info!(station = %cfg.name, peer = %peer, "bmp peer up sent");
+        info!(station = %cfg.name, peer = %p.peer, "bmp peer up sent");
+    }
+    if let Some(ended) = dump::run(hub, cfg, shared, &mut wr, &peers, &scope).await {
+        return ended;
     }
     let mut buf = [0u8; 512];
+    loop {
+        if let Some(ended) = drain(&mut wr, cfg, shared).await {
+            return ended;
+        }
+        tokio::select! {
+            () = shared.wake.notified() => {}
+            r = rd.read(&mut buf) => if matches!(r, Ok(0) | Err(_)) {
+                return Ended::Lost;
+            },
+        }
+    }
+}
+
+/// Sends everything queued, in order. `Some` ends the session: a stop, an
+/// overflow (resync) or a dead collector.
+async fn drain(wr: &mut OwnedWriteHalf, cfg: &StationCfg, shared: &Shared) -> Option<Ended> {
     loop {
         enum Next {
             Stop,
@@ -530,17 +678,17 @@ async fn session(
         };
         match next {
             Next::Stop => {
-                let _ = send(&mut wr, &termination(TERM_ADMIN_CLOSED)).await;
-                return Ended::Stop;
+                let _ = send(wr, &termination(TERM_ADMIN_CLOSED)).await;
+                return Some(Ended::Stop);
             }
             Next::Resync(dropped) => {
                 warn!(station = %cfg.name, dropped, "bmp queue overflowed, resynchronising the station");
-                let _ = send(&mut wr, &termination(TERM_OUT_OF_RESOURCES)).await;
-                return Ended::Resync;
+                let _ = send(wr, &termination(TERM_OUT_OF_RESOURCES)).await;
+                return Some(Ended::Resync);
             }
             Next::Frame(f, kind) => {
-                if !send(&mut wr, &f).await {
-                    return Ended::Lost;
+                if !send(wr, &f).await {
+                    return Some(Ended::Lost);
                 }
                 match kind {
                     Kind::Up(peer) => {
@@ -549,14 +697,13 @@ async fn session(
                     Kind::Down(peer, reason) => {
                         info!(station = %cfg.name, peer = %peer, reason, "bmp peer down sent");
                     }
+                    Kind::Route => debug!(station = %cfg.name, "bmp route monitoring sent"),
+                    Kind::Eor(peer, post) => {
+                        info!(peer = %peer, stream = %stream(post), station = %cfg.name, "bmp end-of-rib sent");
+                    }
                 }
             }
-            Next::Idle => tokio::select! {
-                () = shared.wake.notified() => {}
-                r = rd.read(&mut buf) => if matches!(r, Ok(0) | Err(_)) {
-                    return Ended::Lost;
-                },
-            },
+            Next::Idle => return None,
         }
     }
 }
@@ -578,6 +725,7 @@ mod tests {
             sent_open: Bytes::from_static(b"SENT"),
             recv_open: Bytes::from_static(b"RECV"),
             time: Duration::new(7, 9000),
+            add_path_afis: HashSet::new(),
         }
     }
 

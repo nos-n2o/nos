@@ -583,10 +583,12 @@ impl SessionManager {
                     sys_name: self.instance.clone(),
                     table: table.clone(),
                     scope: crate::bmp::Scope::for_rd(rd),
+                    monitor: s.monitor,
                 })
                 .collect(),
             None => Vec::new(),
         };
+        self.bgp_rib.bmp().attach(Arc::downgrade(&self.bgp_rib));
         self.bgp_rib.bmp().set_stations(want).await;
     }
 

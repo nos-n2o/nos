@@ -101,6 +101,7 @@ use crate::vpn::VpnKey;
 
 mod adj_in;
 mod aggregate;
+mod bmp_tap;
 mod decision;
 mod evpn_out;
 mod flowspec_out;
@@ -749,6 +750,9 @@ pub struct BgpRib {
     path_counts: HashMap<IpAddr, PathCounts>,
     /// Pre-policy copies for peer-groups with soft reconfiguration inbound.
     retained: retain::Retained,
+    /// The BMP hub the post-policy stream is tapped into (#864); `None` in
+    /// tests that never attach one.
+    bmp: Option<Arc<crate::bmp::Hub>>,
     /// Each peer's maximum-prefix limits (`set_peer_max_prefix`), and the
     /// `(peer, family)` pairs already warned about for a `warning_only` limit,
     /// so the warning is logged once per crossing.
@@ -933,6 +937,7 @@ impl BgpRib {
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
             retained: retain::Retained::default(),
+            bmp: None,
             path_counts: HashMap::new(),
             max_prefix: HashMap::new(),
             max_prefix_warned: HashSet::new(),

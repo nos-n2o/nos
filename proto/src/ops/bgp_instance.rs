@@ -494,6 +494,7 @@ mod tests {
             name: "s".into(),
             address: "192.0.2.9".parse().unwrap(),
             port,
+            ..Default::default()
         };
         for port in [5000, 5001] {
             BgpInstanceOp::SetBmpStation {

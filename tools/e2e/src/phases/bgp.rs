@@ -40,14 +40,14 @@ pub(super) fn learned() -> String {
 }
 
 /// Writes an RPL source file `nos-provision` reads on the host.
-fn policy_file(name: &str, source: &str) -> anyhow::Result<String> {
+pub(super) fn policy_file(name: &str, source: &str) -> anyhow::Result<String> {
     let path = std::env::temp_dir().join(format!("nos-e2e-{}-{name}.rpl", std::process::id()));
     std::fs::write(&path, source).with_context(|| format!("writing {}", path.display()))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
 /// A *new* session after `baseline` (a config change restarts sessions).
-async fn reestablished(r: &Router, baseline: usize) -> anyhow::Result<()> {
+pub(super) async fn reestablished(r: &Router, baseline: usize) -> anyhow::Result<()> {
     r.wait_new("bgp session established", baseline, 60).await
 }
 

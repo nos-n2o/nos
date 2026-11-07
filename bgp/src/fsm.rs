@@ -779,6 +779,8 @@ async fn classify_inbound(
         BgpMessage::Notification(n) => Some(Event::NotificationReceived(n)),
         BgpMessage::Update(update) => {
             if let State::Established(remote) = state {
+                // BMP pre-policy: the UPDATE as received, before the RIB lock.
+                bgp_rib.bmp().route_pre(peer.remote_address, &update);
                 let mut rib = bgp_rib.lock().await;
                 rib.handle_update(
                     peer.remote_address,
@@ -809,6 +811,7 @@ async fn classify_inbound(
             if !matches!(state, State::Established(_)) {
                 return Some(Event::UnexpectedUpdate);
             }
+            bgp_rib.bmp().end_of_rib(peer.remote_address, afi, safi);
             if let Some(family) = gr::family_of(afi, safi) {
                 bgp_rib.lock().await.end_of_rib(peer.remote_address, family);
             } else {
@@ -1818,6 +1821,7 @@ pub async fn run(
                     sent_open: crate::bmp::bgp_pdu(BgpMessage::Open(sent)),
                     recv_open: crate::bmp::bgp_pdu(BgpMessage::Open(recv)),
                     time: crate::bmp::now(),
+                    add_path_afis: reader.decoder_mut().add_path_afis.clone(),
                 });
             }
 

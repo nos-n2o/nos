@@ -51,6 +51,24 @@ impl From<StpModeArg> for nos_proto::StpMode {
     }
 }
 
+/// Clap-facing mirror of `bmp-station ... monitor`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum BmpMonitorArg {
+    PostPolicy,
+    PrePolicy,
+    Both,
+}
+
+impl From<BmpMonitorArg> for nos_proto::BmpMonitor {
+    fn from(m: BmpMonitorArg) -> Self {
+        match m {
+            BmpMonitorArg::PostPolicy => nos_proto::BmpMonitor::PostPolicy,
+            BmpMonitorArg::PrePolicy => nos_proto::BmpMonitor::PrePolicy,
+            BmpMonitorArg::Both => nos_proto::BmpMonitor::Both,
+        }
+    }
+}
+
 /// Clap-facing mirror of `spanning-tree force-version`.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum StpForceVersionArg {
@@ -585,6 +603,10 @@ pub struct Args {
     /// repeatable, named `bmp-1`, `bmp-2`... (`BgpInstanceOp::SetBmpStation`).
     #[arg(long)]
     pub bmp_station: Vec<std::net::SocketAddr>,
+
+    /// The policy view every `--bmp-station` monitors (default `both`).
+    #[arg(long, value_enum)]
+    pub bmp_monitor: Option<BmpMonitorArg>,
 
     /// TCP-MD5 password for every `--rpki-cache` session (RFC 8210 §9).
     #[arg(long)]
@@ -2915,6 +2937,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: format!("bmp-{}", i + 1),
                 address: station.ip(),
                 port: station.port(),
+                monitor: args.bmp_monitor.map_or_else(Default::default, Into::into),
             },
         }));
     }
@@ -4328,6 +4351,29 @@ mod tests {
         assert_eq!(
             names,
             [("bmp-1".to_string(), 5000), ("bmp-2".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn bmp_monitor_flag_sets_every_station_and_defaults_to_both() {
+        let monitors = |extra: &[&str]| {
+            let mut a = vec!["--bmp-station", "192.0.2.5:5000"];
+            a.extend_from_slice(extra);
+            ops(&a)
+                .unwrap()
+                .iter()
+                .filter_map(|o| match o {
+                    ConfigOp::BgpInstance(BgpInstanceOp::SetBmpStation { station, .. }) => {
+                        Some(station.monitor)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(monitors(&[]), [nos_proto::BmpMonitor::Both]);
+        assert_eq!(
+            monitors(&["--bmp-monitor", "pre-policy"]),
+            [nos_proto::BmpMonitor::PrePolicy]
         );
     }
 

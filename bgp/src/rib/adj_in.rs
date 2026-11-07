@@ -333,6 +333,7 @@ pub(super) fn learn_prefix(
     import_policy: &CompiledPolicy,
     retain: Option<&mut super::retain::RetainSlot<'_>>,
     blackhole: Option<&[nos_rpl::PrefixListEntry]>,
+    bmp: Option<&crate::bmp::Hub>,
 ) {
     let from = peer.addr;
     // Soft reconfiguration inbound: keep the pre-policy candidate.
@@ -349,6 +350,7 @@ pub(super) fn learn_prefix(
             {
                 route.communities.push(crate::message::COMMUNITY_NO_EXPORT);
             }
+            let mut unchanged = false;
             if let Some(old) = get_path(table, prefix, id) {
                 // An RPKI state change alone is no flap (#17).
                 let same = RibRoute {
@@ -356,6 +358,7 @@ pub(super) fn learn_prefix(
                     validation_state: old.validation_state,
                     ..route.clone()
                 } == *old;
+                unchanged = same;
                 if same {
                     // Keep the age: `received_at` is part of `PartialEq`, so a
                     // fresh one would make every identical re-announcement
@@ -376,11 +379,18 @@ pub(super) fn learn_prefix(
                 local_pref = route.local_pref,
                 "bgp: learned route for {prefix} into adj-rib-in"
             );
+            // BMP state compression: an identical re-announcement says nothing.
+            if let Some(h) = bmp.filter(|_| !unchanged) {
+                h.route_post(from, prefix, id, Some(&route));
+            }
             put_path(table, counts, prefix, id, route);
         }
         None => {
             if take_path(table, counts, prefix, id).is_some() {
                 damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
+                if let Some(h) = bmp {
+                    h.route_post(from, prefix, id, None);
+                }
             }
         }
     }
@@ -688,6 +698,7 @@ impl BgpRib {
         let table = self.adj_rib_in.entry(from).or_default();
         let counts = self.path_counts.entry(from).or_default();
         let mut retain = self.retained.slot(from);
+        let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let blackhole = self.blackhole_peers.get(&from).cloned();
         // This UPDATE adds at most this many entries — reserving
         // once lets the per-peer table grow in fewer, larger steps
@@ -766,6 +777,7 @@ impl BgpRib {
                 import_policy,
                 retain.as_mut(),
                 blackhole.as_deref().map(Vec::as_slice),
+                bmp,
             );
         }
         for mp in &update.mp_reach {
@@ -786,6 +798,7 @@ impl BgpRib {
                     import_policy,
                     retain.as_mut(),
                     blackhole.as_deref().map(Vec::as_slice),
+                    bmp,
                 );
             }
             if !mp.evpn.is_empty() {
@@ -900,12 +913,18 @@ impl BgpRib {
     pub(super) fn remove_path(&mut self, peer: IpAddr, prefix: IpNet, id: u32) -> Option<RibRoute> {
         // The pre-policy copy goes with the path, even one policy rejected.
         self.retained.take(peer, prefix, id);
-        take_path(
+        let gone = take_path(
             self.adj_rib_in.get_mut(&peer)?,
             self.path_counts.entry(peer).or_default(),
             prefix,
             id,
-        )
+        );
+        if gone.is_some()
+            && let Some(h) = super::bmp_tap::tap(self.bmp.as_ref())
+        {
+            h.route_post(peer, prefix, id, None);
+        }
+        gone
     }
 }
 
