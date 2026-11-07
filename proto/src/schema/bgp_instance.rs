@@ -98,6 +98,13 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceRpkiCache, words = "rpki-cache")]
     pub rpki_caches: Vec<RpkiCache>,
 
+    /// RFC 7854 BMP stations (collectors) this instance's `nos-bgpd` dials
+    /// inside the instance's VRF and exports peer up/down events to.
+    #[serde(default)]
+    #[garde(custom(|s: &Vec<BmpStation>, _ctx: &Config| valid_bmp_stations(s)))]
+    #[cli(topic = BgpInstanceBmpStation, words = "bmp-station")]
+    pub bmp_stations: Vec<BmpStation>,
+
     /// RFC 4271 §9.2.2.2 aggregates this instance originates while some
     /// more specific route is in its Loc-RIB.
     #[serde(default)]
@@ -184,6 +191,52 @@ fn valid_rpki_caches(caches: &[RpkiCache], cfg: &Config) -> garde::Result {
             return Err(garde::Error::new("rpki cache addresses must be unique"));
         }
         bgp_peer_group::valid_auth(c.auth.as_ref(), cfg)?;
+    }
+    Ok(())
+}
+
+/// One BMP station (RFC 7854), keyed by its name.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct BmpStation {
+    /// Name of the station; the key.
+    #[cli(key)]
+    pub name: String,
+    /// Address of the BMP station (collector).
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = BgpInstanceBmpStationAddress)]
+    pub address: IpAddr,
+    /// TCP port of the station. Mandatory: BMP has no assigned port, so
+    /// there is deliberately no serde default (and `Default` gives 0, which
+    /// the commit refuses).
+    #[cli(topic = BgpInstanceBmpStationPort)]
+    pub port: u16,
+}
+
+impl Default for BmpStation {
+    fn default() -> Self {
+        BmpStation {
+            name: String::new(),
+            address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 0,
+        }
+    }
+}
+
+fn valid_bmp_stations(stations: &[BmpStation]) -> garde::Result {
+    for (i, s) in stations.iter().enumerate() {
+        crate::validators::name_charset(&s.name)?;
+        if s.port == 0 {
+            return Err(garde::Error::new(
+                "a bmp-station needs a port: it is mandatory (BMP has no default port)",
+            ));
+        }
+        if s.address.is_unspecified() {
+            return Err(garde::Error::new("a bmp-station needs a specified address"));
+        }
+        if stations[..i].iter().any(|o| o.name == s.name) {
+            return Err(garde::Error::new("bmp-station names must be unique"));
+        }
     }
     Ok(())
 }
@@ -358,6 +411,7 @@ impl Default for BgpInstance {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            bmp_stations: Vec::new(),
             aggregates: Vec::new(),
             graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
@@ -522,6 +576,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            bmp_stations: Vec::new(),
             aggregates: Vec::new(),
             graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
@@ -949,6 +1004,40 @@ mod tests {
         assert!(!check(vec![ao]), "ao with no key");
         let json = serde_json::to_string(&md5("k")).unwrap();
         assert_eq!(serde_json::from_str::<RpkiCache>(&json).unwrap(), md5("k"));
+    }
+
+    #[test]
+    fn bmp_stations_are_checked() {
+        use super::BmpStation;
+        let check = |stations: Vec<BmpStation>| {
+            let mut inst = instance("r1", 65000);
+            inst.bmp_stations = stations;
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let st = |n: &str, a: &str, port: u16| BmpStation {
+            name: n.into(),
+            address: a.parse().unwrap(),
+            port,
+        };
+        assert!(check(vec![
+            st("a", "192.0.2.1", 5000),
+            st("b", "2001:db8::1", 1)
+        ]));
+        assert!(!check(vec![st("a", "192.0.2.1", 0)]), "port 0");
+        assert!(!check(vec![BmpStation {
+            name: "a".into(),
+            ..Default::default()
+        }]));
+        assert!(!check(vec![st("a", "0.0.0.0", 5000)]), "unspecified");
+        assert!(
+            !check(vec![st("a", "192.0.2.1", 1), st("a", "192.0.2.2", 1)]),
+            "dup"
+        );
+        assert!(!check(vec![st("a b", "192.0.2.1", 1)]), "charset");
+        assert!(
+            serde_json::from_str::<BmpStation>(r#"{"name":"a","address":"192.0.2.1"}"#).is_err()
+        );
     }
 
     #[test]

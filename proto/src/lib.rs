@@ -115,7 +115,7 @@ pub use schema::{
     BfdAuth, BfdAuthMethod, BfdProfile, BgpAddPath, BgpAggregate, BgpAoAlgorithm, BgpAoKey,
     BgpAuth, BgpBlackhole, BgpConfederation, BgpDamping, BgpFlowspecValidation, BgpGracefulRestart,
     BgpInstance, BgpLocalAs, BgpMaximumPrefix, BgpPeer, BgpPeerGroup, BgpPrefixLimit, BgpRole,
-    BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config, DfAlgorithm,
+    BgpShutdown, BmpStation, BroadcastDomain, CommunityAlias, CommunityGroup, Config, DfAlgorithm,
     EsRedundancy, Interface, InterfaceAddress, LacpMode, LacpRate, LldpDestination, LldpSettings,
     LoggingSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange, OspfAreaType, OspfAuth,
     OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, OspfVirtualLink, Ospfv3Area,

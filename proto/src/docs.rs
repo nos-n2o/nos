@@ -355,6 +355,12 @@ topics! {
     BgpInstanceConfederationIdentifier,
     /// `BgpConfederation.peers`
     BgpInstanceConfederationPeer,
+    /// `BgpInstance.bmp_stations`
+    BgpInstanceBmpStation,
+    /// `BmpStation.address`
+    BgpInstanceBmpStationAddress,
+    /// `BmpStation.port`
+    BgpInstanceBmpStationPort,
     /// `BgpInstance.rpki_caches`
     BgpInstanceRpkiCache,
     /// `RpkiCache.port`

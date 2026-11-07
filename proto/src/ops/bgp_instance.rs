@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use ipnet::IpNet;
 
-use crate::schema::{BgpAggregate, BgpGracefulRestart, BgpInstance, Config, RpkiCache};
+use crate::schema::{BgpAggregate, BgpGracefulRestart, BgpInstance, BmpStation, Config, RpkiCache};
 
 use super::OpError;
 
@@ -92,6 +92,20 @@ pub enum BgpInstanceOp {
         /// Address of the RPKI cache.
         address: IpAddr,
     },
+    /// RFC 7854: adds a BMP station, or replaces the one with that name.
+    SetBmpStation {
+        /// Name of the BGP instance this op targets.
+        name: String,
+        /// BMP station definition.
+        station: BmpStation,
+    },
+    /// Removes BMP station `station_name` from the BGP instance.
+    RemoveBmpStation {
+        /// Name of the BGP instance this op targets.
+        name: String,
+        /// Name of the BMP station.
+        station_name: String,
+    },
     /// BGP multipath: how many equal paths' next hops to install.
     SetMaximumPaths {
         /// Name of the BGP instance this op targets.
@@ -145,6 +159,7 @@ impl BgpInstanceOp {
                         maximum_paths: None,
                         confederation: crate::schema::BgpConfederation::default(),
                         rpki_caches: Vec::new(),
+                        bmp_stations: Vec::new(),
                         aggregates: Vec::new(),
                         graceful_restart: crate::schema::BgpGracefulRestart::default(),
                         routing_table: None,
@@ -217,6 +232,20 @@ impl BgpInstanceOp {
                     .retain(|c| c.address != *address);
                 Ok(())
             }
+            BgpInstanceOp::SetBmpStation { name, station } => {
+                let stations = &mut find_instance_mut(config, name)?.bmp_stations;
+                match stations.iter_mut().find(|s| s.name == station.name) {
+                    Some(s) => *s = station.clone(),
+                    None => stations.push(station.clone()),
+                }
+                Ok(())
+            }
+            BgpInstanceOp::RemoveBmpStation { name, station_name } => {
+                find_instance_mut(config, name)?
+                    .bmp_stations
+                    .retain(|s| s.name != *station_name);
+                Ok(())
+            }
             BgpInstanceOp::SetAggregate { name, aggregate } => {
                 let aggregates = &mut find_instance_mut(config, name)?.aggregates;
                 match aggregates.iter_mut().find(|a| a.prefix == aggregate.prefix) {
@@ -276,6 +305,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            bmp_stations: Vec::new(),
             aggregates: Vec::new(),
             graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
@@ -452,6 +482,35 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].rpki_caches, []);
+    }
+
+    #[test]
+    fn bmp_station_ops_upsert_by_name() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        let station = |port| BmpStation {
+            name: "s".into(),
+            address: "192.0.2.9".parse().unwrap(),
+            port,
+        };
+        for port in [5000, 5001] {
+            BgpInstanceOp::SetBmpStation {
+                name: "r1".into(),
+                station: station(port),
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        assert_eq!(cfg.bgp_instances[0].bmp_stations, vec![station(5001)]);
+        BgpInstanceOp::RemoveBmpStation {
+            name: "r1".into(),
+            station_name: "s".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].bmp_stations, []);
     }
 
     #[test]
