@@ -100,6 +100,7 @@ pub(super) fn learn_evpn(
     ctx: Option<(&CompiledPolicy, u32, bool)>,
     communities: &[u32],
     gs: Option<GsKnobs>,
+    bmp: Option<&crate::bmp::Hub>,
 ) {
     // RFC 8326, eBGP only (`gs` is `None` for iBGP/confed), before policy.
     let mut communities = communities.to_vec();
@@ -120,7 +121,11 @@ pub(super) fn learn_evpn(
         if let Some((policy, peer_as, ibgp)) = ctx
             && evpn_rejected(policy, &route, from, peer_as, ibgp)
         {
-            table.remove(&nlri.route_key());
+            if table.remove(&nlri.route_key()).is_some()
+                && let Some(h) = bmp
+            {
+                h.evpn_post(from, nlri, None);
+            }
             if let Some(r) = retain.as_deref_mut() {
                 r.insert(nlri.route_key(), route);
             }
@@ -131,7 +136,10 @@ pub(super) fn learn_evpn(
             r.remove(&nlri.route_key());
         }
         register_mobility(mac_mobility, &route);
-        if table.insert(nlri.route_key(), route.clone()) != Some(route) {
+        if table.insert(nlri.route_key(), route.clone()) != Some(route.clone()) {
+            if let Some(h) = bmp {
+                h.evpn_post(from, nlri, Some(&route));
+            }
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, local_pref, communities = %format_args!("[{}]", nos_proto::bgp::fmt_communities(&communities)), "evpn route learned");
         }
     }
@@ -147,6 +155,8 @@ pub(super) struct FlowRx<'a> {
     /// The peer's Flowspec import policy (`None` accepts all), its AS and
     /// whether it is a confederation peer.
     pub import: Option<(&'a CompiledPolicy, u32, bool)>,
+    /// The BMP post-policy tap, when some station wants it.
+    pub bmp: Option<&'a crate::bmp::Hub>,
 }
 
 /// Stores one `MP_REACH_NLRI` batch's Flowspec rules in a peer's Flowspec
@@ -182,7 +192,11 @@ pub(super) fn learn_flowspec(
         if let Some((policy, peer_as, confed)) = rx.import
             && !super::flowspec_out::import_flow(policy, &mut route, from, peer_as, confed)
         {
-            table.remove(&k);
+            if table.remove(&k).is_some()
+                && let Some(h) = rx.bmp
+            {
+                h.flow_post(from, &k, None);
+            }
             warn!(peer = %from, family = %family, route = %nlri, "flowspec route rejected by import policy");
             continue;
         }
@@ -192,7 +206,10 @@ pub(super) fn learn_flowspec(
                 route.received_at = old.received_at;
             }
         }
-        if table.insert(k, route.clone()) != Some(route) {
+        if table.insert(k.clone(), route.clone()) != Some(route.clone()) {
+            if let Some(h) = rx.bmp {
+                h.flow_post(from, &k, Some(&route));
+            }
             info!(peer = %from, family = %family, route = %nlri, "flowspec route learned");
         }
     }
@@ -646,6 +663,9 @@ impl BgpRib {
                 .is_some_and(|t| t.remove(&nlri.route_key()).is_some());
             if removed {
                 info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+                if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                    h.evpn_post(from, nlri, None);
+                }
             }
         }
         for u in &update.mp_unreach {
@@ -816,6 +836,7 @@ impl BgpRib {
                     &attrs.communities,
                     (!remote_is_ibgp && !from_confed)
                         .then(|| self.gs_peers.get(&from).copied().unwrap_or_default()),
+                    bmp,
                 );
                 evpn_recheck.extend(
                     mp.evpn
@@ -845,6 +866,7 @@ impl BgpRib {
                         learned_via_ibgp: remote_is_ibgp || from_confed,
                         router_id: remote_bgp_id,
                         import: import.as_deref().map(|p| (p, peer_as, from_confed)),
+                        bmp,
                     };
                     flow_keys.extend(learn_flowspec(
                         self.flowspec_adj_rib_in.entry(from).or_default(),
@@ -903,6 +925,9 @@ impl BgpRib {
             for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
                 if table.remove(&nlri.route_key()).is_some() {
                     info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+                    if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                        h.evpn_post(from, nlri, None);
+                    }
                 }
             }
         }

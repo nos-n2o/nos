@@ -870,3 +870,83 @@ async fn bmp_pre_policy_dump_is_skipped_without_retention() {
     a.manager.shutdown().await;
     b.manager.shutdown().await;
 }
+
+/// #864: an EVPN route is part of both dumps (the pre-policy one from
+/// retention), each family closed by its own End-of-RIB, and a later
+/// withdrawal reaches the collector as an `MP_UNREACH` on both streams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_dump_covers_evpn_and_its_end_of_rib() {
+    use nos_bgp::message::BgpMessage;
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    let key = nos_proto::EvpnKey::Mac {
+        rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+        mac: [0, 0, 0, 0, 0, 7],
+    };
+    a.manager
+        .apply_evpn_local(
+            "dom",
+            nos_proto::EvpnUpdate::Full(vec![nos_proto::EvpnRoute {
+                key: key.clone(),
+                vni: 10100,
+                next_hop: IpAddr::V4(A),
+                ext_communities: vec![0x0002_fde8_0000_2774],
+                esi: [0; 10],
+                l3_vni: None,
+            }]),
+        )
+        .await;
+    a.apply(vec![peer(B, A, 65002)]).await;
+    let mut pb = peer(A, B, 65001);
+    pb.soft_reconfiguration_inbound = true;
+    b.apply(vec![pb]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    eventually("b holds the EVPN route", || async {
+        b.manager
+            .evpn_page(&mut nos_bgp::page::Snapshot::default(), None, 0, usize::MAX)
+            .await
+            .0
+            .len()
+            == 1
+    })
+    .await;
+    b.manager
+        .set_bmp_stations(&[station(port)], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    assert_eq!(bmp_frame(&mut c).await.0, 3);
+    for want_post in [false, true] {
+        let (is_post, msg) = bmp_route(&mut c).await;
+        let BgpMessage::Update(u) = msg else {
+            panic!("{msg:?}")
+        };
+        assert_eq!((is_post, u.mp_reach[0].evpn.len()), (want_post, 1));
+        let (is_post, msg) = bmp_route(&mut c).await;
+        assert!(
+            is_post == want_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }),
+            "{msg:?}"
+        );
+        let (is_post, msg) = bmp_route(&mut c).await;
+        assert!(
+            is_post == want_post && matches!(msg, BgpMessage::EndOfRib { afi: 25, safi: 70 }),
+            "{msg:?}"
+        );
+    }
+    a.manager
+        .apply_evpn_local("dom", nos_proto::EvpnUpdate::Remove(key))
+        .await;
+    let mut seen = [false; 2];
+    for _ in 0..2 {
+        let (is_post, msg) = bmp_route(&mut c).await;
+        assert!(
+            matches!(&msg, BgpMessage::Update(u) if u.mp_unreach[0].evpn.len() == 1),
+            "{msg:?}"
+        );
+        seen[usize::from(is_post)] = true;
+    }
+    assert_eq!(seen, [true, true]);
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}

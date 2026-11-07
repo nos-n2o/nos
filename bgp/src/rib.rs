@@ -1217,11 +1217,15 @@ impl BgpRib {
             return;
         };
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
+        let bmp = bmp_tap::tap(self.bmp.as_ref());
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&peer) {
             table.retain(|key, route| {
                 let rejected = adj_in::evpn_rejected(&policy, route, peer, peer_as, is_ibgp);
                 if rejected {
                     warn!(peer = %peer, route_type = key.route_type(), route = %key, "evpn route rejected by import policy");
+                    if let Some(h) = bmp {
+                        h.evpn_post(peer, &route.nlri, None);
+                    }
                 }
                 !rejected
             });

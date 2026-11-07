@@ -969,9 +969,9 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Customer"' \
 
 ### BMP export (RFC 7854, #878)
 
-`nos-bgpd` can stream monitoring data to a BMP station (collector): Initiation, Peer Up, Route Monitoring of the Adj-RIB-In (IPv4 and IPv6 unicast, #864), Peer Down and Termination.
+`nos-bgpd` can stream monitoring data to a BMP station (collector): Initiation, Peer Up, Route Monitoring of the Adj-RIB-In (every family but RT-Constraint, #864), Peer Down and Termination.
 
-Not yet exported: other address families (VPN, EVPN, Flowspec; their routes are simply absent), Statistics Reports, Adj-RIB-Out (#867) and `show bgp bmp`.
+Not yet exported: RT-Constraint routes (post-policy and dump), Statistics Reports, Adj-RIB-Out (#867) and `show bgp bmp`.
 
 - Configure: `edit bgp instance r1`, then `set bmp-station col1 address 192.0.2.50 port 5000`. The port is mandatory (BMP has no default port): a station without one is refused at commit, as are port 0, an unspecified address and a duplicate name. Several stations are allowed; each gets the same stream.
 - The router dials the station (the station listens), inside the instance's VRF, like peers and RPKI caches. Nothing is dialled until the VRF is resolved.
@@ -983,8 +983,9 @@ Not yet exported: other address families (VPN, EVPN, Flowspec; their routes are 
 - SIGINT or removing a station sends Termination (reason 0) first. If the station's queue overflows (a collector that stops reading), the router sends Termination (reason 2), reconnects and replays.
 - Route Monitoring: `set bmp-station col1 monitor post-policy|pre-policy|both` (default `both`). A change restarts that station and re-sends everything. Which peers: all peers of the instance.
   - Post-policy (L flag set): the Adj-RIB-In as the import policy left it. A re-announcement identical to the stored route sends nothing; a route the policy rejects never appears.
-  - Pre-policy (L flag clear): each UPDATE exactly as the peer sent it (re-encoded, unicast only), so rejected and looped routes show up.
-  - On connect, per peer and stream: the stored routes, one UPDATE per path, then an End-of-RIB per negotiated unicast family. The pre-policy dump comes from the retained routes of `soft-reconfiguration inbound`; without that flag on the peer-group it is skipped (the router logs `bmp pre-policy dump skipped`, the pre-policy End-of-RIB is still sent) and the collector only learns pre-policy changes from then on. Enable the flag for a complete pre-policy table.
+  - Pre-policy (L flag clear): each UPDATE exactly as the peer sent it (re-encoded, every family including RT-Constraint), so rejected and looped routes show up.
+  - On connect, per peer and stream: the stored routes, one UPDATE per path, then an End-of-RIB per negotiated family (IPv4/IPv6 unicast, L2VPN EVPN, IPv4/IPv6 Flowspec, VPNv4/VPNv6). The pre-policy dump comes from the retained routes of `soft-reconfiguration inbound` (for EVPN the held routes plus the rejected ones); without that flag on the peer-group it is skipped (the router logs `bmp pre-policy dump skipped`, the pre-policy End-of-RIB is still sent) and the collector only learns pre-policy changes from then on. Enable the flag for a complete pre-policy table.
+  - EVPN, Flowspec and VPN routes are rebuilt from the stored route. EVPN keeps neither `ORIGIN` nor `AS_PATH`, so its PDU says IGP with an empty path; the VPN codec writes the first label of a stack only.
   - A peer's own End-of-RIB is forwarded on both streams, so a session that comes up after the collector connected gets its markers.
   - PDUs are re-encoded with 4-byte `AS_PATH` (A flag always 0, no `AS4_PATH`); unknown attributes and the RFC 8097 community are not reproduced. A withdraw carries the L flag of the stream it belongs to.
 - Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. There is no `show bgp bmp` yet.

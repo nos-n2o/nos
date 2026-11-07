@@ -1970,8 +1970,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Choose which policy view the BMP station gets as Route Monitoring.",
             concat!(
                 "`post-policy` (routes after the import policy), `pre-policy` (routes as received, \
-             before the policy) or `both` (default). Only IPv4 and IPv6 unicast are monitored for \
-             now. The initial pre-policy dump needs `soft-reconfiguration inbound` on the \
+             before the policy) or `both` (default). Every negotiated family is monitored except \
+             RT-Constraint. The initial pre-policy dump needs `soft-reconfiguration inbound` on the \
              peer-group; without it the station only gets pre-policy changes from then on. \
              Changing it restarts the station and re-dumps.",
                 " ",
