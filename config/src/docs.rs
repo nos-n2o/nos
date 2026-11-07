@@ -1424,6 +1424,25 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Remove a member AS from the confederation's peer list.",
             ),
         ),
+        Topic::BgpInstanceBmpStation => (
+            "Export this instance's BGP monitoring data to a BMP station (RFC 7854).",
+            concat!(
+                "`bmp-station <name>`, then `address <ip>` and `port <n>` on it (both required): the \
+             instance's nos-bgpd dials the station inside the instance's VRF and sends \
+             Initiation, a Peer Up per Established peer, Peer Down and Termination. Route \
+             monitoring is not exported yet.",
+                " ",
+                "Stop exporting to this BMP station.",
+            ),
+        ),
+        Topic::BgpInstanceBmpStationAddress => (
+            "Set the BMP station's address.",
+            "The collector's IPv4 or IPv6 address; reached inside the instance's VRF.",
+        ),
+        Topic::BgpInstanceBmpStationPort => (
+            "Set the BMP station's TCP port.",
+            "Mandatory and non-zero: BMP has no default port, so the commit is refused without it.",
+        ),
         Topic::BgpInstanceRpkiCache => (
             "Take RPKI origin validation data from an RPKI-to-Router cache.",
             concat!(

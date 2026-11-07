@@ -377,6 +377,16 @@ async fn resync(
             crate::rpki::resolve_auths(&own.rpki_caches, &cfg),
         )
         .await;
+    let table_rd = own.routing_table.as_ref().and_then(|t| {
+        cfg.routing_tables
+            .iter()
+            .find(|r| &r.name == t)
+            .and_then(|r| r.vpn.rd.as_deref())
+            .and_then(nos_proto::evpn_id::parse_rd)
+    });
+    sessions
+        .set_bmp_stations(&own.bmp_stations, own.routing_table.clone(), table_rd)
+        .await;
     // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR
     // attribute carries.
     sessions.set_aggregates(own.aggregates.clone()).await;

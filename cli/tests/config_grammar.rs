@@ -704,3 +704,29 @@ fn subinterface_mtu() {
         .join("\n");
     assert!(shown.contains("mtu 9000"), "{shown}");
 }
+
+/// #878: BMP stations, keyed by name; the port has no default.
+#[test]
+fn bmp_station_list() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    for line in [
+        "set bgp instance R1 bmp-station s1 address 192.0.2.60",
+        "set bgp instance R1 bmp-station s1 port 5000",
+        "set bgp instance R1 bmp-station s2 address 192.0.2.61",
+        "delete bgp instance R1 bmp-station s2",
+    ] {
+        let edit = config_grammar::parse(line, &[], &doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(&mut doc, &path, value).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].bmp_stations,
+        vec![nos_proto::BmpStation {
+            name: "s1".into(),
+            address: "192.0.2.60".parse().unwrap(),
+            port: 5000,
+        }]
+    );
+}

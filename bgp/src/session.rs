@@ -560,6 +560,36 @@ impl SessionManager {
         self.reconcile_rpki(rpki_caches, rpki_auths, &vrf).await;
     }
 
+    /// Points the BMP exporter at `stations`. Like the sessions, it dials only
+    /// once the VRF is `Resolved` (never `Pending`/`Invalid`); the hub
+    /// restarts just the stations that changed.
+    pub async fn set_bmp_stations(
+        &self,
+        stations: &[nos_proto::BmpStation],
+        table: Option<String>,
+        rd: Option<[u8; 8]>,
+    ) {
+        let vrf = match &*self.vrf.borrow() {
+            VrfRequirement::Resolved(name) => Some(name.clone()),
+            _ => None,
+        };
+        let want = match vrf {
+            Some(vrf) => stations
+                .iter()
+                .map(|s| crate::bmp::StationCfg {
+                    name: s.name.clone(),
+                    addr: SocketAddr::new(s.address, s.port),
+                    vrf: self.bind_vrf.then(|| vrf.clone()),
+                    sys_name: self.instance.clone(),
+                    table: table.clone(),
+                    scope: crate::bmp::Scope::for_rd(rd),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.bgp_rib.bmp().set_stations(want).await;
+    }
+
     /// (Re)starts the RTR client when the cache list or the VRF changes. It
     /// runs only once the VRF is resolved, like the sessions; without caches
     /// the VRP set is emptied, so every route is `not_found` again.
@@ -1096,6 +1126,7 @@ impl SessionManager {
             }
         }
         drop(tasks);
+        self.bgp_rib.bmp().shutdown().await;
         let taken = self.rpki.lock().await.take();
         if let Some((client, applier)) = taken {
             client.task.abort();
@@ -1443,6 +1474,10 @@ impl SessionManager {
             } else {
                 Disconnect::Hard
             };
+            // The aborted session never reached its own exit path (#878).
+            self.bgp_rib
+                .bmp()
+                .peer_down(addr, &crate::bmp::DownReason::LocalFsm(0));
             self.bgp_rib.lock().await.peer_disconnected(addr, kind);
         }
         for peer in to_spawn {

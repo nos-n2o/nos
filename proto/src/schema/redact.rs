@@ -231,6 +231,7 @@ mod tests {
                 }),
                 ..Default::default()
             }],
+            bmp_stations: Vec::new(),
             rpki_caches: vec![RpkiCache {
                 auth: Some(BgpAuth::Md5 {
                     key_ref: "rpki".into(),

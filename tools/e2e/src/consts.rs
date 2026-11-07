@@ -128,6 +128,14 @@ pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
 pub const RPKI_INVALID_PREFIX: &str = "203.0.120.0/24";
 pub const RPKI_TAGGED_PREFIX: &str = "203.0.121.0/24";
 pub const STAYRTR_IMAGE: &str = "rpki/stayrtr:v0.6.4";
+/// `bmp` (#878): the GoBMP collector, pinned by digest (its last tagged
+/// release is from 2022; `:latest` moves), dumping to the console. 10.50.0.40
+/// is free in the lab network. `FROM scratch`: no shell, no healthcheck.
+pub const GOBMP_IMAGE: &str =
+    "sbezverk/gobmp@sha256:e905f70d90f30d1eee60d04ac74c1fc4d41116fd3e53ba8bba7ae9b4201bfb30";
+pub const BMP_COLLECTOR: &str = "bmp-collector";
+pub const IP_BMP: &str = "10.50.0.40";
+pub const BMP_PORT: u16 = 5000;
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const EXABGP_VERSION: &str = "5.0.13";

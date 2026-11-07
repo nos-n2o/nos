@@ -130,6 +130,7 @@ pub fn base_running() -> Config {
             maximum_paths: None,
             confederation: nos_proto::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            bmp_stations: Vec::new(),
             aggregates: Vec::new(),
             graceful_restart: nos_proto::BgpGracefulRestart::default(),
             routing_table: None,

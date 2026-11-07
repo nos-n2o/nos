@@ -247,6 +247,20 @@ impl Dock {
             .await
     }
 
+    /// A container with no seeded file, for images that run as they are
+    /// (`FROM scratch` GoBMP).
+    pub async fn start_plain_unseeded(
+        &self,
+        name: &str,
+        image: &str,
+        network: &str,
+        ip: &str,
+        cmd: &[&str],
+    ) -> anyhow::Result<()> {
+        self.start_plain_inner(name, image, network, ip, None, cmd, None, &[])
+            .await
+    }
+
     /// `start_plain` with extra capabilities (FRR's daemons need
     /// `NET_ADMIN`/`NET_RAW`/`SYS_ADMIN` to start at all).
     #[allow(clippy::too_many_arguments)]

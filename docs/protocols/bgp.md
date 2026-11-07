@@ -967,6 +967,20 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Customer"' \
   $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/role
 ```
 
+### BMP export (RFC 7854, #878)
+
+`nos-bgpd` can stream monitoring data to a BMP station (collector). Part 1 sends Initiation, Peer Up, Peer Down and Termination; Route Monitoring, Statistics and Adj-RIB-Out are not exported yet (#864, #867), so a collector sees which peers are up but no routes.
+
+- Configure: `edit bgp instance r1`, then `set bmp-station col1 address 192.0.2.50 port 5000`. The port is mandatory (BMP has no default port): a station without one is refused at commit, as are port 0, an unspecified address and a duplicate name. Several stations are allowed; each gets the same stream.
+- The router dials the station (the station listens), inside the instance's VRF, like peers and RPKI caches. Nothing is dialled until the VRF is resolved.
+- On connect: Initiation (sysDescr `nos-bgpd <version>`, sysName the instance name, a string TLV `vrf=<table>`), then a Peer Up per Established peer, then live events.
+- A collector that goes away is redialled with a 5 s backoff doubling to 120 s; the Established peers are replayed on every reconnect.
+- Peer type is 0 (global) with a zero distinguisher, or 1 (RD instance) with the routing table's `vpn` route distinguisher when it has one.
+- Peer Down reasons: 1 when nos sent a NOTIFICATION (shutdown, hold timer, collision), 3 when the peer sent one, 4 when the peer or the transport closed with none, 2 (event 0) when a configuration change stopped the session.
+- Peer Up carries both OPEN messages re-encoded, so a capability nos does not know is missing from them.
+- SIGINT or removing a station sends Termination (reason 0) first. If the station's queue overflows (a collector that stops reading), the router sends Termination (reason 2), reconnects and replays.
+- Check: `bmp station connected` / `bmp peer up sent` in `show log`. There is no `show bgp bmp` yet.
+
 ### RPKI origin validation (RFC 6811, RFC 8210)
 
 NOS checks each route's origin AS against the Validated ROA Payloads (VRPs) of an RPKI cache, such as Routinator or StayRTR. Give the instance one or more caches:

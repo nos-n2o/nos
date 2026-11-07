@@ -581,6 +581,11 @@ pub struct Args {
     #[arg(long)]
     pub rpki_cache: Vec<std::net::SocketAddr>,
 
+    /// An RFC 7854 BMP station for `--bgp-instance`, `<addr>:<port>`,
+    /// repeatable, named `bmp-1`, `bmp-2`... (`BgpInstanceOp::SetBmpStation`).
+    #[arg(long)]
+    pub bmp_station: Vec<std::net::SocketAddr>,
+
     /// TCP-MD5 password for every `--rpki-cache` session (RFC 8210 §9).
     #[arg(long)]
     pub rpki_cache_md5_password: Option<String>,
@@ -2903,6 +2908,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         }));
     }
+    for (i, station) in args.bmp_station.iter().enumerate() {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetBmpStation {
+            name: args.bgp_instance.clone(),
+            station: nos_proto::BmpStation {
+                name: format!("bmp-{}", i + 1),
+                address: station.ip(),
+                port: station.port(),
+            },
+        }));
+    }
     for &prefix in &args.aggregate_address {
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetAggregate {
             name: args.bgp_instance.clone(),
@@ -4290,6 +4305,30 @@ mod tests {
             .position(|o| matches!(o, ConfigOp::BgpInstance(BgpInstanceOp::SetRpkiCache { .. })))
             .expect("SetRpkiCache");
         assert!(at(&key("rpki-192-0-2-5", "cpw")) < cache_at);
+    }
+
+    #[test]
+    fn bmp_station_flags_emit_named_stations() {
+        let set = ops(&[
+            "--bmp-station",
+            "192.0.2.5:5000",
+            "--bmp-station",
+            "[2001:db8::1]:1",
+        ])
+        .unwrap();
+        let names: Vec<_> = set
+            .iter()
+            .filter_map(|o| match o {
+                ConfigOp::BgpInstance(BgpInstanceOp::SetBmpStation { station, .. }) => {
+                    Some((station.name.clone(), station.port))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [("bmp-1".to_string(), 5000), ("bmp-2".to_string(), 1)]
+        );
     }
 
     /// The BGP instance name the default flags provision.

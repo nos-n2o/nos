@@ -62,7 +62,7 @@ pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN};
 pub use as_path_list::AsPathList;
 pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
 pub use bgp_instance::{
-    BgpAggregate, BgpConfederation, BgpGracefulRestart, BgpInstance, RpkiCache,
+    BgpAggregate, BgpConfederation, BgpGracefulRestart, BgpInstance, BmpStation, RpkiCache,
     GR_RESTART_TIME_DEFAULT, GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT,
     RPKI_RTR_PORT_DEFAULT,
 };

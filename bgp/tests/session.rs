@@ -599,3 +599,120 @@ async fn soft_reconfiguration_inbound_applies_policy_changes_in_place() {
     a.manager.shutdown().await;
     b.manager.shutdown().await;
 }
+
+/// One BMP message off the fake collector: (type, body after the 6-byte header).
+async fn bmp_frame(s: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+    let mut h = [0u8; 6];
+    tokio::time::timeout(Duration::from_secs(30), s.read_exact(&mut h))
+        .await
+        .expect("a BMP frame in time")
+        .unwrap();
+    assert_eq!(h[0], 3, "BMP version");
+    let len = u32::from_be_bytes(h[1..5].try_into().unwrap()) as usize;
+    let mut body = vec![0u8; len - 6];
+    s.read_exact(&mut body).await.unwrap();
+    (h[5], body)
+}
+
+fn station(port: u16) -> nos_proto::BmpStation {
+    nos_proto::BmpStation {
+        name: "bmp-1".into(),
+        address: IpAddr::V4(A),
+        port,
+    }
+}
+
+/// #878: Initiation, Peer Up, Peer Down on a config change, the replay after
+/// the collector reconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_station_gets_initiation_peer_up_peer_down_and_a_replay() {
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    a.apply(vec![peer(B, A, 65002)]).await;
+    a.manager
+        .set_bmp_stations(&[station(port)], Some("rt1".into()), None)
+        .await;
+    b.apply(vec![peer(A, B, 65001)]).await;
+
+    let (mut c, _) = collector.accept().await.unwrap();
+    let (t, body) = bmp_frame(&mut c).await;
+    assert_eq!(t, 4, "Initiation first");
+    assert!(body.ends_with(b"vrf=rt1"));
+    let (t, body) = bmp_frame(&mut c).await;
+    assert_eq!(t, 3, "Peer Up");
+    assert_eq!(&body[22..26], &[127, 0, 0, 2], "peer address");
+    assert_eq!(&body[26..30], &65002u32.to_be_bytes(), "peer AS");
+
+    // Dropping the collector reconnects and replays Initiation + Peer Up.
+    drop(c);
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    assert_eq!(bmp_frame(&mut c).await.0, 3, "replayed Peer Up");
+
+    // Removing the peer from a's config ends the session: Peer Down.
+    a.apply(vec![]).await;
+    let (t, body) = bmp_frame(&mut c).await;
+    assert_eq!(t, 2, "Peer Down");
+    assert_eq!(&body[22..26], &[127, 0, 0, 2]);
+
+    // Removing the station sends Termination reason 0.
+    a.manager
+        .set_bmp_stations(&[], Some("rt1".into()), None)
+        .await;
+    let (t, body) = bmp_frame(&mut c).await;
+    assert_eq!((t, &body[..]), (5, &[0, 1, 0, 2, 0, 0][..]));
+}
+
+/// #878: a queue that overflows terminates the session (reason 2), then the
+/// station reconnects and replays the registry.
+#[tokio::test]
+async fn bmp_queue_overflow_resyncs_the_station() {
+    use nos_bgp::bmp::{Hub, PeerUpInfo, QUEUE_CAPACITY};
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let hub = Hub::new();
+    hub.set_stations(vec![nos_bgp::bmp::StationCfg {
+        name: "s".into(),
+        addr: SocketAddr::new(IpAddr::V4(A), port),
+        vrf: None,
+        sys_name: "x".into(),
+        table: None,
+        scope: nos_bgp::bmp::Scope::default(),
+    }])
+    .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    let info = |n: usize| PeerUpInfo {
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1 + u8::try_from(n % 200).unwrap())),
+        asn: 65000,
+        bgp_id: Ipv4Addr::new(9, 9, 9, 9),
+        two_octet_as: false,
+        local: IpAddr::V4(A),
+        local_port: 179,
+        remote_port: 1,
+        sent_open: bytes::Bytes::new(),
+        recv_open: bytes::Bytes::new(),
+        time: Duration::ZERO,
+    };
+    // No await between pushes: the station task cannot drain meanwhile.
+    for n in 0..QUEUE_CAPACITY + 10 {
+        hub.peer_up(info(n));
+    }
+    let mut frames = 0;
+    loop {
+        let (t, body) = bmp_frame(&mut c).await;
+        if t == 5 {
+            assert_eq!(body, [0, 1, 0, 2, 0, 2], "out of resources");
+            break;
+        }
+        frames += 1;
+        assert!(frames <= QUEUE_CAPACITY, "bounded");
+    }
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4);
+    for _ in 0..200 {
+        assert_eq!(bmp_frame(&mut c).await.0, 3, "replayed registry");
+    }
+    hub.shutdown().await;
+}
