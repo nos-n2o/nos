@@ -435,6 +435,7 @@ mod tests {
     /// The reason for the byte budget: a `Full` over `MAX_FRAME` is cut so
     /// every frame, at the production budget, still encodes.
     #[test]
+    #[cfg_attr(miri, ignore = "serialises >16 MiB, minutes under the interpreter")]
     fn a_full_over_max_frame_splits_under_it() {
         let all: Vec<_> = (0..300).map(|i| route(i, 8000)).collect();
         let whole =

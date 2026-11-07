@@ -705,6 +705,7 @@ mod tests {
     /// #751: one changed, one added, one removed in 20 000 routes, found by
     /// key index (the old linear `find` was O(n^2) and cloned every element).
     #[test]
+    #[cfg_attr(miri, ignore = "20k-element list, minutes under the interpreter")]
     fn a_large_list_diffs_to_exactly_its_changes() {
         let n = 20_000;
         let base = statics((0..n).map(|i| (i, 1)));
@@ -906,7 +907,8 @@ mod tests {
     #[test]
     fn the_typed_diff_matches_the_full_json_walk() {
         let mut r = Rng(0x9e37_79b9_7f4a_7c15);
-        for _ in 0..300 {
+        // 300 rounds take tens of minutes under Miri; a few still cover the UB surface.
+        for _ in 0..if cfg!(miri) { 3 } else { 300 } {
             let mut base = Config::default();
             for _ in 0..r.below(12) {
                 mutate(&mut base, &mut r);
@@ -923,6 +925,7 @@ mod tests {
 
     /// A 22k-route instance with one route modified, added and removed.
     #[test]
+    #[cfg_attr(miri, ignore = "22k-element list, minutes under the interpreter")]
     fn a_large_route_list_matches_the_full_walk() {
         let n = 22_000;
         let base = statics((0..n).map(|i| (i, 1)));

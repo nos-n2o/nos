@@ -9,6 +9,12 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260).
 - The nightly cron runs two canaries that only warn: `Clippy (stable canary)` on the newest stable (also on every push/PR) and `Miri (nightly canary)` on the newest nightly.
 - The `alert` job opens one `ci-red` issue (or comments on the open one) when any job or canary is red outside a PR. Branch protection isn't available on this plan, so nothing blocks a red merge: merge only after `gh pr checks <N> --watch` is all green.
 
+**CI budgets (#827).** How to diagnose a job that dies or hangs:
+
+- `Test`/`Coverage` set `CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only` in `ci.yml` only (local builds keep full debuginfo) and start with a "Free runner disk space" step that prints `df -h /` before and after. `rustc-LLVM ERROR: No space left on device` followed by `ld terminated with signal 7` is a full disk, not a linker bug: read those two `df` lines first.
+- `Miri (UB check)` has `timeout-minutes: 45`; a hang fails fast instead of running to GitHub's 6 h cap.
+- A test too slow for the interpreter gets `#[cfg_attr(miri, ignore = "reason")]` (as in `rpl/src/codegen.rs`, `proto/src/bgp.rs`, `ospf-common/src/drouters.rs`). Find outliers with `cargo +<MIRI_TOOLCHAIN> miri test -p <crate> -- -Zunstable-options --report-time`; a test printed without a result after minutes is the culprit. Miri runs tests serially, so one slow test blocks the rest. Measured on the nightly pin (#827): `nos-rpl` ~2 min, `nos-ospf-common` ~2 min, `nos-proto` ~13 min; the tests that do large-N loops, ~16 MiB frames or full-`Config` diffs are ignored under Miri (and `the_typed_diff_matches_the_full_json_walk` runs 3 rounds instead of 300).
+
 To bump:
 
 - Change `RUST_TOOLCHAIN` (ci.yml) and `channel` (rust-toolchain.toml) together; `make toolchain-check` enforces it.

@@ -713,6 +713,10 @@ mod tests {
 
     /// The worst case `BGP_PUSH_CHUNK` is sized for still fits one frame.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "serialises a full chunk, minutes under the interpreter"
+    )]
     fn a_chunk_of_worst_case_routes_fits_max_frame() {
         let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
         let worst = BgpRoute {
@@ -762,6 +766,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "tens of thousands of routes, minutes under the interpreter"
+    )]
     fn vpn_frames_weigh_paths_plus_one_per_route() {
         // Small pushes stay one frame; nothing is no frame.
         assert_eq!(VpnRouteUpdate::frames(vec![]).len(), 0);
@@ -800,6 +808,10 @@ mod tests {
 
     /// The worst case `VPN_PUSH_CHUNK` is sized for still fits one frame.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "serialises a full chunk, minutes under the interpreter"
+    )]
     fn a_chunk_of_worst_case_vpn_routes_fits_max_frame() {
         let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
         let path = VpnPath {
@@ -908,6 +920,10 @@ mod tests {
     /// the densest bytes per weight unit (hop-less routes, every optional
     /// field IPv6/maxed) and one route of `OSPF_PUSH_CHUNK - 1` ECMP hops.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "serialises a full chunk, minutes under the interpreter"
+    )]
     fn a_chunk_of_worst_case_ospf_routes_fits_max_frame() {
         let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
         let worst = |hops: usize| OspfRoute {
