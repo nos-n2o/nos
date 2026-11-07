@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::bmp::{Hub, PeerUpInfo, Scope, StationCfg};
+use crate::flowspec::{Afi, FlowSpec};
 use crate::message::{BgpCodec, BgpMessage};
+use crate::rib::bmp_tap::BmpKey;
 use bytes::BytesMut;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -64,11 +66,12 @@ async fn setup() -> (BgpRib, Arc<Hub>, TcpStream) {
     assert_eq!(frame(&mut c).await.0, 3, "Peer Up");
     let mut rib = new_rib(65000);
     rib.set_bmp(hub.clone());
-    std::mem::forget(register_peer(
+    std::mem::forget(register_mp_peer(
         &mut rib,
         addr(PEER),
         false,
         addr("10.0.0.254"),
+        AddressFamily::ALL.into_iter().collect(),
     ));
     (rib, hub, c)
 }
@@ -178,17 +181,236 @@ fn dump_reads_the_current_paths_and_skips_withdrawn_keys() {
         "rejected: not post-policy"
     );
     let mut pre = rib.bmp_keys(peer, false);
-    pre.sort();
-    assert_eq!(pre, vec![prefix("1.0.0.0/24"), prefix("2.0.0.0/24")]);
+    pre.sort_by_key(|k| format!("{k:?}"));
+    assert_eq!(
+        pre,
+        vec![
+            BmpKey::Prefix(prefix("1.0.0.0/24")),
+            BmpKey::Prefix(prefix("2.0.0.0/24"))
+        ]
+    );
     withdraw(&mut rib, "2.0.0.0/24");
     // The snapshot predates the withdrawal: its key yields nothing.
-    let paths = rib.bmp_paths(peer, false, &pre);
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0].0, prefix("1.0.0.0/24"));
+    let updates = rib.bmp_updates(peer, false, &pre, &HashSet::new());
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].nlri, vec!["1.0.0.0/24".parse().unwrap()]);
     assert_eq!(
         rib.bmp_families(peer).len(),
         2,
         "both unicast families negotiated"
     );
-    assert_eq!(rib.bmp_families(addr("10.9.9.9")), Vec::<u16>::new());
+    assert_eq!(rib.bmp_families(addr("10.9.9.9")), Vec::<(u16, u8)>::new());
+}
+
+fn feed(rib: &mut BgpRib, u: &UpdateMessage) {
+    rib.handle_update(addr(PEER), false, v4("192.0.2.1"), u, &nos_rpl::ACCEPT_ALL);
+}
+
+fn flow_rule(last: u8) -> FlowSpec {
+    FlowSpec::decode(Afi::V4, &[5, 1, 24, 10, last, 0])
+        .unwrap()
+        .0
+}
+
+fn flow_reach(rule: FlowSpec) -> UpdateMessage {
+    let mut u = ebgp_update(vec![], vec![65001], "0.0.0.0");
+    u.attributes.as_mut().unwrap().extended_communities = vec![0x8006_0000_0000_0000];
+    u.mp_reach = vec![message::MpReachNlri {
+        afi: 1,
+        safi: message::SAFI_FLOWSPEC,
+        next_hop: addr("0.0.0.0"),
+        nlri: vec![],
+        nlri_path_ids: vec![],
+        evpn: vec![],
+        flowspec: vec![rule],
+        vpn: vec![],
+        rtc: vec![],
+    }];
+    u
+}
+
+fn mp_unreach(afi: u16, safi: u8) -> message::MpUnreachNlri {
+    message::MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn: vec![],
+        withdrawn_path_ids: vec![],
+        evpn: vec![],
+        flowspec: vec![],
+        vpn: vec![],
+        rtc: vec![],
+    }
+}
+
+fn vpn_nlri(last: u8) -> crate::vpn::VpnNlri {
+    super::vpn::nlri(
+        super::vpn::RD1,
+        &format!("10.10.{last}.0/24"),
+        100 + u32::from(last),
+    )
+}
+
+#[tokio::test]
+async fn evpn_announce_withdraw_and_state_compression() {
+    let (mut rib, hub, mut c) = setup().await;
+    let n = evpn_nlri(1);
+    feed(&mut rib, &evpn_reach(vec![n.clone()], vec![65001]));
+    let (post, u) = route(&mut c).await;
+    assert!(post);
+    assert_eq!(u.mp_reach[0].evpn, vec![n.clone()]);
+    assert_eq!(u.mp_reach[0].next_hop, addr("192.0.2.1"));
+    assert_eq!(
+        u.attributes.unwrap().extended_communities,
+        vec![0x0002_fde8_0000_2710]
+    );
+    // Identical re-announcement: nothing; the next frame is the sentinel.
+    feed(&mut rib, &evpn_reach(vec![n.clone()], vec![65001]));
+    feed(&mut rib, &evpn_reach(vec![evpn_nlri(2)], vec![65001]));
+    assert_eq!(route(&mut c).await.1.mp_reach[0].evpn, vec![evpn_nlri(2)]);
+    let mut w = empty_update();
+    w.mp_unreach = vec![message::MpUnreachNlri {
+        evpn: vec![n.clone()],
+        ..mp_unreach(message::AFI_L2VPN, message::SAFI_EVPN)
+    }];
+    feed(&mut rib, &w);
+    assert_eq!(route(&mut c).await.1.mp_unreach[0].evpn, vec![n]);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn evpn_import_policy_rejection_is_a_withdraw() {
+    let (mut rib, hub, mut c) = setup().await;
+    let n = evpn_nlri(1);
+    feed(&mut rib, &evpn_reach(vec![n.clone()], vec![65001]));
+    route(&mut c).await;
+    rib.set_peer_evpn_import_policy(addr(PEER), Some(Arc::new(nos_rpl::DENY_ALL.clone())), false);
+    assert_eq!(route(&mut c).await.1.mp_unreach[0].evpn, vec![n]);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn flowspec_announce_and_withdraw() {
+    let (mut rib, hub, mut c) = setup().await;
+    feed(&mut rib, &flow_reach(flow_rule(1)));
+    let u = route(&mut c).await.1;
+    assert_eq!(u.mp_reach[0].flowspec, vec![flow_rule(1)]);
+    assert_eq!(
+        u.attributes.unwrap().extended_communities,
+        vec![0x8006_0000_0000_0000]
+    );
+    feed(&mut rib, &flow_reach(flow_rule(1)));
+    feed(&mut rib, &flow_reach(flow_rule(2)));
+    assert_eq!(
+        route(&mut c).await.1.mp_reach[0].flowspec,
+        vec![flow_rule(2)]
+    );
+    let mut w = empty_update();
+    w.mp_unreach = vec![message::MpUnreachNlri {
+        flowspec: vec![flow_rule(1)],
+        ..mp_unreach(1, message::SAFI_FLOWSPEC)
+    }];
+    feed(&mut rib, &w);
+    assert_eq!(
+        route(&mut c).await.1.mp_unreach[0].flowspec,
+        vec![flow_rule(1)]
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn vpn_announce_withdraw_and_policy_rejection() {
+    let (mut rib, hub, mut c) = setup().await;
+    feed(
+        &mut rib,
+        &super::vpn::reach("192.0.2.7", vec![65001], vec![vpn_nlri(1)]),
+    );
+    let u = route(&mut c).await.1;
+    assert_eq!(u.mp_reach[0].vpn, vec![vpn_nlri(1)]);
+    assert_eq!(u.mp_reach[0].next_hop, addr("192.0.2.7"));
+    feed(
+        &mut rib,
+        &super::vpn::reach("192.0.2.7", vec![65001], vec![vpn_nlri(1)]),
+    );
+    feed(
+        &mut rib,
+        &super::vpn::reach("192.0.2.7", vec![65001], vec![vpn_nlri(2)]),
+    );
+    assert_eq!(route(&mut c).await.1.mp_reach[0].vpn, vec![vpn_nlri(2)]);
+    let mut w = empty_update();
+    w.mp_unreach = vec![message::MpUnreachNlri {
+        vpn: vec![crate::vpn::VpnNlri {
+            labels: vec![],
+            ..vpn_nlri(1)
+        }],
+        ..mp_unreach(1, message::SAFI_VPN)
+    }];
+    feed(&mut rib, &w);
+    assert_eq!(
+        route(&mut c).await.1.mp_unreach[0].vpn[0].prefix,
+        vpn_nlri(1).prefix
+    );
+    // A rejecting import policy withdraws a held path.
+    rib.handle_update(
+        addr(PEER),
+        false,
+        v4("192.0.2.1"),
+        &super::vpn::reach("192.0.2.7", vec![65001], vec![vpn_nlri(2)]),
+        &nos_rpl::DENY_ALL,
+    );
+    assert_eq!(
+        route(&mut c).await.1.mp_unreach[0].vpn[0].prefix,
+        vpn_nlri(2).prefix
+    );
+    hub.shutdown().await;
+}
+
+#[test]
+fn the_dump_walks_every_family_post_and_pre_policy() {
+    let mut rib = new_rib(65000);
+    let peer = addr(PEER);
+    std::mem::forget(register_mp_peer(
+        &mut rib,
+        peer,
+        false,
+        addr("10.0.0.254"),
+        AddressFamily::ALL.into_iter().collect(),
+    ));
+    rib.set_peer_soft_reconfig(peer, true);
+    learn(&mut rib, &["1.0.0.0/24"], &nos_rpl::ACCEPT_ALL);
+    feed(&mut rib, &evpn_reach(vec![evpn_nlri(1)], vec![65001]));
+    feed(&mut rib, &flow_reach(flow_rule(1)));
+    feed(
+        &mut rib,
+        &super::vpn::reach("192.0.2.7", vec![65001], vec![vpn_nlri(1)]),
+    );
+    for post in [true, false] {
+        let keys = rib.bmp_keys(peer, post);
+        assert_eq!(keys.len(), 4, "post={post}: one key per family");
+        let updates = rib.bmp_updates(peer, post, &keys, &HashSet::new());
+        assert_eq!(updates.len(), 4);
+        assert_eq!(
+            updates
+                .iter()
+                .map(|u| (u.mp_reach.first().map(|m| (m.afi, m.safi)), u.nlri.len()))
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                (None, 1),
+                (Some((message::AFI_L2VPN, message::SAFI_EVPN)), 0),
+                (Some((1, message::SAFI_FLOWSPEC)), 0),
+                (Some((1, message::SAFI_VPN)), 0),
+            ])
+        );
+    }
+    // A rejected EVPN route is pre-policy only (the policy change itself
+    // dropped the held one).
+    rib.set_peer_evpn_import_policy(peer, Some(Arc::new(nos_rpl::DENY_ALL.clone())), false);
+    feed(&mut rib, &evpn_reach(vec![evpn_nlri(9)], vec![65001]));
+    let evpn = |post| {
+        rib.bmp_keys(peer, post)
+            .into_iter()
+            .filter(|k| matches!(k, BmpKey::Evpn(_)))
+            .count()
+    };
+    assert_eq!((evpn(true), evpn(false)), (0, 1));
+    assert_eq!(rib.bmp_families(peer).len(), 7);
 }

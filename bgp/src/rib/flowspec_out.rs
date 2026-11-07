@@ -174,6 +174,9 @@ impl BgpRib {
             .is_some();
         if removed {
             info!(peer = %peer, family = %k.0, route = %k.1, "flowspec route withdrawn");
+            if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                h.flow_post(peer, k, None);
+            }
             self.select_flow(k);
         }
         removed

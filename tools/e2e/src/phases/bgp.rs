@@ -4485,7 +4485,7 @@ async fn vpn_chunked(w: &World) -> anyhow::Result<()> {
 /// router-a's flags for the VPN phases: `evpn_flags` with VPNv4/VPNv6
 /// toward GoBGP, and `VPN_TABLE` (RD `VPN_RD_A`, export RT `VPN_RD_A`)
 /// importing `import_rt`.
-fn vpn_flags(import_rt: &str) -> Vec<String> {
+pub(super) fn vpn_flags(import_rt: &str) -> Vec<String> {
     let mut f: Vec<String> = evpn_flags()
         .into_iter()
         .map(|f| match f.as_str() {
@@ -5085,7 +5085,7 @@ fn dp_pe(id: Id, rd: &str, l3_address: &str, extra: &[&str]) -> Vec<String> {
 /// The operator's part of an MPLS PE (docker mounts /proc/sys read-only, so
 /// `nos-ribd` only reads these): label space (it withholds a VRF's export
 /// without it), MPLS input on the core link, forwarding. Per container start.
-async fn mpls_ready(w: &World, routers: &[&str]) -> anyhow::Result<()> {
+pub(super) async fn mpls_ready(w: &World, routers: &[&str]) -> anyhow::Result<()> {
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     for router in routers {
         netns(

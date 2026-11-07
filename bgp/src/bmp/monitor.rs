@@ -12,42 +12,186 @@ use ipnet::IpNet;
 use tokio_util::codec::Encoder;
 
 use super::{frame, PeerUpInfo, Scope};
+use crate::evpn::EvpnNlri;
 use crate::message::{
-    BgpCodec, BgpMessage, MpReachNlri, MpUnreachNlri, PathAttributes, UpdateMessage, AFI_IPV4,
-    AFI_IPV6,
+    BgpCodec, BgpMessage, MpReachNlri, MpUnreachNlri, PathAttributes, Pmsi, UpdateMessage,
+    AFI_IPV4, AFI_IPV6, AFI_L2VPN, SAFI_EVPN, SAFI_VPN,
 };
-use crate::rib::RibRoute;
+use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, VpnRoute};
+use crate::vpn::{VpnKey, VpnNlri};
 
 const TYPE_ROUTE_MONITORING: u8 = 0;
 /// A BGP PDU's length field sits after the 16-byte marker.
 const PDU_LEN_AT: usize = 16;
 
-pub(super) fn afi_of(prefix: IpNet) -> u16 {
+pub(crate) fn afi_of(prefix: IpNet) -> u16 {
     match prefix {
         IpNet::V4(_) => AFI_IPV4,
         IpNet::V6(_) => AFI_IPV6,
     }
 }
 
-pub(super) fn is_unicast(afi: u16, safi: u8) -> bool {
-    safi == 1 && (afi == AFI_IPV4 || afi == AFI_IPV6)
+/// Whether `update` carries any route or withdrawal (a bare End-of-RIB form or an
+/// attribute-only UPDATE says nothing a collector keeps).
+pub fn has_routes(update: &UpdateMessage) -> bool {
+    !(update.withdrawn_routes.is_empty()
+        && update.nlri.is_empty()
+        && update.mp_reach.is_empty()
+        && update.mp_unreach.is_empty())
 }
 
-/// `update` reduced to IPv4/IPv6 unicast, `None` when nothing is left.
-/// ponytail: unicast only for now; the other families land with the all-family
-/// monitoring sub-issue.
-pub fn unicast_only(update: &UpdateMessage) -> Option<UpdateMessage> {
-    let mut u = update.clone();
-    u.mp_reach.retain(|m| is_unicast(m.afi, m.safi));
-    u.mp_unreach.retain(|m| is_unicast(m.afi, m.safi));
-    if u.nlri.is_empty() && u.mp_reach.is_empty() {
-        u.attributes = None;
+/// The path attributes of a stored route; `next_hop` is the legacy
+/// `NEXT_HOP` (only meaningful with plain NLRI).
+fn attributes_of(r: &RibRoute, next_hop: Ipv4Addr) -> PathAttributes {
+    PathAttributes {
+        origin: r.bgp_origin,
+        as_path: (*r.as_path).clone(),
+        next_hop,
+        local_pref: Some(r.local_pref),
+        med: r.med,
+        originator_id: r.originator_id,
+        cluster_list: r.cluster_list.to_vec(),
+        communities: r.communities.clone(),
+        extended_communities: r.extended_communities.clone(),
+        large_communities: r.large_communities.clone(),
+        ipv6_extended_communities: Vec::new(),
+        pmsi: None,
+        atomic_aggregate: r.atomic_aggregate,
+        aggregator: r.aggregator,
+        otc: r.otc,
     }
-    let empty = u.withdrawn_routes.is_empty()
-        && u.nlri.is_empty()
-        && u.mp_reach.is_empty()
-        && u.mp_unreach.is_empty();
-    (!empty).then_some(u)
+}
+
+fn reach(afi: u16, safi: u8, next_hop: IpAddr) -> MpReachNlri {
+    MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        nlri: Vec::new(),
+        nlri_path_ids: Vec::new(),
+        evpn: Vec::new(),
+        flowspec: Vec::new(),
+        vpn: Vec::new(),
+        rtc: Vec::new(),
+    }
+}
+
+fn unreach(afi: u16, safi: u8) -> MpUnreachNlri {
+    MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn: Vec::new(),
+        withdrawn_path_ids: Vec::new(),
+        evpn: Vec::new(),
+        flowspec: Vec::new(),
+        vpn: Vec::new(),
+        rtc: Vec::new(),
+    }
+}
+
+/// The UPDATE announcing a stored EVPN route. The store keeps neither
+/// `ORIGIN` nor `AS_PATH`, so the PDU says IGP and an empty path.
+pub fn evpn_to_update(r: &EvpnRoute) -> UpdateMessage {
+    let pmsi = match (&r.nlri, r.pmsi_vni) {
+        (EvpnNlri::InclusiveMulticast { origin, .. }, Some(vni)) => Some(Pmsi {
+            vni,
+            tunnel_ip: *origin,
+        }),
+        _ => None,
+    };
+    let mut mp = reach(AFI_L2VPN, SAFI_EVPN, r.next_hop);
+    mp.evpn = vec![r.nlri.clone()];
+    UpdateMessage {
+        attributes: Some(PathAttributes {
+            origin: crate::message::Origin::Igp,
+            as_path: crate::as_path::AsPath::default(),
+            next_hop: Ipv4Addr::UNSPECIFIED,
+            local_pref: Some(r.local_pref),
+            med: None,
+            originator_id: None,
+            cluster_list: Vec::new(),
+            communities: r.communities.clone(),
+            extended_communities: r.extended_communities.clone(),
+            large_communities: Vec::new(),
+            ipv6_extended_communities: Vec::new(),
+            pmsi,
+            atomic_aggregate: false,
+            aggregator: None,
+            otc: None,
+        }),
+        mp_reach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE withdrawing an EVPN route.
+pub fn evpn_withdraw_to_update(n: &EvpnNlri) -> UpdateMessage {
+    let mut mp = unreach(AFI_L2VPN, SAFI_EVPN);
+    mp.evpn = vec![n.clone()];
+    UpdateMessage {
+        mp_unreach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE announcing a stored Flowspec rule (RFC 8955: no next hop).
+pub fn flowspec_to_update(r: &FlowspecRoute) -> UpdateMessage {
+    let (afi, safi) = crate::gr::afi_safi(r.family);
+    let mut mp = reach(afi, safi, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    mp.flowspec = vec![r.nlri.clone()];
+    UpdateMessage {
+        attributes: Some(r.attributes.clone()),
+        mp_reach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE withdrawing a Flowspec rule.
+pub fn flowspec_withdraw_to_update(k: &FlowspecKey) -> UpdateMessage {
+    let (afi, safi) = crate::gr::afi_safi(k.0);
+    let mut mp = unreach(afi, safi);
+    mp.flowspec = vec![k.1.clone()];
+    UpdateMessage {
+        mp_unreach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE announcing a stored VPN path (labels, RD and PE next hop kept).
+pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
+    let unspecified = match k.1 {
+        IpNet::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpNet::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    };
+    let mut mp = reach(
+        afi_of(k.1),
+        SAFI_VPN,
+        r.route.next_hop.unwrap_or(unspecified),
+    );
+    mp.vpn = vec![VpnNlri {
+        labels: r.labels.clone(),
+        rd: k.0,
+        prefix: k.1,
+    }];
+    UpdateMessage {
+        attributes: Some(attributes_of(&r.route, Ipv4Addr::UNSPECIFIED)),
+        mp_reach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE withdrawing a VPN path.
+pub fn vpn_withdraw_to_update(k: &VpnKey<IpNet>) -> UpdateMessage {
+    let mut mp = unreach(afi_of(k.1), SAFI_VPN);
+    mp.vpn = vec![VpnNlri {
+        labels: Vec::new(),
+        rd: k.0,
+        prefix: k.1,
+    }];
+    UpdateMessage {
+        mp_unreach: vec![mp],
+        ..Default::default()
+    }
 }
 
 /// The UPDATE announcing path `id` of `prefix` as stored: IPv4 in `nlri`
@@ -63,27 +207,14 @@ pub fn rib_route_to_update(prefix: IpNet, id: u32, r: &RibRoute, add_path: bool)
         _ => Ipv4Addr::UNSPECIFIED,
     };
     let ids = if add_path { vec![id] } else { Vec::new() };
-    let attributes = Some(PathAttributes {
-        origin: r.bgp_origin,
-        as_path: (*r.as_path).clone(),
-        next_hop: if legacy.is_some() {
+    let attributes = Some(attributes_of(
+        r,
+        if legacy.is_some() {
             v4_hop
         } else {
             Ipv4Addr::UNSPECIFIED
         },
-        local_pref: Some(r.local_pref),
-        med: r.med,
-        originator_id: r.originator_id,
-        cluster_list: r.cluster_list.to_vec(),
-        communities: r.communities.clone(),
-        extended_communities: r.extended_communities.clone(),
-        large_communities: r.large_communities.clone(),
-        ipv6_extended_communities: Vec::new(),
-        pmsi: None,
-        atomic_aggregate: r.atomic_aggregate,
-        aggregator: r.aggregator,
-        otc: r.otc,
-    });
+    ));
     match legacy {
         Some(p) => UpdateMessage {
             nlri: vec![p],
@@ -391,24 +522,143 @@ mod tests {
     }
 
     #[test]
-    fn unicast_only_filters_other_families() {
-        let mut u = rib_route_to_update(
-            "2001:db8::/32".parse().unwrap(),
-            0,
-            &route(Some("2001:db8::2")),
-            false,
-        );
-        let mut evpn = u.mp_reach[0].clone();
-        evpn.afi = 25;
-        evpn.safi = 70;
-        u.mp_reach.push(evpn);
-        assert_eq!(unicast_only(&u).unwrap().mp_reach.len(), 1);
-        u.mp_reach.retain(|m| m.afi == 25);
+    fn has_routes_ignores_attribute_only_updates() {
+        let mut u = UpdateMessage::default();
+        assert!(!has_routes(&u));
         u.withdrawn_routes.push("10.0.0.0/8".parse().unwrap());
-        let only = unicast_only(&u).unwrap();
-        assert!(only.mp_reach.is_empty() && only.attributes.is_none());
-        u.withdrawn_routes.clear();
-        assert!(unicast_only(&u).is_none(), "nothing unicast left");
+        assert!(has_routes(&u));
+    }
+
+    fn mac(last: u8) -> EvpnNlri {
+        EvpnNlri::MacIp {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            esi: [0; 10],
+            tag: 0,
+            mac: [0xaa, 0, 0, 0, 0, last],
+            ip: None,
+            labels: vec![10_000],
+        }
+    }
+
+    fn back(u: &UpdateMessage) -> UpdateMessage {
+        let f = route_monitoring(
+            &Scope::default(),
+            &peer("192.0.2.2", &[]),
+            true,
+            u,
+            Duration::ZERO,
+        );
+        assert_eq!(f.len(), 1);
+        decode(&f[0])
+    }
+
+    #[test]
+    fn evpn_round_trips_with_imet_pmsi() {
+        let m = EvpnRoute {
+            nlri: mac(1),
+            next_hop: "192.0.2.9".parse().unwrap(),
+            pmsi_vni: None,
+            extended_communities: vec![0x0002_fde8_0000_2710],
+            communities: vec![0x0001_0002],
+            local_pref: 0,
+        };
+        let got = back(&evpn_to_update(&m));
+        assert_eq!(got.mp_reach[0].evpn, vec![mac(1)]);
+        assert_eq!(got.mp_reach[0].next_hop, m.next_hop);
+        let a = got.attributes.unwrap();
+        assert_eq!(
+            (a.extended_communities, a.communities, a.local_pref),
+            (
+                m.extended_communities.clone(),
+                m.communities.clone(),
+                Some(0)
+            )
+        );
+        let origin: IpAddr = "192.0.2.9".parse().unwrap();
+        let imet = EvpnRoute {
+            nlri: EvpnNlri::InclusiveMulticast {
+                rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+                tag: 0,
+                origin,
+            },
+            pmsi_vni: Some(10_100),
+            ..m
+        };
+        let a = back(&evpn_to_update(&imet)).attributes.unwrap();
+        assert_eq!(a.pmsi.map(|p| (p.vni, p.tunnel_ip)), Some((10_100, origin)));
+        let w = back(&evpn_withdraw_to_update(&mac(1)));
+        assert_eq!(w.mp_unreach[0].evpn, vec![mac(1)]);
+    }
+
+    #[test]
+    fn flowspec_round_trips_for_both_families() {
+        use crate::flowspec::{Afi, FlowSpec};
+        use nos_proto::AddressFamily;
+        for (family, afi, bytes) in [
+            (
+                AddressFamily::Ipv4Flowspec,
+                Afi::V4,
+                vec![5u8, 1, 24, 10, 1, 0],
+            ),
+            (
+                AddressFamily::Ipv6Flowspec,
+                Afi::V6,
+                vec![7, 1, 32, 0, 0x20, 0x01, 0x0d, 0xb8],
+            ),
+        ] {
+            let nlri = FlowSpec::decode(afi, &bytes).unwrap().0;
+            let mut attributes =
+                rib_route_to_update("10.0.0.0/8".parse().unwrap(), 0, &route(None), false)
+                    .attributes
+                    .unwrap();
+            attributes.extended_communities = vec![0x8006_0000_0000_0000];
+            let r = FlowspecRoute {
+                family,
+                nlri: nlri.clone(),
+                attributes,
+                learned_via_ibgp: false,
+                router_id: Ipv4Addr::new(2, 2, 2, 2),
+                received_at: std::time::Instant::now(),
+                validity: None,
+            };
+            let got = back(&flowspec_to_update(&r));
+            assert_eq!(got.mp_reach[0].flowspec, vec![nlri.clone()]);
+            assert_eq!(
+                got.attributes.unwrap().extended_communities,
+                vec![0x8006_0000_0000_0000]
+            );
+            let w = back(&flowspec_withdraw_to_update(&(family, nlri.clone())));
+            assert_eq!(w.mp_unreach[0].flowspec, vec![nlri]);
+        }
+    }
+
+    #[test]
+    fn vpn_round_trips_for_both_families() {
+        let rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1];
+        for (prefix, hop) in [
+            ("10.10.0.0/24", "192.0.2.7"),
+            ("2001:db8:10::/48", "2001:db8::7"),
+        ] {
+            let prefix: IpNet = prefix.parse().unwrap();
+            let r = VpnRoute {
+                labels: vec![100],
+                route: route(Some(hop)),
+            };
+            let got = back(&vpn_to_update(&(rd, prefix), &r));
+            assert_eq!(
+                got.mp_reach[0].vpn,
+                vec![VpnNlri {
+                    labels: vec![100],
+                    rd,
+                    prefix
+                }]
+            );
+            assert_eq!(got.mp_reach[0].next_hop, hop.parse::<IpAddr>().unwrap());
+            let a = got.attributes.unwrap();
+            assert_eq!((a.local_pref, a.med), (Some(150), Some(7)));
+            let w = back(&vpn_withdraw_to_update(&(rd, prefix)));
+            assert_eq!(w.mp_unreach[0].vpn[0].prefix, prefix);
+        }
     }
 
     #[test]

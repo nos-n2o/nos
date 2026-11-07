@@ -1,7 +1,7 @@
 //! The initial Adj-RIB-In dump of a freshly connected station (#864): per
 //! Established peer and wanted stream, the stored routes as Route Monitoring
 //! (post-policy from `adj_rib_in`, pre-policy from the soft-reconfiguration
-//! retention), then a per-family End-of-RIB.
+//! retention), then a per-family End-of-RIB (every negotiated family but RT-Constraint).
 //!
 //! Chunked, never one pass under the RIB lock: a key snapshot, then
 //! `DUMP_CHUNK` prefixes per lock hold, re-reading the current paths of each
@@ -12,7 +12,7 @@
 use tokio::net::tcp::OwnedWriteHalf;
 use tracing::{debug, info, warn};
 
-use super::monitor::{afi_of, end_of_rib, rib_route_to_update, route_monitoring};
+use super::monitor::{end_of_rib, route_monitoring};
 use super::DUMP_CHUNK;
 use super::{drain, now, send, stream, Ended, Hub, PeerUpInfo, Scope, Shared, StationCfg};
 use crate::rib::SharedRib;
@@ -61,11 +61,12 @@ async fn one_stream(
                 debug!(station = %cfg.name, peer = %peer, "bmp dump aborted: the peer went down");
                 return None;
             }
-            let paths = rib.lock().await.bmp_paths(peer, post, chunk);
-            for (prefix, id, route) in &paths {
-                let add_path = info.add_path_afis.contains(&afi_of(*prefix));
-                let update = rib_route_to_update(*prefix, *id, route, add_path);
-                for f in route_monitoring(scope, info, post, &update, now()) {
+            let updates = rib
+                .lock()
+                .await
+                .bmp_updates(peer, post, chunk, &info.add_path_afis);
+            for update in &updates {
+                for f in route_monitoring(scope, info, post, update, now()) {
                     if !send(wr, &f).await {
                         return Some(Ended::Lost);
                     }
@@ -87,8 +88,8 @@ async fn one_stream(
     if !hub.session_alive(info) {
         return None;
     }
-    for afi in families {
-        if !send(wr, &end_of_rib(scope, info, post, afi, 1)).await {
+    for (afi, safi) in families {
+        if !send(wr, &end_of_rib(scope, info, post, afi, safi)).await {
             return Some(Ended::Lost);
         }
     }

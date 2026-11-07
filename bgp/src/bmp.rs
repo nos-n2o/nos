@@ -1,6 +1,6 @@
 //! RFC 7854 BMP exporter (#878): `nos-bgpd` dials every configured
 //! `bmp-station` inside the instance's VRF and sends Initiation, a Peer Up per
-//! Established peer, Route Monitoring (IPv4/IPv6 unicast, #864), Peer Down and
+//! Established peer, Route Monitoring (every family, #864), Peer Down and
 //! Termination. The codec half is pure; [`Hub`] is the registry + per-station
 //! bounded queues the FSM and the RIB push into without ever awaiting the
 //! network.
@@ -23,8 +23,10 @@ use tokio::time::Instant;
 use tokio_util::codec::Encoder;
 use tracing::{debug, info, warn};
 
+use crate::evpn::EvpnNlri;
 use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
-use crate::rib::{RibRoute, SharedRib};
+use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnRoute};
+use crate::vpn::VpnKey;
 use ipnet::IpNet;
 use nos_proto::BmpMonitor;
 
@@ -444,14 +446,14 @@ impl Hub {
         }
     }
 
-    /// The pre-policy stream: an UPDATE exactly as `peer` sent it, reduced to
-    /// IPv4/IPv6 unicast. Called before the RIB lock is taken.
+    /// The pre-policy stream: an UPDATE exactly as `peer` sent it, every
+    /// family. Called before the RIB lock is taken.
     pub fn route_pre(&self, peer: IpAddr, update: &UpdateMessage) {
         if !self.pre_on.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(u) = monitor::unicast_only(update) {
-            self.emit(peer, false, |_| u);
+        if monitor::has_routes(update) {
+            self.emit(peer, false, |_| update.clone());
         }
     }
 
@@ -470,9 +472,6 @@ impl Hub {
 
     /// `peer` sent its own End-of-RIB: forward it on both streams.
     pub fn end_of_rib(&self, peer: IpAddr, afi: u16, safi: u8) {
-        if !monitor::is_unicast(afi, safi) {
-            return;
-        }
         let st = lock(&self.state);
         let Some(info) = st.registry.get(&peer) else {
             return;
@@ -483,6 +482,31 @@ impl Hub {
                 s.shared.push(f.clone(), Kind::Eor(peer, post));
             }
         }
+    }
+
+    /// The post-policy stream for EVPN: `route` was stored (`Some`) or the
+    /// route `nlri` removed (`None`). Same contract as [`Hub::route_post`].
+    pub fn evpn_post(&self, peer: IpAddr, nlri: &EvpnNlri, route: Option<&EvpnRoute>) {
+        self.emit(peer, true, |_| match route {
+            Some(r) => monitor::evpn_to_update(r),
+            None => monitor::evpn_withdraw_to_update(nlri),
+        });
+    }
+
+    /// The post-policy stream for Flowspec rule `k`.
+    pub fn flow_post(&self, peer: IpAddr, k: &FlowspecKey, route: Option<&FlowspecRoute>) {
+        self.emit(peer, true, |_| match route {
+            Some(r) => monitor::flowspec_to_update(r),
+            None => monitor::flowspec_withdraw_to_update(k),
+        });
+    }
+
+    /// The post-policy stream for VPN path `k`.
+    pub fn vpn_post(&self, peer: IpAddr, k: &VpnKey<IpNet>, route: Option<&VpnRoute>) {
+        self.emit(peer, true, |_| match route {
+            Some(r) => monitor::vpn_to_update(k, r),
+            None => monitor::vpn_withdraw_to_update(k),
+        });
     }
 
     /// Brings the running stations to `want`, restarting only changed ones

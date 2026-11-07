@@ -240,5 +240,128 @@ async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<(
     gone.extend(strings(&["--remove-static-route", REDISTRIBUTE_PREFIX]));
     w.a()?.provision_flags(&gone).await?;
     wait_route(w, true, "del", 0).await?;
-    wait_route(w, false, "del", 0).await
+    wait_route(w, false, "del", 0).await?;
+    other_families(w).await
+}
+
+/// #864: EVPN and VPNv4 routes of a GoBGP speaker peering router-a (the
+/// router that exports to the collector) reach the collector post-policy,
+/// and leave it again when withdrawn.
+async fn other_families(w: &mut World) -> anyhow::Result<()> {
+    use super::bgp::{gobgp, mpls_ready, start_gobgp, vpn_flags};
+    log("route monitoring: EVPN and VPN routes of a GoBGP peer reach the collector post-policy");
+    let mut flags = vpn_flags("65000:1");
+    flags.extend(strings(&[
+        "--evpn",
+        "--bmp-station",
+        &format!("{IP_BMP}:{BMP_PORT}"),
+    ]));
+    w.start(A, Some(flags), &[]).await?;
+    mpls_ready(w, &["router-a"]).await?;
+    start_gobgp(w, &["l2vpn-evpn", "l3vpn-ipv4-unicast"]).await?;
+    let a = w.a()?;
+    a.wait("bmp station connected").await?;
+    let (mac, ip, rd, rt) = ("aa:bb:cc:00:00:01", "192.0.2.10", "65010:1", "65010:10000");
+    gobgp(
+        w,
+        &[
+            "global", "rib", "add", "-a", "evpn", "macadv", mac, ip, "etag", "0", "label", "10000",
+            "rd", rd, "rt", rt, "encap", "vxlan",
+        ],
+    )
+    .await?;
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "vpnv4",
+            "10.10.0.0/24",
+            "label",
+            "100",
+            "rd",
+            "65001:1",
+            "rt",
+            "65000:1",
+        ],
+    )
+    .await?;
+    // GoBMP keys (recorded from the real collector): EVPN is `msg_type` 14
+    // with `mac`, VPN is 114 with `vpn_rd` and `prefix`.
+    let evpn = |post: bool, action: &str| {
+        vec![
+            "\"msg_type\":14".to_string(),
+            format!("\"action\":\"{action}\""),
+            format!("\"mac\":\"{mac}\""),
+            format!("\"is_adj_rib_in_post_policy\":{post}"),
+        ]
+    };
+    let vpn = |post: bool, action: &str| {
+        vec![
+            "\"msg_type\":114".to_string(),
+            format!("\"action\":\"{action}\""),
+            "\"vpn_rd\":\"65001:1\"".to_string(),
+            "\"prefix\":\"10.10.0.0\"".to_string(),
+            format!("\"is_adj_rib_in_post_policy\":{post}"),
+        ]
+    };
+    for n in [
+        evpn(true, "add"),
+        evpn(false, "add"),
+        vpn(true, "add"),
+        vpn(false, "add"),
+    ] {
+        wait_collector(w, &n.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
+    }
+
+    log("route monitoring: after a collector restart the dump carries both families and their End-of-RIB");
+    let dump = format!("bmp rib dump sent peer={IP_G} stream=post-policy routes=2");
+    let base = w.a()?.count(&dump);
+    w.dock.container_remove(BMP_COLLECTOR).await;
+    start_collector(w).await?;
+    w.a()?.wait_new(&dump, base, 90).await?;
+    for n in [evpn(true, "add"), vpn(true, "add")] {
+        wait_collector(w, &n.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
+    }
+    for (msg_type, post) in [(14, true), (114, true), (14, false), (114, false)] {
+        let eor = [
+            format!("\"msg_type\":{msg_type}"),
+            "\"is_eor\":true".to_string(),
+            format!("\"peer_ip\":\"{IP_G}\""),
+            format!("\"is_adj_rib_in_post_policy\":{post}"),
+        ];
+        wait_collector(w, &eor.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
+    }
+
+    log("route monitoring: withdrawing both deletes them post-policy");
+    gobgp(
+        w,
+        &[
+            "global", "rib", "del", "-a", "evpn", "macadv", mac, ip, "etag", "0", "label", "10000",
+            "rd", rd,
+        ],
+    )
+    .await?;
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "del",
+            "-a",
+            "vpnv4",
+            "10.10.0.0/24",
+            "label",
+            "100",
+            "rd",
+            "65001:1",
+        ],
+    )
+    .await?;
+    for n in [evpn(true, "del"), vpn(true, "del")] {
+        wait_collector(w, &n.iter().map(String::as_str).collect::<Vec<_>>(), 0).await?;
+    }
+    Ok(())
 }

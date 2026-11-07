@@ -37,11 +37,11 @@ pub(super) struct Retained {
     awaiting_eorr: HashSet<(IpAddr, AddressFamily)>,
     /// EVPN routes the import policy rejected: a held route is already the
     /// raw one (the policy only accepts or rejects).
-    evpn: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
+    pub(super) evpn: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
     /// Flowspec rules as received: the policy rewrites the held copy.
-    flow: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
+    pub(super) flow: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
     /// VPN paths as received (the policy rewrites the held copy).
-    vpn: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    pub(super) vpn: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
 }
 
 /// The import policies a re-evaluation applies, as the peer slot holds them.
@@ -505,8 +505,12 @@ impl BgpRib {
             return;
         }
         let nlri = &route.nlri;
+        let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         if rejected {
             self.evpn_adj_rib_in.entry(peer).or_default().remove(k);
+            if let Some(h) = bmp {
+                h.evpn_post(peer, k, None);
+            }
             self.retained
                 .evpn
                 .entry(peer)
@@ -517,6 +521,9 @@ impl BgpRib {
             self.retained.take_evpn(peer, k);
             register_mobility(&mut self.mac_mobility, &route);
             macs.extend(evpn_mac_key(nlri).map(|(vni, mac, _)| (vni, mac)));
+            if let Some(h) = bmp {
+                h.evpn_post(peer, k, Some(&route));
+            }
             info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, next_hop = %route.next_hop, local_pref = route.local_pref, communities = %format_args!("[{}]", nos_proto::bgp::fmt_communities(&route.communities)), "evpn route learned");
             self.evpn_adj_rib_in
                 .entry(peer)
@@ -546,6 +553,7 @@ impl BgpRib {
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
         let confed = self.confed_peers.contains(&peer);
         let accepted = policy.is_none_or(|p| import_flow(p, &mut route, peer, peer_as, confed));
+        let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let table = self.flowspec_adj_rib_in.entry(peer).or_default();
         let changed = if accepted {
             if let Some(old) = table.get(k) {
@@ -557,6 +565,9 @@ impl BgpRib {
             let changed = table.get(k) != Some(&route);
             if changed {
                 info!(peer = %peer, family = %k.0, route = %k.1, "flowspec route learned");
+                if let Some(h) = bmp {
+                    h.flow_post(peer, k, Some(&route));
+                }
                 table.insert(k.clone(), route);
             }
             changed
@@ -564,6 +575,9 @@ impl BgpRib {
             let removed = table.remove(k).is_some();
             if removed {
                 warn!(peer = %peer, family = %k.0, route = %k.1, "flowspec route rejected by import policy");
+                if let Some(h) = bmp {
+                    h.flow_post(peer, k, None);
+                }
             }
             removed
         };
@@ -593,6 +607,7 @@ impl BgpRib {
             Some(k.0),
         );
         let accepted = result.is_some();
+        let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let table = self.vpn_adj_rib_in.entry(peer).or_default();
         let changed = if let Some(mut route) = result {
             if let Some(old) = table.get(k)
@@ -611,6 +626,9 @@ impl BgpRib {
             let changed = table.get(k) != Some(&new);
             if changed {
                 info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route learned");
+                if let Some(h) = bmp {
+                    h.vpn_post(peer, k, Some(&new));
+                }
                 table.insert(*k, new);
             }
             changed
@@ -618,6 +636,9 @@ impl BgpRib {
             let removed = table.remove(k).is_some();
             if removed {
                 warn!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route rejected by import policy");
+                if let Some(h) = bmp {
+                    h.vpn_post(peer, k, None);
+                }
             }
             removed
         };

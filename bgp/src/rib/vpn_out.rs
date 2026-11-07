@@ -56,6 +56,7 @@ fn learn_batch(
     base: &RibRoute,
     peer: (IpAddr, u32),
     import_policy: &CompiledPolicy,
+    bmp: Option<&crate::bmp::Hub>,
 ) -> Vec<VpnKey<IpNet>> {
     let from = peer.0;
     let mut keys = Vec::with_capacity(mp.vpn.len());
@@ -83,7 +84,11 @@ fn learn_batch(
             Some(PolicyPeer::new(peer.0, peer.1)),
             Some(n.rd),
         ) else {
-            table.remove(&k);
+            if table.remove(&k).is_some()
+                && let Some(h) = bmp
+            {
+                h.vpn_post(from, &k, None);
+            }
             warn!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, "vpn route rejected by import policy");
             continue;
         };
@@ -100,7 +105,10 @@ fn learn_batch(
             labels: n.labels.clone(),
             route,
         };
-        if table.insert(k, new.clone()) != Some(new) {
+        if table.insert(k, new.clone()) != Some(new.clone()) {
+            if let Some(h) = bmp {
+                h.vpn_post(from, &k, Some(&new));
+            }
             info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, "vpn route learned");
         }
     }
@@ -136,7 +144,16 @@ impl BgpRib {
             }
             let table = self.vpn_adj_rib_in.entry(from).or_default();
             let retain = self.retained.vpn_slot(from);
-            keys.extend(learn_batch(table, retain, mp, base, peer, import_policy));
+            let bmp = super::bmp_tap::tap(self.bmp.as_ref());
+            keys.extend(learn_batch(
+                table,
+                retain,
+                mp,
+                base,
+                peer,
+                import_policy,
+                bmp,
+            ));
         }
         for k in keys {
             self.select_vpn(&k);
@@ -155,6 +172,9 @@ impl BgpRib {
             .is_some();
         if removed {
             info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route withdrawn");
+            if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                h.vpn_post(peer, k, None);
+            }
             self.select_vpn(k);
         }
         removed

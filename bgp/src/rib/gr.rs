@@ -333,6 +333,9 @@ impl BgpRib {
             if let Some(EvpnRoute { nlri, .. }) = table.remove(&key) {
                 count += 1;
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+                if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                    h.evpn_post(peer, &nlri, None);
+                }
             }
         }
         count
