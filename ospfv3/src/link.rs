@@ -456,6 +456,15 @@ pub async fn run(
                                         }
                                     }
                                     OspfPacket::Lsu(lsu) => {
+                                        if lsu.discarded > 0
+                                            && warn_limiter.allow(tokio::time::Instant::now().into_std())
+                                        {
+                                            warn!(
+                                                link = %cfg.attach_point, neighbor = %lsu.router_id,
+                                                discarded = lsu.discarded, error = ?lsu.last_error,
+                                                "ospfv3 lsu: discarded LSAs that failed to decode"
+                                            );
+                                        }
                                         if let Some(actions) =
                                             handle_lsu(&cfg, local_router_id, &status, &stores, &lsu).await
                                         {
@@ -1097,6 +1106,8 @@ fn lsu_packets(
         |l| crate::lsa::encode_lsa(l).len(),
         |c| {
             packet::encode_lsu(&LsuPacket {
+                discarded: 0,
+                last_error: None,
                 router_id: local_router_id,
                 area_id: cfg.area_id,
                 lsas: c.iter().map(|l| (**l).clone()).collect(),
@@ -1593,6 +1604,8 @@ fn send_grace_lsas(
         }),
     };
     let payload = packet::encode_lsu(&LsuPacket {
+        discarded: 0,
+        last_error: None,
         router_id: local_router_id,
         area_id: cfg.area_id,
         lsas: vec![grace],
@@ -3718,6 +3731,8 @@ pub(crate) mod tests {
             s.neighbors.insert(neighbor_id, info);
         });
         let lsu = |lsas| LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: neighbor_id,
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas,
@@ -5319,6 +5334,8 @@ pub(crate) mod tests {
             let got = handle_lsr(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsr).await;
             assert_eq!(got.is_some(), handled, "lsr {state:?}");
             let lsu = LsuPacket {
+                discarded: 0,
+                last_error: None,
                 router_id: neighbor_id,
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![],

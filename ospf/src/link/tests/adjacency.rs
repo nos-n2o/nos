@@ -450,6 +450,8 @@ async fn lsr_and_lsu_ignored_below_exchange() {
         let got = rx::handle_lsr(&cfg, id(1), &status, &lsdb, &link_local, &lsr).await;
         assert_eq!(got.is_some(), handled, "lsr {state:?}");
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: neighbor_id,
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![],

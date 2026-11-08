@@ -86,6 +86,7 @@ show route rt1
 ```
 
 - `show ospf neigh` prints one line per link and neighbour: the link, its area, the link's state (`point-to-point`, or `dr`/`backup`/`dr-other`/`waiting` on a LAN), the neighbour's router ID and state (`Init`, `2-Way`, `ExStart`, `Exchange`, `Loading`, `Full`), when its last Hello arrived, the timers and priorities, and the DR and BDR.
+- A bad LSA inside a Link State Update is discarded alone (RFC 2328 section 13): a wrong checksum, an unknown type or an unparseable body skips that LSA, the others in the packet are processed and acked, and the sender retransmits only the bad one. The daemon logs `lsu: discarded LSAs that failed to decode` (rate limited) with the count and the last error. A header whose length cannot be framed still drops the whole packet.
 - `show ospf database` lists the header of every LSA held, per area: its type (1 router, 2 network, 3 summary, 4 ASBR summary, 5 AS-external, 9/10/11 opaque, see [Opaque LSAs](#features-and-behaviour)), link-state ID, advertising router, sequence number, age and checksum.
 - Both cover every OSPF instance on the router.
 

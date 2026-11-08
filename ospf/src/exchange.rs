@@ -198,6 +198,8 @@ mod tests {
             opaque(lsa::LSA_TYPE_OPAQUE_AREA),
         );
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l9.clone(), l10.clone()],
@@ -273,6 +275,8 @@ mod tests {
 
         let (mut area, mut link) = (Lsdb::default(), Lsdb::default());
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![as_scope.clone()],
@@ -318,6 +322,8 @@ mod tests {
             };
             let (mut area, mut link) = (Lsdb::default(), Lsdb::default());
             let lsu = LsuPacket {
+                discarded: 0,
+                last_error: None,
                 router_id: router_id("9.9.9.10"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![type5.clone(), type7.clone()],

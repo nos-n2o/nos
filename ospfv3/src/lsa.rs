@@ -1234,7 +1234,7 @@ pub fn decode_lsa(data: &[u8]) -> Result<Lsa, PacketError> {
 /// (offset 14 of `without_age`) as zero regardless of its actual contents —
 /// so this same function both computes a fresh checksum (`encode_lsa`) and
 /// validates an existing one (`decode_lsa`).
-fn lsa_checksum(without_age: &[u8]) -> u16 {
+pub(crate) fn lsa_checksum(without_age: &[u8]) -> u16 {
     const CHECKSUM_OFFSET: usize = 14;
     let mut c0: i64 = 0;
     let mut c1: i64 = 0;

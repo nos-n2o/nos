@@ -148,6 +148,8 @@ pub(super) fn split_lsu(
             let lsas = c.to_vec();
             packet::encode_lsu(
                 &LsuPacket {
+                    discarded: 0,
+                    last_error: None,
                     router_id,
                     area_id: cfg.area_id,
                     lsas,
