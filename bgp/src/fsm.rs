@@ -1058,9 +1058,9 @@ impl SessionCtx<'_> {
 
 /// Hold/keepalive timers and what was negotiated, owned by `run`.
 struct Timers {
-    /// Doubles, before negotiation, as the OpenSent-wait timer. A configured
-    /// `local_hold_time` of 0 disarms it entirely, same as a negotiated hold
-    /// time of 0 does later via `Action::ArmHoldTimer`.
+    /// Doubles, before negotiation, as the OpenSent-wait timer: a configured
+    /// `local_hold_time` of 0 still arms `OPEN_SENT_HOLD`. Only a negotiated
+    /// hold time of 0 disarms it, later, via `Action::ArmHoldTimer`.
     hold_period: Option<Duration>,
     hold_deadline: Option<Instant>,
     keepalive_period: Option<Duration>,
@@ -1069,13 +1069,17 @@ struct Timers {
     negotiated_keepalive: Option<u16>,
 }
 
+/// RFC 4271 §8.2.2 (OpenSent): "`HoldTimer` set to a large value. A `HoldTimer`
+/// value of 4 minutes is suggested", whatever the configured hold time is.
+const OPEN_SENT_HOLD: Duration = Duration::from_secs(240);
+
 impl Timers {
     fn new(local_hold_time: u16) -> Self {
-        let hold_period = if local_hold_time == 0 {
-            None
+        let hold_period = Some(if local_hold_time == 0 {
+            OPEN_SENT_HOLD
         } else {
-            Some(Duration::from_secs(u64::from(local_hold_time)))
-        };
+            Duration::from_secs(u64::from(local_hold_time))
+        });
         Self {
             hold_period,
             hold_deadline: hold_period.map(|p| Instant::now() + p),
@@ -2239,6 +2243,15 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timers_new_arms_open_sent_wait_even_for_hold_zero() {
+        let t = Timers::new(0);
+        assert_eq!(t.hold_period, Some(Duration::from_secs(240)));
+        assert!(t.hold_deadline.is_some());
+        let t = Timers::new(90);
+        assert_eq!(t.hold_period, Some(Duration::from_secs(90)));
+    }
 
     fn ctx(expected_remote_as: u32) -> NegotiationContext {
         NegotiationContext {
