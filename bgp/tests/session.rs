@@ -820,8 +820,12 @@ async fn bmp_dump_and_incremental_updates_on_both_streams() {
         .apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
         .await;
     let mut seen = [false; 2];
-    for _ in 0..2 {
+    while seen != [true, true] {
         let (is_post, msg) = bmp_route(&mut c).await;
+        // A late End-of-RIB of the peer's own (a pre-existing race) is not a withdraw.
+        if matches!(msg, BgpMessage::EndOfRib { .. }) {
+            continue;
+        }
         assert!(
             matches!(&msg, BgpMessage::Update(upd) if upd.withdrawn_routes.len()
                 + upd.mp_unreach.iter().map(|msg| msg.withdrawn.len()).sum::<usize>() == 1),
@@ -1144,6 +1148,41 @@ async fn bmp_adj_rib_out_dump_increments_and_mode_change() {
             .await
             .is_err()
     );
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}
+
+/// #867: a peer that comes up after the station connected: the pre-policy
+/// candidates are announced by the peer-up sync, the post-policy ones by the
+/// wire hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_adj_rib_out_follows_a_peer_that_comes_up_later() {
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    a.apply(vec![]).await; // resolves the VRF, no peer yet
+    let mut st = station(port);
+    st.monitor_out = nos_proto::BmpMonitorOut::Both;
+    a.manager
+        .set_bmp_stations(&[st], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4, "Initiation, no peer yet");
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    b.apply(vec![unicast_only(peer(A, B, 65001))]).await;
+    let (mut pre, mut post) = (false, false);
+    while !(pre && post) {
+        let f = bmp_out_frames(&mut c, 1).await.remove(0);
+        if announces(&f.2, "198.51.100.0/24") {
+            *(if f.0 { &mut post } else { &mut pre }) = true;
+        }
+    }
     a.manager.shutdown().await;
     b.manager.shutdown().await;
 }
