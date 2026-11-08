@@ -53,7 +53,7 @@ fn updt_roles_tree(b: &mut Bridge) {
     let mut root_port = None;
     for (i, p) in b.ports.iter().enumerate() {
         if p.info_is == InfoIs::Received
-            && p.port_priority.designated_bridge != me
+            && !p.port_priority.designated_bridge.same_address(&me)
             && !p.prot.root_guard
         {
             let mut v = p.port_priority;
@@ -94,7 +94,7 @@ fn updt_roles_tree(b: &mut Bridge) {
         // is root-inconsistent (and ends up Alternate below).
         let would_be_root = p.prot.root_guard
             && p.info_is == InfoIs::Received
-            && p.port_priority.designated_bridge != me
+            && !p.port_priority.designated_bridge.same_address(&me)
             && {
                 let mut v = p.port_priority;
                 v.root_path_cost = v.root_path_cost.saturating_add(p.path_cost);
@@ -128,7 +128,7 @@ fn updt_roles_tree(b: &mut Bridge) {
                     p.selected_role = Role::Root;
                     p.updt_info = false;
                 } else if p.designated_priority.worse_than(&p.port_priority) {
-                    p.selected_role = if p.port_priority.designated_bridge == me {
+                    p.selected_role = if p.port_priority.designated_bridge.same_address(&me) {
                         Role::Backup
                     } else {
                         Role::Alternate
@@ -210,6 +210,25 @@ mod tests {
             crate::machines::tests::bid(1)
         );
         assert_eq!(b.root_times.message_age, 1);
+    }
+
+    #[test]
+    fn own_mac_with_another_priority_is_not_a_root_port_candidate() {
+        // 13.30 updtRolesTree compares the designated bridge by address only.
+        let mut b = bridge(5);
+        let mut mine = b.id;
+        mine = crate::vector::BridgeId::new(4096, 0, mine.mac()).unwrap();
+        b.ports[0].info_is = InfoIs::Received;
+        b.ports[0].port_priority = PriorityVector {
+            root: crate::machines::tests::bid(1),
+            root_path_cost: 0,
+            designated_bridge: mine,
+            designated_port: b.ports[1].port_id,
+            bridge_port: b.ports[0].port_id,
+        };
+        b.ports[0].reselect = true;
+        assert!(step(&mut b));
+        assert_eq!(b.root_port, None);
     }
 
     #[test]

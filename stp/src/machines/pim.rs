@@ -277,6 +277,48 @@ mod tests {
         assert_eq!(receive(&mut b, grew), State::SuperiorDesignated);
     }
 
+    /// `msg(1, 0, 1, 1, Designated)` with the sender's priorities replaced.
+    fn msg_with(bridge: crate::vector::BridgeId, port: crate::vector::PortId) -> Bpdu {
+        let Bpdu::Rst(mut pr) = msg(1, 0, 1, 1, crate::bpdu::PortRole::Designated, 0) else {
+            unreachable!()
+        };
+        pr.bridge = bridge;
+        pr.port = port;
+        Bpdu::Rst(pr)
+    }
+
+    #[test]
+    fn receive_sender_priority_change_is_the_same_sender() {
+        use crate::vector::{BridgeId, PortId};
+        // 13.29 rcvInfo: sender identity is address + port number.
+        let mut b = bridge(5);
+        receive(
+            &mut b,
+            msg(1, 0, 1, 1, crate::bpdu::PortRole::Designated, 0),
+        );
+        b.ports[0].info_is = InfoIs::Received;
+        let worse_bridge = BridgeId::new(36864, 0, [0, 0, 0, 0, 0, 1]).unwrap();
+        let same_port = PortId::new(128, 1).unwrap();
+        assert_eq!(
+            receive(&mut b, msg_with(worse_bridge, same_port)),
+            State::SuperiorDesignated
+        );
+        assert_eq!(b.ports[0].port_priority.designated_bridge, worse_bridge);
+        // Same number, worse port priority.
+        let worse_port = PortId::new(144, 1).unwrap();
+        assert_eq!(
+            receive(&mut b, msg_with(worse_bridge, worse_port)),
+            State::SuperiorDesignated
+        );
+        assert_eq!(b.ports[0].port_priority.designated_port, worse_port);
+        // A different MAC is a different sender: worse stays inferior.
+        let other = BridgeId::new(36864, 0, [0, 0, 0, 0, 0, 3]).unwrap();
+        assert_eq!(
+            receive(&mut b, msg_with(other, worse_port)),
+            State::InferiorDesignated
+        );
+    }
+
     #[test]
     fn receive_root_role_worse_is_not_designated_and_records_agreement() {
         let mut b = bridge(1);
