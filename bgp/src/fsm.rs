@@ -30,9 +30,8 @@ use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 use crate::collision::{self, FsmCommand, PeerSlot};
 use crate::gr::{self, Disconnect, PeerGr};
 use crate::message::{
-    self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, FsmSubcode, MessageHeaderSubcode,
-    NotificationMessage, OpenMessage, OpenMessageSubcode, RouteRefreshMessage,
-    UpdateMessageSubcode, WireError,
+    self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, FsmSubcode, NotificationMessage,
+    OpenMessage, OpenMessageSubcode, RouteRefreshMessage, WireError,
 };
 use crate::rib::{OutboundUpdate, OutboxTx, SharedRib};
 use crate::session::{LocalIdentity, PeerKind};
@@ -434,6 +433,9 @@ enum Event {
 enum Action {
     SendKeepalive,
     SendNotification(u8, u8),
+    /// A NOTIFICATION with a data field (RFC 4271 §6: the erroneous length /
+    /// type octet, RFC 7313: the whole message).
+    SendNotificationData(u8, u8, Bytes),
     /// `Duration::ZERO` disarms the timer entirely (RFC 4271 allows a
     /// negotiated hold time of 0, meaning no keepalives and no expiry).
     ArmHoldTimer(Duration),
@@ -543,10 +545,13 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
             vec![Action::SendKeepalive],
         ),
         (_, Event::MalformedMessage(e)) => {
-            let (code, subcode) = notification_for_wire_error(&e);
+            let (code, subcode, data) = e.notification();
             (
                 None,
-                vec![Action::SendNotification(code, subcode), Action::Close],
+                vec![
+                    Action::SendNotificationData(code, subcode, data),
+                    Action::Close,
+                ],
             )
         }
         // Anything else (an OPEN arriving twice, a KeepaliveTimerExpires
@@ -658,32 +663,6 @@ fn reject(subcode: OpenMessageSubcode) -> (Option<State>, Vec<Action>) {
             Action::Close,
         ],
     )
-}
-
-/// Maps a decode failure to the `(error_code, error_subcode)` pair its
-/// NOTIFICATION should carry. Every case but `MalformedUpdate` is a Message
-/// Header error (RFC 4271 §6.1); `MalformedUpdate` is the one case that
-/// belongs to the UPDATE Message Error table (§6.3) instead.
-fn notification_for_wire_error(e: &WireError) -> (u8, u8) {
-    match e {
-        WireError::BadMarker => (
-            ErrorCode::MessageHeader as u8,
-            MessageHeaderSubcode::ConnectionNotSynchronized as u8,
-        ),
-        WireError::BadLength(_)
-        | WireError::Truncated
-        | WireError::MalformedOpen
-        | WireError::MalformedNotification
-        | WireError::MalformedRouteRefresh
-        | WireError::Io(_) => (
-            ErrorCode::MessageHeader as u8,
-            MessageHeaderSubcode::BadMessageLength as u8,
-        ),
-        WireError::MalformedUpdate => (
-            ErrorCode::UpdateMessage as u8,
-            UpdateMessageSubcode::MalformedAttributeList as u8,
-        ),
-    }
 }
 
 /// How one FSM session ended, for `session.rs` to log.
@@ -820,13 +799,6 @@ async fn classify_inbound(
                     "ignoring end-of-rib for an unknown family"
                 );
             }
-            None
-        }
-        BgpMessage::Unhandled { message_type, .. } => {
-            debug!(
-                peer = %peer.remote_address, message_type,
-                "ignoring unrecognized bgp message type"
-            );
             None
         }
     }
@@ -1590,17 +1562,23 @@ async fn run_actions(
             Action::SendKeepalive => {
                 let _ = writer.send(BgpMessage::Keepalive).await;
             }
-            Action::SendNotification(code, subcode) => {
+            Action::SendNotification(..) | Action::SendNotificationData(..) => {
+                let (code, subcode, data) = match action {
+                    Action::SendNotification(c, sc) => (*c, *sc, Bytes::new()),
+                    Action::SendNotificationData(c, sc, d) => (*c, *sc, d.clone()),
+                    _ => unreachable!(),
+                };
+                let data_len = data.len();
                 let _ = writer
                     .send(BgpMessage::Notification(NotificationMessage {
-                        error_code: *code,
-                        error_subcode: *subcode,
-                        data: Bytes::new(),
+                        error_code: code,
+                        error_subcode: subcode,
+                        data,
                     }))
                     .await;
-                notification_sent = Some((*code, *subcode));
+                notification_sent = Some((code, subcode));
                 info!(
-                    peer = %cx.peer.remote_address, code = *code, subcode = *subcode,
+                    peer = %cx.peer.remote_address, code, subcode, data_len,
                     "sent notification"
                 );
             }

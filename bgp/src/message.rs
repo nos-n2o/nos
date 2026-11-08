@@ -22,9 +22,8 @@
 //! (`BgpCodec::two_octet_as`), speaks RFC 6793's transition encoding: 2-byte
 //! `AS_PATH` with `AS_TRANS` plus `AS4_PATH` on send, `AS4_PATH` merged back
 //! in on receipt (no `AGGREGATOR` attribute exists here, so no
-//! `AS4_AGGREGATOR`). Any other/unknown message type
-//! still decodes as `BgpMessage::Unhandled` so the codec never chokes on one
-//! arriving.
+//! `AS4_AGGREGATOR`). An unknown message type is `WireError::BadType`
+//! (RFC 4271 §6.1: Header Error / Bad Message Type).
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -42,6 +41,8 @@ use crate::vpn::{self, VpnNlri};
 pub const BGP_VERSION: u8 = 4;
 const MARKER: [u8; 16] = [0xFF; 16];
 const HEADER_LEN: usize = 19;
+/// RFC 4271 §4.2: the smallest legal OPEN (header + 10 fixed octets).
+const OPEN_MIN_LEN: usize = 29;
 const MAX_MESSAGE_LEN: usize = 4096;
 /// RFC 8654 §4: ceiling once both sides advertised the Extended Message
 /// capability — never applies to OPEN or KEEPALIVE.
@@ -154,9 +155,8 @@ const ATTR_FLAG_OPTIONAL_NON_TRANSITIVE: u8 = 0x80;
 /// attribute types' own flag value.
 const ATTR_FLAG_OPTIONAL_TRANSITIVE: u8 = 0xC0;
 
-/// Structural decode failures — the type byte itself is never rejected here
-/// (an unknown type decodes as `BgpMessage::Unhandled`), only malformed
-/// headers/bodies for the types this crate actually understands.
+/// Structural decode failures: malformed headers/bodies, or an unknown type.
+/// `WireError::notification` gives the NOTIFICATION each one is answered with.
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
     #[error("bgp message marker is not all-ones")]
@@ -171,8 +171,14 @@ pub enum WireError {
     MalformedNotification,
     #[error("malformed UPDATE message body")]
     MalformedUpdate,
-    #[error("malformed ROUTE-REFRESH message body")]
-    MalformedRouteRefresh,
+    #[error("malformed ROUTE-REFRESH message (body length is not 4)")]
+    MalformedRouteRefresh(Bytes),
+    #[error("unknown bgp message type {0}")]
+    BadType(u8),
+    #[error("invalid network field in an NLRI")]
+    InvalidNetworkField,
+    #[error("malformed MP_REACH_NLRI / MP_UNREACH_NLRI attribute")]
+    MalformedMpAttribute,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -186,6 +192,56 @@ pub enum ErrorCode {
     HoldTimerExpired = 4,
     FiniteStateMachine = 5,
     Cease = 6,
+    /// RFC 7313 §5.
+    RouteRefresh = 7,
+}
+
+/// RFC 7313 §5 ROUTE-REFRESH Message Error subcodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRefreshSubcode {
+    InvalidMessageLength = 1,
+}
+
+impl WireError {
+    /// The `(error_code, error_subcode, data)` this failure is answered with
+    /// (RFC 4271 §6, RFC 7313 §5).
+    pub fn notification(&self) -> (u8, u8, Bytes) {
+        use MessageHeaderSubcode as H;
+        let hdr = ErrorCode::MessageHeader as u8;
+        match self {
+            WireError::BadMarker => (hdr, H::ConnectionNotSynchronized as u8, Bytes::new()),
+            WireError::BadLength(len) => (
+                hdr,
+                H::BadMessageLength as u8,
+                Bytes::copy_from_slice(&len.to_be_bytes()),
+            ),
+            WireError::BadType(t) => (hdr, H::BadMessageType as u8, Bytes::copy_from_slice(&[*t])),
+            WireError::Truncated | WireError::MalformedNotification | WireError::Io(_) => {
+                (hdr, H::BadMessageLength as u8, Bytes::new())
+            }
+            WireError::MalformedOpen => (ErrorCode::OpenMessage as u8, 0, Bytes::new()),
+            WireError::MalformedUpdate => (
+                ErrorCode::UpdateMessage as u8,
+                UpdateMessageSubcode::MalformedAttributeList as u8,
+                Bytes::new(),
+            ),
+            WireError::InvalidNetworkField => (
+                ErrorCode::UpdateMessage as u8,
+                UpdateMessageSubcode::InvalidNetworkField as u8,
+                Bytes::new(),
+            ),
+            WireError::MalformedMpAttribute => (
+                ErrorCode::UpdateMessage as u8,
+                UpdateMessageSubcode::OptionalAttributeError as u8,
+                Bytes::new(),
+            ),
+            WireError::MalformedRouteRefresh(raw) => (
+                ErrorCode::RouteRefresh as u8,
+                RouteRefreshSubcode::InvalidMessageLength as u8,
+                raw.clone(),
+            ),
+        }
+    }
 }
 
 /// RFC 4271 §6.1 Message Header Error subcodes.
@@ -193,8 +249,6 @@ pub enum ErrorCode {
 pub enum MessageHeaderSubcode {
     ConnectionNotSynchronized = 1,
     BadMessageLength = 2,
-    #[allow(dead_code)]
-    // reserved for a future "reject unrecognized type" policy — see fsm.rs's Unhandled handling
     BadMessageType = 3,
 }
 
@@ -212,13 +266,14 @@ pub enum OpenMessageSubcode {
     RoleMismatch = 11,
 }
 
-/// RFC 4271 §6.3 UPDATE Message Error subcodes (only the one this crate's
-/// parser can actually produce is modeled; the rest of the RFC 4271 table —
-/// missing/invalid individual well-known attributes, invalid `NEXT_HOP`, etc.
-/// — isn't distinguished from a generic malformed attribute list).
+/// RFC 4271 §6.3 UPDATE Message Error subcodes the parser can produce (per
+/// RFC 7606 only framing errors still reset; the rest of the table is
+/// treat-as-withdraw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateMessageSubcode {
     MalformedAttributeList = 1,
+    OptionalAttributeError = 9,
+    InvalidNetworkField = 10,
 }
 
 /// RFC 6608 Finite State Machine Error subcodes.
@@ -581,12 +636,6 @@ pub enum BgpMessage {
         afi: u16,
         safi: u8,
     },
-    /// Any message type this crate doesn't parse a body for (unknown to this
-    /// implementation).
-    Unhandled {
-        message_type: u8,
-        body: Bytes,
-    },
 }
 
 /// Builds this instance's own OPEN, carrying only the four-octet AS number
@@ -706,11 +755,18 @@ impl Decoder for BgpCodec {
         }
 
         let mut frame = src.split_to(length as usize);
+        let raw = frame.clone().freeze();
         frame.advance(HEADER_LEN);
         let body = frame;
 
         let message = match message_type {
-            TYPE_OPEN => BgpMessage::Open(parse_open(&body)?),
+            TYPE_OPEN => {
+                // RFC 4271 §6.1: shorter than the 29-octet minimum is a bad length.
+                if (length as usize) < OPEN_MIN_LEN {
+                    return Err(WireError::BadLength(length));
+                }
+                BgpMessage::Open(parse_open(&body).map_err(|_| WireError::MalformedOpen)?)
+            }
             TYPE_UPDATE => match end_of_rib(&body) {
                 Some((afi, safi)) => BgpMessage::EndOfRib { afi, safi },
                 None => {
@@ -723,12 +779,13 @@ impl Decoder for BgpCodec {
                 }
                 BgpMessage::Keepalive
             }
-            TYPE_NOTIFICATION => BgpMessage::Notification(parse_notification(&body)?),
-            TYPE_ROUTE_REFRESH => BgpMessage::RouteRefresh(parse_route_refresh(&body)?),
-            other => BgpMessage::Unhandled {
-                message_type: other,
-                body: body.freeze(),
-            },
+            TYPE_NOTIFICATION => BgpMessage::Notification(
+                parse_notification(&body).map_err(|_| WireError::BadLength(length))?,
+            ),
+            TYPE_ROUTE_REFRESH => BgpMessage::RouteRefresh(
+                parse_route_refresh(&body).map_err(|_| WireError::MalformedRouteRefresh(raw))?,
+            ),
+            other => return Err(WireError::BadType(other)),
         };
         Ok(Some(message))
     }
@@ -756,7 +813,6 @@ impl Encoder<BgpMessage> for BgpCodec {
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
             BgpMessage::RouteRefresh(rr) => (TYPE_ROUTE_REFRESH, encode_route_refresh(rr)),
             BgpMessage::EndOfRib { afi, safi } => (TYPE_UPDATE, encode_end_of_rib(afi, safi)),
-            BgpMessage::Unhandled { message_type, body } => (message_type, body.to_vec()),
         };
         let total_len = HEADER_LEN + body.len();
         // Never send more than the peer will accept: 4096 unless RFC 8654 was
@@ -1226,8 +1282,8 @@ fn parse_notification(body: &[u8]) -> Result<NotificationMessage, WireError> {
 }
 
 fn parse_route_refresh(body: &[u8]) -> Result<RouteRefreshMessage, WireError> {
-    if body.len() < 4 {
-        return Err(WireError::MalformedRouteRefresh);
+    if body.len() != 4 {
+        return Err(WireError::MalformedRouteRefresh(Bytes::new()));
     }
     Ok(RouteRefreshMessage {
         afi: u16::from_be_bytes([body[0], body[1]]),
@@ -1394,7 +1450,7 @@ fn decode_prefixes(
     while !data.is_empty() {
         let path_id = if with_ids {
             if data.len() < 4 {
-                return Err(WireError::MalformedUpdate);
+                return Err(WireError::InvalidNetworkField);
             }
             let id = u32::from_be_bytes(data[..4].try_into().unwrap());
             data = &data[4..];
@@ -1403,15 +1459,15 @@ fn decode_prefixes(
             0
         };
         if data.is_empty() {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let prefix_len = data[0];
         if prefix_len > max_prefix_len {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let byte_len = usize::from(prefix_len).div_ceil(8);
         if data.len() < 1 + byte_len {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let mut octets = [0u8; 16];
         octets[..byte_len].copy_from_slice(&data[1..=byte_len]);
@@ -1420,7 +1476,7 @@ fn decode_prefixes(
         } else {
             Ipv6Addr::from(octets).into()
         };
-        let net = IpNet::new(addr, prefix_len).map_err(|_| WireError::MalformedUpdate)?;
+        let net = IpNet::new(addr, prefix_len).map_err(|_| WireError::InvalidNetworkField)?;
         prefixes.push(net);
         if with_ids {
             path_ids.push(path_id);
@@ -1464,7 +1520,7 @@ fn decode_prefixes_v4(data: &[u8], with_ids: bool) -> Result<(Vec<Ipv4Net>, Vec<
         .into_iter()
         .map(|net| match net {
             IpNet::V4(n) => Ok(n),
-            IpNet::V6(_) => Err(WireError::MalformedUpdate),
+            IpNet::V6(_) => Err(WireError::InvalidNetworkField),
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((nets, path_ids))
@@ -1859,7 +1915,7 @@ fn decode_rtc_nlris(mut data: &[u8]) -> Result<Vec<RtcNlri>, WireError> {
     while let Some((&bits, rest)) = data.split_first() {
         let n = usize::from(bits).div_ceil(8);
         if (bits != 0 && !(32..=96).contains(&bits)) || rest.len() < n {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let mut buf = [0u8; 12];
         buf[..n].copy_from_slice(&rest[..n]);
@@ -1895,13 +1951,13 @@ fn encode_rtc_nlris(nlris: &[RtcNlri], out: &mut Vec<u8>) {
 /// batch's own `afi` carries a leading Path Identifier per NLRI entry.
 fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachNlri, WireError> {
     if data.len() < 5 {
-        return Err(WireError::MalformedUpdate);
+        return Err(WireError::MalformedMpAttribute);
     }
     let afi = u16::from_be_bytes([data[0], data[1]]);
     let safi = data[2];
     let nh_len = data[3] as usize;
     if data.len() < 4 + nh_len + 1 {
-        return Err(WireError::MalformedUpdate);
+        return Err(WireError::MalformedMpAttribute);
     }
     let next_hop: IpAddr = match nh_len {
         _ if safi == SAFI_VPN => vpn::decode_next_hop(afi, &data[4..4 + nh_len])?,
@@ -1918,21 +1974,21 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
         0 if safi == SAFI_FLOWSPEC => match afi {
             AFI_IPV4 => Ipv4Addr::UNSPECIFIED.into(),
             AFI_IPV6 => Ipv6Addr::UNSPECIFIED.into(),
-            _ => return Err(WireError::MalformedUpdate),
+            _ => return Err(WireError::MalformedMpAttribute),
         },
-        _ => return Err(WireError::MalformedUpdate),
+        _ => return Err(WireError::MalformedMpAttribute),
     };
     let mut pos = 4 + nh_len;
     let snpa_count = data[pos];
     pos += 1;
     for _ in 0..snpa_count {
         if data.len() <= pos {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::MalformedMpAttribute);
         }
         let snpa_len = data[pos] as usize;
         pos += 1 + snpa_len;
         if data.len() < pos {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::MalformedMpAttribute);
         }
     }
     if (afi, safi) == (AFI_L2VPN, SAFI_EVPN) {
@@ -2011,7 +2067,7 @@ fn decode_mp_unreach(
     add_path_afis: &HashSet<u16>,
 ) -> Result<MpUnreachNlri, WireError> {
     if data.len() < 3 {
-        return Err(WireError::MalformedUpdate);
+        return Err(WireError::MalformedMpAttribute);
     }
     let afi = u16::from_be_bytes([data[0], data[1]]);
     let safi = data[2];
@@ -2691,11 +2747,21 @@ mod tests {
         }
     }
 
-    fn unhandled(message_type: u8, body_len: usize) -> BgpMessage {
-        BgpMessage::Unhandled {
-            message_type,
-            body: Bytes::from(vec![0u8; body_len]),
-        }
+    fn big(body_len: usize) -> BgpMessage {
+        BgpMessage::Notification(NotificationMessage {
+            error_code: 6,
+            error_subcode: 0,
+            data: Bytes::from(vec![0u8; body_len]),
+        })
+    }
+
+    fn raw_frame(message_type: u8, total_len: u16) -> BytesMut {
+        let mut b = BytesMut::new();
+        b.extend_from_slice(&MARKER);
+        b.extend_from_slice(&total_len.to_be_bytes());
+        b.extend_from_slice(&[message_type]);
+        b.resize(usize::from(total_len), 0);
+        b
     }
 
     fn encoded(msg: BgpMessage) -> Vec<u8> {
@@ -2843,16 +2909,14 @@ mod tests {
     fn message_length_limit_follows_extended_negotiation() {
         // 5000 bytes: over 4096, under 65535.
         let mut plain = BgpCodec::default();
-        assert!(plain
-            .encode(unhandled(99, 5000), &mut BytesMut::new())
-            .is_err());
+        assert!(plain.encode(big(5000), &mut BytesMut::new()).is_err());
 
         let mut ext = BgpCodec {
             extended: true,
             ..BgpCodec::default()
         };
         let mut buf = BytesMut::new();
-        ext.encode(unhandled(99, 5000), &mut buf).unwrap();
+        ext.encode(big(5000), &mut buf).unwrap();
         // A non-extended decoder refuses it, an extended one accepts it.
         assert!(matches!(
             BgpCodec::default().decode(&mut buf.clone()),
@@ -2860,19 +2924,17 @@ mod tests {
         ));
         assert!(matches!(
             ext.decode(&mut buf),
-            Ok(Some(BgpMessage::Unhandled { .. }))
+            Ok(Some(BgpMessage::Notification(_)))
         ));
         // Never more than 65535, negotiated or not.
-        assert!(ext
-            .encode(unhandled(99, 65535), &mut BytesMut::new())
-            .is_err());
+        assert!(ext.encode(big(65535), &mut BytesMut::new()).is_err());
         // OPEN and KEEPALIVE stay at 4096 even when negotiated.
-        assert!(ext
-            .encode(unhandled(TYPE_OPEN, 5000), &mut BytesMut::new())
-            .is_err());
-        assert!(ext
-            .encode(unhandled(TYPE_KEEPALIVE, 5000), &mut BytesMut::new())
-            .is_err());
+        for t in [TYPE_OPEN, TYPE_KEEPALIVE] {
+            assert!(matches!(
+                ext.decode(&mut raw_frame(t, 5000)),
+                Err(WireError::BadLength(5000))
+            ));
+        }
     }
 
     fn decode_all(codec: &mut BgpCodec, buf: &mut BytesMut) -> Vec<BgpMessage> {
@@ -3388,8 +3450,51 @@ mod tests {
         let body = vec![0u8, 1u8, 0u8]; // 3 bytes, needs 4
         assert!(matches!(
             parse_route_refresh(&body),
-            Err(WireError::MalformedRouteRefresh)
+            Err(WireError::MalformedRouteRefresh(_))
         ));
+    }
+
+    #[test]
+    fn wire_errors_map_to_their_notification() {
+        let dec = |b: &mut BytesMut| BgpCodec::default().decode(b).unwrap_err().notification();
+        // Unknown type 6: Header Error / Bad Message Type, data = the type.
+        assert_eq!(dec(&mut raw_frame(6, 19)), (1, 3, Bytes::from_static(&[6])));
+        // Bad length: data = the erroneous length.
+        assert_eq!(
+            dec(&mut raw_frame(TYPE_KEEPALIVE, 20)),
+            (1, 2, Bytes::from_static(&[0, 20]))
+        );
+        // OPEN shorter than 29 octets: Bad Message Length, length as data.
+        assert_eq!(
+            dec(&mut raw_frame(TYPE_OPEN, 25)),
+            (1, 2, Bytes::from_static(&[0, 25]))
+        );
+        // Long enough but unparsable OPEN: OPEN Message Error / Unspecific.
+        let mut open = raw_frame(TYPE_OPEN, 29);
+        open[HEADER_LEN] = 4;
+        open[28] = 200; // optional parameters longer than the message
+        assert_eq!(dec(&mut open), (2, 0, Bytes::new()));
+        // ROUTE-REFRESH with a 5-octet body: code 7 / 1, data = whole message.
+        let mut rr = raw_frame(TYPE_ROUTE_REFRESH, 24);
+        let whole = Bytes::copy_from_slice(&rr);
+        assert_eq!(dec(&mut rr), (7, 1, whole));
+        // Bad NLRI / bad MP attribute.
+        assert_eq!(
+            WireError::InvalidNetworkField.notification(),
+            (3, 10, Bytes::new())
+        );
+        assert!(matches!(
+            decode_prefixes(AFI_IPV4, &[33, 1, 2, 3, 4, 5], false),
+            Err(WireError::InvalidNetworkField)
+        ));
+        assert!(matches!(
+            decode_mp_reach(&[0, 2], &HashSet::new()),
+            Err(WireError::MalformedMpAttribute)
+        ));
+        assert_eq!(
+            WireError::MalformedMpAttribute.notification(),
+            (3, 9, Bytes::new())
+        );
     }
 
     #[test]
@@ -3400,20 +3505,6 @@ mod tests {
             roundtrip(BgpMessage::Open(open.clone())),
             BgpMessage::Open(open)
         );
-    }
-
-    #[test]
-    fn unknown_type_decodes_as_unhandled() {
-        match roundtrip(BgpMessage::Unhandled {
-            message_type: 200, // not a type this crate understands
-            body: Bytes::from_static(b"not parsed"),
-        }) {
-            BgpMessage::Unhandled { message_type, body } => {
-                assert_eq!(message_type, 200);
-                assert_eq!(&body[..], b"not parsed");
-            }
-            other => panic!("expected Unhandled, got {other:?}"),
-        }
     }
 
     fn attrs(as_path: Vec<u32>, local_pref: Option<u32>) -> PathAttributes {
@@ -4305,7 +4396,10 @@ mod tests {
                 encode_attribute(&mut a, 0x80, t, &[0, 2, 1]);
             }
             assert!(
-                matches!(body_attrs(&a), Err(WireError::MalformedUpdate)),
+                matches!(
+                    body_attrs(&a),
+                    Err(WireError::MalformedUpdate | WireError::MalformedMpAttribute)
+                ),
                 "type {t}"
             );
         }
@@ -4396,7 +4490,7 @@ mod tests {
         let body = vec![0u8, 2u8, 33u8, 10u8];
         assert!(matches!(
             parse_update(&body, &HashSet::new(), false),
-            Err(WireError::MalformedUpdate)
+            Err(WireError::InvalidNetworkField)
         ));
     }
 
@@ -4407,7 +4501,7 @@ mod tests {
         let body = vec![0u8, 2u8, 24u8, 10u8];
         assert!(matches!(
             parse_update(&body, &HashSet::new(), false),
-            Err(WireError::MalformedUpdate)
+            Err(WireError::InvalidNetworkField)
         ));
     }
 
@@ -4742,11 +4836,14 @@ mod shutdown_message_tests {
     fn mp_reach_minimum_and_next_hop_boundaries() {
         let afis = HashSet::new();
         let d = |v: &[u8]| decode_mp_reach(v, &afis);
-        assert!(matches!(d(&[0, 1, 1, 4]), Err(WireError::MalformedUpdate)));
+        assert!(matches!(
+            d(&[0, 1, 1, 4]),
+            Err(WireError::MalformedMpAttribute)
+        ));
         // 5 bytes with nh_len 0: unsupported next-hop length, never an index panic.
         assert!(matches!(
             d(&[0, 1, 1, 0, 0]),
-            Err(WireError::MalformedUpdate)
+            Err(WireError::MalformedMpAttribute)
         ));
         for nh_len in [4usize, 16, 32] {
             // exactly header + next hop + SNPA count
@@ -4757,7 +4854,7 @@ mod shutdown_message_tests {
             assert_eq!((got.afi, got.safi, got.nlri.len()), (1, 1, 0), "{nh_len}");
             v.pop();
             assert!(
-                matches!(d(&v), Err(WireError::MalformedUpdate)),
+                matches!(d(&v), Err(WireError::MalformedMpAttribute)),
                 "one short, nh_len {nh_len}"
             );
         }
@@ -4773,7 +4870,7 @@ mod shutdown_message_tests {
             decode_mp_reach(&v, &afis)
         };
         // One SNPA announced but its length byte is missing.
-        assert!(matches!(base(&[1]), Err(WireError::MalformedUpdate)));
+        assert!(matches!(base(&[1]), Err(WireError::MalformedMpAttribute)));
         // Length byte present, empty SNPA, then one NLRI (10.1.0.0/16).
         let got = base(&[1, 0, 16, 10, 1]).unwrap();
         assert_eq!(got.nlri.len(), 1);
@@ -4781,10 +4878,13 @@ mod shutdown_message_tests {
         assert_eq!(base(&[1, 2, 0xaa, 0xbb]).unwrap().nlri.len(), 0);
         assert!(matches!(
             base(&[1, 2, 0xaa]),
-            Err(WireError::MalformedUpdate)
+            Err(WireError::MalformedMpAttribute)
         ));
         // Two SNPAs, the second missing.
-        assert!(matches!(base(&[2, 0]), Err(WireError::MalformedUpdate)));
+        assert!(matches!(
+            base(&[2, 0]),
+            Err(WireError::MalformedMpAttribute)
+        ));
     }
 
     const RT: u64 = 0x0002_FDE8_0000_0064; // 65000:100
@@ -4834,7 +4934,7 @@ mod shutdown_message_tests {
             vec![32, 0, 0, 0],
         ] {
             assert!(
-                matches!(decode_rtc_nlris(&wire), Err(WireError::MalformedUpdate)),
+                matches!(decode_rtc_nlris(&wire), Err(WireError::InvalidNetworkField)),
                 "{wire:?}"
             );
         }

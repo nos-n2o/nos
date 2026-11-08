@@ -3,6 +3,7 @@
 //! command or message per branch. The negotiation core (`step`) keeps its
 //! unit tests in `fsm.rs`.
 
+use crate::message::MessageHeaderSubcode;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -325,36 +326,6 @@ fn add_path_direction_names() {
 }
 
 #[test]
-fn wire_errors_map_to_their_notification() {
-    let hdr = ErrorCode::MessageHeader as u8;
-    assert_eq!(
-        notification_for_wire_error(&WireError::BadMarker),
-        (hdr, MessageHeaderSubcode::ConnectionNotSynchronized as u8)
-    );
-    for e in [
-        WireError::BadLength(5),
-        WireError::Truncated,
-        WireError::MalformedOpen,
-        WireError::MalformedNotification,
-        WireError::MalformedRouteRefresh,
-        WireError::Io(std::io::Error::other("x")),
-    ] {
-        assert_eq!(
-            notification_for_wire_error(&e),
-            (hdr, MessageHeaderSubcode::BadMessageLength as u8),
-            "{e:?}"
-        );
-    }
-    assert_eq!(
-        notification_for_wire_error(&WireError::MalformedUpdate),
-        (
-            ErrorCode::UpdateMessage as u8,
-            UpdateMessageSubcode::MalformedAttributeList as u8
-        )
-    );
-}
-
-#[test]
 fn a_malformed_message_in_any_state_sends_its_notification_and_closes() {
     let (next, actions) = step(
         State::OpenSent,
@@ -374,9 +345,10 @@ fn a_malformed_message_in_any_state_sends_its_notification_and_closes() {
     assert_eq!(
         actions,
         [
-            Action::SendNotification(
+            Action::SendNotificationData(
                 ErrorCode::MessageHeader as u8,
-                MessageHeaderSubcode::ConnectionNotSynchronized as u8
+                MessageHeaderSubcode::ConnectionNotSynchronized as u8,
+                Bytes::new()
             ),
             Action::Close
         ]
@@ -850,16 +822,6 @@ async fn inbound_messages_map_to_their_events() {
         .await,
         Some(Event::NotificationReceived(_))
     ));
-    assert!(c
-        .feed(
-            BgpMessage::Unhandled {
-                message_type: 99,
-                body: Bytes::new()
-            },
-            &est
-        )
-        .await
-        .is_none());
 }
 
 #[tokio::test]
