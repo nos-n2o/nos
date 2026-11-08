@@ -931,7 +931,8 @@ impl LinkManager {
             // Collected first, so a prefix intra-area in two source areas is
             // one Type-3 (the cheaper), and Appendix E sees the whole set.
             let mut type3: HashMap<Ipv4Net, u32> = HashMap::new();
-            let mut asbr_ids = HashSet::new();
+            // One Type-4 per ASBR at the best cost over all source areas (§12.4.3).
+            let mut type4: HashMap<Ipv4Addr, u32> = HashMap::new();
             // RFC 2328 §12.4.3.1: an ABR sends a default Type-3 into a stub
             // area — and, totally stubby (no `ImportSummaries`), nothing else.
             // ponytail: ABR-ness stays "2+ areas", with no check that one of
@@ -954,18 +955,8 @@ impl LinkManager {
                     continue;
                 }
                 for &(asbr, dist) in asbrs {
-                    asbr_ids.insert(asbr);
-                    install_self_originated(
-                        &mut dest_lsdb,
-                        local_router_id,
-                        lsa::LSA_TYPE_ASBR_SUMMARY,
-                        asbr,
-                        LsaBody::Summary(SummaryLsaBody {
-                            tos: Vec::new(),
-                            network_mask: Ipv4Addr::UNSPECIFIED,
-                            metric: dist,
-                        }),
-                    );
+                    let entry = type4.entry(asbr).or_insert(dist);
+                    *entry = (*entry).min(dist);
                 }
             }
             let mut network_ids = HashSet::new();
@@ -983,6 +974,19 @@ impl LinkManager {
                     }),
                 );
             }
+            for (&asbr, &dist) in &type4 {
+                install_self_originated(
+                    &mut dest_lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_ASBR_SUMMARY,
+                    asbr,
+                    LsaBody::Summary(SummaryLsaBody {
+                        tos: Vec::new(),
+                        network_mask: Ipv4Addr::UNSPECIFIED,
+                        metric: dist,
+                    }),
+                );
+            }
             // RFC 2328 §14.1: a prefix/ASBR no longer intra-area to some
             // other area is flushed, not left to age out over `MAX_AGE`.
             withdraw_undesired(
@@ -995,7 +999,7 @@ impl LinkManager {
                 &mut dest_lsdb,
                 local_router_id,
                 lsa::LSA_TYPE_ASBR_SUMMARY,
-                &asbr_ids,
+                &type4.keys().copied().collect(),
             );
         }
     }
