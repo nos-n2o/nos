@@ -1526,6 +1526,7 @@ mod tests {
 
     fn p2p(neighbor: Ipv4Addr, own_addr: Ipv4Addr, metric: u16) -> RouterLink {
         RouterLink {
+            tos: Vec::new(),
             link_id: neighbor,
             link_data: own_addr,
             link_type: LINK_TYPE_POINT_TO_POINT,
@@ -1535,6 +1536,7 @@ mod tests {
 
     fn transit(network_id: Ipv4Addr, own_addr: Ipv4Addr, metric: u16) -> RouterLink {
         RouterLink {
+            tos: Vec::new(),
             link_id: network_id,
             link_data: own_addr,
             link_type: LINK_TYPE_TRANSIT_NETWORK,
@@ -1544,6 +1546,7 @@ mod tests {
 
     fn stub(net: Ipv4Addr, mask: Ipv4Addr, metric: u16) -> RouterLink {
         RouterLink {
+            tos: Vec::new(),
             link_id: net,
             link_data: mask,
             link_type: LINK_TYPE_STUB_NETWORK,
@@ -1627,6 +1630,7 @@ mod tests {
 
     fn vlink(endpoint: Ipv4Addr, own_addr: Ipv4Addr, metric: u16) -> RouterLink {
         RouterLink {
+            tos: Vec::new(),
             link_id: endpoint,
             link_data: own_addr,
             link_type: LINK_TYPE_VIRTUAL,
@@ -2011,6 +2015,7 @@ mod tests {
                 length: 0,
             },
             body: LsaBody::AsExternal(AsExternalLsaBody {
+                tos: Vec::new(),
                 network_mask: mask,
                 metric: DEFAULT_EXTERNAL_METRIC,
                 // E bit set: translation must carry it, SPF ignores it.
@@ -2342,6 +2347,7 @@ mod tests {
                 length: 0,
             },
             body: LsaBody::Summary(SummaryLsaBody {
+                tos: Vec::new(),
                 network_mask: mask,
                 metric,
             }),
@@ -2361,6 +2367,7 @@ mod tests {
                 length: 0,
             },
             body: LsaBody::Summary(SummaryLsaBody {
+                tos: Vec::new(),
                 network_mask: Ipv4Addr::UNSPECIFIED,
                 metric,
             }),
@@ -2706,7 +2713,7 @@ mod tests {
                         } else {
                             MAX_LINK_METRIC
                         },
-                        ..*rl
+                        ..rl.clone()
                     })
                     .collect();
                 router_lsa(router, links)
@@ -2778,6 +2785,43 @@ mod tests {
                 ],
             ),
         ]
+    }
+
+    /// #644: TOS/MT entries on links never change the TOS-0 routes.
+    #[test]
+    fn tos_entries_do_not_change_routes() {
+        let with_tos: Vec<Arc<Lsa>> = chain()
+            .into_iter()
+            .map(|l| {
+                let LsaBody::Router(b) = &l.body else {
+                    unreachable!()
+                };
+                let links = b
+                    .links
+                    .iter()
+                    .cloned()
+                    .map(|mut rl| {
+                        rl.tos = vec![0x10, 0, 0, 99];
+                        rl
+                    })
+                    .collect();
+                router_lsa_with(
+                    l.header.advertising_router,
+                    RouterLsaBody {
+                        flags: b.flags,
+                        links,
+                    },
+                )
+            })
+            .collect();
+        let sorted = |mut v: Vec<RouteEntry>| {
+            v.sort_by_key(|r| r.prefix.to_string());
+            v
+        };
+        assert_eq!(
+            sorted(compute(router_id(1), &with_tos)),
+            sorted(compute(router_id(1), &chain()))
+        );
     }
 
     #[test]

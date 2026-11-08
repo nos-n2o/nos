@@ -71,6 +71,7 @@ pub(super) fn router_lsa_links(
                 .map(|(id, _)| *id)
             {
                 result.push(RouterLink {
+                    tos: Vec::new(),
                     link_id: neighbor_id,
                     link_data: cfg.local_addr,
                     link_type: LINK_TYPE_VIRTUAL,
@@ -90,6 +91,7 @@ pub(super) fn router_lsa_links(
                     .find(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
                 {
                     result.push(RouterLink {
+                        tos: Vec::new(),
                         link_id: *neighbor_id,
                         link_data: cfg.local_addr,
                         link_type: LINK_TYPE_POINT_TO_POINT,
@@ -98,6 +100,7 @@ pub(super) fn router_lsa_links(
                 }
                 if let Some(subnet) = local_subnet(cfg).filter(|_| !prefix_suppression) {
                     result.push(RouterLink {
+                        tos: Vec::new(),
                         link_id: subnet.network(),
                         link_data: subnet.netmask(),
                         link_type: LINK_TYPE_STUB_NETWORK,
@@ -112,6 +115,7 @@ pub(super) fn router_lsa_links(
                 for (neighbor_id, n) in &status.neighbors {
                     if n.state == NeighborState::Full || n.grace_deadline.is_some() {
                         result.push(RouterLink {
+                            tos: Vec::new(),
                             link_id: *neighbor_id,
                             link_data: cfg.local_addr,
                             link_type: LINK_TYPE_POINT_TO_POINT,
@@ -121,6 +125,7 @@ pub(super) fn router_lsa_links(
                 }
                 if !prefix_suppression {
                     result.push(RouterLink {
+                        tos: Vec::new(),
                         link_id: cfg.local_addr,
                         link_data: Ipv4Addr::BROADCAST,
                         link_type: LINK_TYPE_STUB_NETWORK,
@@ -139,6 +144,7 @@ pub(super) fn router_lsa_links(
                     }
                 };
                 result.push(RouterLink {
+                    tos: Vec::new(),
                     link_id: dr_addr,
                     link_data: cfg.local_addr,
                     link_type: LINK_TYPE_TRANSIT_NETWORK,
@@ -586,6 +592,7 @@ impl LinkManager {
             // Loopbacks aren't transit, so RFC 6860 never hides them.
             for (subnet, cost) in stub_networks.get(&area_id).into_iter().flatten() {
                 router_links.push(RouterLink {
+                    tos: Vec::new(),
                     link_id: subnet.network(),
                     link_data: subnet.netmask(),
                     link_type: LINK_TYPE_STUB_NETWORK,
@@ -766,6 +773,7 @@ impl LinkManager {
                     lsa::LSA_TYPE_AS_EXTERNAL,
                     id,
                     LsaBody::AsExternal(AsExternalLsaBody {
+                        tos: Vec::new(),
                         network_mask: prefix.netmask(),
                         metric: type5[&prefix].0,
                         e_type2: type5[&prefix].1,
@@ -789,6 +797,7 @@ impl LinkManager {
                     id,
                     options,
                     LsaBody::AsExternal(AsExternalLsaBody {
+                        tos: Vec::new(),
                         network_mask: prefix.netmask(),
                         metric,
                         e_type2,
@@ -952,6 +961,7 @@ impl LinkManager {
                         lsa::LSA_TYPE_ASBR_SUMMARY,
                         asbr,
                         LsaBody::Summary(SummaryLsaBody {
+                            tos: Vec::new(),
                             network_mask: Ipv4Addr::UNSPECIFIED,
                             metric: dist,
                         }),
@@ -967,6 +977,7 @@ impl LinkManager {
                     lsa::LSA_TYPE_NETWORK_SUMMARY,
                     id,
                     LsaBody::Summary(SummaryLsaBody {
+                        tos: Vec::new(),
                         network_mask: prefix.netmask(),
                         metric: type3[&prefix],
                     }),

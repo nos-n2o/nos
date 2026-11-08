@@ -107,6 +107,7 @@ fn foreign_type5(age: u16) -> Lsa {
             length: 0,
         },
         body: LsaBody::AsExternal(AsExternalLsaBody {
+            tos: Vec::new(),
             network_mask: Ipv4Addr::new(255, 255, 255, 0),
             metric: 20,
             e_type2: false,

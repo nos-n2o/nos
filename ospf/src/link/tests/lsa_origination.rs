@@ -1084,6 +1084,7 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
         body: LsaBody::Router(RouterLsaBody {
             flags: 0,
             links: vec![RouterLink {
+                tos: Vec::new(),
                 link_id: asbr,
                 link_data: Ipv4Addr::new(10, 0, 0, 1),
                 link_type: LINK_TYPE_POINT_TO_POINT,
@@ -1105,6 +1106,7 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
         body: LsaBody::Router(RouterLsaBody {
             flags: 0,
             links: vec![RouterLink {
+                tos: Vec::new(),
                 link_id: router_id,
                 link_data: Ipv4Addr::new(10, 0, 0, 2),
                 link_type: LINK_TYPE_POINT_TO_POINT,
@@ -1124,6 +1126,7 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
             length: 0,
         },
         body: LsaBody::AsExternal(AsExternalLsaBody {
+            tos: Vec::new(),
             network_mask: Ipv4Addr::new(255, 255, 255, 0),
             metric: 0,
             e_type2: false,
@@ -1192,6 +1195,7 @@ async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix
     lsdb0.lock().await.install(router_lsa(
         router_id,
         RouterLink {
+            tos: Vec::new(),
             link_id: w,
             link_data: Ipv4Addr::new(10, 0, 0, 1),
             link_type: LINK_TYPE_POINT_TO_POINT,
@@ -1213,12 +1217,14 @@ async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix
             flags: 0,
             links: vec![
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: router_id,
                     link_data: Ipv4Addr::new(10, 0, 0, 2),
                     link_type: LINK_TYPE_POINT_TO_POINT,
                     metric: 3,
                 },
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: prefix_net,
                     link_data: mask,
                     link_type: LINK_TYPE_STUB_NETWORK,
@@ -1233,6 +1239,7 @@ async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix
     lsdb1.lock().await.install(router_lsa(
         router_id,
         RouterLink {
+            tos: Vec::new(),
             link_id: v,
             link_data: Ipv4Addr::new(10, 0, 1, 1),
             link_type: LINK_TYPE_POINT_TO_POINT,
@@ -1254,12 +1261,14 @@ async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix
             flags: 0,
             links: vec![
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: router_id,
                     link_data: Ipv4Addr::new(10, 0, 1, 2),
                     link_type: LINK_TYPE_POINT_TO_POINT,
                     metric: 1,
                 },
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: prefix_net,
                     link_data: mask,
                     link_type: LINK_TYPE_STUB_NETWORK,
@@ -1299,12 +1308,14 @@ async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix
             flags: 0,
             links: vec![
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: router_id,
                     link_data: Ipv4Addr::new(10, 0, 1, 2),
                     link_type: LINK_TYPE_POINT_TO_POINT,
                     metric: 1,
                 },
                 RouterLink {
+                    tos: Vec::new(),
                     link_id: prefix_net,
                     link_data: mask,
                     link_type: LINK_TYPE_STUB_NETWORK,

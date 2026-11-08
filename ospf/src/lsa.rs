@@ -233,12 +233,16 @@ impl LsaHeader {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterLink {
     pub link_id: Ipv4Addr,
     pub link_data: Ipv4Addr,
     pub link_type: u8,
     pub metric: u16,
+    /// RFC 2328 A.4.2 / RFC 4915 per-link TOS/MT entries (4 bytes each),
+    /// kept verbatim so a foreign LSA re-floods byte-identical (§13.3).
+    /// SPF ignores them (TOS 0 / MT-ID 0 only, RFC 2328 §16.3).
+    pub tos: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,7 +264,7 @@ pub struct NetworkLsaBody {
 /// originated one gets it from `redistribute ... metric-type`.
 /// `ponytail:` `forwarding_address` is decoded faithfully but never
 /// originated non-zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsExternalLsaBody {
     pub network_mask: Ipv4Addr,
     /// Low 24 bits only; the E bit lives in `e_type2`.
@@ -269,6 +273,9 @@ pub struct AsExternalLsaBody {
     pub e_type2: bool,
     pub forwarding_address: Ipv4Addr,
     pub external_route_tag: u32,
+    /// Trailing TOS/MT entries (A.4.5, 12 bytes each in RFC 2328: kept
+    /// verbatim, multiple of 4), ignored by SPF.
+    pub tos: Vec<u8>,
 }
 
 /// The 24-bit metric of an AS-external or Summary LSA (the E bit is split off
@@ -281,14 +288,15 @@ const EXTERNAL_METRIC_MASK: u32 = 0x00FF_FFFF;
 /// network's address for type 3, the ASBR's own router-id for type 4, with
 /// `network_mask` conventionally `0.0.0.0` for type 4) distinguish them —
 /// mirrors RFC 2328 itself, which defines an identical wire format for both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryLsaBody {
     pub network_mask: Ipv4Addr,
     /// Low 24 bits only, reusing `EXTERNAL_METRIC_MASK` — RFC 2328 A.4.4's
-    /// metric field is also a 24-bit value following a 1-byte TOS field; no
-    /// TOS-metric list support, the same "# TOS metrics: none supported"
-    /// simplification `RouterLsaBody`'s own links already use.
+    /// metric field is also a 24-bit value following a 1-byte TOS field.
     pub metric: u32,
+    /// Trailing TOS/MT entries (A.4.4, 4 bytes each), kept verbatim and
+    /// ignored by SPF.
+    pub tos: Vec<u8>,
 }
 
 /// RFC 3623 Grace-LSA body: how long the restarting router asks its
@@ -415,8 +423,9 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
                 buf.extend_from_slice(&link.link_id.octets());
                 buf.extend_from_slice(&link.link_data.octets());
                 buf.push(link.link_type);
-                buf.push(0); // # TOS metrics: none supported
+                buf.push(u8::try_from(link.tos.len() / 4).unwrap_or(u8::MAX));
                 buf.extend_from_slice(&link.metric.to_be_bytes());
+                buf.extend_from_slice(&link.tos);
             }
             buf
         }
@@ -435,12 +444,14 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
             buf.extend_from_slice(&word.to_be_bytes());
             buf.extend_from_slice(&e.forwarding_address.octets());
             buf.extend_from_slice(&e.external_route_tag.to_be_bytes());
+            buf.extend_from_slice(&e.tos);
             buf
         }
         LsaBody::Summary(s) => {
             let mut buf = Vec::with_capacity(8);
             buf.extend_from_slice(&s.network_mask.octets());
             buf.extend_from_slice(&(s.metric & EXTERNAL_METRIC_MASK).to_be_bytes());
+            buf.extend_from_slice(&s.tos);
             buf
         }
         LsaBody::Grace(g) => {
@@ -503,21 +514,29 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
             }
             let flags = data[0];
             let num_links = usize::from(u16::from_be_bytes([data[2], data[3]]));
-            let link_bytes = &data[4..];
-            if link_bytes.len() != num_links * ROUTER_LINK_LEN {
+            let mut rest = &data[4..];
+            let mut links = Vec::with_capacity(num_links.min(rest.len() / ROUTER_LINK_LEN));
+            for _ in 0..num_links {
+                if rest.len() < ROUTER_LINK_LEN {
+                    return Err(PacketError::TruncatedBody);
+                }
+                let tos_len = usize::from(rest[9]) * 4;
+                let end = ROUTER_LINK_LEN + tos_len;
+                if rest.len() < end {
+                    return Err(PacketError::TruncatedBody);
+                }
+                links.push(RouterLink {
+                    link_id: read_ipv4(rest, 0),
+                    link_data: read_ipv4(rest, 4),
+                    link_type: rest[8],
+                    metric: u16::from_be_bytes([rest[10], rest[11]]),
+                    tos: rest[ROUTER_LINK_LEN..end].to_vec(),
+                });
+                rest = &rest[end..];
+            }
+            if !rest.is_empty() {
                 return Err(PacketError::TruncatedBody);
             }
-            let links = link_bytes
-                .as_chunks::<ROUTER_LINK_LEN>()
-                .0
-                .iter()
-                .map(|c| RouterLink {
-                    link_id: read_ipv4(c, 0),
-                    link_data: read_ipv4(c, 4),
-                    link_type: c[8],
-                    metric: u16::from_be_bytes([c[10], c[11]]),
-                })
-                .collect();
             Ok(LsaBody::Router(RouterLsaBody { flags, links }))
         }
         LSA_TYPE_NETWORK => {
@@ -537,7 +556,7 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
             }))
         }
         LSA_TYPE_AS_EXTERNAL | LSA_TYPE_NSSA_EXTERNAL => {
-            if data.len() < 16 {
+            if data.len() < 16 || !data.len().is_multiple_of(4) {
                 return Err(PacketError::TruncatedBody);
             }
             let network_mask = read_ipv4(data, 0);
@@ -552,10 +571,11 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
                 e_type2,
                 forwarding_address,
                 external_route_tag,
+                tos: data[16..].to_vec(),
             }))
         }
         LSA_TYPE_NETWORK_SUMMARY | LSA_TYPE_ASBR_SUMMARY => {
-            if data.len() < 8 {
+            if data.len() < 8 || !data.len().is_multiple_of(4) {
                 return Err(PacketError::TruncatedBody);
             }
             let network_mask = read_ipv4(data, 0);
@@ -564,6 +584,7 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
             Ok(LsaBody::Summary(SummaryLsaBody {
                 network_mask,
                 metric,
+                tos: data[8..].to_vec(),
             }))
         }
         LSA_TYPE_OPAQUE_LINK if opaque_type(header.link_state_id) == OPAQUE_TYPE_GRACE => {
@@ -690,6 +711,74 @@ mod tests {
         }
     }
 
+    /// #644: TOS/MT entries on Router links, Summary and AS-External LSAs
+    /// decode and re-encode byte for byte (checksum included).
+    #[test]
+    fn tos_entries_round_trip_verbatim() {
+        let mut r = router_lsa();
+        let LsaBody::Router(body) = &mut r.body else {
+            unreachable!()
+        };
+        body.links[0].tos = vec![0, 0, 0, 5, 0x21, 0, 0, 9];
+        body.links.push(RouterLink {
+            link_id: Ipv4Addr::new(10, 0, 1, 1),
+            link_data: Ipv4Addr::new(10, 0, 1, 2),
+            link_type: 1,
+            metric: 7,
+            tos: Vec::new(),
+        });
+        let mut ext = router_lsa();
+        ext.header.lsa_type = LSA_TYPE_AS_EXTERNAL;
+        ext.body = LsaBody::AsExternal(AsExternalLsaBody {
+            network_mask: Ipv4Addr::new(255, 255, 255, 0),
+            metric: 3,
+            e_type2: true,
+            forwarding_address: Ipv4Addr::UNSPECIFIED,
+            external_route_tag: 0,
+            tos: vec![0x80, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0],
+        });
+        let mut sum = router_lsa();
+        sum.header.lsa_type = LSA_TYPE_NETWORK_SUMMARY;
+        sum.body = LsaBody::Summary(SummaryLsaBody {
+            network_mask: Ipv4Addr::new(255, 255, 0, 0),
+            metric: 1,
+            tos: vec![0x10, 0, 0, 2],
+        });
+        for lsa in [r, ext, sum] {
+            let wire = encode_lsa(&lsa);
+            let back = decode_lsa(&wire).unwrap();
+            assert_eq!(back.body, lsa.body);
+            assert_eq!(encode_lsa(&back), wire);
+        }
+    }
+
+    #[test]
+    fn router_link_wire_layout_carries_tos_count() {
+        // RFC 2328 A.4.2: link 1 has #TOS = 1 (one extra 4-byte entry).
+        let mut body = vec![0, 0, 0, 1];
+        body.extend_from_slice(&[10, 0, 0, 1, 255, 255, 255, 0, 3, 1, 0, 1, 0x05, 0, 0, 9]);
+        let LsaBody::Router(r) = decode_body(&router_lsa().header, &body).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(r.links[0].tos, [0x05, 0, 0, 9]);
+        assert_eq!(r.links[0].metric, 1);
+        // #TOS pointing past the end, or trailing junk, is malformed.
+        body.truncate(body.len() - 1);
+        assert!(decode_body(&router_lsa().header, &body).is_err());
+        let mut junk = body.clone();
+        junk.extend_from_slice(&[0, 0, 0, 0, 0]);
+        assert!(decode_body(&router_lsa().header, &junk).is_err());
+    }
+
+    #[test]
+    fn misaligned_tos_tail_is_truncated_body() {
+        let mut h = router_lsa().header;
+        h.lsa_type = LSA_TYPE_NETWORK_SUMMARY;
+        assert_eq!(decode_body(&h, &[0; 11]), Err(PacketError::TruncatedBody));
+        h.lsa_type = LSA_TYPE_AS_EXTERNAL;
+        assert_eq!(decode_body(&h, &[0; 18]), Err(PacketError::TruncatedBody));
+    }
+
     fn router_lsa() -> Lsa {
         Lsa {
             header: LsaHeader {
@@ -705,6 +794,7 @@ mod tests {
             body: LsaBody::Router(RouterLsaBody {
                 flags: 0,
                 links: vec![RouterLink {
+                    tos: Vec::new(),
                     link_id: Ipv4Addr::new(10, 0, 0, 1),
                     link_data: Ipv4Addr::new(255, 255, 255, 0),
                     link_type: 3,
@@ -751,6 +841,7 @@ mod tests {
         lsa.body = LsaBody::Router(RouterLsaBody {
             flags: ROUTER_FLAG_B | ROUTER_FLAG_V,
             links: vec![RouterLink {
+                tos: Vec::new(),
                 link_id: Ipv4Addr::new(9, 9, 9, 8),
                 link_data: Ipv4Addr::new(203, 0, 113, 66),
                 link_type: LINK_TYPE_VIRTUAL,
@@ -808,6 +899,7 @@ mod tests {
                 length: 0,
             },
             body: LsaBody::AsExternal(AsExternalLsaBody {
+                tos: Vec::new(),
                 network_mask: Ipv4Addr::new(255, 255, 255, 0),
                 metric: 20,
                 e_type2: false,
@@ -882,6 +974,7 @@ mod tests {
                 length: 0,
             },
             body: LsaBody::Summary(SummaryLsaBody {
+                tos: Vec::new(),
                 network_mask,
                 metric: 20,
             }),
