@@ -65,7 +65,12 @@ impl BgpRib {
     }
 
     /// Everything one peer's Statistics Report carries (never empty).
-    pub fn bmp_stats(&self, peer: IpAddr, loc: LocTotals) -> Vec<Stat> {
+    pub fn bmp_stats(
+        &self,
+        peer: IpAddr,
+        loc: LocTotals,
+        monitor_out: nos_proto::BmpMonitorOut,
+    ) -> Vec<Stat> {
         let s = self.peer_stats(peer);
         let mut out = vec![
             Stat::Counter(0, s.rejected),
@@ -95,6 +100,19 @@ impl BgpRib {
         );
         out.push(Stat::AfiSafi(10, 1, 1, loc.v4));
         out.push(Stat::AfiSafi(10, 2, 1, loc.v6));
+        // RFC 8671 section 6.2: 14/15 all families, 16/17 per AFI/SAFI.
+        // ponytail: 16/17 cover the unicast families only.
+        let c = self.bmp_out_counts(peer);
+        if monitor_out.wants(false) {
+            out.push(Stat::Gauge(14, c.pre));
+            out.push(Stat::AfiSafi(16, 1, 1, c.pre_v4));
+            out.push(Stat::AfiSafi(16, 2, 1, c.pre - c.pre_v4));
+        }
+        if monitor_out.wants(true) {
+            out.push(Stat::Gauge(15, c.post));
+            out.push(Stat::AfiSafi(17, 1, 1, c.post_v4));
+            out.push(Stat::AfiSafi(17, 2, 1, c.post_v6));
+        }
         out
     }
 }

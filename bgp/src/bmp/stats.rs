@@ -26,7 +26,7 @@ pub enum Stat {
 /// each statistic as type, length, value.
 pub fn stats_report(scope: &Scope, p: &PeerUpInfo, stats: &[Stat], ts: Duration) -> Bytes {
     let mut b = BytesMut::new();
-    p.put_header(&mut b, scope, ts, false, false);
+    p.put_header(&mut b, scope, ts, (false, false, false)); // O = 0 (RFC 8671 section 6)
     b.put_u32(u32::try_from(stats.len()).unwrap_or(u32::MAX));
     for s in stats {
         match *s {
@@ -71,7 +71,7 @@ pub(super) async fn send_reports(
         peers
             .into_iter()
             .map(|p| {
-                let s = rib.bmp_stats(p.peer, loc);
+                let s = rib.bmp_stats(p.peer, loc, cfg.monitor_out);
                 (p, s)
             })
             .collect()
@@ -121,6 +121,7 @@ mod tests {
             m.len()
         );
         assert_eq!(m[7] & 0x40, 0, "L flag clear");
+        assert_eq!(m[7] & 0x10, 0, "O flag clear: Statistics are never Out");
         let b = &m[6 + 42..];
         assert_eq!(&b[..4], &3u32.to_be_bytes(), "count");
         assert_eq!(&b[4..12], &[0, 0, 0, 4, 0, 0, 0, 7], "counter");

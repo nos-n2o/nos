@@ -29,7 +29,7 @@ use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
 use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnRoute};
 use crate::vpn::VpnKey;
 use ipnet::IpNet;
-use nos_proto::{BmpFrameCounts, BmpMonitor, BmpStationState, BmpStationStatus};
+use nos_proto::{BmpFrameCounts, BmpMonitor, BmpMonitorOut, BmpStationState, BmpStationStatus};
 
 /// BMP version 3 (RFC 7854 section 4.1).
 pub const BMP_VERSION: u8 = 3;
@@ -67,6 +67,38 @@ const FLAG_V: u8 = 0x80;
 const FLAG_A: u8 = 0x20;
 /// L: the message is post-policy (RFC 7854 section 4.2).
 const FLAG_L: u8 = 0x40;
+/// O: Adj-RIB-Out, not Adj-RIB-In (RFC 8671 section 4; IANA flag 3, the
+/// fourth bit from the MSB: V L A O). Only Route Monitoring sets it.
+const FLAG_O: u8 = 0x10;
+
+/// The per-peer header flags (RFC 7854 section 4.2, RFC 8671 section 4).
+#[allow(clippy::struct_excessive_bools, reason = "the four wire flag bits")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flags {
+    /// V: the peer address is IPv6.
+    pub v: bool,
+    /// L: post-policy.
+    pub l: bool,
+    /// A: the PDU uses 2-octet AS numbers.
+    pub a: bool,
+    /// O: Adj-RIB-Out. Reserved bits are always 0.
+    pub o: bool,
+}
+
+impl Flags {
+    /// The flags byte.
+    pub fn byte(self) -> u8 {
+        [
+            (self.v, FLAG_V),
+            (self.l, FLAG_L),
+            (self.a, FLAG_A),
+            (self.o, FLAG_O),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |b, (_, bit)| b | bit)
+    }
+}
 
 /// Peer Down reasons (RFC 7854 section 4.9), with their data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,20 +217,20 @@ fn put_addr(b: &mut BytesMut, addr: IpAddr) {
 }
 
 impl PeerUpInfo {
-    /// The 42-byte per-peer header (RFC 7854 section 4.2).
-    fn put_header(&self, b: &mut BytesMut, scope: &Scope, time: Duration, a: bool, post: bool) {
+    /// The 42-byte per-peer header (RFC 7854 section 4.2). `a`: A flag,
+    /// `post`: L flag, `out`: O flag (Adj-RIB-Out, Route Monitoring only).
+    fn put_header(&self, b: &mut BytesMut, scope: &Scope, time: Duration, fl: (bool, bool, bool)) {
+        let (a, post, out) = fl;
         b.put_u8(scope.peer_type);
-        let mut flags = 0;
-        if self.peer.is_ipv6() {
-            flags |= FLAG_V;
-        }
-        if a {
-            flags |= FLAG_A;
-        }
-        if post {
-            flags |= FLAG_L;
-        }
-        b.put_u8(flags);
+        b.put_u8(
+            Flags {
+                v: self.peer.is_ipv6(),
+                l: post,
+                a,
+                o: out,
+            }
+            .byte(),
+        );
         b.put_slice(&scope.distinguisher);
         put_addr(b, self.peer);
         b.put_u32(self.asn);
@@ -229,7 +261,7 @@ pub fn termination(reason: u16) -> Bytes {
 /// Peer Up (section 4.10).
 pub fn peer_up(scope: &Scope, p: &PeerUpInfo) -> Bytes {
     let mut b = BytesMut::new();
-    p.put_header(&mut b, scope, p.time, p.two_octet_as, false);
+    p.put_header(&mut b, scope, p.time, (p.two_octet_as, false, false));
     put_addr(&mut b, p.local);
     b.put_u16(p.local_port);
     b.put_u16(p.remote_port);
@@ -241,7 +273,7 @@ pub fn peer_up(scope: &Scope, p: &PeerUpInfo) -> Bytes {
 /// Peer Down (section 4.9).
 pub fn peer_down(scope: &Scope, p: &PeerUpInfo, reason: &DownReason, time: Duration) -> Bytes {
     let mut b = BytesMut::new();
-    p.put_header(&mut b, scope, time, p.two_octet_as, false);
+    p.put_header(&mut b, scope, time, (p.two_octet_as, false, false));
     b.put_u8(reason.code());
     match reason {
         DownReason::LocalNotification(pdu) | DownReason::RemoteNotification(pdu) => {
@@ -277,6 +309,8 @@ pub struct StationCfg {
     pub monitor: BmpMonitor,
     /// Seconds between Statistics Reports; `None` = none.
     pub statistics_interval: Option<u32>,
+    /// Which Adj-RIB-Out views this station gets (RFC 8671).
+    pub monitor_out: BmpMonitorOut,
 }
 
 impl StationCfg {
@@ -420,6 +454,9 @@ pub struct Hub {
     /// the UPDATE path when no station does.
     pre_on: AtomicBool,
     post_on: AtomicBool,
+    /// Same for the Adj-RIB-Out streams (RFC 8671).
+    out_pre_on: AtomicBool,
+    out_post_on: AtomicBool,
     rib: Mutex<Weak<SharedRib>>,
 }
 
@@ -457,6 +494,54 @@ impl Hub {
     /// Some station wants the post-policy stream (the RIB tap's cheap gate).
     pub fn post_enabled(&self) -> bool {
         self.post_on.load(Ordering::Relaxed)
+    }
+
+    /// Some station wants the pre-policy (`false`) or post-policy (`true`)
+    /// Adj-RIB-Out stream: the one atomic check the wire and RIB hooks make.
+    pub fn out_enabled(&self, post: bool) -> bool {
+        let on = if post {
+            &self.out_post_on
+        } else {
+            &self.out_pre_on
+        };
+        on.load(Ordering::Relaxed)
+    }
+
+    /// Whether `peer` is reported up (its Adj-RIB-Out can be monitored).
+    pub fn is_up(&self, peer: IpAddr) -> bool {
+        lock(&self.state).registry.contains_key(&peer)
+    }
+
+    /// Queues the Adj-RIB-Out frames of `pdus` for `peer` on every station
+    /// that wants that stream. A peer not reported up is skipped.
+    fn emit_out(&self, peer: IpAddr, post: bool, a: bool, pdus: &[u8]) {
+        let st = lock(&self.state);
+        let Some(info) = st.registry.get(&peer) else {
+            return;
+        };
+        let frames = monitor::out_frames(&st.scope, info, post, a, pdus, now());
+        for s in st
+            .stations
+            .values()
+            .filter(|s| s.cfg.monitor_out.wants(post))
+        {
+            for f in &frames {
+                s.shared.push(f.clone(), Kind::Route);
+            }
+        }
+    }
+
+    /// The post-policy Adj-RIB-Out stream: `pdus` are the BGP PDUs just
+    /// encoded for `peer`'s wire (same codec settings), `a` = that codec's
+    /// 2-octet-AS flag. Called from the FSM's writer, never under a lock.
+    pub fn route_out_wire(&self, peer: IpAddr, a: bool, pdus: &[u8]) {
+        self.emit_out(peer, true, a, pdus);
+    }
+
+    /// The pre-policy Adj-RIB-Out stream: a candidate announcement or
+    /// withdrawal (built by [`monitor::pre_out_update`]). Called from the RIB.
+    pub fn route_out_pre(&self, peer: IpAddr, update: &UpdateMessage) {
+        self.emit_out(peer, false, false, &monitor::encode_plain(update));
     }
 
     /// Points the initial dump at the RIB it reads (a `Weak`: the RIB owns
@@ -569,6 +654,14 @@ impl Hub {
                 .store(want.iter().any(|c| c.wants(false)), Ordering::Relaxed);
             self.post_on
                 .store(want.iter().any(|c| c.wants(true)), Ordering::Relaxed);
+            self.out_pre_on.store(
+                want.iter().any(|c| c.monitor_out.wants(false)),
+                Ordering::Relaxed,
+            );
+            self.out_post_on.store(
+                want.iter().any(|c| c.monitor_out.wants(true)),
+                Ordering::Relaxed,
+            );
             let names: Vec<_> = want.iter().map(|c| c.name.clone()).collect();
             let stale: Vec<_> = st
                 .stations
@@ -872,6 +965,52 @@ mod tests {
             time: Duration::new(7, 9000),
             add_path_afis: HashSet::new(),
         }
+    }
+
+    #[test]
+    fn flags_byte_covers_all_sixteen_combinations_and_keeps_reserved_bits_zero() {
+        for n in 0u8..16 {
+            let f = Flags {
+                v: n & 8 != 0,
+                l: n & 4 != 0,
+                a: n & 2 != 0,
+                o: n & 1 != 0,
+            };
+            let want = (n & 8) << 4 | (n & 4) << 4 | (n & 2) << 4 | (n & 1) << 4;
+            assert_eq!(f.byte(), want, "{f:?}");
+            assert_eq!(f.byte() & 0x0f, 0, "reserved bits");
+        }
+        assert_eq!(
+            Flags {
+                o: true,
+                ..Flags::default()
+            }
+            .byte(),
+            0x10,
+            "RFC 8671 O"
+        );
+    }
+
+    #[test]
+    fn only_route_monitoring_sets_o() {
+        let p = info("192.0.2.1", "192.0.2.2");
+        let sc = Scope::default();
+        let flags = |m: &Bytes| m[6 + 1];
+        assert_eq!(flags(&peer_up(&sc, &p)) & 0x10, 0);
+        assert_eq!(
+            flags(&peer_down(
+                &sc,
+                &p,
+                &DownReason::RemoteClosed,
+                Duration::ZERO
+            )) & 0x10,
+            0
+        );
+        let pdu = bgp_pdu(BgpMessage::Keepalive);
+        let out = monitor::out_frames(&sc, &p, true, true, &pdu, Duration::ZERO);
+        assert_eq!(flags(&out[0]), 0x10 | 0x40 | 0x20, "O, L and A");
+        let pre = monitor::out_frames(&sc, &p, false, false, &pdu, Duration::ZERO);
+        assert_eq!(flags(&pre[0]), 0x10, "O only");
     }
 
     #[test]

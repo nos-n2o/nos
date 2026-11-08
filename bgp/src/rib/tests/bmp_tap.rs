@@ -47,6 +47,7 @@ async fn setup() -> (BgpRib, Arc<Hub>, TcpStream) {
         scope: Scope::default(),
         monitor: nos_proto::BmpMonitor::PostPolicy,
         statistics_interval: None,
+        monitor_out: nos_proto::BmpMonitorOut::None,
     }])
     .await;
     let (mut c, _) = listener.accept().await.unwrap();

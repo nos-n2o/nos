@@ -69,6 +69,26 @@ impl From<BmpMonitorArg> for nos_proto::BmpMonitor {
     }
 }
 
+/// Clap-facing mirror of `bmp-station ... monitor-out`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum BmpMonitorOutArg {
+    None,
+    PrePolicy,
+    PostPolicy,
+    Both,
+}
+
+impl From<BmpMonitorOutArg> for nos_proto::BmpMonitorOut {
+    fn from(m: BmpMonitorOutArg) -> Self {
+        match m {
+            BmpMonitorOutArg::None => nos_proto::BmpMonitorOut::None,
+            BmpMonitorOutArg::PrePolicy => nos_proto::BmpMonitorOut::PrePolicy,
+            BmpMonitorOutArg::PostPolicy => nos_proto::BmpMonitorOut::PostPolicy,
+            BmpMonitorOutArg::Both => nos_proto::BmpMonitorOut::Both,
+        }
+    }
+}
+
 /// Clap-facing mirror of `spanning-tree force-version`.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum StpForceVersionArg {
@@ -607,6 +627,11 @@ pub struct Args {
     /// The policy view every `--bmp-station` monitors (default `both`).
     #[arg(long, value_enum)]
     pub bmp_monitor: Option<BmpMonitorArg>,
+
+    /// The Adj-RIB-Out views (RFC 8671) every `--bmp-station` monitors
+    /// (default `none`).
+    #[arg(long, value_enum)]
+    pub bmp_monitor_out: Option<BmpMonitorOutArg>,
 
     /// Seconds between Statistics Reports on every `--bmp-station`.
     #[arg(long)]
@@ -2943,6 +2968,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 port: station.port(),
                 monitor: args.bmp_monitor.map_or_else(Default::default, Into::into),
                 statistics_interval: args.bmp_statistics_interval,
+                monitor_out: args
+                    .bmp_monitor_out
+                    .map_or_else(Default::default, Into::into),
             },
         }));
     }
@@ -4379,6 +4407,29 @@ mod tests {
         assert_eq!(
             monitors(&["--bmp-monitor", "pre-policy"]),
             [nos_proto::BmpMonitor::PrePolicy]
+        );
+    }
+
+    #[test]
+    fn bmp_monitor_out_flag_sets_every_station_and_defaults_to_none() {
+        let outs = |extra: &[&str]| {
+            let mut a = vec!["--bmp-station", "192.0.2.5:5000"];
+            a.extend_from_slice(extra);
+            ops(&a)
+                .unwrap()
+                .iter()
+                .filter_map(|o| match o {
+                    ConfigOp::BgpInstance(BgpInstanceOp::SetBmpStation { station, .. }) => {
+                        Some(station.monitor_out)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(outs(&[]), [nos_proto::BmpMonitorOut::None]);
+        assert_eq!(
+            outs(&["--bmp-monitor-out", "both"]),
+            [nos_proto::BmpMonitorOut::Both]
         );
     }
 

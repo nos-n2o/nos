@@ -49,7 +49,7 @@ of re-auditing the codebase. Update this file as items are implemented.
 
 ## Not implemented (confirmed zero hits)
 
-- **Messages/monitoring**: Adj-RIB-Out (#867); Initiation, Peer Up/Down, Termination (#878), Route Monitoring for every family, Statistics Reports (#864; no type 13) and `show bgp bmp` (#864) are done.
+- **Messages/monitoring**: Adj-RIB-Out pre-policy for EVPN/Flowspec/VPN, ADD-PATH ranked paths pre-policy, Statistics 16/17 for non-unicast families, Loc-RIB (RFC 9069), Out/In frame counters in `show bgp bmp`; Adj-RIB-Out (#867, RFC 8671) otherwise done; Initiation, Peer Up/Down, Termination (#878), Route Monitoring for every family, Statistics Reports (#864; no type 13) and `show bgp bmp` (#864) are done.
 - **Attributes**: ATOMIC_AGGREGATE, AGGREGATOR, COMMUNITIES, EXTENDED
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).

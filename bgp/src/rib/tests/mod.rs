@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 mod add_path;
 mod aggregate;
 mod blackhole;
+mod bmp_out;
 mod bmp_tap;
 mod confed;
 mod decision;

@@ -268,11 +268,25 @@ pub fn rib_withdraw_to_update(prefix: IpNet, id: u32, add_path: bool) -> UpdateM
     }
 }
 
-fn body(scope: &Scope, p: &PeerUpInfo, post: bool, ts: Duration, pdu: &[u8]) -> Bytes {
+fn body(scope: &Scope, p: &PeerUpInfo, fl: (bool, bool, bool), ts: Duration, pdu: &[u8]) -> Bytes {
     let mut b = BytesMut::with_capacity(42 + pdu.len());
-    p.put_header(&mut b, scope, ts, false, post);
+    p.put_header(&mut b, scope, ts, fl);
     b.extend_from_slice(pdu);
     frame(TYPE_ROUTE_MONITORING, &b)
+}
+
+/// Splits a buffer of concatenated BGP PDUs.
+fn split_pdus(mut rest: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while rest.len() > PDU_LEN_AT + 2 {
+        let len = usize::from(u16::from_be_bytes([rest[PDU_LEN_AT], rest[PDU_LEN_AT + 1]]));
+        if len < 19 || len > rest.len() {
+            break;
+        }
+        out.push(&rest[..len]);
+        rest = &rest[len..];
+    }
+    out
 }
 
 /// Route Monitoring frames for `update`: one per BGP PDU the encoder needs
@@ -295,23 +309,53 @@ pub fn route_monitoring(
     {
         return Vec::new();
     }
-    let mut out = Vec::new();
-    let mut rest = &buf[..];
-    while rest.len() > PDU_LEN_AT + 2 {
-        let len = usize::from(u16::from_be_bytes([rest[PDU_LEN_AT], rest[PDU_LEN_AT + 1]]));
-        if len < 19 || len > rest.len() {
-            break;
-        }
-        out.push(body(scope, p, post, ts, &rest[..len]));
-        rest = &rest[len..];
-    }
-    out
+    split_pdus(&buf)
+        .into_iter()
+        .map(|pdu| body(scope, p, (false, post, false), ts, pdu))
+        .collect()
+}
+
+/// Adj-RIB-Out Route Monitoring (RFC 8671, O = 1) frames for `pdus`, the
+/// concatenated BGP PDUs exactly as encoded for the wire (`post`, L = 1) or
+/// for a pre-policy candidate (L = 0). `a` is the A flag of those bytes.
+pub fn out_frames(
+    scope: &Scope,
+    p: &PeerUpInfo,
+    post: bool,
+    a: bool,
+    pdus: &[u8],
+    ts: Duration,
+) -> Vec<Bytes> {
+    split_pdus(pdus)
+        .into_iter()
+        .map(|pdu| body(scope, p, (a, post, true), ts, pdu))
+        .collect()
+}
+
+/// The pre-policy Adj-RIB-Out UPDATE of `prefix` (RFC 8671 section 5.2): the
+/// Loc-RIB route as stored, next hop zero (not known before export policy).
+pub fn pre_out_update(prefix: IpNet, route: &RibRoute) -> UpdateMessage {
+    let mut r = route.clone();
+    r.next_hop = None;
+    rib_route_to_update(prefix, 0, &r, false)
+}
+
+/// The pre-policy Adj-RIB-Out withdrawal of `prefix`.
+pub fn pre_out_withdraw(prefix: IpNet) -> UpdateMessage {
+    rib_withdraw_to_update(prefix, 0, false)
+}
+
+/// The concatenated 4-octet-AS PDUs of `update`, no ADD-PATH (pre-policy Out).
+pub fn encode_plain(update: &UpdateMessage) -> Bytes {
+    let mut buf = BytesMut::new();
+    let _ = BgpCodec::default().encode(BgpMessage::Update(update.clone()), &mut buf);
+    buf.freeze()
 }
 
 /// A per-peer End-of-RIB marker (RFC 4724 form) for `afi`/`safi`.
 pub fn end_of_rib(scope: &Scope, p: &PeerUpInfo, post: bool, afi: u16, safi: u8) -> Bytes {
     let pdu = super::bgp_pdu(BgpMessage::EndOfRib { afi, safi });
-    body(scope, p, post, super::now(), &pdu)
+    body(scope, p, (false, post, false), super::now(), &pdu)
 }
 
 #[cfg(test)]
@@ -677,5 +721,47 @@ mod tests {
         assert!(frames.len() > 1);
         let n: usize = frames.iter().map(|f| decode(f).nlri.len()).sum();
         assert_eq!(n, 2000);
+    }
+
+    #[test]
+    fn pre_out_update_zeroes_the_next_hop_and_withdraws() {
+        let r = route(Some("192.0.2.9"));
+        let u = pre_out_update("10.0.0.0/8".parse().unwrap(), &r);
+        assert_eq!(u.attributes.unwrap().next_hop, Ipv4Addr::UNSPECIFIED);
+        let u6 = pre_out_update("2001:db8::/32".parse().unwrap(), &r);
+        assert_eq!(
+            u6.mp_reach[0].next_hop,
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        );
+        let w = pre_out_withdraw("10.0.0.0/8".parse().unwrap());
+        assert_eq!(w.withdrawn_routes.len(), 1);
+    }
+
+    #[test]
+    fn out_frames_carry_the_wire_pdu_byte_for_byte() {
+        // A 2-octet-AS session: the PDU is the 2-byte encoding, A = 1.
+        let u = rib_route_to_update(
+            "10.1.0.0/16".parse().unwrap(),
+            0,
+            &route(Some("192.0.2.2")),
+            false,
+        );
+        let mut codec = BgpCodec {
+            two_octet_as: true,
+            ..Default::default()
+        };
+        let mut wire = BytesMut::new();
+        codec.encode(BgpMessage::Update(u), &mut wire).unwrap();
+        let f = out_frames(
+            &Scope::default(),
+            &peer("192.0.2.2", &[]),
+            true,
+            true,
+            &wire,
+            Duration::ZERO,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(&f[0][6 + 42..], &wire[..]);
+        assert_eq!(f[0][7], 0x10 | 0x40 | 0x20);
     }
 }

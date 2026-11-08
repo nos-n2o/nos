@@ -988,10 +988,16 @@ Not yet exported: RT-Constraint routes (post-policy and dump), Adj-RIB-Out (#867
   - EVPN, Flowspec and VPN routes are rebuilt from the stored route. EVPN keeps neither `ORIGIN` nor `AS_PATH`, so its PDU says IGP with an empty path; the VPN codec writes the first label of a stack only.
   - A peer's own End-of-RIB is forwarded on both streams, so a session that comes up after the collector connected gets its markers.
   - PDUs are re-encoded with 4-byte `AS_PATH` (A flag always 0, no `AS4_PATH`); unknown attributes and the RFC 8097 community are not reproduced. A withdraw carries the L flag of the stream it belongs to.
+- Adj-RIB-Out (RFC 8671, #867): `set bmp-station col1 monitor-out none|pre-policy|post-policy|both` (default `none`: it costs one extra encode per advertised prefix of every monitored peer). A change restarts that station and re-sends everything, as RFC 8671 section 7.2 requires. The peer address, AS and BGP ID are the remote peer's (the one the UPDATE is sent to); the O flag marks the frames.
+  - Post-policy (O and L set): exactly the UPDATE put on the wire, after export policy, rewrite and the MRAI timer, every family; the A flag is the session's 2-octet-AS flag and ADD-PATH path ids are present as sent. An End-of-RIB sent to the peer is mirrored.
+  - Pre-policy (O set, L clear): the Loc-RIB candidates for that peer before export policy, so a prefix the export policy rejects shows up here and never post-policy. IPv4/IPv6 unicast only; attributes as stored (no export prepend), next hop `0.0.0.0` / `::` (not known before export), best path only on an ADD-PATH session.
+  - On connect, per peer: what the peer is sent now (rebuilt from the RIB, not a stored copy: an announcement still held by MRAI appears as current state and is sent again when released), then the pre-policy candidates, then an O=1 End-of-RIB per negotiated family (unicast only for pre-policy). Log: `bmp adj-rib-out dump sent peer=<ip> pre=<n> post=<n>`.
+  - Show-bgp-bmp frame counters do not separate Out frames from In frames yet.
 - Statistics Reports: `set bmp-station col1 statistics-interval 30` (1 to 86400 seconds; unset = none). Every interval the router sends one report per Established peer; a change restarts that station.
   - Counters (reset when the session comes up, gone with it): rejected by inbound policy (type 0, per prefix, also EVPN, Flowspec and VPN), duplicate advertisements (1), withdraws of a path not held (2), updates dropped for a `CLUSTER_LIST` loop (3), an `AS_PATH` loop (4), our own `ORIGINATOR_ID` (5), an `AS_CONFED` loop (6), updates (11) and prefixes (12) treated as withdraw (RFC 7606 parse errors, an unusable next hop, a stray confederation segment).
   - Gauges: Adj-RIB-In routes, all families (7); Loc-RIB routes (8); Adj-RIB-In per negotiated AFI/SAFI (9); Loc-RIB per IPv4/IPv6 unicast (10).
-  - Not sent: type 13 (duplicate update messages) and the Adj-RIB-Out gauges (#867).
+  - Adj-RIB-Out gauges (#867, only with `monitor-out`): pre-policy (14, and per IPv4/IPv6 unicast 16) and post-policy (15, and per IPv4/IPv6 unicast 17), carried in a report with the O flag clear.
+  - Not sent: type 13 (duplicate update messages).
 - Check: `bmp station connected` / `bmp peer up sent` / `bmp rib dump sent` / `bmp end-of-rib sent` in `show log`. `bmp statistics sent` marks each report. 
 - `show bgp bmp` (`GET /v1/bgp/bmp`) shows each station per instance:
   - State: `Connecting`, `Connected` or `Backoff` (waiting out the reconnect delay), plus `last-error` after a failed dial or lost connection.

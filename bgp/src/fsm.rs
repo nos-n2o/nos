@@ -1186,6 +1186,7 @@ async fn send_outbound(
     writer: &mut SessionWriter,
     mrai: &mut crate::mrai::Mrai,
     update: OutboundUpdate,
+    out: (&crate::bmp::Hub, IpAddr),
 ) {
     // RFC 7313 EoRR and RFC 4724 End-of-RIB must follow every
     // route they close, so release anything MRAI holds first.
@@ -1197,14 +1198,33 @@ async fn send_outbound(
         } | OutboundUpdate::EndOfRib(_)
     ) {
         for held in mrai.drain() {
-            if let Err(e) = writer.send(outbound_update_to_message(held)).await {
-                warn!(error = %e, "could not send update");
-            }
+            write_update(writer, out, held).await;
         }
     }
-    if let Some(update) = mrai.push(update, Instant::now())
-        && let Err(e) = writer.send(outbound_update_to_message(update)).await
-    {
+    if let Some(update) = mrai.push(update, Instant::now()) {
+        write_update(writer, out, update).await;
+    }
+}
+
+/// The one place an UPDATE (or End-of-RIB) reaches the wire. When a BMP
+/// station wants the post-policy Adj-RIB-Out (RFC 8671, L = 1, O = 1) the
+/// same message is encoded a second time with the writer's own codec settings,
+/// so the monitored bytes are those of the wire, after MRAI and coalescing.
+async fn write_update(
+    writer: &mut SessionWriter,
+    (hub, peer): (&crate::bmp::Hub, IpAddr),
+    update: OutboundUpdate,
+) {
+    let msg = outbound_update_to_message(update);
+    if hub.out_enabled(true) && matches!(msg, BgpMessage::Update(_) | BgpMessage::EndOfRib { .. }) {
+        let mut codec = writer.encoder().clone();
+        let a = codec.two_octet_as;
+        let mut buf = bytes::BytesMut::new();
+        if tokio_util::codec::Encoder::encode(&mut codec, msg.clone(), &mut buf).is_ok() {
+            hub.route_out_wire(peer, a, &buf);
+        }
+    }
+    if let Err(e) = writer.send(msg).await {
         warn!(error = %e, "could not send update");
     }
 }
@@ -1743,7 +1763,7 @@ pub async fn run(
                     break 'session FsmOutcome::GrReplaced;
                 }
                 Some(update) = outbox_rx.recv() => {
-                    send_outbound(&mut writer, &mut mrai, update).await;
+                    send_outbound(&mut writer, &mut mrai, update, (bgp_rib.bmp(), peer.remote_address)).await;
                     resync_outbox(&cx, &outbox_rx).await;
                     continue;
                 }
@@ -1759,9 +1779,7 @@ pub async fn run(
                 }
                 () = sleep_until_opt(mrai.deadline()) => {
                     for update in mrai.flush(Instant::now()) {
-                        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
-                            warn!(error = %e, "could not send update");
-                        }
+                        write_update(&mut writer, (bgp_rib.bmp(), peer.remote_address), update).await;
                     }
                     continue;
                 }
@@ -1823,6 +1841,10 @@ pub async fn run(
                     time: crate::bmp::now(),
                     add_path_afis: reader.decoder_mut().add_path_afis.clone(),
                 });
+                if bgp_rib.bmp().out_enabled(false) {
+                    // The initial update ran before the hub knew the peer.
+                    bgp_rib.lock().await.bmp_pre_out_sync(peer.remote_address);
+                }
             }
 
             if let Some(s) = next_state {
@@ -1864,7 +1886,7 @@ pub async fn run(
 /// family, since the same IPv4 prefix is encoded differently depending on
 /// what the destination peer negotiated.
 #[allow(clippy::too_many_lines, reason = "one arm per OutboundUpdate variant")]
-fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
+pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
     match update {
         OutboundUpdate::Announce(route) if route.use_mp => {
             let path_ids = route.path_id.map_or_else(Vec::new, |id| vec![id]);

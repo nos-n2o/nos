@@ -581,6 +581,8 @@ topics! {
     BgpInstanceBmpStationMonitor,
     /// `BmpStation.statistics_interval`
     BgpInstanceBmpStationStatisticsInterval,
+    /// `BmpStation.monitor_out`
+    BgpInstanceBmpStationMonitorOut,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

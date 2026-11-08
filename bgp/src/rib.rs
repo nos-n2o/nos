@@ -102,6 +102,7 @@ pub use stats::{LocTotals, PeerStats};
 
 mod adj_in;
 mod aggregate;
+mod bmp_out;
 mod bmp_tap;
 mod decision;
 mod evpn_out;
@@ -130,8 +131,8 @@ pub use vpn_out::AdvertisedVpn;
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
 pub use decision::Hops;
 use decision::{
-    best_index, best_path, build_advertisement, igp_lookup, multipath_next_hops, origin_rank,
-    otc_leak, rank, redistributed_route, runner_up_next_hop, Candidate,
+    best_index, best_path, build_advertisement, eligibility, igp_lookup, multipath_next_hops,
+    origin_rank, otc_leak, rank, redistributed_route, runner_up_next_hop, Candidate,
 };
 pub use flowspec_validate::{FlowValidity, InvalidReason};
 
@@ -881,6 +882,9 @@ pub struct BgpRib {
     maximum_paths: usize,
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
+    /// BMP pre-policy Adj-RIB-Out (#867): the prefixes announced to a
+    /// collector per monitored peer; only filled while a station wants it.
+    bmp_pre_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
     /// Each peer's negotiated remote ASN (see `set_peer_asn`), for RPL's
     /// `this.bgp.peer_as`. Kept across resets like damping params.
@@ -991,6 +995,7 @@ impl BgpRib {
             multipaths: HashMap::new(),
             maximum_paths: 1,
             adj_rib_out: HashMap::new(),
+            bmp_pre_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
             peer_asns: HashMap::new(),
             add_path_sent: HashMap::new(),
@@ -1707,6 +1712,7 @@ impl BgpRib {
         // keeping it); keep entries across resets to damp session flaps too.
         self.damping.clear_peer(peer);
         self.adj_rib_out.remove(&peer);
+        self.bmp_pre_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
         self.vpn_adj_rib_out.remove(&peer);
@@ -2006,6 +2012,7 @@ impl BgpRib {
             .get(&prefix)
             .is_some_and(|r| self.source_is_rr_client(r));
         let best = self.loc_rib.get(&prefix);
+        let pre_out = self.bmp.as_deref().filter(|h| h.out_enabled(false));
         // Reused across calls (see `peer_scratch`'s doc comment) instead of
         // collecting a fresh Vec on every touched prefix.
         let mut peers = std::mem::take(&mut self.peer_scratch);
@@ -2013,6 +2020,18 @@ impl BgpRib {
         peers.extend(self.peer_outboxes.keys().copied());
         for &peer in &peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
+            if let Some(hub) = pre_out.filter(|h| h.is_up(peer)) {
+                let cand = best.filter(|_| !suppressed).filter(|r| {
+                    eligibility(family_of(prefix), r, peer, outbox, source_is_rr_client).is_some()
+                });
+                bmp_out::pre_step(
+                    hub,
+                    self.bmp_pre_out.entry(peer).or_default(),
+                    peer,
+                    prefix,
+                    cand,
+                );
+            }
             if outbox.add_path_tx.contains(&family_of(prefix)) {
                 continue; // `propagate_add_path`'s, every NLRI needs an id
             }

@@ -621,6 +621,7 @@ fn station(port: u16) -> nos_proto::BmpStation {
         port,
         monitor: nos_proto::BmpMonitor::Both,
         statistics_interval: None,
+        monitor_out: nos_proto::BmpMonitorOut::None,
     }
 }
 
@@ -695,6 +696,7 @@ async fn bmp_queue_overflow_resyncs_the_station() {
         scope: nos_bgp::bmp::Scope::default(),
         monitor: nos_proto::BmpMonitor::Both,
         statistics_interval: None,
+        monitor_out: nos_proto::BmpMonitorOut::None,
     }])
     .await;
     let (mut c, _) = collector.accept().await.unwrap();
@@ -818,8 +820,12 @@ async fn bmp_dump_and_incremental_updates_on_both_streams() {
         .apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
         .await;
     let mut seen = [false; 2];
-    for _ in 0..2 {
+    while seen != [true, true] {
         let (is_post, msg) = bmp_route(&mut c).await;
+        // A late End-of-RIB of the peer's own (a pre-existing race) is not a withdraw.
+        if matches!(msg, BgpMessage::EndOfRib { .. }) {
+            continue;
+        }
         assert!(
             matches!(&msg, BgpMessage::Update(upd) if upd.withdrawn_routes.len()
                 + upd.mp_unreach.iter().map(|msg| msg.withdrawn.len()).sum::<usize>() == 1),
@@ -1019,6 +1025,163 @@ async fn bmp_statistics_report_every_interval() {
         assert_eq!(val(0), Some(1u32.to_be_bytes().to_vec()), "rejected");
         assert_eq!(val(7), Some(0u64.to_be_bytes().to_vec()), "Adj-RIB-In");
         assert!(stats.iter().any(|s| s.0 == 9 && s.1.len() == 11));
+    }
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}
+
+/// The next `n` Adj-RIB-Out Route Monitoring frames (O = 1) off the fake
+/// collector, as (L, A, message); anything else is skipped.
+async fn bmp_out_frames(
+    s: &mut tokio::net::TcpStream,
+    n: usize,
+) -> Vec<(bool, bool, nos_bgp::message::BgpMessage)> {
+    use tokio_util::codec::Decoder;
+    let mut out = Vec::new();
+    while out.len() < n {
+        let (t, body) = bmp_frame(s).await;
+        if t != 0 || body[1] & 0x10 == 0 {
+            continue;
+        }
+        let mut b = bytes::BytesMut::from(&body[42..]);
+        let msg = nos_bgp::message::BgpCodec::default()
+            .decode(&mut b)
+            .unwrap()
+            .expect("a whole PDU");
+        out.push((body[1] & 0x40 != 0, body[1] & 0x20 != 0, msg));
+    }
+    out
+}
+
+fn announces(msg: &nos_bgp::message::BgpMessage, prefix: &str) -> bool {
+    let p: ipnet::IpNet = prefix.parse().unwrap();
+    matches!(msg, nos_bgp::message::BgpMessage::Update(u)
+        if u.nlri.iter().any(|n| IpAddr::from(n.addr()) == p.addr())
+            || u.mp_reach.iter().any(|m| m.nlri.contains(&p)))
+}
+
+/// #867: RFC 8671 Adj-RIB-Out: the connect-time dump (both views, each closed
+/// by an O = 1 End-of-RIB), the wire increment and withdrawal, and a
+/// `monitor-out` change reconnecting the station with only the new view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_adj_rib_out_dump_increments_and_mode_change() {
+    use nos_bgp::message::BgpMessage;
+    use nos_proto::BmpMonitorOut::{Both, PostPolicy};
+    let station_out = |port, out| nos_proto::BmpStation {
+        monitor_out: out,
+        ..station(port)
+    };
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    let route = |p: &str| RedistributedRoute {
+        prefix: p.parse().unwrap(),
+        gateway: "10.0.0.9".parse().unwrap(),
+    };
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![route("198.51.100.0/24")]))
+        .await;
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    b.apply(vec![unicast_only(peer(A, B, 65001))]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    a.wait_for(BgpSessionState::Established).await;
+    eventually("b learns the route", || async {
+        b.manager.peer_summaries().await[0].accepted_prefixes == Some([1, 0, 0])
+    })
+    .await;
+
+    a.manager
+        .set_bmp_stations(&[station_out(port, Both)], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    // Dump: post update, pre update, then one End-of-RIB per view.
+    let dump = bmp_out_frames(&mut c, 4).await;
+    let routes: Vec<_> = dump
+        .iter()
+        .filter(|f| announces(&f.2, "198.51.100.0/24"))
+        .collect();
+    assert_eq!(routes.len(), 2, "{dump:?}");
+    assert!(
+        routes.iter().any(|f| f.0) && routes.iter().any(|f| !f.0),
+        "both views"
+    );
+    let eors: Vec<_> = dump
+        .iter()
+        .filter(|f| matches!(f.2, BgpMessage::EndOfRib { afi: 1, safi: 1 }))
+        .collect();
+    assert_eq!(eors.len(), 2, "{dump:?}");
+    assert!(dump.iter().all(|f| !f.1), "4-octet AS session: A clear");
+
+    // Withdrawal: pre-policy candidate gone, and the wire withdrawal.
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
+        .await;
+    let gone = bmp_out_frames(&mut c, 2).await;
+    assert!(
+        gone.iter().any(|f| f.0) && gone.iter().any(|f| !f.0),
+        "{gone:?}"
+    );
+    assert!(gone.iter().all(|f| matches!(&f.2, BgpMessage::Update(u)
+        if u.withdrawn_routes.len() + u.mp_unreach.iter().map(|m| m.withdrawn.len()).sum::<usize>() == 1)));
+
+    // RFC 8671 section 7.2: a mode change bounces the session, new view only.
+    a.manager
+        .set_bmp_stations(&[station_out(port, PostPolicy)], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    let dump = bmp_out_frames(&mut c, 1).await;
+    assert!(
+        dump[0].0 && matches!(dump[0].2, BgpMessage::EndOfRib { .. }),
+        "{dump:?}"
+    );
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![route("203.0.113.0/24")]))
+        .await;
+    let inc = bmp_out_frames(&mut c, 1).await;
+    assert!(
+        inc[0].0 && announces(&inc[0].2, "203.0.113.0/24"),
+        "{inc:?}"
+    );
+    // Nothing else Out: the pre-policy view is off.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), bmp_out_frames(&mut c, 1))
+            .await
+            .is_err()
+    );
+    a.manager.shutdown().await;
+    b.manager.shutdown().await;
+}
+
+/// #867: a peer that comes up after the station connected: the pre-policy
+/// candidates are announced by the peer-up sync, the post-policy ones by the
+/// wire hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bmp_adj_rib_out_follows_a_peer_that_comes_up_later() {
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = collector.local_addr().unwrap().port();
+    let (a, b, _) = routers();
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix: "198.51.100.0/24".parse().unwrap(),
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    a.apply(vec![]).await; // resolves the VRF, no peer yet
+    let mut st = station(port);
+    st.monitor_out = nos_proto::BmpMonitorOut::Both;
+    a.manager
+        .set_bmp_stations(&[st], Some("rt1".into()), None)
+        .await;
+    let (mut c, _) = collector.accept().await.unwrap();
+    assert_eq!(bmp_frame(&mut c).await.0, 4, "Initiation, no peer yet");
+    a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
+    b.apply(vec![unicast_only(peer(A, B, 65001))]).await;
+    let mut seen = [false; 2]; // [pre-policy, post-policy]
+    while seen != [true; 2] {
+        let f = bmp_out_frames(&mut c, 1).await.remove(0);
+        if announces(&f.2, "198.51.100.0/24") {
+            seen[usize::from(f.0)] = true;
+        }
     }
     a.manager.shutdown().await;
     b.manager.shutdown().await;

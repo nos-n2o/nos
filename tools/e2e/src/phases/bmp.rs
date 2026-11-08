@@ -284,7 +284,111 @@ async fn route_monitoring(w: &mut World, a_flags: &[String]) -> anyhow::Result<(
     w.a()?.provision_flags(&gone).await?;
     wait_route(w, true, "del", 0).await?;
     wait_route(w, false, "del", 0).await?;
+    adj_rib_out(w, a_flags).await?;
     other_families(w).await
+}
+
+/// A prefix router-a's export policy toward router-b rejects (#867).
+const DENIED_PREFIX: &str = "203.0.113.0/24";
+
+/// Needles of an Adj-RIB-Out unicast line of the collector (#867).
+fn out_line(prefix: &str, post: bool, action: &str) -> Vec<String> {
+    vec![
+        format!("\"prefix\":\"{}\"", prefix.split('/').next().unwrap_or("")),
+        "\"is_adj_rib_out\":true".to_string(),
+        format!("\"is_adj_rib_out_post_policy\":{post}"),
+        format!("\"action\":\"{action}\""),
+    ]
+}
+
+fn count_out(log: &str, prefix: &str, post: bool, action: &str) -> usize {
+    let n = out_line(prefix, post, action);
+    lines_with(log, &n.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+async fn wait_out(w: &World, prefix: &str, post: bool, action: &str) -> anyhow::Result<()> {
+    let n = out_line(prefix, post, action);
+    wait_collector(w, &n.iter().map(String::as_str).collect::<Vec<_>>(), 0).await
+}
+
+/// #867: RFC 8671 Adj-RIB-Out on router-a (`monitor-out both`): the prefix it
+/// advertises to router-b is seen pre- and post-policy, the prefix its export
+/// policy rejects pre-policy only, a withdrawal deletes both, and
+/// `monitor-out none` ends the Out stream.
+async fn adj_rib_out(w: &mut World, a_flags: &[String]) -> anyhow::Result<()> {
+    log("adj-rib-out: router-a monitors what it sends; the denied prefix is pre-policy only");
+    let file = super::bgp::policy_file(
+        "bmp-out-deny",
+        &format!("if this.prefix in {DENIED_PREFIX}:\n    reject\nelse:\n    accept\n"),
+    )?;
+    let mut flags = a_flags.to_vec();
+    flags.extend(strings(&super::bgp::redistribute()));
+    flags.extend(strings(&[
+        "--static-route",
+        DENIED_PREFIX,
+        "--policy-name",
+        "bmp-out-deny",
+        "--policy-source-file",
+        &file,
+        "--export-policy",
+        "bmp-out-deny",
+    ]));
+    let mut both = flags.clone();
+    both.extend(strings(&["--bmp-monitor-out", "both"]));
+    w.a()?.provision_flags(&both).await?;
+    wait_out(w, REDISTRIBUTE_PREFIX, true, "add").await?;
+    wait_out(w, REDISTRIBUTE_PREFIX, false, "add").await?;
+    wait_out(w, DENIED_PREFIX, false, "add").await?;
+    let gobmp = collector_log(w).await?;
+    if count_out(&gobmp, DENIED_PREFIX, true, "add") != 0 {
+        bail!("an export-denied prefix reached the collector post-policy:\n{gobmp}");
+    }
+
+    log("adj-rib-out: a mode change bounces the station and the dump rebuilds the current state");
+    // Established stays up: only the station restarts, so the connect-time
+    // dump has the peer. Candidates: both statics; sent: the allowed one.
+    let a = w.a()?;
+    let dump = format!("bmp adj-rib-out dump sent peer={IP_B}");
+    let (only_post, with_pre) = (
+        format!("{dump} pre=0 post=1"),
+        format!("{dump} pre=2 post=1"),
+    );
+    let (base_post, base_pre) = (a.count(&only_post), a.count(&with_pre));
+    let mut post_only = flags.clone();
+    post_only.extend(strings(&["--bmp-monitor-out", "post-policy"]));
+    a.provision_flags(&post_only).await?;
+    a.wait_new(&only_post, base_post, 90).await?;
+    a.provision_flags(&both).await?;
+    a.wait_new(&with_pre, base_pre, 90).await?;
+
+    log("adj-rib-out: withdrawing the advertised prefix deletes it on both views");
+    let mut gone = both.clone();
+    gone.extend(strings(&["--remove-static-route", REDISTRIBUTE_PREFIX]));
+    w.a()?.provision_flags(&gone).await?;
+    wait_out(w, REDISTRIBUTE_PREFIX, true, "del").await?;
+    wait_out(w, REDISTRIBUTE_PREFIX, false, "del").await?;
+
+    log("adj-rib-out: monitor-out none bounces the station and ends the Out stream");
+    let a = w.a()?;
+    let conn_base = a.count("bmp station connected");
+    let mut none = flags.clone();
+    none.extend(strings(&["--bmp-monitor-out", "none"]));
+    a.provision_flags(&none).await?;
+    a.wait_new("bmp station connected", conn_base, 90).await?;
+    let before = count_all_out(&collector_log(w).await?);
+    let mut again = none.clone();
+    again.extend(strings(&["--remove-static-route", DENIED_PREFIX]));
+    w.a()?.provision_flags(&again).await?;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let after = count_all_out(&collector_log(w).await?);
+    if after != before {
+        bail!("Adj-RIB-Out lines kept coming after monitor-out none ({before} -> {after})");
+    }
+    Ok(())
+}
+
+fn count_all_out(log: &str) -> usize {
+    lines_with(log, &["\"is_adj_rib_out\":true"])
 }
 
 /// #864: EVPN and VPNv4 routes of a GoBGP speaker peering router-a (the
