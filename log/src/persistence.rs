@@ -16,6 +16,11 @@ use crate::store::{entry_size, MAX_MEMORY_BYTES};
 /// paying a full rewrite on every single append.
 const COMPACT_FACTOR: usize = 2;
 
+/// Disk ceiling (#640): the file is also compacted once it passes this many
+/// bytes, so large entries cannot reach `capacity * 2` lines of gigabytes.
+/// Twice the tail window `compact` keeps; not configurable.
+const MAX_FILE_BYTES: u64 = 2 * MAX_MEMORY_BYTES as u64;
+
 /// Loads up to `capacity` most-recent entries from `path`, oldest-first, for
 /// seeding `LogStore` at startup. A missing file is not an error — the first
 /// run has nothing to load yet, exactly like `nos-config`'s
@@ -104,9 +109,15 @@ pub async fn run(
     if file.is_some() {
         info!(path = %path.display(), "log persistence started");
     }
-    let mut sink = file.map(|file| Sink {
-        lines_since_compact: count_lines(&path).unwrap_or(0),
-        file,
+    let mut sink = file.map(|file| {
+        let bytes_since_compact = file.metadata().map_or(0, |m| m.len());
+        Sink {
+            // ponytail: bounded count = lines in the tail window only; a file
+            // above MAX_FILE_BYTES is compacted on the first append.
+            lines_since_compact: count_lines(&path).unwrap_or(0),
+            bytes_since_compact,
+            file,
+        }
     });
 
     // Without a file, entries are just discarded so senders never block on a
@@ -129,6 +140,7 @@ pub async fn run(
 struct Sink {
     file: File,
     lines_since_compact: usize,
+    bytes_since_compact: u64,
 }
 
 /// Releases `entry`'s queue bytes and, if persistence is on, appends it
@@ -144,23 +156,30 @@ fn handle(
     let Some(Sink {
         file,
         lines_since_compact,
+        bytes_since_compact,
     }) = sink
     else {
         return;
     };
     match serde_json::to_string(entry) {
         Ok(line) => match writeln!(file, "{line}") {
-            Ok(()) => *lines_since_compact += 1,
+            Ok(()) => {
+                *lines_since_compact += 1;
+                *bytes_since_compact += line.len() as u64 + 1;
+            }
             Err(e) => warn!(error = %e, "failed to append to log store file"),
         },
         Err(e) => warn!(error = %e, "failed to serialize log entry for persistence"),
     }
 
-    if *lines_since_compact > capacity.saturating_mul(COMPACT_FACTOR) {
+    if *lines_since_compact > capacity.saturating_mul(COMPACT_FACTOR)
+        || *bytes_since_compact > MAX_FILE_BYTES
+    {
         match compact(path, capacity) {
             Ok(new_file) => {
+                *bytes_since_compact = new_file.metadata().map_or(0, |m| m.len());
                 *file = new_file;
-                *lines_since_compact = capacity;
+                *lines_since_compact = capacity.min(*lines_since_compact);
                 debug!(path = %path.display(), capacity, "compacted log store file");
             }
             Err(e) => warn!(error = %e, "failed to compact log store file"),
@@ -168,9 +187,12 @@ fn handle(
     }
 }
 
+/// Lines in the last `MAX_FILE_BYTES` of the file (bounded read).
 fn count_lines(path: &Path) -> std::io::Result<usize> {
-    let file = File::open(path)?;
-    Ok(BufReader::new(file).lines().count())
+    let mut file = File::open(path)?;
+    let start = file.metadata()?.len().saturating_sub(MAX_FILE_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    Ok(BufReader::new(file).lines().map_while(Result::ok).count())
 }
 
 /// Rewrites `path` keeping only its last `capacity` lines (via a temp file
@@ -311,6 +333,52 @@ mod tests {
         .expect("run must return on drain");
         assert_eq!(queued.load(Ordering::Relaxed), 0);
         drop(tx);
+    }
+
+    #[test]
+    fn bytes_threshold_compacts_few_large_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("e.jsonl");
+        let mut sink = Some(Sink {
+            file: OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            lines_since_compact: 0,
+            bytes_since_compact: MAX_FILE_BYTES,
+        });
+        // Far below capacity * 2 lines, but over the byte bound.
+        handle(
+            &mut sink,
+            &path,
+            1000,
+            &AtomicUsize::new(1 << 20),
+            &entry("x"),
+        );
+        assert!(sink.unwrap().bytes_since_compact < 1024);
+    }
+
+    #[test]
+    fn oversized_file_is_compacted_on_first_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("e.jsonl");
+        write_lines(&path, 10);
+        let file = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut sink = Some(Sink {
+            file,
+            lines_since_compact: count_lines(&path).unwrap(),
+            bytes_since_compact: MAX_FILE_BYTES + 1,
+        });
+        handle(
+            &mut sink,
+            &path,
+            3,
+            &AtomicUsize::new(1 << 20),
+            &entry("new"),
+        );
+        let kept = load_recent(&path, 100);
+        assert_eq!(msgs(&kept), ["m008", "m009", "new"]);
     }
 
     fn write_lines(path: &Path, n: usize) {
