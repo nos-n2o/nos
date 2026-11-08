@@ -7,10 +7,10 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 - `neighbor`, `election`: RFC 2328 §10.5 neighbor FSM and §9.4 DR/BDR election (identical in RFC 5340).
 - `ratelimit`: `WarnLimiter` (token bucket for peer-triggerable `warn!`s) and `MAX_NEIGHBORS_PER_LINK`.
 - `bfd`: `bfd_wanted`, the neighbor-state rule for which neighbors get a BFD session.
-- `drouters`: `AllDRouters` (idempotent AllDRouters join/leave on a `socket2::Socket`; `Iface` implies the family), `wants_all_drouters`, `ALL_D_ROUTERS_V4/V6`.
+- `drouters`: `AllDRouters` (idempotent AllDRouters join/leave on a `socket2::Socket`; `Iface` implies the family), `wants_all_drouters`, `ALL_D_ROUTERS_V4/V6`, `Dest` and `flood_dest` (where a flooded LSU/delayed LSAck goes, #879).
 - `lsa`: the `LsaHeader` and `Lsa` traits, `MAX_AGE`, and the RFC 2328 §13.1 `is_newer` ordering (a provided method of `LsaHeader`).
 - `lsdb`: the generic `Lsdb<L: Lsa>` store, `InstallOutcome`, `MIN_LS_ARRIVAL`, `MAX_AGE_HOLD_TICKS`.
-- `exchange`: the RFC 2328 §10.6-10.8 DBD exchange (`Dbd<H>`, `AdjacencyData<L>`, `Action<L>`, `Params`, `on_dbd_received`), LSR/LSU handling (`on_lsr_received`, `on_lsu_received`, `Stores`, `Scope`), the §13.5 delayed-ack queue (`take_pending_acks`), `on_lsack_received`, `mtu_based_max_headers`/`mtu_acceptable`.
+- `exchange`: the RFC 2328 §10.6-10.8 DBD exchange (`Dbd<H>`, `AdjacencyData<L>`, `Action<L>`, `Params`, `on_dbd_received`), LSR/LSU handling (`on_lsr_received`, `on_lsu_received`, `Stores`, `Scope`), the §13.5 delayed-ack queue (`take_pending_acks`, `take_all_pending_acks` for the broadcast-link multicast set), `on_lsack_received`, `mtu_based_max_headers`/`mtu_acceptable`.
 
 ## Rules
 

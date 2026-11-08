@@ -11,6 +11,7 @@ use super::{
 mod adjacency;
 mod areas;
 mod drouters;
+mod flood;
 mod grace;
 mod hello;
 mod lsa_origination;
@@ -198,6 +199,16 @@ pub mod wire {
 
     type Tx = mpsc::UnboundedSender<(Ipv4Addr, Vec<u8>)>;
 
+    /// Where a send goes on the wire.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum To {
+        /// 224.0.0.5: every other port on the net.
+        AllSpf,
+        /// 224.0.0.6: only ports that joined it.
+        AllD,
+        Unicast(Ipv4Addr),
+    }
+
     #[derive(Default)]
     pub struct Wire {
         ports: Mutex<Vec<(Ipv4Net, Ipv4Addr, Tx)>>,
@@ -209,6 +220,10 @@ pub mod wire {
         pub drouters: Mutex<std::collections::HashMap<Ipv4Addr, bool>>,
         /// Makes every 224.0.0.6 join/leave fail.
         pub fail_drouters: std::sync::atomic::AtomicBool,
+        /// Every send as (sender, destination, OSPF packet type byte).
+        pub sent: Mutex<Vec<(Ipv4Addr, To, u8)>>,
+        /// Sender addresses whose 224.0.0.6 sends fail.
+        pub fail_all_d: Mutex<HashSet<Ipv4Addr>>,
     }
 
     impl Wire {
@@ -264,17 +279,32 @@ pub mod wire {
             Ok(prev.unwrap_or(false) != want)
         }
 
-        pub fn send(&self, dest: Option<Ipv4Addr>, payload: &[u8]) {
+        pub fn send(&self, to: To, payload: &[u8]) -> std::io::Result<()> {
+            if to == To::AllD && self.wire.fail_all_d.lock().unwrap().contains(&self.addr) {
+                return Err(std::io::Error::other("injected"));
+            }
             if self.wire.cut.lock().unwrap().contains(&self.addr)
                 || (payload[1] == 1 && self.wire.drop_hellos.lock().unwrap().contains(&self.addr))
             {
-                return;
+                return Ok(());
             }
+            self.wire
+                .sent
+                .lock()
+                .unwrap()
+                .push((self.addr, to, payload[1]));
+            let joined = self.wire.drouters.lock().unwrap().clone();
             for (net, addr, tx) in self.wire.ports.lock().unwrap().iter() {
-                if *net == self.net && *addr != self.addr && dest.is_none_or(|d| d == *addr) {
+                let hears = match to {
+                    To::AllSpf => true,
+                    To::AllD => joined.get(addr).copied().unwrap_or(false),
+                    To::Unicast(d) => d == *addr,
+                };
+                if *net == self.net && *addr != self.addr && hears {
                     let _ = tx.send((self.addr, payload.to_vec()));
                 }
             }
+            Ok(())
         }
 
         pub async fn recv(&self) -> std::io::Result<(Ipv4Addr, Vec<u8>)> {

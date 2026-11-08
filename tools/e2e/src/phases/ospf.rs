@@ -477,6 +477,35 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
         10,
     )
     .await?;
+    // #879 (RFC 2328 §13.3): on the broadcast bridge the DROther floods to
+    // AllDRouters, the DR and BDR to AllSPFRouters.
+    c.wait(&format!(
+        "ospf lsu flood destination changed {link} dest=all-drouters"
+    ))
+    .await?;
+    for r in [a, b] {
+        r.wait(&format!(
+            "ospf lsu flood destination changed {link} dest=all-spf-routers"
+        ))
+        .await?;
+    }
+    // Data plane: router-c's new Router-LSA has no unicast path to the DR/BDR
+    // any more, so its arrival at both proves 224.0.0.6 delivery in the kernel.
+    let lsa_c = format!("ospf lsa installed.*advertising_router={OSPF_ROUTER_ID_C}");
+    let (a0, b0) = (a.count(&lsa_c), b.count(&lsa_c));
+    let mut flags = ospf_instance_only(OSPF_ROUTER_ID_C);
+    flags.extend(strings(&[
+        "--loopback-address",
+        OSPF_DR_LOOPBACK_ADDRESS_C,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ]));
+    c.provision_flags(&with_base(crate::router::C, flags))
+        .await?;
+    a.wait_new(&lsa_c, a0, 60).await?;
+    b.wait_new(&lsa_c, b0, 60).await?;
+    c.provision(&["--clear-ospf-loopback-profile"]).await?;
+
     // #139: router-c's eth0.0 subnet is connected in rt1 but not in OSPF, so
     // router-a/b advertise it to c as a stub and c's SPF computes an OSPF
     // route for it. The connected route wins: nos-ribd must leave the prefix
@@ -3543,6 +3572,32 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     b.wait(&joined).await?;
     a.wait(&joined).await?;
     c.assert_quiet(&joined, base_c, 10).await?;
+
+    // #879: as `ospf-dr`, over ff02::6 / ff02::5.
+    c.wait(&format!(
+        "ospfv3 lsu flood destination changed {link} dest=all-drouters"
+    ))
+    .await?;
+    for r in [a, b] {
+        r.wait(&format!(
+            "ospfv3 lsu flood destination changed {link} dest=all-spf-routers"
+        ))
+        .await?;
+    }
+    let lsa_c = format!("ospfv3 lsa installed.*advertising_router={OSPFV3_ROUTER_ID_C}");
+    let (a0, b0) = (a.count(&lsa_c), b.count(&lsa_c));
+    let mut flags = ospfv3_instance_only(OSPFV3_ROUTER_ID_C);
+    flags.extend(strings(&[
+        "--ospfv3-loopback-address",
+        OSPFV3_DR_LOOPBACK_ADDRESS_C,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]));
+    c.provision_flags(&with_base(crate::router::C, flags))
+        .await?;
+    a.wait_new(&lsa_c, a0, 60).await?;
+    b.wait_new(&lsa_c, b0, 60).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
 
     log("router-c holds only the bridge's own link-lsas (rfc 5340 §4.5.1)");
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;

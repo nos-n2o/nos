@@ -1330,3 +1330,30 @@ fn truncated_only_past_the_buffer() {
     assert!(!truncated(RECV_BUF_LEN, RECV_BUF_LEN));
     assert!(truncated(RECV_BUF_LEN + 1, RECV_BUF_LEN));
 }
+
+#[test]
+fn take_all_pending_acks_dedupes_drains_and_keeps_oldest_since() {
+    let t0 = Instant::now();
+    let t1 = t0 + std::time::Duration::from_secs(1);
+    let (h1, h2) = (header("1.0.0.1", SEQ1), header("1.0.0.2", SEQ1));
+    let mut a = AdjacencyData {
+        pending_acks: vec![h1, h2],
+        pending_acks_since: Some(t1),
+        ..Default::default()
+    };
+    let mut b = AdjacencyData {
+        pending_acks: vec![h1],
+        pending_acks_since: Some(t0),
+        ..Default::default()
+    };
+    let mut idle = AdjacencyData::default();
+    let (set, since) = take_all_pending_acks([&mut a, &mut idle, &mut b].into_iter());
+    assert_eq!(set, vec![h1, h2]);
+    assert_eq!(since, Some(t0));
+    assert!(a.pending_acks.is_empty() && b.pending_acks.is_empty());
+    assert_eq!(a.pending_acks_since, None);
+    assert_eq!(
+        take_all_pending_acks([&mut a, &mut b].into_iter()),
+        (vec![], None)
+    );
+}

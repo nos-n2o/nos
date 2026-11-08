@@ -28,6 +28,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use nos_ospf_common::drouters::{flood_dest, Dest};
+
 use crate::bfd;
 use crate::bfd_client::{Host, Target, Want};
 use crate::election;
@@ -57,10 +59,30 @@ impl LinkSocket {
         match self {
             Self::Os(s) => s.send_multicast(ifindex, payload),
             #[cfg(test)]
-            Self::Mem(p) => {
-                p.send(None, payload);
-                Ok(())
-            }
+            Self::Mem(p) => p.send(tests::wire::To::AllSpf, payload),
+        }
+    }
+
+    fn send_all_drouters(&self, ifindex: u32, payload: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Os(s) => s.send_all_drouters(ifindex, payload),
+            #[cfg(test)]
+            Self::Mem(p) => p.send(tests::wire::To::AllD, payload),
+        }
+    }
+
+    /// One flood-path send (`flood_dest`): the group, or `neighbor` directly.
+    fn send_flood(
+        &self,
+        dest: Dest,
+        neighbor: Ipv6Addr,
+        ifindex: u32,
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        match dest {
+            Dest::Unicast => self.send_unicast(neighbor, ifindex, payload),
+            Dest::AllSpfRouters => self.send_multicast(ifindex, payload),
+            Dest::AllDRouters => self.send_all_drouters(ifindex, payload),
         }
     }
 
@@ -68,10 +90,7 @@ impl LinkSocket {
         match self {
             Self::Os(s) => s.send_unicast(dest, ifindex, payload),
             #[cfg(test)]
-            Self::Mem(p) => {
-                p.send(Some(dest), payload);
-                Ok(())
-            }
+            Self::Mem(p) => p.send(tests::wire::To::Unicast(dest), payload),
         }
     }
 
@@ -314,6 +333,10 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
 /// Link-LSAs never leave the link they belong to, so every summary/flood
 /// below draws from both, but only ever *this* link's Link-LSAs).
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one select loop; the arms are the logic"
+)]
 pub async fn run(
     socket: std::io::Result<LinkSocket>,
     cfg: LinkConfig,
@@ -356,6 +379,7 @@ pub async fn run(
     let mut waiting = is_broadcast;
     let mut warn_limiter = nos_ospf_common::ratelimit::WarnLimiter::default();
 
+    let mut last_flood_dest: Option<Dest> = None;
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -478,7 +502,7 @@ pub async fn run(
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
                 flush_pending_acks(&socket, &cfg, local_router_id, &status);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status).await;
+                flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status, &mut last_flood_dest).await;
             }
         }
     }
@@ -1175,6 +1199,11 @@ fn flush_pending_acks(
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
 ) {
+    let dest = current_dest(cfg, status);
+    if dest != Dest::Unicast {
+        flush_pending_acks_group(socket, cfg, local_router_id, status, dest);
+        return;
+    }
     let mut flushes = Vec::new();
     status.send_if_modified(|s| {
         for (neighbor_id, info) in &mut s.neighbors {
@@ -1205,6 +1234,64 @@ fn flush_pending_acks(
             neighbor_id,
             vec![action],
         );
+    }
+}
+
+/// RFC 2328 §13.3 step 5 / §13.5 (RFC 5340 §4.5 keeps them): where this
+/// link's flooded LSUs and delayed `LSAcks` go. Only broadcast links use a
+/// group; the DR/Backup role picks which.
+fn current_dest(cfg: &LinkConfig, status: &StatusHandle) -> Dest {
+    flood_dest(
+        cfg.network_type == NetworkType::Broadcast,
+        matches!(
+            status.borrow().interface_state,
+            InterfaceState::Dr | InterfaceState::Backup
+        ),
+    )
+}
+
+/// Broadcast links: one deduplicated `LSAck` set for every neighbor's queue,
+/// to the group `dest`. A failed group send warns once and falls back to a
+/// unicast copy per adjacent neighbor.
+fn flush_pending_acks_group(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    dest: Dest,
+) {
+    let mut taken = (Vec::new(), None);
+    status.send_if_modified(|s| {
+        taken = exchange::take_all_pending_acks(
+            s.neighbors
+                .values_mut()
+                .filter_map(|n| n.adjacency.as_mut()),
+        );
+        false
+    });
+    let (headers, since) = taken;
+    if headers.is_empty() {
+        return;
+    }
+    info!(
+        link = %cfg.attach_point, dest = %dest.as_str(), acked = headers.len(),
+        delayed_ms = since.map_or(0, |t| t.elapsed().as_millis()),
+        "ospfv3 lsack sent"
+    );
+    for payload in lsack_packets(cfg, local_router_id, &headers) {
+        if let Err(e) = socket.send_flood(dest, Ipv6Addr::UNSPECIFIED, cfg.interface_id, &payload) {
+            warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospfv3 lsack, falling back to unicast");
+            let targets: Vec<Ipv6Addr> = status
+                .borrow()
+                .neighbors
+                .values()
+                .filter(|n| n.adjacency.is_some())
+                .map(|n| n.address)
+                .collect();
+            for addr in targets {
+                let _ = socket.send_unicast(addr, cfg.interface_id, &payload);
+            }
+        }
     }
 }
 
@@ -1258,7 +1345,13 @@ async fn flood_full_neighbors(
     local_router_id: Ipv4Addr,
     stores: &Stores<'_>,
     status: &StatusHandle,
+    last_dest: &mut Option<Dest>,
 ) {
+    let dest = current_dest(cfg, status);
+    if *last_dest != Some(dest) {
+        *last_dest = Some(dest);
+        info!(link = %cfg.attach_point, dest = %dest.as_str(), "ospfv3 lsu flood destination changed");
+    }
     let full_neighbors: Vec<(Ipv4Addr, Ipv6Addr)> = status
         .borrow()
         .neighbors
@@ -1274,6 +1367,22 @@ async fn flood_full_neighbors(
         return;
     }
     let payloads = lsu_packets(cfg, local_router_id, &lsas);
+    // Multicast (RFC 2328 §13.3 step 5): each chunk once to the group; a
+    // send error falls back to the unicast loop for this pass. One signed
+    // packet is valid for all receivers (the trailer binds only the source).
+    if dest != Dest::Unicast {
+        let sent = payloads.iter().all(|payload| {
+            socket
+                .send_flood(dest, Ipv6Addr::UNSPECIFIED, cfg.interface_id, payload)
+                .map_err(|e| {
+                    warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospfv3 lsu, falling back to unicast");
+                })
+                .is_ok()
+        });
+        if sent {
+            return;
+        }
+    }
     for (neighbor_id, neighbor_addr) in full_neighbors {
         for payload in &payloads {
             if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, payload) {
@@ -4300,6 +4409,16 @@ pub(crate) mod tests {
 
         type Tx = mpsc::UnboundedSender<(Ipv6Addr, Vec<u8>)>;
 
+        /// Where a send goes on the wire.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum To {
+            /// `FF02::5`: every other port on the net.
+            AllSpf,
+            /// `FF02::6`: only ports that joined it.
+            AllD,
+            Unicast(Ipv6Addr),
+        }
+
         #[derive(Default)]
         pub struct Wire {
             ports: Mutex<Vec<(Ipv6Net, Ipv6Addr, Tx)>>,
@@ -4311,6 +4430,10 @@ pub(crate) mod tests {
             pub drouters: Mutex<std::collections::HashMap<Ipv6Addr, bool>>,
             /// Makes every `FF02::6` join/leave fail.
             pub fail_drouters: std::sync::atomic::AtomicBool,
+            /// Every send as (sender, destination, OSPF packet type byte).
+            pub sent: Mutex<Vec<(Ipv6Addr, To, u8)>>,
+            /// Sender addresses whose `FF02::6` sends fail.
+            pub fail_all_d: Mutex<HashSet<Ipv6Addr>>,
         }
 
         impl Wire {
@@ -4364,13 +4487,22 @@ pub(crate) mod tests {
                 Ok(prev.unwrap_or(false) != want)
             }
 
-            pub fn send(&self, dest: Option<Ipv6Addr>, payload: &[u8]) {
+            pub fn send(&self, to: To, payload: &[u8]) -> std::io::Result<()> {
+                if to == To::AllD && self.wire.fail_all_d.lock().unwrap().contains(&self.addr) {
+                    return Err(std::io::Error::other("injected"));
+                }
                 if self.wire.cut.lock().unwrap().contains(&self.addr)
                     || (payload[1] == 1
                         && self.wire.drop_hellos.lock().unwrap().contains(&self.addr))
                 {
-                    return;
+                    return Ok(());
                 }
+                self.wire
+                    .sent
+                    .lock()
+                    .unwrap()
+                    .push((self.addr, to, payload[1]));
+                let joined = self.wire.drouters.lock().unwrap().clone();
                 let mut packet = payload.to_vec();
                 crate::packet::set_instance_id(&mut packet, self.instance_id);
                 if let Some(auth) = &self.auth {
@@ -4381,10 +4513,16 @@ pub(crate) mod tests {
                     );
                 }
                 for (net, addr, tx) in self.wire.ports.lock().unwrap().iter() {
-                    if *net == self.net && *addr != self.addr && dest.is_none_or(|d| d == *addr) {
+                    let hears = match to {
+                        To::AllSpf => true,
+                        To::AllD => joined.get(addr).copied().unwrap_or(false),
+                        To::Unicast(d) => d == *addr,
+                    };
+                    if *net == self.net && *addr != self.addr && hears {
                         let _ = tx.send((self.addr, packet.clone()));
                     }
                 }
+                Ok(())
             }
 
             pub async fn recv(&self) -> std::io::Result<(Ipv6Addr, Vec<u8>)> {
@@ -5203,5 +5341,214 @@ pub(crate) mod tests {
                 .len();
             assert_eq!(left == 0, handled, "lsack {state:?}");
         }
+    }
+
+    // --- #879: multicast LSU flooding and delayed LSAck ---
+
+    fn sent(wire: &wire::Wire, from: u8, ty: u8) -> Vec<wire::To> {
+        let a: Ipv6Addr = format!("fe80::{from}").parse().unwrap();
+        wire.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(f, _, t)| *f == a && *t == ty)
+            .map(|(_, to, _)| *to)
+            .collect()
+    }
+
+    /// Three routers on one broadcast net: 1 = DR, 2 = BDR, 3 = `DROther`.
+    async fn trio(
+        wire: &Arc<wire::Wire>,
+        auth: Option<packet::TrailerAuth>,
+    ) -> Vec<Arc<LinkManager>> {
+        let mut out = Vec::new();
+        for n in 1..=3u8 {
+            let m = router(wire);
+            let mut l = wired_link(n, NetworkType::Broadcast);
+            l.priority = 4 - n;
+            l.auth.clone_from(&auth);
+            m.reconcile(vec![l], loopback(n), id(n)).await;
+            out.push(m);
+        }
+        out
+    }
+
+    async fn heard(m: &LinkManager, router: Ipv4Addr) -> bool {
+        m.database_summaries()
+            .await
+            .iter()
+            .any(|l| l.advertising_router == router)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drother_uses_all_drouters_and_dr_bdr_use_all_spf() {
+        let wire = Arc::new(wire::Wire::default());
+        let m = trio(&wire, None).await;
+        settle(90).await;
+        let c = sent(&wire, 3, 4);
+        assert!(c.last() == Some(&wire::To::AllD), "{c:?}");
+        assert!(sent(&wire, 3, 5).iter().all(|t| *t == wire::To::AllD));
+        for n in [1, 2] {
+            let s = sent(&wire, n, 4);
+            assert!(s.last() == Some(&wire::To::AllSpf), "{n}: {s:?}");
+        }
+        assert!(heard(&m[0], id(3)).await && heard(&m[1], id(3)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multicast_lsu_verifies_under_trailer_auth() {
+        let wire = Arc::new(wire::Wire::default());
+        let m = trio(&wire, Some(trailer(b"k"))).await;
+        settle(90).await;
+        let c = sent(&wire, 3, 4);
+        assert!(c.last() == Some(&wire::To::AllD), "{c:?}");
+        assert!(heard(&m[0], id(3)).await && heard(&m[1], id(3)).await);
+        assert!(heard(&m[2], id(1)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn multicast_failure_falls_back_to_unicast() {
+        let wire = Arc::new(wire::Wire::default());
+        wire.fail_all_d
+            .lock()
+            .unwrap()
+            .insert("fe80::3".parse().unwrap());
+        let m = trio(&wire, None).await;
+        settle(90).await;
+        assert!(sent(&wire, 3, 4)
+            .iter()
+            .any(|t| matches!(t, wire::To::Unicast(_))));
+        assert!(heard(&m[0], id(3)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn point_to_point_never_uses_a_group_for_lsu_or_ack() {
+        let wire = Arc::new(wire::Wire::default());
+        let (_a, _b) = pair(&wire, None, None).await;
+        for n in [1, 2] {
+            for ty in [4, 5] {
+                let s = sent(&wire, n, ty);
+                assert!(s.iter().all(|t| matches!(t, wire::To::Unicast(_))), "{s:?}");
+            }
+        }
+        assert!(sent(&wire, 1, 4).len() > 1);
+    }
+
+    fn dr_status(state: InterfaceState, neighbors: &[u8]) -> StatusHandle {
+        let mut s = LinkStatus::new(NetworkType::Broadcast);
+        s.interface_state = state;
+        for n in neighbors {
+            let mut info = neighbor_info(
+                NeighborState::Full,
+                format!("fe80::{n}").parse().unwrap(),
+                u32::from(*n),
+            );
+            info.adjacency = Some(AdjacencyData::default());
+            s.neighbors.insert(id(*n), info);
+        }
+        watch::channel(s).0
+    }
+
+    fn header() -> crate::lsa::LsaHeader {
+        crate::lsa::LsaHeader {
+            age: 0,
+            lsa_type: 0x2003,
+            link_state_id: Ipv4Addr::new(1, 0, 0, 1),
+            advertising_router: id(9),
+            sequence_number: 1,
+            checksum: 0,
+            length: 20,
+        }
+    }
+
+    fn queue_acks(status: &StatusHandle) {
+        status.send_modify(|s| {
+            for n in s.neighbors.values_mut() {
+                n.adjacency.as_mut().unwrap().pending_acks = vec![header()];
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn delayed_acks_are_one_deduplicated_group_set() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg).unwrap();
+        let status = dr_status(InterfaceState::Dr, &[2, 3]);
+        queue_acks(&status);
+        flush_pending_acks(&socket, &cfg, id(1), &status);
+        assert_eq!(sent(&wire, 1, 5), vec![wire::To::AllSpf]);
+        flush_pending_acks(&socket, &cfg, id(1), &status);
+        assert_eq!(sent(&wire, 1, 5).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ack_group_failure_falls_back_to_unicast() {
+        let wire = Arc::new(wire::Wire::default());
+        wire.fail_all_d
+            .lock()
+            .unwrap()
+            .insert("fe80::1".parse().unwrap());
+        let cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg).unwrap();
+        let status = dr_status(InterfaceState::DrOther, &[2]);
+        queue_acks(&status);
+        flush_pending_acks(&socket, &cfg, id(1), &status);
+        assert_eq!(
+            sent(&wire, 1, 5),
+            vec![wire::To::Unicast("fe80::2".parse().unwrap())]
+        );
+    }
+
+    #[tokio::test]
+    async fn destination_is_reported_only_on_change() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg).unwrap();
+        let status = dr_status(InterfaceState::Dr, &[]);
+        let (a, l, s) = (
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+        );
+        let stores = Stores {
+            area: &a,
+            link: &l,
+            as_scope: &s,
+        };
+        let mut last = None;
+        flood_full_neighbors(&socket, &cfg, id(1), &stores, &status, &mut last).await;
+        assert_eq!(last, Some(Dest::AllSpfRouters));
+        status.send_modify(|s| s.interface_state = InterfaceState::DrOther);
+        flood_full_neighbors(&socket, &cfg, id(1), &stores, &status, &mut last).await;
+        assert_eq!(last, Some(Dest::AllDRouters));
+    }
+
+    #[tokio::test]
+    async fn retransmission_resend_stays_unicast() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg).unwrap();
+        let status = dr_status(InterfaceState::Dr, &[2]);
+        let l = crate::lsa::Lsa {
+            header: header(),
+            body: crate::lsa::LsaBody::Opaque(vec![1, 2, 3, 4]),
+        };
+        status.send_modify(|s| {
+            let adj = s
+                .neighbors
+                .values_mut()
+                .next()
+                .unwrap()
+                .adjacency
+                .as_mut()
+                .unwrap();
+            adj.retransmission_list.insert(l.header.key(), Arc::new(l));
+        });
+        retransmit_pending(&socket, &cfg, id(1), &status);
+        assert_eq!(
+            sent(&wire, 1, 4),
+            vec![wire::To::Unicast("fe80::2".parse().unwrap())]
+        );
     }
 }

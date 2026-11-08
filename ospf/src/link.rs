@@ -40,6 +40,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use nos_ospf_common::drouters::Dest;
+
 use crate::bfd;
 use crate::bfd_client::{Host, Target, Want};
 use crate::election::{self, Candidate};
@@ -69,10 +71,15 @@ impl LinkSocket {
         match self {
             Self::Os(s) => s.send_multicast(payload),
             #[cfg(test)]
-            Self::Mem(p) => {
-                p.send(None, payload);
-                Ok(())
-            }
+            Self::Mem(p) => p.send(tests::wire::To::AllSpf, payload),
+        }
+    }
+
+    fn send_all_drouters(&self, payload: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Os(s) => s.send_all_drouters(payload),
+            #[cfg(test)]
+            Self::Mem(p) => p.send(tests::wire::To::AllD, payload),
         }
     }
 
@@ -80,10 +87,16 @@ impl LinkSocket {
         match self {
             Self::Os(s) => s.send_unicast(dest, payload),
             #[cfg(test)]
-            Self::Mem(p) => {
-                p.send(Some(dest), payload);
-                Ok(())
-            }
+            Self::Mem(p) => p.send(tests::wire::To::Unicast(dest), payload),
+        }
+    }
+
+    /// One flood-path send (`flood_dest`): the group, or `neighbor` directly.
+    fn send_flood(&self, dest: Dest, neighbor: Ipv4Addr, payload: &[u8]) -> std::io::Result<()> {
+        match dest {
+            Dest::Unicast => self.send_unicast(neighbor, payload),
+            Dest::AllSpfRouters => self.send_multicast(payload),
+            Dest::AllDRouters => self.send_all_drouters(payload),
         }
     }
 
@@ -539,6 +552,10 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
 /// `LinkManager`). Owns the raw socket, the Hello send ticker, and every
 /// timer this link's network type needs.
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one select loop; the arms are the logic"
+)]
 pub async fn run(
     socket: std::io::Result<LinkSocket>,
     cfg: LinkConfig,
@@ -593,6 +610,7 @@ pub async fn run(
     // restart (a fresh `next_crypto_seq` call always floors back up to
     // "now" if the in-memory counter would otherwise be behind).
     let mut next_seq = initial_crypto_seq(&cfg.auth, boot_count);
+    let mut last_flood_dest: Option<Dest> = None;
 
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospf link driver started");
     if cfg.auth.is_extended() {
@@ -718,14 +736,14 @@ pub async fn run(
                     send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
                 }
                 LinkCommand::FloodNow => {
-                    flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq).await;
+                    flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
                 }
                 LinkCommand::BfdDown(address) => kill_bfd_neighbor(&cfg, &status, address),
             },
             _ = rxmt_sweep.tick() => {
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq).await;
+                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
             }
         }
     }
