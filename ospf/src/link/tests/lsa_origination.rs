@@ -1155,6 +1155,96 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
+    reason = "linear scenario: three areas, run, assert"
+)]
+async fn originate_summary_lsas_type4_takes_minimum_over_two_source_areas() {
+    fn router(id: Ipv4Addr, peer: Ipv4Addr, metric: u16) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: id,
+                advertising_router: id,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![RouterLink {
+                    tos: Vec::new(),
+                    link_id: peer,
+                    link_data: Ipv4Addr::new(10, 0, 0, 1),
+                    link_type: LINK_TYPE_POINT_TO_POINT,
+                    metric,
+                }],
+            }),
+        }
+    }
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let area0 = Ipv4Addr::UNSPECIFIED;
+    let area1 = Ipv4Addr::new(0, 0, 0, 1);
+    let area2 = Ipv4Addr::new(0, 0, 0, 2);
+    let router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let asbr = Ipv4Addr::new(2, 2, 2, 2);
+    manager.lsdb_for(area0).await;
+    for (area, cost) in [(area1, 5), (area2, 9)] {
+        let lsdb = manager.lsdb_for(area).await;
+        let mut lsdb = lsdb.lock().await;
+        lsdb.install(router(router_id, asbr, cost));
+        lsdb.install(router(asbr, router_id, cost));
+        lsdb.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+                link_state_id: Ipv4Addr::new(198, 51, 100, 0),
+                advertising_router: asbr,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                tos: Vec::new(),
+                network_mask: Ipv4Addr::new(255, 255, 255, 0),
+                metric: 0,
+                e_type2: false,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+            }),
+        });
+    }
+    let key = LsaKey {
+        lsa_type: lsa::LSA_TYPE_ASBR_SUMMARY,
+        link_state_id: asbr,
+        advertising_router: router_id,
+    };
+    let mut seq0 = None;
+    // HashMap order is random per run: repeat so a regression fails reliably.
+    for _ in 0..20 {
+        manager.originate_summary_lsas(router_id).await;
+        for (area, want) in [(area0, 5), (area1, 9), (area2, 5)] {
+            let lsa = manager.lsdb_for(area).await.lock().await.get(&key).unwrap();
+            let LsaBody::Summary(body) = &lsa.body else {
+                panic!("expected summary lsa")
+            };
+            assert_eq!(body.metric, want, "area {area}");
+            if area == area0 {
+                let seq = *seq0.get_or_insert(lsa.header.sequence_number);
+                assert_eq!(lsa.header.sequence_number, seq, "seq bumped");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
     reason = "linear scenario: build two areas, run, assert"
 )]
 async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix() {
