@@ -76,6 +76,8 @@ Editing the config happens inside a **named transaction**, held server-side in `
   - The store counts live diff subscribers per class (`ConfigStore::subscribe_diff`, released when the forwarder task ends). Registering and `broadcast::Sender::subscribe` happen under one lock, so a commit owes exactly the classes of the receivers that get it.
   - The class that sees everything (`User`, `Restd`) diffs the shared configs directly. Other classes build their `for_role` projections inside the diff task and drop them with it.
   - A commit with no diff subscriber keeps no previous config.
+- Ordering (#631): `commit_transaction` and `upgrade_password_hash` swap `running` and call `broadcast` under one `running` write guard, so broadcast order equals swap order. The `NoUsersLeft` check runs under that guard too.
+- Each `CommitUpdate` carries a `seq` bumped under the guard. A subscriber subscribes to the channel first, then reads `(snapshot, seq)` under the read guard; its forwarder drops updates with `seq <=` that value (already in the initial event), so there is no duplicate and no gap.
 - The diff is typed (#778): `diff_configs` compares root fields and keyed-list elements with `==` and serializes only what differs, so its transient is the JSON of the change, not of both configs.
   - Every keyed root list is paired by its typed key; a modified static routing instance pairs its `routes` by `subnet` the same way, so a one-route change in 22k routes serializes one route.
   - The singleton root fields (`hostname`, `lldp`, `logging`, `admin`, ...) are always walked as JSON: they are small, and a duplicate key inside one is reported even between equal sides.

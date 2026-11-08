@@ -95,6 +95,10 @@ enum Edit {
 /// diff, then released, so a slot keeps `config` plus delta-sized diffs.
 pub(crate) struct CommitUpdate {
     pub config: Arc<Config>,
+    /// Commit order (#631): bumped under the `running` write guard, so it
+    /// matches swap order. A subscriber drops updates `<=` the seq of the
+    /// snapshot it started from.
+    pub seq: u64,
     state: std::sync::Mutex<DiffState>,
 }
 
@@ -112,12 +116,18 @@ impl CommitUpdate {
     pub(crate) fn new(config: Arc<Config>, prev: Arc<Config>, pending: HashSet<ViewClass>) -> Self {
         Self {
             config,
+            seq: 0,
             state: std::sync::Mutex::new(DiffState {
                 prev: (!pending.is_empty()).then_some(prev),
                 pending,
                 diffs: HashMap::new(),
             }),
         }
+    }
+
+    fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = seq;
+        self
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, DiffState> {
@@ -186,6 +196,8 @@ struct Inner {
     running: RwLock<Arc<Config>>,
     transactions: Mutex<HashMap<String, Transaction>>,
     tx: broadcast::Sender<Arc<CommitUpdate>>,
+    /// Count of broadcasts; only bumped under the `running` write guard (#631).
+    seq: std::sync::atomic::AtomicU64,
     /// Held across registering and `tx.subscribe()`, and across reading it
     /// and `tx.send()`, so a commit's `pending` classes are exactly those of
     /// the receivers that get it.
@@ -216,6 +228,7 @@ impl ConfigStore {
             running: RwLock::new(Arc::new(initial)),
             transactions: Mutex::new(HashMap::new()),
             tx,
+            seq: std::sync::atomic::AtomicU64::new(0),
             diff_subscribers: std::sync::Mutex::default(),
             config_path,
             idle_ttl: TX_IDLE_TTL,
@@ -273,15 +286,27 @@ impl ConfigStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `running`'s config and the seq of the last broadcast, read together
+    /// under the read guard (a commit bumps seq under the write guard).
+    async fn snapshot_seq(&self) -> (Arc<Config>, u64) {
+        let r = self.0.running.read().await;
+        (
+            Arc::clone(&r),
+            self.0.seq.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
     /// Hands a commit to every subscriber, owing a diff to each live class.
+    /// Must be called with the `running` write guard held, so broadcast order
+    /// equals swap order and seq is consistent with snapshots (#631).
     fn broadcast(&self, config: Arc<Config>, prev: Arc<Config>) {
         let subs = self.diff_subscribers();
         let pending = subs.keys().copied().collect();
+        let seq = self.0.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         // Ignore send errors — no active receivers is not a failure.
-        let _ = self
-            .0
-            .tx
-            .send(Arc::new(CommitUpdate::new(config, prev, pending)));
+        let _ = self.0.tx.send(Arc::new(
+            CommitUpdate::new(config, prev, pending).with_seq(seq),
+        ));
     }
 
     /// `Request::Subscribe`: forwards every later commit to `out` as
@@ -293,10 +318,11 @@ impl ConfigStore {
         out: mpsc::Sender<Event>,
     ) -> (Event, JoinHandle<()>) {
         let rx = self.0.tx.subscribe();
-        let task = forward(rx, None, out, move |u| async move {
+        let (snap, seq) = self.snapshot_seq().await;
+        let task = forward(rx, seq, None, out, move |u| async move {
             Some(Event::Config(u.config.for_role(role)))
         });
-        let initial = Event::Config(self.running_snapshot().await.for_role(role));
+        let initial = Event::Config(snap.for_role(role));
         (initial, task)
     }
 
@@ -320,14 +346,18 @@ impl ConfigStore {
             class,
         };
         let task_scopes = scopes.clone();
-        let task = forward(rx, Some(guard), out, move |u| {
+        let (snap, seq) = self.snapshot_seq().await;
+        let task = forward(rx, seq, Some(guard), out, move |u| {
             let wanted = task_scopes.clone();
             async move {
                 let diff = u.diff_for(role).await?.scoped(&wanted);
                 (!diff.is_empty()).then_some(Event::Diff(diff))
             }
         });
-        let initial = Event::Diff(self.initial_diff(role).await.scoped(&scopes));
+        // Everything running, as `Added` (a diff against empty never has
+        // `Removed`/`Modified`).
+        let initial =
+            Event::Diff(diff_configs_for_role(&Config::default(), &snap, role).scoped(&scopes));
         (initial, task)
     }
 
@@ -590,7 +620,9 @@ impl ConfigStore {
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
         check_syslog_trust_anchors(&txn.config)?;
-        if txn.config.users.is_empty() && !self.0.running.read().await.users.is_empty() {
+        // Held through the swap and broadcast: the check must not go stale (#631).
+        let mut running = self.0.running.write().await;
+        if txn.config.users.is_empty() && !running.users.is_empty() {
             return Err(ConfigError::NoUsersLeft);
         }
         let mut config = txs
@@ -603,11 +635,10 @@ impl ConfigStore {
         sync_routing_table_refs(Arc::make_mut(&mut config));
         let warnings = crate::warnings::commit_warnings(&config);
 
-        let mut running = self.0.running.write().await;
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
-        drop(running);
         info!(transaction = %name, "config committed");
         self.broadcast(config, prev);
+        drop(running);
         #[cfg(feature = "dhat-heap")]
         if DHAT_PROFILING.load(std::sync::atomic::Ordering::Relaxed) {
             let s = dhat::HeapStats::get();
@@ -643,18 +674,10 @@ impl ConfigStore {
         let mut config = Arc::clone(&running);
         Arc::make_mut(&mut config).users[i].password = new;
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
-        drop(running);
         info!(user = ?user, "password hash upgraded");
         self.broadcast(config, prev);
+        drop(running);
         Ok(())
-    }
-
-    /// The diff a fresh `SubscribeDiff` connection should see as its initial
-    /// event: everything currently in the running config, reported as
-    /// `Added` (diffing against an empty config can never produce
-    /// `Removed`/`Modified`).
-    pub(crate) async fn initial_diff(&self, role: nos_proto::Role) -> ConfigDiff {
-        diff_configs_for_role(&Config::default(), &*self.running_snapshot().await, role)
     }
 
     /// Computes the structural difference between the running config and a
@@ -707,6 +730,7 @@ impl ConfigStore {
 /// commit outside its scopes). `guard` lives as long as the task.
 fn forward<Fut>(
     mut rx: broadcast::Receiver<Arc<CommitUpdate>>,
+    min_seq: u64,
     guard: Option<DiffSubscriber>,
     tx: mpsc::Sender<Event>,
     to_event: impl Fn(Arc<CommitUpdate>) -> Fut + Send + 'static,
@@ -719,6 +743,10 @@ where
         loop {
             match rx.recv().await {
                 Ok(update) => {
+                    // Already inside the subscriber's initial snapshot (#631).
+                    if update.seq <= min_seq {
+                        continue;
+                    }
                     let Some(event) = to_event(update).await else {
                         continue;
                     };
@@ -908,6 +936,173 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert!(store.diff_subscribers().is_empty());
+    }
+
+    fn user(name: &str) -> nos_proto::User {
+        nos_proto::User {
+            name: name.into(),
+            password: "pw".into(),
+        }
+    }
+
+    /// #631: an update at or below the snapshot's seq is dropped.
+    #[tokio::test]
+    async fn forward_drops_updates_already_in_the_snapshot() {
+        let (btx, rx) = broadcast::channel(8);
+        let (out, mut orx) = mpsc::channel(8);
+        for seq in 1..=3 {
+            let u = CommitUpdate::new(Arc::default(), Arc::default(), HashSet::new());
+            let _ = btx.send(Arc::new(u.with_seq(seq)));
+        }
+        let task = forward(rx, 2, None, out, |u| async move {
+            Some(Event::Config(u.config.for_role(Role::User)))
+        });
+        drop(btx);
+        let _ = task.await;
+        assert!(orx.recv().await.is_some());
+        assert!(orx.recv().await.is_none(), "only seq 3 forwarded");
+    }
+
+    /// #631: commits and hash upgrades racing end with the subscriber on running.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_commits_broadcast_in_swap_order() {
+        let store = ConfigStore::new(
+            Config {
+                users: vec![user("a")],
+                ..Config::default()
+            },
+            None,
+        );
+        let (out, mut rx) = mpsc::channel(1024);
+        let (first, task) = store.subscribe_config(Role::Watchdog, out).await;
+        assert!(matches!(first, Event::Config(_)));
+        let mut hs = Vec::new();
+        for i in 0..20 {
+            let s = store.clone();
+            hs.push(tokio::spawn(async move {
+                let t = format!("t{i}");
+                s.open_transaction(&t, TransactionBase::Current)
+                    .await
+                    .unwrap();
+                s.apply_op(
+                    &t,
+                    ConfigOp::User(nos_proto::UserOp::SetPassword {
+                        name: format!("u{i}"),
+                        password: "pw".into(),
+                    }),
+                )
+                .await
+                .unwrap();
+                let _ = s.commit_transaction(&t, None).await;
+            }));
+            let s = store.clone();
+            hs.push(tokio::spawn(async move {
+                let cur = s.running_snapshot().await;
+                if let Some(u) = cur.users.iter().find(|u| u.name == "a") {
+                    let _ = s
+                        .upgrade_password_hash("a", &u.password.clone(), format!("$argon2id$x{i}"))
+                        .await;
+                }
+            }));
+        }
+        for h in hs {
+            h.await.unwrap();
+        }
+        let last = store.running_snapshot().await.for_role(Role::Watchdog);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut seen = None;
+        while let Ok(Event::Config(c)) = rx.try_recv().map_err(|_| ()) {
+            seen = Some(c);
+        }
+        assert_eq!(seen.expect("an update").users, last.users);
+        task.abort();
+    }
+
+    /// #631: a subscriber's initial snapshot plus later events has no
+    /// duplicate or gap, however commits interleave with the subscribe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn subscribe_races_commits_without_gap_or_duplicate() {
+        let store = ConfigStore::new(Config::default(), None);
+        let writer = {
+            let s = store.clone();
+            tokio::spawn(async move {
+                for i in 0..12 {
+                    // < BROADCAST_CAPACITY: no lag
+                    s.open_transaction("w", TransactionBase::Current)
+                        .await
+                        .unwrap();
+                    s.set_transaction_path(
+                        "w",
+                        &segs("hostname"),
+                        Some(&format!("\"h{i}\"")),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    s.commit_transaction("w", None).await.unwrap();
+                }
+            })
+        };
+        let mut subs = Vec::new();
+        for _ in 0..20 {
+            let (out, rx) = mpsc::channel(1024);
+            let (first, task) = store.subscribe_config(Role::Watchdog, out).await;
+            subs.push((first, rx, task));
+            tokio::task::yield_now().await;
+        }
+        writer.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let n = |c: &Config| {
+            let d: String = c.hostname.chars().filter(char::is_ascii_digit).collect();
+            if d.is_empty() {
+                0
+            } else {
+                d.parse::<i32>().unwrap() + 1
+            }
+        };
+        for (first, mut rx, task) in subs {
+            let Event::Config(c) = first else { panic!() };
+            let mut cur = n(&c);
+            while let Ok(Event::Config(c)) = rx.try_recv().map_err(|_| ()) {
+                assert_eq!(n(&c), cur + 1, "gap or duplicate");
+                cur += 1;
+            }
+            assert_eq!(cur, 12);
+            task.abort();
+        }
+    }
+
+    /// #631: two commits that each empty the users never both pass the check.
+    #[tokio::test]
+    async fn racing_commits_cannot_empty_the_users() {
+        let store = ConfigStore::new(
+            Config {
+                users: vec![user("a")],
+                ..Config::default()
+            },
+            None,
+        );
+        for i in 0..2 {
+            let t = format!("t{i}");
+            store
+                .open_transaction(&t, TransactionBase::Current)
+                .await
+                .unwrap();
+            store
+                .apply_op(
+                    &t,
+                    ConfigOp::User(nos_proto::UserOp::Delete { name: "a".into() }),
+                )
+                .await
+                .unwrap();
+        }
+        let (a, b) = tokio::join!(
+            store.commit_transaction("t0", None),
+            store.commit_transaction("t1", None)
+        );
+        assert!(a.is_err() && b.is_err(), "emptying users is refused");
+        assert_eq!(store.running_snapshot().await.users.len(), 1);
     }
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
