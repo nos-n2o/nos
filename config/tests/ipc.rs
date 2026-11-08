@@ -1719,3 +1719,111 @@ async fn instance_lists_and_rest_api_round_trip_for_restd_only() {
         Event::Error(m) if m == "permission denied"
     ));
 }
+
+/// Commits `n` transactions of 20 new instances each, so a client that never
+/// reads fills the socket buffers and stalls the forwarder.
+async fn commit_bulk(store: &ConfigStore, n: usize) {
+    for i in 0..n {
+        let t = format!("bulk{i}");
+        store
+            .open_transaction(&t, TransactionBase::Current)
+            .await
+            .unwrap();
+        for j in 0..20 {
+            let n = format!("lag-instance-{i}-{j}");
+            store.apply_op(&t, ensure_op(&n)).await.unwrap();
+            store.apply_op(&t, set_asn_op(&n, 65000)).await.unwrap();
+        }
+        store.commit_transaction(&t, None).await.unwrap();
+    }
+}
+
+/// #632: a subscriber that falls behind the broadcast ring is sent a terminal
+/// `Error("lagged")` and disconnected; a fresh subscription is authoritative.
+async fn lagged_subscriber_is_disconnected(request: fn() -> Request, commits: usize) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(request()).await.unwrap();
+    next_event(&mut reader).await; // initial
+                                   // Never read: the socket fills, the forwarder stalls, the ring overflows.
+    commit_bulk(&store, commits).await;
+
+    let mut saw_lagged = false;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), reader.next())
+            .await
+            .expect("connection never closed")
+        {
+            Some(Ok(Event::Error(m))) => {
+                assert_eq!(m, "lagged");
+                saw_lagged = true;
+            }
+            Some(Ok(_)) => {}
+            Some(Err(_)) | None => break,
+        }
+    }
+    assert!(saw_lagged, "terminal lagged error not delivered");
+
+    let (mut r2, mut w2) = connect(&path).await;
+    w2.send(request()).await.unwrap();
+    match next_event(&mut r2).await {
+        Event::Diff(d) => assert_eq!(d.bgp_instances.len(), commits * 20),
+        Event::Config(c) => assert_eq!(c.bgp_instances.len(), commits * 20),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lagged_diff_subscriber_is_disconnected_and_resyncs() {
+    lagged_subscriber_is_disconnected(
+        || Request::SubscribeDiff {
+            scopes: vec![DiffScope::BgpInstances],
+        },
+        300,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn lagged_full_subscriber_is_disconnected() {
+    lagged_subscriber_is_disconnected(|| Request::Subscribe, 100).await;
+}
+
+/// #632: a client that keeps up is never disconnected.
+#[tokio::test]
+async fn prompt_subscriber_is_never_disconnected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::SubscribeDiff {
+            scopes: vec![DiffScope::BgpInstances],
+        })
+        .await
+        .unwrap();
+    next_event(&mut reader).await;
+    for i in 0..100 {
+        let t = format!("p{i}");
+        store
+            .open_transaction(&t, TransactionBase::Current)
+            .await
+            .unwrap();
+        let n = format!("i{i}");
+        store.apply_op(&t, ensure_op(&n)).await.unwrap();
+        store.apply_op(&t, set_asn_op(&n, 65000)).await.unwrap();
+        store.commit_transaction(&t, None).await.unwrap();
+        assert!(matches!(next_event(&mut reader).await, Event::Diff(_)));
+    }
+}
