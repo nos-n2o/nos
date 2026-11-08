@@ -147,3 +147,81 @@ async fn snapshot_resets_the_tracking_to_the_candidates() {
     assert_eq!((c.pre, c.pre_v4, c.post), (1, 1, 0));
     hub.shutdown().await;
 }
+
+/// A rib with an accepting destination (`DST`, optionally ADD-PATH) and a
+/// route learned from `SRC`; no hub (the snapshot needs none).
+fn accepting(add_path: bool) -> BgpRib {
+    let mut rib = new_rib(65000);
+    std::mem::forget(register_mp_peer(
+        &mut rib,
+        addr(SRC),
+        false,
+        addr("10.0.0.254"),
+        all_afs(),
+    ));
+    let (tx, rx) = test_channel();
+    std::mem::forget(rx);
+    rib.peer_established(
+        addr(DST),
+        false,
+        Some(addr("10.0.0.254")),
+        all_afs(),
+        true,
+        None,
+        false,
+        false,
+        if add_path {
+            [AddressFamily::Ipv4Unicast].into_iter().collect()
+        } else {
+            HashSet::new()
+        },
+        accept_all_policy(),
+        tx,
+    );
+    learn(&mut rib, "1.0.0.0/24");
+    rib
+}
+
+#[test]
+fn post_snapshot_rebuilds_what_the_peer_was_sent() {
+    let mut rib = accepting(false);
+    let snap = rib.bmp_out_snapshot(addr(DST), true, false);
+    assert!(snap.pre.is_empty() && snap.tx_afis.is_empty());
+    let [OutboundUpdate::Announce(adv)] = &snap.post[..] else {
+        panic!("{:?}", snap.post.len())
+    };
+    assert_eq!(adv.prefix, "1.0.0.0/24".parse().unwrap());
+    assert_eq!(
+        adv.as_path,
+        vec![65000, 65001],
+        "export prepend is in the post view"
+    );
+    let c = rib.bmp_out_counts(addr(DST));
+    assert_eq!((c.post, c.post_v4, c.post_v6), (1, 1, 0));
+    let s = rib.bmp_stats(addr(DST), rib.loc_totals(), nos_proto::BmpMonitorOut::Both);
+    for t in [14, 15, 16, 17] {
+        assert!(
+            s.iter().any(|x| matches!(x,
+                crate::bmp::stats::Stat::Gauge(n, _) | crate::bmp::stats::Stat::AfiSafi(n, ..) if *n == t)),
+            "type {t}"
+        );
+    }
+}
+
+#[test]
+fn add_path_snapshot_keeps_the_path_ids_it_sent() {
+    let mut rib = accepting(true);
+    let snap = rib.bmp_out_snapshot(addr(DST), true, false);
+    assert_eq!(snap.tx_afis, HashSet::from([1]), "AFI 1 carries ids");
+    let ids: Vec<_> = snap
+        .post
+        .iter()
+        .map(|u| match u {
+            OutboundUpdate::Announce(a) => a.path_id,
+            _ => panic!("announce expected"),
+        })
+        .collect();
+    assert_eq!(ids.len(), 1);
+    assert!(ids[0].is_some());
+    assert_eq!(rib.bmp_out_counts(addr(DST)).post_v4, 1);
+}
