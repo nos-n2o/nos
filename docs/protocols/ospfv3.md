@@ -35,6 +35,7 @@ Prefix options (RFC 5340 A.4.1.1):
 - a loopback `/128` is advertised with the LA bit (a host address of this router);
 - a prefix a neighbor advertises with the NU bit is not routed to, nor summarized into other areas;
 - the P and DN bits are never set.
+- a bad LSA inside a Link State Update (wrong checksum or unparseable body) is discarded alone: the other LSAs of the packet are processed and acked, the sender retransmits only the bad one, and the daemon logs `lsu: discarded LSAs that failed to decode` (rate limited); an LSA header whose length cannot be framed still drops the whole packet.
 
 A link needs an IPv6 address to be advertised. Neighbours talk over IPv6 link-local addresses, which the kernel creates for every interface, so the next hops of OSPFv3 routes are link-local addresses.
 

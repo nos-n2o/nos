@@ -685,6 +685,15 @@ pub async fn run(
                                         }
                                     }
                                     OspfPacket::Lsu(lsu) => {
+                                        if lsu.discarded > 0
+                                            && warn_limiter.allow(tokio::time::Instant::now().into_std())
+                                        {
+                                            warn!(
+                                                link = %cfg.attach_point, neighbor = %lsu.router_id,
+                                                discarded = lsu.discarded, error = ?lsu.last_error,
+                                                "ospf lsu: discarded LSAs that failed to decode"
+                                            );
+                                        }
                                         if let Some(actions) =
                                             handle_lsu(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsu).await
                                         {

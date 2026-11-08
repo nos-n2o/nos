@@ -1614,6 +1614,8 @@ async fn handle_lsu_marks_a_reflected_own_lsa_and_wakes_the_originator() {
         s.neighbors.insert(neighbor_id, info);
     });
     let lsu = |lsas| LsuPacket {
+        discarded: 0,
+        last_error: None,
         router_id: neighbor_id,
         area_id: Ipv4Addr::UNSPECIFIED,
         lsas,

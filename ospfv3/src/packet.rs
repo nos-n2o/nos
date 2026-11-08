@@ -79,7 +79,7 @@ const DBD_FLAG_MASTER: u8 = 0x01;
 const DBD_FLAG_MORE: u8 = 0x02;
 const DBD_FLAG_INIT: u8 = 0x04;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PacketError {
     #[error("packet shorter than the 16-byte OSPFv3 header")]
     Truncated,
@@ -363,6 +363,10 @@ pub struct LsuPacket {
     pub router_id: Ipv4Addr,
     pub area_id: Ipv4Addr,
     pub lsas: Vec<Lsa>,
+    /// LSAs skipped for a per-LSA error (checksum, body); never in `lsas`.
+    pub discarded: usize,
+    /// The most recent error behind `discarded`.
+    pub last_error: Option<PacketError>,
 }
 
 /// One Link State Acknowledgment packet's contents (§A.3.6).
@@ -563,19 +567,36 @@ pub fn decode_lsu(data: &[u8]) -> Result<LsuPacket, PacketError> {
         .unwrap_or(usize::MAX);
     let mut rest = &body[4..];
     let mut lsas = Vec::with_capacity(count.min(rest.len() / lsa::LSA_HEADER_LEN + 1));
+    let mut seen = 0;
+    let mut discarded = 0;
+    let mut last_error = None;
     while !rest.is_empty() {
-        let l = lsa::decode_lsa(rest)?;
-        let consumed = usize::from(l.header.length);
-        lsas.push(l);
-        rest = &rest[consumed..];
+        seen += 1;
+        // An unframeable header ends the packet; any later per-LSA error only
+        // skips that LSA (RFC 2328 §13 steps 1-2) so the sender retransmits
+        // just it, not the whole LSU forever.
+        let len = usize::from(lsa::decode_lsa_header(rest)?.length);
+        if len < lsa::LSA_HEADER_LEN || len > rest.len() {
+            return Err(PacketError::TruncatedBody);
+        }
+        match lsa::decode_lsa(&rest[..len]) {
+            Ok(l) => lsas.push(l),
+            Err(e) => {
+                discarded += 1;
+                last_error = Some(e);
+            }
+        }
+        rest = &rest[len..];
     }
-    if lsas.len() != count {
+    if seen != count {
         return Err(PacketError::TruncatedBody);
     }
     Ok(LsuPacket {
         router_id,
         area_id,
         lsas,
+        discarded,
+        last_error,
     })
 }
 
@@ -768,6 +789,8 @@ mod tests {
 
     fn sample_lsu() -> LsuPacket {
         LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: Ipv4Addr::new(9, 9, 9, 9),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![Lsa {
@@ -894,6 +917,53 @@ mod tests {
         assert_eq!(decoded.router_id, pkt.router_id);
         assert_eq!(decoded.lsas.len(), pkt.lsas.len());
         assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
+    }
+
+    fn lsu_good_bad_good(bad: Vec<u8>) -> Vec<u8> {
+        let pkt = sample_lsu();
+        let mut body = 3u32.to_be_bytes().to_vec();
+        body.extend(lsa::encode_lsa(&pkt.lsas[0]));
+        body.extend(bad);
+        body.extend(lsa::encode_lsa(&pkt.lsas[0]));
+        encode_packet(TYPE_LSU, pkt.router_id, pkt.area_id, &body)
+    }
+
+    /// Valid checksum, unparseable body (#645): discarded alone, counted.
+    #[test]
+    fn lsu_skips_a_malformed_body_lsa_and_counts_it() {
+        let pkt = sample_lsu();
+        let mut bad = lsa::encode_lsa(&pkt.lsas[0]);
+        bad.push(0); // stray byte: not a whole number of 16-byte links
+        let len = u16::try_from(bad.len()).unwrap();
+        bad[18..20].copy_from_slice(&len.to_be_bytes());
+        let sum = lsa::lsa_checksum(&bad[2..]);
+        bad[16..18].copy_from_slice(&sum.to_be_bytes());
+        let decoded = decode_lsu(&lsu_good_bad_good(bad)).unwrap();
+        assert_eq!(decoded.lsas.len(), 2);
+        assert_eq!(decoded.discarded, 1);
+        assert_eq!(decoded.last_error, Some(PacketError::TruncatedBody));
+    }
+
+    #[test]
+    fn lsu_counts_a_bad_checksum_lsa() {
+        let pkt = sample_lsu();
+        let mut bad = lsa::encode_lsa(&pkt.lsas[0]);
+        bad[16] ^= 0xFF;
+        let decoded = decode_lsu(&lsu_good_bad_good(bad)).unwrap();
+        assert_eq!(decoded.lsas.len(), 2);
+        assert_eq!(decoded.discarded, 1);
+        assert_eq!(decoded.last_error, Some(PacketError::BadChecksum));
+    }
+
+    #[test]
+    fn lsu_with_an_overlong_lsa_header_length_is_dropped_whole() {
+        let pkt = sample_lsu();
+        let mut bad = lsa::encode_lsa(&pkt.lsas[0]);
+        bad[18..20].copy_from_slice(&0x7FFFu16.to_be_bytes());
+        assert_eq!(
+            decode_lsu(&lsu_good_bad_good(bad)),
+            Err(PacketError::TruncatedBody)
+        );
     }
 
     #[test]

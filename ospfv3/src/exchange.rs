@@ -206,6 +206,8 @@ mod tests {
         let router = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         let link = link_lsa(0x8000_0001u32.cast_signed());
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![router.clone(), link.clone()],
@@ -247,6 +249,8 @@ mod tests {
         let (u_area, u_as, u_link, no_u, reserved) =
             (mk(0xA0FF), mk(0xC0FF), mk(0x80FF), mk(0x20FF), mk(0xE0FF));
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![
@@ -290,6 +294,8 @@ mod tests {
         };
         let (grace, router) = (mk(lsa::LSA_TYPE_GRACE), mk(lsa::LSA_TYPE_ROUTER));
         let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![grace.clone(), router],

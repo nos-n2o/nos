@@ -131,6 +131,8 @@ pub(super) fn send_grace_lsas(
         .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
     let payload = packet::encode_lsu(
         &LsuPacket {
+            discarded: 0,
+            last_error: None,
             router_id: local_router_id,
             area_id: cfg.area_id,
             lsas: vec![grace],
