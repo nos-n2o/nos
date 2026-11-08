@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use nos_ospf_common::exchange as common;
 pub use nos_ospf_common::exchange::{
-    mtu_acceptable, on_lsack_received, take_pending_acks, Params, DEFAULT_DBD_MAX_HEADERS,
+    mtu_acceptable, on_lsack_received, take_all_pending_acks, take_pending_acks, Params,
+    DEFAULT_DBD_MAX_HEADERS,
 };
 
 use crate::lsa::{self, Lsa, LsaHeader};

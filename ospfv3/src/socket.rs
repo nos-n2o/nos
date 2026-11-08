@@ -177,6 +177,21 @@ impl OspfSocket {
         Ok(())
     }
 
+    /// Sends `payload` to `FF02::6` (RFC 2328 §13.3/§13.5 via RFC 5340 §4.5:
+    /// a non-DR router's LSU and delayed `LSAck` on a broadcast link). Signed
+    /// like every send; the trailer binds only the source, so one packet is
+    /// valid for every receiver.
+    pub fn send_all_drouters(&self, ifindex: u32, payload: &[u8]) -> io::Result<()> {
+        let dest = SockAddr::from(SocketAddrV6::new(
+            nos_ospf_common::drouters::ALL_D_ROUTERS_V6,
+            0,
+            0,
+            ifindex,
+        ));
+        self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
+        Ok(())
+    }
+
     /// Sends `payload` directly to `dest` — DBD/LSR/LSU/LSAck are unicast to
     /// one specific neighbor's link-local address, unlike Hello.
     pub fn send_unicast(&self, dest: Ipv6Addr, ifindex: u32, payload: &[u8]) -> io::Result<()> {

@@ -401,6 +401,8 @@ pub const OSPF_BROADCAST_ADDRESS_C: &str = "203.0.113.67/28";
 /// A destination with no neighbor of its own, on router-b's loopback, so
 /// router-a can only learn it through a real SPF computation.
 pub const OSPF_SPF_LOOPBACK_ADDRESS: &str = "203.0.113.80/32";
+/// router-c's loopback for the `ospf-dr` multicast data-plane proof (#879).
+pub const OSPF_DR_LOOPBACK_ADDRESS_C: &str = "203.0.113.98/32";
 /// `ospf-remote-lfa`: the five-router ring a-b-c-d-e-a. Ring link `i` (from
 /// the `i`-th router's eth1 to the next one's eth2) is `10.61.i.0/24`, `.1`
 /// on eth1 and `.2` on eth2; router `i`'s loopback is `10.62.0.i/32`.
@@ -517,6 +519,8 @@ pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 /// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
+/// router-c's loopback for the `ospfv3-dr` multicast data-plane proof (#879).
+pub const OSPFV3_DR_LOOPBACK_ADDRESS_C: &str = "2001:db8:4::8/128";
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
 pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 /// RFC 5340 AS-External-LSA (0x4005) and RFC 8362 E-AS-External-LSA (0xC025),

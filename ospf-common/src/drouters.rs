@@ -29,6 +29,39 @@ pub const fn wants_all_drouters(is_dr_or_backup: bool, point_to_point: bool) -> 
     is_dr_or_backup && !point_to_point
 }
 
+/// Where a flooded LSU or delayed `LSAck` goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dest {
+    /// One unicast per adjacent neighbor.
+    Unicast,
+    AllSpfRouters,
+    AllDRouters,
+}
+
+impl Dest {
+    /// The `dest=` log value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unicast => "unicast",
+            Self::AllSpfRouters => "all-spf-routers",
+            Self::AllDRouters => "all-drouters",
+        }
+    }
+}
+
+/// RFC 2328 §13.3 step 5 / §13.5: on a broadcast network a DR or Backup
+/// multicasts to `AllSPFRouters`, any other router to `AllDRouters`; every
+/// other network type stays unicast.
+#[must_use]
+pub const fn flood_dest(broadcast: bool, dr_or_backup: bool) -> Dest {
+    match (broadcast, dr_or_backup) {
+        (false, _) => Dest::Unicast,
+        (true, true) => Dest::AllSpfRouters,
+        (true, false) => Dest::AllDRouters,
+    }
+}
+
 /// Idempotent `AllDRouters` membership for one socket.
 #[derive(Default)]
 pub struct AllDRouters {
@@ -78,6 +111,17 @@ mod tests {
         assert!(!wants_all_drouters(true, true));
         assert!(!wants_all_drouters(false, false));
         assert!(!wants_all_drouters(false, true));
+    }
+
+    #[test]
+    fn flood_dest_truth_table() {
+        assert_eq!(flood_dest(true, true), Dest::AllSpfRouters);
+        assert_eq!(flood_dest(true, false), Dest::AllDRouters);
+        assert_eq!(flood_dest(false, true), Dest::Unicast);
+        assert_eq!(flood_dest(false, false), Dest::Unicast);
+        assert_eq!(Dest::Unicast.as_str(), "unicast");
+        assert_eq!(Dest::AllSpfRouters.as_str(), "all-spf-routers");
+        assert_eq!(Dest::AllDRouters.as_str(), "all-drouters");
     }
 
     fn udp(d: Domain) -> Socket {

@@ -124,6 +124,18 @@ impl OspfSocket {
         Ok(())
     }
 
+    /// Sends `payload` to 224.0.0.6 (RFC 2328 §13.3/§13.5: a non-DR router's
+    /// LSU and delayed `LSAck` on a broadcast link). Same socket options as
+    /// `send_multicast`.
+    pub fn send_all_drouters(&self, payload: &[u8]) -> io::Result<()> {
+        let dest = SockAddr::from(SocketAddrV4::new(
+            nos_ospf_common::drouters::ALL_D_ROUTERS_V4,
+            0,
+        ));
+        self.inner.get_ref().send_to(payload, &dest)?;
+        Ok(())
+    }
+
     /// Sends `payload` directly to `dest` — DBD/LSR/LSU/LSAck are unicast to
     /// one specific neighbor (RFC 2328 §10.8), unlike Hello.
     pub fn send_unicast(&self, dest: Ipv4Addr, payload: &[u8]) -> io::Result<()> {

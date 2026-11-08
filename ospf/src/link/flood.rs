@@ -1,11 +1,25 @@
 //! Acks, retransmission, reliable flooding and the neighbor liveness timers.
 //! Moved verbatim out of `link.rs`.
 
+use super::rx::split_lsack;
 use super::rx::{execute_actions, next_crypto_seq, split_lsr, split_lsu};
 use super::{
-    bfd, exchange, info, lsa, neighbor, packet, warn, Duration, Instant, Ipv4Addr, LinkConfig,
-    LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
+    bfd, exchange, info, lsa, neighbor, packet, warn, Dest, Duration, Instant, InterfaceState,
+    Ipv4Addr, LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
 };
+
+/// RFC 2328 §13.3 step 5 / §13.5: where this link's flooded LSUs and delayed
+/// `LSAcks` go right now. Only broadcast links use a group; the DR/Backup role
+/// picks which.
+fn current_dest(cfg: &LinkConfig, status: &StatusHandle) -> Dest {
+    nos_ospf_common::drouters::flood_dest(
+        cfg.network_type == NetworkType::Broadcast,
+        matches!(
+            status.borrow().interface_state,
+            InterfaceState::Dr | InterfaceState::Backup
+        ),
+    )
+}
 
 /// RFC 2328 §13.5 delayed acknowledgment: sends each neighbor's queued acks
 /// (`AdjacencyData::pending_acks`, filled by `on_lsu_received`) as one
@@ -19,6 +33,11 @@ pub(super) fn flush_pending_acks(
     status: &StatusHandle,
     next_seq: &mut u64,
 ) {
+    let dest = current_dest(cfg, status);
+    if dest != Dest::Unicast {
+        flush_pending_acks_group(socket, cfg, local_router_id, status, next_seq, dest);
+        return;
+    }
     let mut flushes = Vec::new();
     status.send_if_modified(|s| {
         for (neighbor_id, info) in &mut s.neighbors {
@@ -50,6 +69,52 @@ pub(super) fn flush_pending_acks(
             vec![action],
             next_seq,
         );
+    }
+}
+
+/// Broadcast links: one deduplicated `LSAck` set for every neighbor's queue,
+/// to the group `dest`. A failed group send warns once and falls back to a
+/// unicast copy per adjacent neighbor, so acks are never lost to it.
+fn flush_pending_acks_group(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+    dest: Dest,
+) {
+    let mut taken = (Vec::new(), None);
+    status.send_if_modified(|s| {
+        taken = exchange::take_all_pending_acks(
+            s.neighbors
+                .values_mut()
+                .filter_map(|n| n.adjacency.as_mut()),
+        );
+        false
+    });
+    let (headers, since) = taken;
+    if headers.is_empty() {
+        return;
+    }
+    info!(
+        link = %cfg.attach_point, dest = %dest.as_str(), acked = headers.len(),
+        delayed_ms = since.map_or(0, |t| t.elapsed().as_millis()),
+        "ospf lsack sent"
+    );
+    for payload in split_lsack(cfg, next_seq, local_router_id, &headers) {
+        if let Err(e) = socket.send_flood(dest, Ipv4Addr::UNSPECIFIED, &payload) {
+            warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospf lsack, falling back to unicast");
+            let targets: Vec<Ipv4Addr> = status
+                .borrow()
+                .neighbors
+                .values()
+                .filter(|n| n.adjacency.is_some())
+                .map(|n| n.address)
+                .collect();
+            for addr in targets {
+                let _ = socket.send_unicast(addr, &payload);
+            }
+        }
     }
 }
 
@@ -126,6 +191,10 @@ pub(super) fn retransmit_pending(
 /// (threading a fan-out channel through every link task) for a latency bound
 /// nothing needs tightened. Revisit once a SPF phase makes convergence speed
 /// actually matter.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the link task's own state, passed through"
+)]
 pub(super) async fn flood_full_neighbors(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -134,7 +203,13 @@ pub(super) async fn flood_full_neighbors(
     link_local_lsdb: &Mutex<Lsdb>,
     status: &StatusHandle,
     next_seq: &mut u64,
+    last_dest: &mut Option<Dest>,
 ) {
+    let dest = current_dest(cfg, status);
+    if *last_dest != Some(dest) {
+        *last_dest = Some(dest);
+        info!(link = %cfg.attach_point, dest = %dest.as_str(), "ospf lsu flood destination changed");
+    }
     let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr, bool)> = status
         .borrow()
         .neighbors
@@ -159,11 +234,39 @@ pub(super) async fn flood_full_neighbors(
     // (`accept_crypto_sequence` keys on the sender's own `router_id`), so two
     // different neighbors each independently accepting the same sequence
     // number is correct, not a replay.
+    // Multicast (RFC 2328 §13.3 step 5): each chunk goes out once to the
+    // group. Opaque LSAs (RFC 5250 §3) ride along only when every Full
+    // neighbor is opaque-capable; otherwise they stay unicast below.
+    // Under Crypto auth one packet is valid for all receivers (anti-replay is
+    // per neighbor). A send error falls back to the unicast loop for this pass.
+    let all_opaque = full_neighbors.iter().all(|n| n.2);
+    let mut multicast_done = false;
+    if dest != Dest::Unicast {
+        let group: Vec<Lsa> = lsas
+            .iter()
+            .filter(|l| all_opaque || !lsa::is_opaque(l.header.lsa_type))
+            .map(|l| (**l).clone())
+            .collect();
+        multicast_done = true;
+        if !group.is_empty() {
+            for payload in split_lsu(cfg, next_seq, local_router_id, &group) {
+                if let Err(e) = socket.send_flood(dest, Ipv4Addr::UNSPECIFIED, &payload) {
+                    warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospf lsu, falling back to unicast");
+                    multicast_done = false;
+                    break;
+                }
+            }
+        }
+    }
     for opaque in [true, false] {
+        if multicast_done && (!opaque || all_opaque) {
+            continue;
+        }
         let group: Vec<_> = full_neighbors.iter().filter(|n| n.2 == opaque).collect();
         let lsas: Vec<Lsa> = lsas
             .iter()
             .filter(|l| opaque || !lsa::is_opaque(l.header.lsa_type))
+            .filter(|l| !multicast_done || lsa::is_opaque(l.header.lsa_type))
             .map(|l| (**l).clone())
             .collect();
         if group.is_empty() || lsas.is_empty() {

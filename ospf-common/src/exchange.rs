@@ -504,6 +504,33 @@ pub fn take_pending_acks<L: Lsa>(adj: &mut AdjacencyData<L>) -> Option<Action<L>
     Some(Action::SendLsAck(std::mem::take(&mut adj.pending_acks)))
 }
 
+/// RFC 2328 §13.5 on a broadcast link: drains every neighbor's queued acks
+/// into one set for a single multicast `LSAck`, deduplicated by exact header
+/// (the same LSA instance heard from two neighbors is acked once), plus the
+/// oldest `pending_acks_since` among the drained queues. Empty set when
+/// nothing is pending.
+// ponytail: `contains` dedupe is O(n^2); the ack batch per 5s tick is a handful.
+pub fn take_all_pending_acks<'a, L: Lsa + 'a>(
+    adjs: impl Iterator<Item = &'a mut AdjacencyData<L>>,
+) -> (Vec<L::Header>, Option<Instant>) {
+    let (mut all, mut since): (Vec<L::Header>, Option<Instant>) = (Vec::new(), None);
+    for adj in adjs {
+        if adj.pending_acks.is_empty() {
+            continue;
+        }
+        since = match (since, adj.pending_acks_since.take()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        for h in adj.pending_acks.drain(..) {
+            if !all.contains(&h) {
+                all.push(h);
+            }
+        }
+    }
+    (all, since)
+}
+
 /// Handles one received `LSAck`'s headers: RFC 2328 §10.9 — stop
 /// retransmitting whatever it acknowledges.
 pub fn on_lsack_received<L: Lsa>(adj: &mut AdjacencyData<L>, acked: &[L::Header]) {
