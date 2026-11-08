@@ -12,18 +12,11 @@ use nos_bgp::collision::FsmCommand;
 use nos_bgp::session::{LocalIdentity, ResolvedAuth, ResolvedPeer, SessionManager, VrfRequirement};
 use nos_proto::bgp::BgpSessionState;
 use nos_proto::{AddressFamily, BgpShutdown, RedistributeUpdate, RedistributedRoute};
+use nos_test_support::free_port;
 use tokio::io::AsyncReadExt;
 
 const A: Ipv4Addr = Ipv4Addr::LOCALHOST;
 const B: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
     let accept = Arc::new(nos_rpl::ACCEPT_ALL.clone());
@@ -84,6 +77,8 @@ where
 struct Router {
     manager: Arc<SessionManager>,
     local: LocalIdentity,
+    /// (own listen port, peer's listen port): only for the timeout dump.
+    ports: (u16, u16),
 }
 
 impl Router {
@@ -112,10 +107,35 @@ impl Router {
     }
 
     async fn wait_for(&self, want: BgpSessionState) {
-        eventually(&format!("never reached {want:?}"), || async {
-            self.state().await == Some(want)
-        })
-        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while self.state().await != Some(want) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out: never reached {want:?}; {}",
+                self.diagnostics().await
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// What a timeout needs to be self-explaining (#965): this router's
+    /// peers and whether each listener of the pair accepts a loopback connect.
+    async fn diagnostics(&self) -> String {
+        let mut out = format!("peers={:?}", self.manager.peer_summaries().await);
+        for (name, port) in [("own", self.ports.0), ("peer", self.ports.1)] {
+            let r = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::net::TcpStream::connect((A, port)),
+            )
+            .await;
+            // A free port here means nobody (the router included) holds it.
+            let bind = std::net::TcpListener::bind(("0.0.0.0", port)).map(drop);
+            out += &format!(
+                " {name}-listener:{port}=connect:{:?} bind:{bind:?}",
+                r.map(|c| c.map(drop))
+            );
+        }
+        out
     }
 }
 
@@ -131,10 +151,12 @@ fn routers() -> (Router, Router, u16) {
         Router {
             manager: SessionManager::with_listen("a".to_string(), pa, pb, false),
             local: local(Ipv4Addr::new(1, 1, 1, 1), 65001),
+            ports: (pa, pb),
         },
         Router {
             manager: SessionManager::with_listen("b".to_string(), pb, pa, false),
             local: local(Ipv4Addr::new(2, 2, 2, 2), 65002),
+            ports: (pb, pa),
         },
         pa,
     )
@@ -563,7 +585,11 @@ async fn soft_reconfiguration_inbound_applies_policy_changes_in_place() {
     // Nothing to re-evaluate without the flag: soft-in is a Route Refresh.
     assert!(b.manager.soft_in_local(IpAddr::V4(A)).await.is_none());
     let accepted = || async { b.manager.peer_summaries().await[0].accepted_prefixes };
-    tokio::time::sleep(Duration::from_millis(1300)).await;
+    // The "no restart" checks below need an uptime of at least a second.
+    eventually("b's session is a second old", || async {
+        b.manager.peer_summaries().await[0].uptime_secs >= Some(1)
+    })
+    .await;
 
     // Enable in place: no restart, and A's refresh reply is retained.
     b.apply(vec![b_peer(true, false)]).await;

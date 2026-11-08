@@ -15,7 +15,7 @@ use nos_proto::{
     InterfaceStatus, Request, RoutingTable, RoutingTableEvpn, ServiceRef, SourceAddress,
     SubinterfaceStatus, LOOPBACK_PREFIX,
 };
-use nos_test_support::{serve, Fake, Fakes, Reply};
+use nos_test_support::{free_port, serve, Fake, Fakes, Reply};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -24,14 +24,6 @@ use super::{
     REAPPLY_INTERVAL,
 };
 use crate::session::{ResolvedPeer, SessionManager, VrfRequirement};
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn addr(s: &str, label: Option<&str>) -> InterfaceAddress {
     InterfaceAddress {
