@@ -292,7 +292,10 @@ where
                 }
             }
             Some(event) = sub_rx.recv() => {
-                if writer.send(event).await.is_err() {
+                // Only the forwarder feeds `sub_rx`; an Error is its terminal
+                // "lagged" (#632): flush it, then close so the client resubscribes.
+                let terminal = matches!(event, Event::Error(_));
+                if writer.send(event).await.is_err() || terminal {
                     break;
                 }
             }

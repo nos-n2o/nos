@@ -19,6 +19,8 @@ use crate::secrets::unmask_op;
 use crate::users::{hash_clear_passwords, is_clear, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
+/// The terminal `Event::Error` sent to a subscriber that fell behind (#632).
+pub(crate) const LAGGED: &str = "lagged";
 /// Set by `main` once its dhat profiler runs (`HeapStats::get` panics without
 /// one); then every commit logs the live heap (#796).
 #[cfg(feature = "dhat-heap")]
@@ -754,7 +756,13 @@ where
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "IPC subscriber lagged, dropped messages");
+                    warn!(
+                        lagged = n,
+                        "IPC subscriber lagged, closing connection to force a resync"
+                    );
+                    // Terminal: the connection loop closes after writing it.
+                    let _ = tx.send(Event::Error(LAGGED.into())).await;
+                    break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -967,6 +975,23 @@ mod tests {
         let _ = task.await;
         assert!(orx.recv().await.is_some());
         assert!(orx.recv().await.is_none(), "only seq 3 forwarded");
+    }
+
+    /// #632: a subscriber that overflows the ring gets a terminal error and the task ends.
+    #[tokio::test]
+    async fn lagged_subscriber_gets_terminal_error() {
+        let (btx, rx) = broadcast::channel(2);
+        let (out, mut orx) = mpsc::channel(8);
+        for seq in 1..=3 {
+            let u = CommitUpdate::new(Arc::default(), Arc::default(), HashSet::new());
+            let _ = btx.send(Arc::new(u.with_seq(seq)));
+        }
+        let task = forward(rx, 0, None, out, |u| async move {
+            Some(Event::Config(u.config.for_role(Role::User)))
+        });
+        task.await.unwrap();
+        assert!(matches!(orx.recv().await, Some(Event::Error(m)) if m == LAGGED));
+        assert!(orx.recv().await.is_none());
     }
 
     /// #631: commits and hash upgrades racing end with the subscriber on running.
