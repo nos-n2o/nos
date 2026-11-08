@@ -794,8 +794,12 @@ async fn bmp_dump_and_incremental_updates_on_both_streams() {
     let (mut c, _) = collector.accept().await.unwrap();
     assert_eq!(bmp_frame(&mut c).await.0, 4);
     assert_eq!(bmp_frame(&mut c).await.0, 3);
-    // Pre-policy dump: the rejected route, then End-of-RIB.
-    let (is_post, msg) = bmp_route(&mut c).await;
+    // Pre-policy dump: the rejected route, then End-of-RIB. Peer A's own
+    // End-of-RIB may still be in flight (#942): skip one leading live one.
+    let (mut is_post, mut msg) = bmp_route(&mut c).await;
+    if !is_post && matches!(msg, BgpMessage::EndOfRib { .. }) {
+        (is_post, msg) = bmp_route(&mut c).await;
+    }
     let BgpMessage::Update(upd) = msg else {
         panic!("{msg:?}")
     };
@@ -874,7 +878,11 @@ async fn bmp_pre_policy_dump_is_skipped_without_retention() {
         !is_post && matches!(msg, BgpMessage::EndOfRib { afi: 1, safi: 1 }),
         "pre: only the End-of-RIB"
     );
-    let (is_post, msg) = bmp_route(&mut c).await;
+    // A live End-of-RIB of the peer's own may follow (#942): skip one.
+    let (mut is_post, mut msg) = bmp_route(&mut c).await;
+    if !is_post && matches!(msg, BgpMessage::EndOfRib { .. }) {
+        (is_post, msg) = bmp_route(&mut c).await;
+    }
     assert!(
         is_post && matches!(&msg, BgpMessage::Update(upd) if upd.nlri.len() == 1),
         "{msg:?}"
