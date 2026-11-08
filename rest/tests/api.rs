@@ -1827,6 +1827,47 @@ async fn too_many_failed_logins_get_429_with_retry_after() {
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
 }
 
+/// #635: five bad logins from one address lock out only that address's
+/// attempts on the user; the right password from another address still works.
+#[tokio::test]
+async fn login_lockout_is_per_source_address() {
+    let f = fixture(vec![]).await;
+    let guess = |ip: &str, password: &str| {
+        let body = json!({"user": USER, "password": password, "csr": "AQID"});
+        HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(PeerUser(None, None))
+            .extension(nos_rest::login::ClientIp(ip.parse().unwrap()))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    for _ in 0..5 {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(guess("192.0.2.1", "nope"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let locked = f
+        .app
+        .clone()
+        .oneshot(guess("192.0.2.1", PASSWORD))
+        .await
+        .unwrap();
+    assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+    let other = f
+        .app
+        .clone()
+        .oneshot(guess("192.0.2.2", PASSWORD))
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::OK);
+}
+
 /// A certificate the watchdog no longer vouches for (password changed,
 /// session past its cap) is refused on every route, renewal included.
 #[tokio::test]
