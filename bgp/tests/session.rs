@@ -1176,11 +1176,11 @@ async fn bmp_adj_rib_out_follows_a_peer_that_comes_up_later() {
     assert_eq!(bmp_frame(&mut c).await.0, 4, "Initiation, no peer yet");
     a.apply(vec![unicast_only(peer(B, A, 65002))]).await;
     b.apply(vec![unicast_only(peer(A, B, 65001))]).await;
-    let (mut pre, mut post) = (false, false);
-    while !(pre && post) {
+    let mut seen = [false; 2]; // [pre-policy, post-policy]
+    while seen != [true; 2] {
         let f = bmp_out_frames(&mut c, 1).await.remove(0);
         if announces(&f.2, "198.51.100.0/24") {
-            *(if f.0 { &mut post } else { &mut pre }) = true;
+            seen[usize::from(f.0)] = true;
         }
     }
     a.manager.shutdown().await;
