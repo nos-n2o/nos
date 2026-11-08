@@ -1356,7 +1356,7 @@ async fn report_established(
     writer: &mut SessionWriter,
     timers: &Timers,
     action: &Action,
-) {
+) -> bool {
     let SessionCtx {
         peer,
         slot,
@@ -1393,8 +1393,15 @@ async fn report_established(
     };
     // GR on here and the peer sent the capability.
     let gr_negotiated = our_gr.and(*remote_gr);
-    slot.mark_established(role, gr_negotiated.is_some(), replaced.clone())
-        .await;
+    if !slot
+        .mark_established(role, gr_negotiated.is_some(), replaced.clone())
+        .await
+    {
+        // Lost the collision just before registering: leave the winner's
+        // `BgpRib` entry, status and refresh caps alone (#965).
+        info!(peer = %peer.remote_address, role = ?role, "bgp session lost the collision before registering");
+        return false;
+    }
     let mut negotiated_afs = HashSet::new();
     if *negotiated_ipv4_unicast {
         negotiated_afs.insert(AddressFamily::Ipv4Unicast);
@@ -1548,17 +1555,19 @@ async fn report_established(
         peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
         role = ?role, "bgp session established"
     );
+    true
 }
 
 /// Executes `step`'s actions in order; returns the Notification sent, if any,
-/// and whether `ReportEstablished` registered the peer with the RIB.
+/// whether `ReportEstablished` registered the peer with the RIB, and whether
+/// it lost the collision on the way (#965: the caller ends the session).
 async fn run_actions(
     cx: &SessionCtx<'_>,
     reader: &mut SessionReader,
     writer: &mut SessionWriter,
     timers: &mut Timers,
     actions: &[Action],
-) -> (Option<(u8, u8)>, bool) {
+) -> (Option<(u8, u8)>, bool, bool) {
     let mut notification_sent = None;
     let mut registered = false;
     for action in actions {
@@ -1599,13 +1608,22 @@ async fn run_actions(
                 timers.negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
             }
             Action::ReportEstablished { .. } => {
-                report_established(cx, reader, writer, timers, action).await;
+                if !report_established(cx, reader, writer, timers, action).await {
+                    let _ = writer
+                        .send(BgpMessage::Notification(NotificationMessage {
+                            error_code: ErrorCode::Cease as u8,
+                            error_subcode: CeaseSubcode::ConnectionCollisionResolution as u8,
+                            data: Bytes::new(),
+                        }))
+                        .await;
+                    return (notification_sent, false, true);
+                }
                 registered = true;
             }
             Action::Close => {}
         }
     }
-    (notification_sent, registered)
+    (notification_sent, registered, false)
 }
 
 #[allow(clippy::too_many_lines)] // the session loop is one select!; its arms already delegate to helpers
@@ -1803,8 +1821,11 @@ pub async fn run(
                 actions = lost;
             }
 
-            let (notification_sent, newly_registered) =
+            let (notification_sent, newly_registered, lost) =
                 run_actions(&cx, &mut reader, &mut writer, &mut timers, &actions).await;
+            if lost {
+                break 'session FsmOutcome::CollisionLost;
+            }
             registered |= newly_registered;
             if newly_registered
                 && let (Some(State::Established(remote)), Some(sent), Some(recv)) =
