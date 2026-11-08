@@ -41,6 +41,50 @@ pub fn entry_size(entry: &LogEntry) -> usize {
     128 + entry.source.len() + entry.target.len() + entry.message.len() + fields
 }
 
+/// Largest [`entry_size`] a recorded entry may have (#640): bigger entries are
+/// truncated by [`clamp_entry`], so one `Push` (up to the 16 MiB frame) cannot
+/// fill the ring or the disk file by itself.
+pub const MAX_ENTRY_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE: usize = 16 * 1024;
+const MAX_FIELDS: usize = 32;
+const MAX_KEY: usize = 128;
+const MAX_VALUE: usize = 1024;
+const MAX_IDENT: usize = 256;
+const TRUNCATED: &str = "...[truncated]";
+
+/// Cuts `s` to at most `max` bytes (marker included) on a UTF-8 boundary.
+fn truncate(s: &mut String, max: usize) -> bool {
+    if s.len() <= max {
+        return false;
+    }
+    let mut end = max.saturating_sub(TRUNCATED.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s.push_str(TRUNCATED);
+    true
+}
+
+/// Bounds an entry to [`MAX_ENTRY_BYTES`] by truncating (and marking) its
+/// message, source, target and fields; small entries are left untouched.
+pub fn clamp_entry(entry: &mut LogEntry) {
+    let mut cut = truncate(&mut entry.message, MAX_MESSAGE);
+    cut |= truncate(&mut entry.source, MAX_IDENT);
+    cut |= truncate(&mut entry.target, MAX_IDENT);
+    if entry.fields.len() > MAX_FIELDS {
+        entry.fields.truncate(MAX_FIELDS);
+        cut = true;
+    }
+    for (k, v) in &mut entry.fields {
+        cut |= truncate(k, MAX_KEY);
+        cut |= truncate(v, MAX_VALUE);
+    }
+    if cut {
+        warn!(source = %entry.source, "oversized log entry truncated");
+    }
+}
+
 #[derive(Default)]
 struct Ring {
     entries: VecDeque<LogEntry>,
@@ -116,7 +160,8 @@ impl LogStore {
     /// Records one entry: appends to the in-memory buffer (evicting the
     /// oldest if at capacity), notifies any live `Tail` subscribers, and
     /// forwards it to the persistence task. Never blocks on disk I/O.
-    pub async fn record(&self, entry: LogEntry) {
+    pub async fn record(&self, mut entry: LogEntry) {
+        clamp_entry(&mut entry);
         {
             let mut buffer = self.buffer.write().await;
             if buffer.push(entry.clone(), self.capacity) > 0 {
@@ -298,7 +343,9 @@ mod tests {
         while rx.try_recv().is_ok() {
             queued += 1;
         }
-        assert!(queued * entry_size(&entry("a", &big)) <= PERSIST_QUEUE_BYTES);
+        let mut clamped = entry("a", &big);
+        clamp_entry(&mut clamped);
+        assert!(queued * entry_size(&clamped) <= PERSIST_QUEUE_BYTES);
         assert!(queued > 0 && queued < 1000);
     }
 
