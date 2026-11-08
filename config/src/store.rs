@@ -618,8 +618,7 @@ impl ConfigStore {
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(if_match.as_deref())?;
         // Pass the config itself as the validation context (cross-reference checks).
-        txn.config.validate_with(&txn.config)?;
-        check_syslog_trust_anchors(&txn.config)?;
+        validate_config(&txn.config)?;
         // Held through the swap and broadcast: the check must not go stale (#631).
         let mut running = self.0.running.write().await;
         if txn.config.users.is_empty() && !running.users.is_empty() {
@@ -761,6 +760,13 @@ where
             }
         }
     })
+}
+
+/// Everything a commit checks (and a loaded file must pass, #634): garde rules
+/// with the config as the cross-reference context, plus the syslog trust anchors.
+pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    config.validate_with(config)?;
+    check_syslog_trust_anchors(config)
 }
 
 /// A syslog server's `trust_anchor` must parse as PEM certificates. Done here,

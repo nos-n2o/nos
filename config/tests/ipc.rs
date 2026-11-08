@@ -466,7 +466,7 @@ async fn save_persists_running_config_to_disk() {
     let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Saved));
 
-    let saved = nos_config::persistence::load_or_default(&config_path).unwrap();
+    let saved = nos_config::persistence::load_or_default(&config_path);
     assert_eq!(saved.bgp_instances.len(), 1);
     assert_eq!(saved.bgp_instances[0].name, "default");
 }

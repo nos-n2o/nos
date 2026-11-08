@@ -15,9 +15,9 @@ use crate::error::ConfigError;
 /// partially-written file at `path`.
 pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
     let yaml = serde_norway::to_string(config)?;
-    // Keep the last good primary as `.bak`; a corrupt primary never replaces it.
+    // Keep the last good primary as `.bak`; a corrupt or invalid primary never replaces it.
     if let Ok(old) = std::fs::read(path)
-        && serde_norway::from_slice::<Config>(&old).is_ok()
+        && serde_norway::from_slice::<Config>(&old).is_ok_and(|c| check_as_run(&c).is_ok())
     {
         write_durable(&backup_path(path), &old)?;
     }
@@ -48,50 +48,71 @@ fn backup_path(path: &Path) -> std::path::PathBuf {
     os.into()
 }
 
-/// Loads a config from `path`.
+/// Loads a config from `path`; infallible, never refuses to start.
 ///
-/// A missing file is treated as a first run and yields `Config::default()`.
-/// A file that exists but fails to parse falls back to `<path>.bak` (loudly)
-/// and the primary is rewritten from it (a failed restore is logged, not fatal);
-/// if that is missing or corrupt too it is a hard error — a corrupt config
-/// must never be silently discarded in favor of a default.
-pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
+/// Candidates in order: the primary, `<path>.bak`, a blank config (default
+/// plus the seeded user, which `main` adds). A candidate is accepted only if
+/// it reads, parses and passes `validate_config` as it will run (normalized,
+/// hashed, seeded, on a clone). Each rejection is an `error!` with the full
+/// report and the path; the rejected file is not preserved. A missing primary
+/// is a first run: `Config::default()`. When the `.bak` wins, the primary is
+/// rewritten from it (a failed restore is logged, not fatal).
+///
+/// This reverses #401's "never silently discard a corrupt config": a bad
+/// primary and bad `.bak` now yield a blank config.
+pub fn load_or_default(path: &Path) -> Config {
     warn_if_readable_by_others(path);
-    match std::fs::read(path) {
-        Ok(bytes) => match serde_norway::from_slice(&bytes) {
-            Ok(cfg) => {
-                info!(path = %path.display(), "loaded config from disk");
-                Ok(cfg)
-            }
-            Err(e) => {
-                error!(path = %path.display(), error = %e, "failed to parse config file");
-                let bak = backup_path(path);
-                match std::fs::read(&bak)
-                    .ok()
-                    .and_then(|b| Some((serde_norway::from_slice::<Config>(&b).ok()?, b)))
-                {
-                    Some((cfg, bytes)) => {
-                        error!(path = %bak.display(), "primary config corrupt, loaded backup");
-                        match write_durable(path, &bytes) {
-                            Ok(()) => {
-                                info!(path = %path.display(), "restored primary config from backup");
-                            }
-                            Err(e) => {
-                                error!(path = %path.display(), error = %e, "failed to restore primary config from backup");
-                            }
-                        }
-                        Ok(cfg)
-                    }
-                    None => Err(e.into()),
+    match try_load(path) {
+        Ok((cfg, _)) => {
+            info!(path = %path.display(), "loaded config from disk");
+            return cfg;
+        }
+        Err(None) => {
+            warn!(path = %path.display(), "no config file found, starting with default (empty) config");
+            return Config::default();
+        }
+        Err(Some(reason)) => {
+            error!(path = %path.display(), %reason, "config file rejected");
+        }
+    }
+    let bak = backup_path(path);
+    match try_load(&bak) {
+        Ok((cfg, bytes)) => {
+            error!(path = %bak.display(), "primary config unusable, loaded backup");
+            match write_durable(path, &bytes) {
+                Ok(()) => info!(path = %path.display(), "restored primary config from backup"),
+                Err(e) => {
+                    error!(path = %path.display(), error = %e, "failed to restore primary config from backup");
                 }
             }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            warn!(path = %path.display(), "no config file found, starting with default (empty) config");
-            Ok(Config::default())
+            cfg
         }
-        Err(source) => Err(persistence_error(path, source)),
+        Err(reason) => {
+            let reason = reason.unwrap_or_else(|| "no backup file".into());
+            error!(path = %bak.display(), %reason, "backup config unusable, starting with a blank config");
+            Config::default()
+        }
     }
+}
+
+/// `Err(None)` is `NotFound`; `Err(Some(report))` any read/parse/validation failure.
+fn try_load(path: &Path) -> Result<(Config, Vec<u8>), Option<String>> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        (e.kind() != std::io::ErrorKind::NotFound).then(|| format!("read failed: {e}"))
+    })?;
+    let cfg: Config = serde_norway::from_slice(&bytes).map_err(|e| Some(format!("{e}")))?;
+    check_as_run(&cfg).map_err(|e| Some(e.to_string()))?;
+    Ok((cfg, bytes))
+}
+
+/// Validates `cfg` after the steps `main` and `ConfigStore::new` apply.
+fn check_as_run(cfg: &Config) -> Result<(), ConfigError> {
+    let mut c = cfg.clone();
+    crate::users::seed_default_user(&mut c);
+    nos_proto::sync_routing_table_refs(&mut c);
+    crate::users::normalize_names(&mut c.users);
+    crate::users::hash_clear_passwords(&mut c.users, &[]);
+    crate::store::validate_config(&c)
 }
 
 /// The file holds the admin keystore in clear text (daemons need the real
@@ -149,7 +170,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("does-not-exist.yaml");
 
-        let cfg = load_or_default(&path).unwrap();
+        let cfg = load_or_default(&path);
         assert_eq!(cfg, Config::default());
     }
 
@@ -177,7 +198,7 @@ mod tests {
             .join("\n");
         assert!(!old.contains("graceful_restart"));
         std::fs::write(&path, old).unwrap();
-        let cfg = load_or_default(&path).unwrap();
+        let cfg = load_or_default(&path);
         assert_eq!(
             cfg.bgp_instances[0].graceful_restart.enabled_restart_time(),
             Some(120)
@@ -185,13 +206,11 @@ mod tests {
     }
 
     #[test]
-    fn load_or_default_returns_error_on_corrupt_file() {
+    fn corrupt_file_without_backup_gives_blank() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::fs::write(&path, b"not: [valid: yaml: at: all").unwrap();
-
-        let err = load_or_default(&path).unwrap_err();
-        assert!(matches!(err, ConfigError::Serialization(_)));
+        assert_eq!(load_or_default(&path), Config::default());
     }
 
     #[test]
@@ -201,7 +220,7 @@ mod tests {
         let cfg = sample_config();
 
         save_to_disk(&cfg, &path).unwrap();
-        let loaded = load_or_default(&path).unwrap();
+        let loaded = load_or_default(&path);
         assert_eq!(loaded, cfg);
     }
 
@@ -213,7 +232,7 @@ mod tests {
         save_to_disk(&Config::default(), &path).unwrap();
         save_to_disk(&sample_config(), &path).unwrap();
 
-        let loaded = load_or_default(&path).unwrap();
+        let loaded = load_or_default(&path);
         assert_eq!(loaded, sample_config());
     }
 
@@ -234,7 +253,7 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         save_to_disk(&sample_config(), &path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(load_or_default(&path).unwrap(), sample_config());
+        assert_eq!(load_or_default(&path), sample_config());
     }
 
     #[test]
@@ -263,11 +282,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         two_saves(&path);
-        assert_eq!(
-            load_or_default(&backup_path(&path)).unwrap(),
-            Config::default()
-        );
-        assert_eq!(load_or_default(&path).unwrap(), sample_config());
+        assert_eq!(load_or_default(&backup_path(&path)), Config::default());
+        assert_eq!(load_or_default(&path), sample_config());
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
     }
 
@@ -277,7 +293,7 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         two_saves(&path);
         std::fs::write(&path, CORRUPT).unwrap();
-        assert_eq!(load_or_default(&path).unwrap(), Config::default());
+        assert_eq!(load_or_default(&path), Config::default());
         // The primary was restored from the backup and parses on its own.
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
@@ -296,20 +312,91 @@ mod tests {
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let res = load_or_default(&path);
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(res.unwrap(), Config::default());
+        assert_eq!(res, Config::default());
     }
 
     #[test]
-    fn corrupt_primary_and_backup_errors() {
+    fn corrupt_primary_and_backup_give_blank() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         two_saves(&path);
         std::fs::write(&path, CORRUPT).unwrap();
         std::fs::write(backup_path(&path), CORRUPT).unwrap();
-        assert!(matches!(
-            load_or_default(&path).unwrap_err(),
-            ConfigError::Serialization(_)
-        ));
+        assert_eq!(load_or_default(&path), Config::default());
+    }
+
+    /// Parses fine, fails garde (#634): a BGP instance with ASN 0.
+    fn invalid_config() -> Config {
+        let mut c = sample_config();
+        c.bgp_instances[0].asn = 0;
+        c
+    }
+
+    fn write_yaml(path: &Path, c: &Config) {
+        std::fs::write(path, serde_norway::to_string(c).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn validate_config_rejects_what_commit_rejects() {
+        assert!(crate::store::validate_config(&invalid_config()).is_err());
+        assert!(crate::store::validate_config(&sample_config()).is_ok());
+    }
+
+    #[test]
+    fn seeded_blank_config_validates() {
+        assert!(check_as_run(&Config::default()).is_ok());
+    }
+
+    #[test]
+    fn invalid_primary_loads_valid_backup_and_rewrites_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        write_yaml(&path, &invalid_config());
+        assert_eq!(load_or_default(&path), Config::default());
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            serde_norway::from_slice::<Config>(&bytes).unwrap(),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn invalid_primary_and_invalid_backup_give_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        write_yaml(&path, &invalid_config());
+        write_yaml(&backup_path(&path), &invalid_config());
+        assert_eq!(load_or_default(&path), Config::default());
+    }
+
+    #[test]
+    fn invalid_primary_without_backup_gives_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        write_yaml(&path, &invalid_config());
+        assert_eq!(load_or_default(&path), Config::default());
+    }
+
+    #[test]
+    fn unreadable_primary_loads_backup_or_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        // A directory: read fails with something other than NotFound.
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(load_or_default(&path), Config::default());
+        write_yaml(&backup_path(&path), &sample_config());
+        assert_eq!(load_or_default(&path), sample_config());
+    }
+
+    #[test]
+    fn saving_over_invalid_primary_keeps_good_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        two_saves(&path);
+        write_yaml(&path, &invalid_config());
+        save_to_disk(&sample_config(), &path).unwrap();
+        assert_eq!(load_or_default(&backup_path(&path)), Config::default());
     }
 
     #[test]
@@ -319,9 +406,6 @@ mod tests {
         two_saves(&path);
         std::fs::write(&path, CORRUPT).unwrap();
         save_to_disk(&sample_config(), &path).unwrap();
-        assert_eq!(
-            load_or_default(&backup_path(&path)).unwrap(),
-            Config::default()
-        );
+        assert_eq!(load_or_default(&backup_path(&path)), Config::default());
     }
 }
