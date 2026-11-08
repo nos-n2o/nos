@@ -214,7 +214,7 @@ struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
         if self.0.len() < n {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let (head, rest) = self.0.split_at(n);
         self.0 = rest;
@@ -239,7 +239,7 @@ impl<'a> Reader<'a> {
         match len {
             4 => Ok(Ipv4Addr::from(self.array::<4>()?).into()),
             16 => Ok(Ipv6Addr::from(self.array::<16>()?).into()),
-            _ => Err(WireError::MalformedUpdate),
+            _ => Err(WireError::InvalidNetworkField),
         }
     }
     /// Every byte of the body must have been consumed.
@@ -247,7 +247,7 @@ impl<'a> Reader<'a> {
         if self.0.is_empty() {
             Ok(())
         } else {
-            Err(WireError::MalformedUpdate)
+            Err(WireError::InvalidNetworkField)
         }
     }
 }
@@ -256,16 +256,16 @@ impl<'a> Reader<'a> {
 /// whole of an `MP_UNREACH_NLRI` for AFI 25 / SAFI 70).
 ///
 /// # Errors
-/// `MalformedUpdate` on any truncated or inconsistent length.
+/// `InvalidNetworkField` on any truncated or inconsistent length.
 pub fn decode_nlris(mut data: &[u8]) -> Result<Vec<EvpnNlri>, WireError> {
     let mut out = Vec::new();
     while !data.is_empty() {
         if data.len() < 2 {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         let (route_type, len) = (data[0], usize::from(data[1]));
         if data.len() < 2 + len {
-            return Err(WireError::MalformedUpdate);
+            return Err(WireError::InvalidNetworkField);
         }
         out.push(decode_one(route_type, &data[2..2 + len])?);
         data = &data[2 + len..];
@@ -285,20 +285,20 @@ fn decode_one(route_type: u8, body: &[u8]) -> Result<EvpnNlri, WireError> {
         ROUTE_MAC_IP => {
             let (rd, esi, tag) = (r.array()?, r.array()?, r.u32()?);
             if r.u8()? != 48 {
-                return Err(WireError::MalformedUpdate);
+                return Err(WireError::InvalidNetworkField);
             }
             let mac = r.array()?;
             let ip = match r.u8()? {
                 0 => None,
                 32 => Some(r.ip(4)?),
                 128 => Some(r.ip(16)?),
-                _ => return Err(WireError::MalformedUpdate),
+                _ => return Err(WireError::InvalidNetworkField),
             };
             // One label, or two when an IP-VRF label follows the MAC-VRF one.
             let count = match r.0.len() {
                 3 => 1,
                 6 => 2,
-                _ => return Err(WireError::MalformedUpdate),
+                _ => return Err(WireError::InvalidNetworkField),
             };
             let labels = (0..count).map(|_| r.label()).collect::<Result<_, _>>()?;
             EvpnNlri::MacIp {
@@ -335,10 +335,10 @@ fn decode_one(route_type: u8, body: &[u8]) -> Result<EvpnNlri, WireError> {
             let addr_len = match body.len() {
                 34 => 4,
                 58 => 16,
-                _ => return Err(WireError::MalformedUpdate),
+                _ => return Err(WireError::InvalidNetworkField),
             };
             let prefix =
-                IpNet::new(r.ip(addr_len)?, plen).map_err(|_| WireError::MalformedUpdate)?;
+                IpNet::new(r.ip(addr_len)?, plen).map_err(|_| WireError::InvalidNetworkField)?;
             EvpnNlri::IpPrefix {
                 rd,
                 esi,

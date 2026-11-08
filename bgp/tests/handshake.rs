@@ -971,3 +971,126 @@ async fn route_refresh_stale_timer_is_cancelled_by_eorr() {
 async fn zero_route_refresh_stale_time_keeps_stale_routes() {
     assert_eq!(refresh_case(Duration::ZERO, false).await, 2);
 }
+
+/// RFC 4271 §6.1: a message of an unknown type is answered with a Message
+/// Header Error / Bad Message Type NOTIFICATION whose data is the type octet.
+#[tokio::test]
+async fn unknown_message_type_is_answered_with_bad_message_type() {
+    use bytes::BytesMut;
+    use tokio::io::AsyncWriteExt;
+    use tokio_util::codec::Encoder;
+
+    let (a_stream, b_stream) = loopback_pair().await;
+    let a_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let a_asn = 65001;
+    let b_asn = 65002;
+
+    let slot_a = PeerSlot::new(ResolvedPeer {
+        remote_address: "10.0.0.2".parse().unwrap(),
+        source_address: None,
+        remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 30,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+        mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
+        damping: None,
+        max_hops: None,
+        auth: None,
+        next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
+        import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        evpn_import_policy: None,
+        flowspec_import_policy: None,
+        flowspec_export_policy: None,
+        enforce_first_as: true,
+        flowspec_validation: nos_proto::BgpFlowspecValidation::default(),
+        shutdown: None,
+        maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
+        blackhole: None,
+        soft_reconfiguration_inbound: false,
+        local_as: None,
+        add_path: None,
+        add_path_send_count: None,
+        role: None,
+        strict_mode: false,
+        confed_id: None,
+        confed_member: false,
+        graceful_restart: None,
+    });
+
+    let a_fut = fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: a_asn,
+            router_id: a_router_id,
+            cluster_id: a_router_id,
+            confed_id: None,
+        },
+        PeerContext {
+            remote_address: "10.0.0.2".parse().unwrap(),
+            expected_remote_as: b_asn,
+            local_hold_time: 30,
+            keepalive_override: None,
+            mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
+            damping: None,
+            next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
+            import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        },
+        slot_a,
+        new_bgp_rib(),
+    );
+
+    let fake_b = tokio::spawn(async move {
+        let (r, mut w) = b_stream.into_split();
+        let mut buf = BytesMut::new();
+        BgpCodec::default()
+            .encode(
+                BgpMessage::Open(message::build_open(b_asn, Ipv4Addr::new(2, 2, 2, 2), 60)),
+                &mut buf,
+            )
+            .unwrap();
+        // A header-only message of the unassigned type 6.
+        buf.extend_from_slice(&[0xff; 16]);
+        buf.extend_from_slice(&19u16.to_be_bytes());
+        buf.extend_from_slice(&[6]);
+        w.write_all(&buf).await.unwrap();
+        let mut reader = FramedRead::new(r, BgpCodec::default());
+        loop {
+            if let Some(Ok(BgpMessage::Notification(n))) = reader.next().await {
+                return n;
+            }
+        }
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), a_fut)
+        .await
+        .expect("session should end on the bad message type");
+    assert!(
+        matches!(
+            outcome,
+            FsmOutcome::NotificationSent {
+                code: 1,
+                subcode: 3
+            }
+        ),
+        "{outcome:?}"
+    );
+    let n = tokio::time::timeout(Duration::from_secs(5), fake_b)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((n.error_code, n.error_subcode), (1, 3));
+    assert_eq!(&n.data[..], &[6]);
+}
