@@ -75,8 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     nos_log_client::install_panic_hook();
 
-    let mut initial = persistence::load_or_default(&args.config_file)
-        .with_context(|| format!("failed to load config from {}", args.config_file.display()))?;
+    let mut initial = persistence::load_or_default(&args.config_file);
     users::seed_default_user(&mut initial);
 
     let store = ConfigStore::new(initial, Some(args.config_file.clone()));

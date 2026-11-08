@@ -44,9 +44,11 @@ Editing the config happens inside a **named transaction**, held server-side in `
 ### Persistence
 
 - `save_to_disk` writes a temp file, fsyncs it, renames it over `config.yaml`, then fsyncs the directory.
-- Before each save the previous `config.yaml` is copied (same durable write) to `config.yaml.bak`, but only if it still parses, so a corrupt primary never replaces the last good backup.
-- On start, a primary that fails to parse falls back to `config.yaml.bak` with an `error!` ("primary config corrupt, loaded backup"), and the primary is rewritten from the backup immediately (a failed restore is logged; the load still succeeds).
-- If the backup is missing or also corrupt, `nos-configd` refuses to start (never a silent default).
+- Before each save the previous `config.yaml` is copied (same durable write) to `config.yaml.bak`, but only if it parses and passes `validate_config`, so a bad primary never replaces the last good backup.
+- On start every candidate must read, parse and pass `validate_config` (the commit check plus syslog trust anchors, run after seeding/normalizing/hashing on a clone). Order: primary, then `config.yaml.bak`, then a blank config with the seeded `admin`.
+- A missing primary is a first run (default config, `warn!`). Any other rejection (read error such as permission denied, parse error, validation failure) logs an `error!` with the path and the full report; the rejected file is not preserved.
+- When the backup wins, the primary is rewritten from it (a failed restore is logged; the load still succeeds).
+- `load_or_default` never fails, so a bad config cannot stop `nos-configd` from starting. This reverses #401's "never silently discard". The next `Save` overwrites whatever the primary was, so a transient read error can lose the operator's config; the `.bak` copy rule limits that to the primary.
 
 ### Framing limit
 

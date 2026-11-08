@@ -48,7 +48,7 @@ By convention the socket is `/run/nos/config.sock`; tests use a tempdir.
 
 ## Config file convention
 
-By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a malformed one falls back to `config.yaml.bak` (error! logged, primary rewritten from it, a failed restore doesn't fail the load); fatal only if the backup is bad too — never a silent default. Details: `docs/architecture/config-protocol.md`.
+By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a primary that is unreadable, unparseable or fails `validate_config` falls back to `.bak` (must validate; primary rewritten), then to a blank config with the seeded admin; never fails (reverses #401). See `docs/architecture/config-protocol.md`.
 
 ## ConfigStore rules
 
