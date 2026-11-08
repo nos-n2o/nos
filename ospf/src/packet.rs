@@ -480,11 +480,27 @@ pub fn decode_lsu(data: &[u8], auth: &AuthPolicy<'_>) -> Result<LsuPacket, Packe
                 lsas.push(l);
                 rest = &rest[consumed..];
             }
-            // RFC 2328 §13 step 2: an LSA of an unknown type is discarded on
-            // its own, not with every good LSA sent beside it. `decode_lsa`
-            // checked its length and checksum before rejecting the type.
-            Err(PacketError::UnknownLsaType(_)) => {
-                rest = &rest[usize::from(lsa::decode_lsa_header(rest)?.length)..];
+            // RFC 2328 §13 step 1-2: an LSA that fails its checksum, has a
+            // malformed body or an unknown type is discarded on its own, not
+            // with every good LSA sent beside it, as long as its header
+            // length still frames it.
+            Err(
+                e @ (PacketError::UnknownLsaType(_)
+                | PacketError::BadChecksum
+                | PacketError::TruncatedBody),
+            ) => {
+                let header = lsa::decode_lsa_header(rest)?;
+                let len = usize::from(header.length);
+                if len < lsa::LSA_HEADER_LEN || len > rest.len() {
+                    return Err(e);
+                }
+                tracing::debug!(
+                    lsa_type = header.lsa_type,
+                    advertising_router = %header.advertising_router,
+                    error = %e,
+                    "discarded undecodable LSA from LSU"
+                );
+                rest = &rest[len..];
             }
             Err(e) => return Err(e),
         }
@@ -1168,6 +1184,29 @@ mod tests {
         assert_eq!(decoded.lsas.len(), 2);
         assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
         assert_eq!(decoded.lsas[1].body, pkt.lsas[2].body);
+    }
+
+    /// RFC 2328 §13 step 1 (#644): a bad-checksum LSA is dropped alone.
+    #[test]
+    fn lsu_skips_a_bad_checksum_lsa_and_keeps_the_rest() {
+        let pkt = sample_lsu();
+        let mut encoded = encode_lsu(&pkt, &OutgoingAuth::None);
+        let second = HEADER_LEN + 4 + lsa::encode_lsa(&pkt.lsas[0]).len();
+        // Flip a body byte of the second LSA.
+        encoded[second + lsa::LSA_HEADER_LEN] ^= 0x01;
+        encoded[12..14].copy_from_slice(&0u16.to_be_bytes());
+        let sum = checksum(&encoded);
+        encoded[12..14].copy_from_slice(&sum.to_be_bytes());
+        let decoded = decode_lsu(&encoded, &AuthPolicy::None).unwrap();
+        assert_eq!(decoded.lsas.len(), pkt.lsas.len() - 1);
+        assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
+        // An unusable header length (framing lost) still fails the LSU.
+        let mut encoded = encode_lsu(&pkt, &OutgoingAuth::None);
+        encoded[second + 18..second + 20].copy_from_slice(&5u16.to_be_bytes());
+        encoded[12..14].copy_from_slice(&0u16.to_be_bytes());
+        let sum = checksum(&encoded);
+        encoded[12..14].copy_from_slice(&sum.to_be_bytes());
+        assert!(decode_lsu(&encoded, &AuthPolicy::None).is_err());
     }
 
     /// RFC 2328 §13.3: the wire age is the stored age plus `InfTransDelay`,

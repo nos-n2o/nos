@@ -380,6 +380,7 @@ fn resolve_virtual_link_up_down_and_address() {
         })
     };
     let p2p = |to: Ipv4Addr, own: [u8; 4], metric| RouterLink {
+        tos: Vec::new(),
         link_id: to,
         link_data: Ipv4Addr::from(own),
         link_type: LINK_TYPE_POINT_TO_POINT,
@@ -442,6 +443,7 @@ fn router_lsa_links_virtual_link_only_when_full() {
     assert_eq!(
         links(&status),
         [RouterLink {
+            tos: Vec::new(),
             link_id: id(3),
             link_data: Ipv4Addr::new(10, 0, 0, 1),
             link_type: LINK_TYPE_VIRTUAL,

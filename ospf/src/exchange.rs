@@ -294,6 +294,7 @@ mod tests {
                     ..header("9.9.9.10", 0x8000_0001u32.cast_signed())
                 },
                 body: lsa::LsaBody::AsExternal(lsa::AsExternalLsaBody {
+                    tos: Vec::new(),
                     network_mask: router_id("255.255.255.0"),
                     metric: 0,
                     e_type2: false,
