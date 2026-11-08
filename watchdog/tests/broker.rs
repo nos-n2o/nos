@@ -209,8 +209,22 @@ async fn an_unauthenticated_peer_can_only_log_in() {
     )
     .await;
     assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    // ...and the broker hangs up after that first refusal.
+    assert!(conn.0.next().await.is_none_or(|r| r.is_err()));
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
     let event = ask(&mut conn, WatchdogRequest::RenewCert { csr_der: vec![] }).await;
     assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    assert!(conn.0.next().await.is_none_or(|r| r.is_err()));
+}
+
+#[tokio::test]
+async fn an_authenticated_wrong_role_peer_stays_connected_after_a_denial() {
+    let e = env(vec![]).await;
+    let mut conn = dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await;
+    for _ in 0..2 {
+        let event = ask(&mut conn, WatchdogRequest::RenewCert { csr_der: vec![] }).await;
+        assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    }
 }
 
 #[tokio::test]
@@ -440,8 +454,9 @@ async fn only_restd_may_use_the_rest_requests() {
             );
         }
     }
-    let mut conn = dial(&e.anonymous(), &e.broker).await;
     for request in requests() {
+        // The broker hangs up on an anonymous peer after a refusal.
+        let mut conn = dial(&e.anonymous(), &e.broker).await;
         let event = ask(&mut conn, request).await;
         assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
     }

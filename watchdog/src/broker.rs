@@ -114,6 +114,9 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
         // Only a direct `Login` is throttled here: `RestLogin` comes over
         // `nos-restd`'s shared connection, which does its own per-user delay.
         let is_login = matches!(request, WatchdogRequest::Login { .. });
+        // An anonymous peer may only log in: answer its first other request
+        // (one warn in `dispatch`) and hang up, so it can't flood the log.
+        let hang_up = peer.is_none() && !allowed(None, &request);
         let event = dispatch(&ctx, peer.as_ref(), request).await;
         let rejected_login =
             is_login && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS);
@@ -121,7 +124,7 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
             failed_logins += 1;
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
         }
-        if writer.send(event).await.is_err() || failed_logins >= MAX_FAILED_LOGINS {
+        if writer.send(event).await.is_err() || hang_up || failed_logins >= MAX_FAILED_LOGINS {
             break;
         }
     }
