@@ -10,6 +10,7 @@ fn handle_hello_matches_the_e_bit_to_the_stub_flag() {
     for (options, accepted) in [(packet::OPTION_E, false), (0, true)] {
         let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
         let hello = packet::HelloPacket {
+            lls: None,
             options,
             ..matching_hello(&cfg, peer)
         };
@@ -46,6 +47,7 @@ fn handle_hello_matches_the_n_bit_to_the_nssa_flag() {
         assert_eq!(hello_options(&cfg) & packet::OPTION_N != 0, nssa);
         let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
         let hello = packet::HelloPacket {
+            lls: None,
             options,
             ..matching_hello(&cfg, peer)
         };

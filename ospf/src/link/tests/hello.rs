@@ -28,6 +28,7 @@ fn extended_replay_check_is_per_packet_type() {
     let src = Ipv4Addr::new(10, 0, 0, 2);
     let hello = |seq: u64| {
         let pkt = packet::HelloPacket {
+            lls: None,
             router_id: peer,
             area_id: Ipv4Addr::UNSPECIFIED,
             network_mask: Ipv4Addr::UNSPECIFIED,
@@ -64,6 +65,7 @@ fn extended_replay_check_is_per_packet_type() {
     // (lower) number would be a replay if the slot were shared.
     let dbd = packet::encode_dbd(
         &packet::DbdPacket {
+            lls: None,
             router_id: peer,
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,

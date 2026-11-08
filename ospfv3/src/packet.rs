@@ -497,6 +497,7 @@ pub fn decode_dbd(data: &[u8]) -> Result<DbdPacket, PacketError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(DbdPacket {
+        lls: None,
         router_id,
         area_id,
         options,
@@ -755,6 +756,7 @@ mod tests {
 
     fn sample_dbd() -> DbdPacket {
         DbdPacket {
+            lls: None,
             router_id: Ipv4Addr::new(9, 9, 9, 9),
             area_id: Ipv4Addr::UNSPECIFIED,
             options: lsa::OPTION_V6 | lsa::OPTION_R,

@@ -173,6 +173,7 @@ fn ext_auth() -> LinkAuthConfig {
 /// mutate one field away from.
 fn matching_hello(cfg: &LinkConfig, router_id: Ipv4Addr) -> packet::HelloPacket {
     packet::HelloPacket {
+        lls: None,
         router_id,
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),

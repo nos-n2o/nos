@@ -4,7 +4,7 @@
 use super::*;
 use crate::lsa::test_lsa::{H, L};
 
-type DbdPacket = Dbd<H>;
+type DbdPacket = Dbd<H, ()>;
 type AdjacencyData = super::AdjacencyData<L>;
 type Action = super::Action<L>;
 
@@ -26,6 +26,7 @@ fn header(link_state_id: &str, seq: i32) -> H {
 
 fn negotiation_dbd(router_id: Ipv4Addr, seq: u32) -> DbdPacket {
     DbdPacket {
+        lls: None,
         router_id,
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -120,6 +121,7 @@ fn slave_accepts_masters_reply_as_exstart_trigger() {
     let mut adj = AdjacencyData::default();
     let master_lsa = header("1.1.1.1", 0x8000_0001u32.cast_signed());
     let poll = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -150,6 +152,7 @@ fn slave_accepts_masters_reply_as_exstart_trigger() {
         actions,
         vec![
             Action::SendDbd(DbdPacket {
+                lls: None,
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
@@ -214,6 +217,7 @@ fn master_accepts_neighbors_reply_as_exstart_trigger() {
     };
     let neighbor_lsa = header("1.1.1.1", 0x8000_0001u32.cast_signed());
     let reply = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.5"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -257,6 +261,7 @@ fn slave_ignores_a_reply_shaped_packet_in_exstart() {
     // than acted on.
     let mut adj = AdjacencyData::default();
     let reply = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -306,6 +311,7 @@ fn exchange_as_master_with_empty_summaries_reaches_exchange_done() {
         ..Default::default()
     };
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -348,6 +354,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
         ..Default::default()
     };
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.5"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -376,6 +383,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
         actions,
         vec![
             Action::SendDbd(DbdPacket {
+                lls: None,
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
@@ -402,6 +410,7 @@ fn exchange_requests_lsas_missing_locally() {
     };
     let neighbor_header = header("1.1.1.1", 0x8000_0001u32.cast_signed());
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -441,6 +450,7 @@ fn exchange_does_not_request_lsas_already_current_locally() {
     let local = header("1.1.1.1", 0x8000_0002u32.cast_signed());
     let neighbor_header = header("1.1.1.1", 0x8000_0001u32.cast_signed());
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -484,6 +494,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
         ..Default::default()
     };
     let empty_slave_reply = |seq: u32| DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -512,6 +523,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
     assert_eq!(
         actions,
         vec![Action::SendDbd(DbdPacket {
+            lls: None,
             router_id: router_id("9.9.9.9"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
@@ -540,6 +552,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
     assert_eq!(
         actions,
         vec![Action::SendDbd(DbdPacket {
+            lls: None,
             router_id: router_id("9.9.9.9"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
@@ -585,6 +598,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
         ..Default::default()
     };
     let master_poll = |seq: u32, more: bool| DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.5"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -613,6 +627,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
     assert_eq!(
         actions,
         vec![Action::SendDbd(DbdPacket {
+            lls: None,
             router_id: router_id("9.9.9.9"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
@@ -643,6 +658,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
         actions,
         vec![
             Action::SendDbd(DbdPacket {
+                lls: None,
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
@@ -675,6 +691,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
         ..Default::default()
     };
     let slave_reply = |seq: u32, more: bool, header: H| DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -700,6 +717,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
     assert_eq!(
         actions,
         vec![Action::SendDbd(DbdPacket {
+            lls: None,
             router_id: router_id("9.9.9.9"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
@@ -743,6 +761,7 @@ fn exchange_mismatch_as_master_triggers_seq_number_mismatch() {
         ..Default::default()
     };
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.10"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,
@@ -782,6 +801,7 @@ fn exchange_mismatch_as_slave_triggers_seq_number_mismatch() {
         ..Default::default()
     };
     let dbd = DbdPacket {
+        lls: None,
         router_id: router_id("9.9.9.5"),
         area_id: Ipv4Addr::UNSPECIFIED,
         interface_mtu: 0,

@@ -88,7 +88,7 @@ pub fn mtu_acceptable(neighbor_mtu: u16, local_mtu: u16, ignore: bool) -> bool {
 /// A.3.3), wire-agnostic: each daemon's `packet.rs` aliases it and keeps the
 /// codec. `options` is v2's 8-bit or v3's 24-bit Options field.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Dbd<H> {
+pub struct Dbd<H, X = ()> {
     pub router_id: Ipv4Addr,
     pub area_id: Ipv4Addr,
     pub interface_mtu: u16,
@@ -101,7 +101,12 @@ pub struct Dbd<H> {
     pub master: bool,
     pub dd_sequence_number: u32,
     pub lsa_headers: Vec<H>,
+    /// RFC 5613 LLS block carried after the packet (`OSPFv2` only; `()` for v3).
+    pub lls: Option<X>,
 }
+
+/// The `Dbd` of an LSA family `L`.
+type DbdOf<L> = Dbd<<L as Lsa>::Header, <L as Lsa>::Lls>;
 
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 // Independent flags, each read on its own.
@@ -122,7 +127,7 @@ pub struct AdjacencyData<L: Lsa> {
     /// aren't synchronized: whichever side reaches `ExStart` first sends a
     /// negotiation packet the other side isn't ready to receive yet, so
     /// without a resend that first packet is silently dropped forever.
-    pub last_dbd_sent: Option<Dbd<L::Header>>,
+    pub last_dbd_sent: Option<Dbd<L::Header, L::Lls>>,
     /// RFC 2328 §10.8: local LSDB headers not yet sent to this neighbor —
     /// seeded once from a full LSDB snapshot at `ExStart` exit, then drained
     /// `max_headers` at a time (`pop_chunk`), one chunk per DD sequence
@@ -169,7 +174,7 @@ impl<L: Lsa> Default for AdjacencyData<L> {
 /// `Event` back into `neighbor::step`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action<L: Lsa> {
-    SendDbd(Dbd<L::Header>),
+    SendDbd(Dbd<L::Header, L::Lls>),
     SendLsr(Vec<Key<L>>),
     SendLsu(Vec<Arc<L>>),
     SendLsAck(Vec<L::Header>),
@@ -218,7 +223,7 @@ pub fn on_dbd_received<L, FS, FO>(
     adj: &mut AdjacencyData<L>,
     state: NeighborState,
     p: &Params,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
     local_lsdb_headers: &[L::Header],
     in_scope: FS,
     is_opaque: FO,
@@ -261,7 +266,7 @@ where
 /// - Anything else (the master's duplicate, other strays): discarded.
 fn on_dbd_in_loading_or_full<L: Lsa>(
     adj: &AdjacencyData<L>,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
 ) -> Vec<Action<L>> {
     if dbd.init {
         return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
@@ -280,7 +285,7 @@ fn on_dbd_in_loading_or_full<L: Lsa>(
 fn on_dbd_in_exstart<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     p: &Params,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
     local_lsdb_headers: &[L::Header],
     in_scope: &impl Fn(&L::Header) -> bool,
     is_opaque: &impl Fn(&L::Header) -> bool,
@@ -389,9 +394,9 @@ fn seed_summary<L: Lsa>(
 fn slave_process_poll<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     p: &Params,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
     local_lsdb_headers: &[L::Header],
-) -> (Dbd<L::Header>, bool) {
+) -> (Dbd<L::Header, L::Lls>, bool) {
     adj.dd_sequence_number = dbd.dd_sequence_number;
     adj.request_list
         .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
@@ -406,6 +411,7 @@ fn slave_process_poll<L: Lsa>(
         master: false,
         dd_sequence_number: adj.dd_sequence_number,
         lsa_headers: chunk,
+        lls: None,
     };
     let done = !dbd.more && !more;
     (reply, done)
@@ -419,9 +425,9 @@ fn slave_process_poll<L: Lsa>(
 fn master_process_reply<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     p: &Params,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
     local_lsdb_headers: &[L::Header],
-) -> (Option<Dbd<L::Header>>, bool) {
+) -> (Option<DbdOf<L>>, bool) {
     adj.request_list
         .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
     if !dbd.more && adj.summary_remaining.is_empty() {
@@ -439,6 +445,7 @@ fn master_process_reply<L: Lsa>(
         master: true,
         dd_sequence_number: adj.dd_sequence_number,
         lsa_headers: chunk,
+        lls: None,
     };
     (Some(poll), false)
 }
@@ -446,7 +453,7 @@ fn master_process_reply<L: Lsa>(
 fn on_dbd_in_exchange<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     p: &Params,
-    dbd: &Dbd<L::Header>,
+    dbd: &Dbd<L::Header, L::Lls>,
     local_lsdb_headers: &[L::Header],
 ) -> Vec<Action<L>> {
     // A negotiation-shaped packet (I=1,M=1,MS=1) here means the peer is

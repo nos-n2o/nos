@@ -129,6 +129,7 @@ mod tests {
 
     fn negotiation_dbd(router_id: Ipv4Addr, seq: u32) -> DbdPacket {
         DbdPacket {
+            lls: None,
             router_id,
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
@@ -231,6 +232,7 @@ mod tests {
         for (options, expected) in [(DBD_OPTIONS, 3), (u32::from(OPTION_E), 1)] {
             let mut adj = AdjacencyData::default();
             let dbd = DbdPacket {
+                lls: None,
                 options,
                 ..negotiation_dbd(router_id("9.9.9.10"), 1)
             };
@@ -264,6 +266,7 @@ mod tests {
         assert_eq!(dbd_options(false), DBD_OPTIONS);
 
         let listing = DbdPacket {
+            lls: None,
             lsa_headers: vec![as_scope.header],
             ..negotiation_dbd(router_id("9.9.9.10"), 1)
         };

@@ -115,6 +115,7 @@ mod tests {
             peer_opaque_capable: false,
         };
         let poll = DbdPacket {
+            lls: None,
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             options: 0x13,

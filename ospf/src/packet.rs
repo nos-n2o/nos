@@ -15,6 +15,7 @@ use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
 use thiserror::Error;
 
+use crate::lls::{self, Lls, LlsCrypto};
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
 
 pub const VERSION: u8 = 2;
@@ -40,6 +41,8 @@ pub const OPTION_E: u8 = 0x02;
 /// RFC 3101 §2.1's N-bit in Hellos: set exactly in an NSSA, and a peer's must
 /// match. The same bit is the P-bit in an LSA header (`lsa::OPTION_P`).
 pub const OPTION_N: u8 = 0x08;
+/// RFC 5613 section 2.1's `L` bit: an LLS data block follows this Hello/DBD.
+pub const OPTION_L: u8 = 0x10;
 /// RFC 5250 §3's `O` bit: "I store and flood opaque LSAs". Set in DBDs only
 /// (it SHOULD NOT be set in Hellos), read from the peer's DBD.
 pub const OPTION_O: u8 = 0x40;
@@ -228,12 +231,14 @@ pub struct HelloPacket {
     /// link (which has at most one neighbor), but honestly a full list for
     /// a broadcast link's potentially many neighbors.
     pub neighbors: Vec<Ipv4Addr>,
+    /// RFC 5613 LLS block, `Some` only if the L-bit was set and the block valid.
+    pub lls: Option<Lls>,
 }
 
 /// One Database Description packet's contents (RFC 2328 Appendix A.3.3):
 /// the shared `nos_ospf_common::exchange::Dbd`, whose `options` carries v2's
 /// 8-bit Options in its low byte.
-pub type DbdPacket = nos_ospf_common::exchange::Dbd<LsaHeader>;
+pub type DbdPacket = nos_ospf_common::exchange::Dbd<LsaHeader, Lls>;
 
 /// One Link State Request packet's contents (RFC 2328 Appendix A.3.4) — the
 /// LSAs the sender is missing and wants a full copy of via LSU.
@@ -282,7 +287,8 @@ pub fn encode_hello(pkt: &HelloPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     let mut body = Vec::with_capacity(HELLO_BODY_FIXED_LEN + pkt.neighbors.len() * 4);
     body.extend_from_slice(&pkt.network_mask.octets());
     body.extend_from_slice(&pkt.hello_interval.to_be_bytes());
-    body.push(pkt.options);
+    let lls = effective_lls(pkt.lls.as_ref(), auth);
+    body.push(pkt.options | l_bit(lls));
     body.push(pkt.router_priority);
     body.extend_from_slice(&pkt.dead_interval.to_be_bytes());
     body.extend_from_slice(&pkt.designated_router.octets());
@@ -290,7 +296,7 @@ pub fn encode_hello(pkt: &HelloPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     for n in &pkt.neighbors {
         body.extend_from_slice(&n.octets());
     }
-    encode_packet(TYPE_HELLO, pkt.router_id, pkt.area_id, &body, auth)
+    encode_packet(TYPE_HELLO, pkt.router_id, pkt.area_id, &body, auth, lls)
 }
 
 /// Decodes a Hello packet, validating the common header and auth first.
@@ -311,6 +317,7 @@ pub fn decode_hello(data: &[u8], auth: &AuthPolicy<'_>) -> Result<HelloPacket, P
     let designated_router = read_ipv4(body, 12);
     let backup_designated_router = read_ipv4(body, 16);
 
+    let lls = decode_lls(data, auth, options);
     let neighbor_bytes = &body[HELLO_BODY_FIXED_LEN..];
     if !neighbor_bytes.len().is_multiple_of(4) {
         return Err(PacketError::TruncatedBody);
@@ -333,6 +340,7 @@ pub fn decode_hello(data: &[u8], auth: &AuthPolicy<'_>) -> Result<HelloPacket, P
         designated_router,
         backup_designated_router,
         neighbors,
+        lls,
     })
 }
 
@@ -341,7 +349,8 @@ pub fn encode_dbd(pkt: &DbdPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     let mut body =
         Vec::with_capacity(DBD_BODY_FIXED_LEN + pkt.lsa_headers.len() * lsa::LSA_HEADER_LEN);
     body.extend_from_slice(&pkt.interface_mtu.to_be_bytes());
-    body.push(pkt.options.to_be_bytes()[3]);
+    let lls = effective_lls(pkt.lls.as_ref(), auth);
+    body.push(pkt.options.to_be_bytes()[3] | l_bit(lls));
     let mut flags = 0u8;
     if pkt.init {
         flags |= DBD_FLAG_INIT;
@@ -357,7 +366,7 @@ pub fn encode_dbd(pkt: &DbdPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     for header in &pkt.lsa_headers {
         lsa::encode_lsa_header(&mut body, header);
     }
-    encode_packet(TYPE_DBD, pkt.router_id, pkt.area_id, &body, auth)
+    encode_packet(TYPE_DBD, pkt.router_id, pkt.area_id, &body, auth, lls)
 }
 
 /// Decodes a DBD packet, validating the common header and auth first.
@@ -375,6 +384,7 @@ pub fn decode_dbd(data: &[u8], auth: &AuthPolicy<'_>) -> Result<DbdPacket, Packe
     let flags = body[3];
     let dd_sequence_number = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
 
+    let lls = decode_lls(data, auth, body[2]);
     let header_bytes = &body[DBD_BODY_FIXED_LEN..];
     if !header_bytes.len().is_multiple_of(lsa::LSA_HEADER_LEN) {
         return Err(PacketError::TruncatedBody);
@@ -396,6 +406,7 @@ pub fn decode_dbd(data: &[u8], auth: &AuthPolicy<'_>) -> Result<DbdPacket, Packe
         master: flags & DBD_FLAG_MASTER != 0,
         dd_sequence_number,
         lsa_headers,
+        lls,
     })
 }
 
@@ -405,7 +416,7 @@ pub fn encode_lsr(pkt: &LsrPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     for key in &pkt.requests {
         lsa::encode_key(&mut body, key);
     }
-    encode_packet(TYPE_LSR, pkt.router_id, pkt.area_id, &body, auth)
+    encode_packet(TYPE_LSR, pkt.router_id, pkt.area_id, &body, auth, None)
 }
 
 /// Decodes an LSR packet, validating the common header and auth first.
@@ -458,7 +469,7 @@ pub fn encode_lsu(pkt: &LsuPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
             .min(lsa::MAX_AGE);
         body.extend_from_slice(&lsa::encode_lsa(&delayed));
     }
-    encode_packet(TYPE_LSU, pkt.router_id, pkt.area_id, &body, auth)
+    encode_packet(TYPE_LSU, pkt.router_id, pkt.area_id, &body, auth, None)
 }
 
 /// Decodes an LSU packet, validating the common header and auth first.
@@ -514,7 +525,7 @@ pub fn encode_lsack(pkt: &LsAckPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     for header in &pkt.lsa_headers {
         lsa::encode_lsa_header(&mut body, header);
     }
-    encode_packet(TYPE_LSACK, pkt.router_id, pkt.area_id, &body, auth)
+    encode_packet(TYPE_LSACK, pkt.router_id, pkt.area_id, &body, auth, None)
 }
 
 /// Decodes an `LSAck` packet, validating the common header and auth first.
@@ -642,7 +653,7 @@ fn ext_digest_input(
 
 /// `AuType` 2's digest over `data` (the packet): plain MD5 hashes the packet
 /// then the key, the RFC 5709 HMAC-SHA family hashes the packet then `Apad`.
-fn classic_digest(algorithm: CryptoAlgorithm, data: &[u8], key: &[u8]) -> Vec<u8> {
+pub(crate) fn classic_digest(algorithm: CryptoAlgorithm, data: &[u8], key: &[u8]) -> Vec<u8> {
     match algorithm {
         CryptoAlgorithm::Md5 => algorithm.digest(data, key),
         _ => algorithm.digest(&[data, &apad(algorithm, None)].concat(), key),
@@ -660,6 +671,7 @@ fn encode_packet(
     area_id: Ipv4Addr,
     body: &[u8],
     auth: &OutgoingAuth<'_>,
+    lls: Option<&Lls>,
 ) -> Vec<u8> {
     let total_len = HEADER_LEN + body.len();
     let mut buf = Vec::with_capacity(total_len);
@@ -716,8 +728,12 @@ fn encode_packet(
 
     match auth {
         OutgoingAuth::None | OutgoingAuth::Simple { .. } => {
+            // The checksum covers the OSPF packet only (RFC 5613 section 2.2).
             let sum = checksum(&buf);
             buf[12..14].copy_from_slice(&sum.to_be_bytes());
+            if let Some(l) = lls {
+                buf.extend_from_slice(&lls::encode(l, None));
+            }
         }
         OutgoingAuth::Crypto {
             algorithm,
@@ -744,6 +760,14 @@ fn encode_packet(
             // Checksum field stays zero — not calculated for this AuType.
             let digest = classic_digest(*algorithm, &buf, key);
             buf.extend_from_slice(&digest);
+            if let Some(l) = lls {
+                let crypto = LlsCrypto {
+                    algorithm: *algorithm,
+                    key,
+                    sequence: u32::try_from(*sequence).unwrap_or(u32::MAX),
+                };
+                buf.extend_from_slice(&lls::encode(l, Some(crypto)));
+            }
         }
     }
     buf
@@ -770,23 +794,25 @@ fn decode_header(data: &[u8]) -> Result<(u8, Ipv4Addr, Ipv4Addr), PacketError> {
 
 /// Verifies `data`'s `AuType` matches `auth` and its integrity (checksum for
 /// Null/Simple, real digest for Crypto — RFC 2328 D.4.3/D.5), returning the
-/// real body slice: `&data[HEADER_LEN..]` for Null/Simple (unchanged
-/// behavior), or `&data[HEADER_LEN..length]` for Crypto, where `length` is
-/// the wire's own packet-length field — the first place this module reads
-/// it, since only a Crypto packet ever has trailing bytes (the digest)
-/// beyond it. Shared by every packet type's own `decode_*`, called after
+/// real body slice `&data[HEADER_LEN..length]`, where `length` is the wire's
+/// own packet-length field: bytes beyond it (a Crypto digest, an RFC 5613 LLS
+/// block) are never part of the body. Shared by every packet type's own `decode_*`, called after
 /// its own type check.
 fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], PacketError> {
     let wire_auth_type = u16::from_be_bytes([data[14], data[15]]);
+    let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+    if length < HEADER_LEN || length > data.len() {
+        return Err(PacketError::TruncatedBody);
+    }
     match (wire_auth_type, auth) {
         (AUTH_TYPE_NULL, AuthPolicy::None) => {
-            if checksum(data) != 0 {
+            if checksum(&data[..length]) != 0 {
                 return Err(PacketError::BadChecksum);
             }
-            Ok(&data[HEADER_LEN..])
+            Ok(&data[HEADER_LEN..length])
         }
         (AUTH_TYPE_SIMPLE, AuthPolicy::Simple { password }) => {
-            if checksum(data) != 0 {
+            if checksum(&data[..length]) != 0 {
                 return Err(PacketError::BadChecksum);
             }
             let mut expected = [0u8; 8];
@@ -795,7 +821,7 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             if data[16..24] != expected {
                 return Err(PacketError::AuthFailed);
             }
-            Ok(&data[HEADER_LEN..])
+            Ok(&data[HEADER_LEN..length])
         }
         (
             AUTH_TYPE_CRYPTO,
@@ -804,10 +830,6 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
                 extended: None,
             },
         ) => {
-            let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
-            if length < HEADER_LEN || data.len() < length {
-                return Err(PacketError::TruncatedBody);
-            }
             let key_id = u16::from(data[18]);
             let auth_data_len = usize::from(data[19]);
             let Some((_, algorithm, key)) = keys.iter().find(|(id, _, _)| *id == key_id) else {
@@ -829,8 +851,7 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
                 extended: Some(source),
             },
         ) => {
-            let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
-            if length < HEADER_LEN || data.len() < length + 8 {
+            if data.len() < length + 8 {
                 return Err(PacketError::TruncatedBody);
             }
             let key_id = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
@@ -851,6 +872,62 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             Ok(&data[HEADER_LEN..length])
         }
         _ => Err(PacketError::AuthTypeMismatch),
+    }
+}
+
+/// Where the RFC 5613 LLS block of an already-verified packet starts, and
+/// what signs it: after the packet (Null/Simple) or after the digest (classic
+/// Crypto, same key/algorithm/sequence). RFC 7474 packets: unsupported, `None`.
+fn locate<'a>(data: &'a [u8], auth: &AuthPolicy<'a>) -> Option<(&'a [u8], Option<LlsCrypto<'a>>)> {
+    let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+    match auth {
+        AuthPolicy::None | AuthPolicy::Simple { .. } => Some((data.get(length..)?, None)),
+        AuthPolicy::Crypto {
+            keys,
+            extended: None,
+        } => {
+            let key_id = u16::from(data[18]);
+            let (_, algorithm, key) = keys.iter().find(|(id, _, _)| *id == key_id)?;
+            let block = data.get(length + usize::from(data[19])..)?;
+            let sequence = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+            Some((
+                block,
+                Some(LlsCrypto {
+                    algorithm: *algorithm,
+                    key,
+                    sequence,
+                }),
+            ))
+        }
+        AuthPolicy::Crypto { .. } => None,
+    }
+}
+
+/// The LLS of a Hello/DBD that passed `verify_auth`: only if its `options`
+/// carry the L-bit and the block is valid.
+fn decode_lls(data: &[u8], auth: &AuthPolicy<'_>, options: u8) -> Option<Lls> {
+    if options & OPTION_L == 0 {
+        return None;
+    }
+    let (block, crypto) = locate(data, auth)?;
+    lls::decode(block, crypto)
+}
+
+/// `lls` unless the packet is RFC 7474-signed (LLS unsupported there).
+fn effective_lls<'a>(lls: Option<&'a Lls>, auth: &OutgoingAuth<'_>) -> Option<&'a Lls> {
+    match auth {
+        OutgoingAuth::Crypto {
+            extended: Some(_), ..
+        } => None,
+        _ => lls,
+    }
+}
+
+fn l_bit(lls: Option<&Lls>) -> u8 {
+    if lls.is_some() {
+        OPTION_L
+    } else {
+        0
     }
 }
 
@@ -898,6 +975,7 @@ mod tests {
 
     fn sample() -> HelloPacket {
         HelloPacket {
+            lls: None,
             router_id: Ipv4Addr::new(9, 9, 9, 9),
             area_id: Ipv4Addr::UNSPECIFIED,
             network_mask: Ipv4Addr::new(255, 255, 255, 0),
@@ -913,6 +991,7 @@ mod tests {
 
     fn sample_dbd() -> DbdPacket {
         DbdPacket {
+            lls: None,
             router_id: Ipv4Addr::new(9, 9, 9, 9),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
@@ -1217,6 +1296,7 @@ mod tests {
             pkt.area_id,
             &body,
             &OutgoingAuth::None,
+            None,
         )
     }
 
@@ -1777,6 +1857,7 @@ mod tests {
             Ipv4Addr::UNSPECIFIED,
             body,
             &auth,
+            None,
         );
         (wire, vec![(1, algorithm, b"secret".to_vec())])
     }
@@ -1874,5 +1955,209 @@ mod tests {
                 "ext={extended}"
             );
         }
+    }
+
+    // ---- RFC 5613 LLS placement and the packet-length fix (#960) ----
+
+    const SEQ: u64 = 7;
+    const KEY: &[u8] = b"secret";
+
+    /// Runs `f` once per auth type: Null, Simple, classic MD5, classic HMAC-SHA256.
+    fn for_each_auth(f: impl Fn(&OutgoingAuth<'_>, &AuthPolicy<'_>)) {
+        f(&OutgoingAuth::None, &AuthPolicy::None);
+        f(
+            &OutgoingAuth::Simple { password: b"pw" },
+            &AuthPolicy::Simple { password: b"pw" },
+        );
+        for algorithm in [CryptoAlgorithm::Md5, CryptoAlgorithm::HmacSha256] {
+            let keys = vec![(1u16, algorithm, KEY.to_vec())];
+            f(
+                &OutgoingAuth::Crypto {
+                    key_id: 1,
+                    algorithm,
+                    key: KEY,
+                    sequence: SEQ,
+                    extended: None,
+                },
+                &AuthPolicy::Crypto {
+                    keys: &keys,
+                    extended: None,
+                },
+            );
+        }
+    }
+
+    fn all_eofs() -> [Option<u32>; 5] {
+        [
+            None,
+            Some(0),
+            Some(crate::lls::EOF_LR),
+            Some(crate::lls::EOF_RS),
+            Some(crate::lls::EOF_LR | crate::lls::EOF_RS),
+        ]
+    }
+
+    #[test]
+    fn hello_and_dbd_lls_round_trip_under_every_auth() {
+        for eof in all_eofs() {
+            for_each_auth(|out, pol| {
+                let mut hello = sample();
+                hello.lls = Some(Lls { eof });
+                let got = decode_hello(&encode_hello(&hello, out), pol).unwrap();
+                hello.options |= OPTION_L;
+                assert_eq!(got, hello);
+
+                let mut dbd = sample_dbd();
+                dbd.lls = Some(Lls { eof });
+                let got = decode_dbd(&encode_dbd(&dbd, out), pol).unwrap();
+                dbd.options |= u32::from(OPTION_L);
+                assert_eq!(got, dbd);
+            });
+        }
+    }
+
+    #[test]
+    fn trailing_bytes_never_reach_the_body_of_any_packet_type() {
+        let junk = [0xdeu8, 0xad, 0xbe, 0xef, 1, 2, 3, 4];
+        for_each_auth(|out, pol| {
+            let mut w = encode_hello(&sample(), out);
+            w.extend_from_slice(&junk);
+            assert_eq!(decode_hello(&w, pol).unwrap(), sample());
+            let mut w = encode_dbd(&sample_dbd(), out);
+            w.extend_from_slice(&junk);
+            assert_eq!(decode_dbd(&w, pol).unwrap(), sample_dbd());
+            let mut w = encode_lsr(&sample_lsr(), out);
+            w.extend_from_slice(&junk);
+            assert_eq!(decode_lsr(&w, pol).unwrap(), sample_lsr());
+            let mut w = encode_lsu(&sample_lsu(), out);
+            w.extend_from_slice(&junk);
+            assert_eq!(
+                decode_lsu(&w, pol).unwrap().lsas.len(),
+                sample_lsu().lsas.len()
+            );
+            let ack = LsAckPacket {
+                router_id: Ipv4Addr::new(9, 9, 9, 9),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                lsa_headers: sample_dbd().lsa_headers,
+            };
+            let mut w = encode_lsack(&ack, out);
+            w.extend_from_slice(&junk);
+            assert_eq!(decode_lsack(&w, pol).unwrap(), ack);
+        });
+    }
+
+    #[test]
+    fn null_and_simple_length_field_must_fit_the_datagram() {
+        for (out, pol) in [
+            (OutgoingAuth::None, AuthPolicy::None),
+            (
+                OutgoingAuth::Simple { password: b"pw" },
+                AuthPolicy::Simple { password: b"pw" },
+            ),
+        ] {
+            let wire = encode_hello(&sample(), &out);
+            for bad in [0, HEADER_LEN - 1, wire.len() + 1] {
+                let mut w = wire.clone();
+                set_length(&mut w, bad);
+                assert_eq!(
+                    decode_hello(&w, &pol),
+                    Err(PacketError::TruncatedBody),
+                    "length={bad}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extended_crypto_ignores_lls() {
+        let src = Ipv4Addr::new(10, 0, 0, 1);
+        let keys = vec![(1u16, CryptoAlgorithm::HmacSha256, KEY.to_vec())];
+        let out = OutgoingAuth::Crypto {
+            key_id: 1,
+            algorithm: CryptoAlgorithm::HmacSha256,
+            key: KEY,
+            sequence: SEQ,
+            extended: Some(src),
+        };
+        let pol = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(src),
+        };
+        // `lls` is not encoded at all (no L-bit, no block).
+        let mut hello = sample();
+        hello.lls = Some(Lls::default());
+        let w = encode_hello(&hello, &out);
+        assert_eq!(decode_hello(&w, &pol).unwrap(), sample());
+        // Even with the L-bit set and trailing bytes, nothing is decoded.
+        let mut with_bit = sample();
+        with_bit.options |= OPTION_L;
+        let mut w = encode_hello(&with_bit, &out);
+        w.extend_from_slice(&crate::lls::encode(&Lls::default(), None));
+        assert_eq!(decode_hello(&w, &pol).unwrap(), with_bit);
+    }
+
+    #[test]
+    fn invalid_lls_is_dropped_but_the_packet_is_accepted() {
+        let mut hello = sample();
+        hello.lls = Some(Lls { eof: Some(1) });
+        let mut expected = hello.clone();
+        expected.options |= OPTION_L;
+        expected.lls = None;
+        // Null: corrupt the block checksum.
+        let mut w = encode_hello(&hello, &OutgoingAuth::None);
+        *w.last_mut().unwrap() ^= 0xff;
+        assert_eq!(decode_hello(&w, &AuthPolicy::None).unwrap(), expected);
+        // Crypto: corrupt the CA digest (the packet digest stays valid).
+        let keys = vec![(1u16, CryptoAlgorithm::Md5, KEY.to_vec())];
+        let out = OutgoingAuth::Crypto {
+            key_id: 1,
+            algorithm: CryptoAlgorithm::Md5,
+            key: KEY,
+            sequence: SEQ,
+            extended: None,
+        };
+        let pol = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: None,
+        };
+        let mut w = encode_hello(&hello, &out);
+        *w.last_mut().unwrap() ^= 1;
+        assert_eq!(decode_hello(&w, &pol).unwrap(), expected);
+        // Crypto: a different packet sequence number than the CA-TLV's.
+        let mut w = encode_hello(&hello, &out);
+        w[23] ^= 1; // packet sequence; the packet digest breaks too, so re-sign
+        assert_eq!(
+            decode_hello(&w, &pol),
+            Err(PacketError::AuthFailed),
+            "a tampered sequence fails the packet digest first"
+        );
+    }
+
+    #[test]
+    fn lls_block_without_the_l_bit_is_ignored() {
+        let mut w = encode_hello(&sample(), &OutgoingAuth::None);
+        w.extend_from_slice(&crate::lls::encode(&Lls { eof: Some(0) }, None));
+        assert_eq!(decode_hello(&w, &AuthPolicy::None).unwrap(), sample());
+    }
+
+    #[test]
+    fn cisco_style_hello_with_lls_round_trips_byte_for_byte() {
+        // Null auth, checksums computed independently (RFC 1071), EOF flags 0.
+        let wire = hex(
+            "020100300101010100000000d69500000000000000000000ffffff00000a1201\
+             000000280a000001000000000a000002fff700030001000400000000",
+        );
+        let got = decode_hello(&wire, &AuthPolicy::None).unwrap();
+        assert_eq!(got.options, 0x12);
+        assert_eq!(got.neighbors, vec![Ipv4Addr::new(10, 0, 0, 2)]);
+        assert_eq!(got.lls, Some(Lls { eof: Some(0) }));
+        assert_eq!(encode_hello(&got, &OutgoingAuth::None), wire);
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 }
