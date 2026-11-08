@@ -585,6 +585,7 @@ impl SessionManager {
                     scope: crate::bmp::Scope::for_rd(rd),
                     monitor: s.monitor,
                     statistics_interval: s.statistics_interval,
+                    monitor_out: s.monitor_out,
                 })
                 .collect(),
             None => Vec::new(),

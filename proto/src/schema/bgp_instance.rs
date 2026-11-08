@@ -221,6 +221,39 @@ pub struct BmpStation {
     #[serde(default)]
     #[cli(topic = BgpInstanceBmpStationStatisticsInterval, words = "statistics-interval")]
     pub statistics_interval: Option<u32>,
+    /// Which Adj-RIB-Out views (RFC 8671) the station gets: what NOS sends
+    /// to each peer. Default `none`. Appended last: postcard is positional.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceBmpStationMonitorOut, words = "monitor-out")]
+    pub monitor_out: BmpMonitorOut,
+}
+
+/// The Adj-RIB-Out views a `bmp-station` monitors (RFC 8671). Variant order
+/// is the postcard index: `None` first, it is the default.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum BmpMonitorOut {
+    /// No Adj-RIB-Out monitoring.
+    #[default]
+    None,
+    /// Candidates before the export policy (unicast only).
+    PrePolicy,
+    /// Exactly the UPDATEs put on the wire.
+    PostPolicy,
+    /// Both views.
+    Both,
+}
+
+impl BmpMonitorOut {
+    /// Whether the pre-policy (`false`) or post-policy (`true`) view is on.
+    pub fn wants(self, post: bool) -> bool {
+        match self {
+            BmpMonitorOut::None => false,
+            BmpMonitorOut::Both => true,
+            BmpMonitorOut::PostPolicy => post,
+            BmpMonitorOut::PrePolicy => !post,
+        }
+    }
 }
 
 /// The policy view a `bmp-station` monitors (RFC 7854 section 5).
@@ -244,6 +277,7 @@ impl Default for BmpStation {
             port: 0,
             monitor: BmpMonitor::default(),
             statistics_interval: None,
+            monitor_out: BmpMonitorOut::default(),
         }
     }
 }

@@ -12,9 +12,16 @@
 use tokio::net::tcp::OwnedWriteHalf;
 use tracing::{debug, info, warn};
 
-use super::monitor::{end_of_rib, route_monitoring};
+use bytes::{Bytes, BytesMut};
+use nos_proto::BmpMonitorOut;
+use tokio_util::codec::Encoder;
+
+use super::bgp_pdu;
+use super::monitor::{encode_plain, end_of_rib, out_frames, route_monitoring};
 use super::DUMP_CHUNK;
 use super::{drain, now, send, send_as, stream, Ended, Hub, PeerUpInfo, Scope, Shared, StationCfg};
+use crate::fsm::outbound_update_to_message;
+use crate::message::{BgpCodec, BgpMessage};
 use crate::rib::SharedRib;
 
 /// Dumps every peer in `peers`; `Some` ends the session.
@@ -36,7 +43,96 @@ pub(super) async fn run(
                 }
             }
         }
+        if cfg.monitor_out != BmpMonitorOut::None {
+            let ended = out_dump(hub, &rib, (cfg, shared, scope), wr, info).await;
+            if ended.is_some() {
+                return ended;
+            }
+        }
     }
+    None
+}
+
+/// The Adj-RIB-Out dump of one peer (RFC 8671): what it is sent now, rebuilt
+/// from the RIB under one lock hold (O = 1), then an O = 1 End-of-RIB per
+/// family of each stream. A live change racing the snapshot is queued behind
+/// it and replays idempotently. ponytail: an MRAI-held change shows as
+/// current state here and is sent again when released.
+async fn out_dump(
+    hub: &Hub,
+    rib: &SharedRib,
+    (cfg, shared, scope): (&StationCfg, &Shared, &Scope),
+    wr: &mut OwnedWriteHalf,
+    info: &PeerUpInfo,
+) -> Option<Ended> {
+    let (want_pre, want_post) = (cfg.monitor_out.wants(false), cfg.monitor_out.wants(true));
+    let (snap, families) = {
+        let mut rib = rib.lock().await;
+        (
+            rib.bmp_out_snapshot(info.peer, want_post, want_pre),
+            rib.bmp_families(info.peer),
+        )
+    };
+    let mut codec = BgpCodec {
+        add_path_afis: snap.tx_afis,
+        two_octet_as: info.two_octet_as,
+        ..Default::default()
+    };
+    let mut frames: Vec<(Bytes, bool)> = Vec::new(); // (frame, post)
+    let mut buf = BytesMut::new();
+    for u in snap.post {
+        let _ = codec.encode(outbound_update_to_message(u), &mut buf);
+    }
+    let a = info.two_octet_as;
+    frames.extend(
+        out_frames(scope, info, true, a, &buf, now())
+            .into_iter()
+            .map(|f| (f, true)),
+    );
+    let post_n = frames.len();
+    let mut pre_buf = BytesMut::new();
+    for u in &snap.pre {
+        pre_buf.extend_from_slice(&encode_plain(u));
+    }
+    frames.extend(
+        out_frames(scope, info, false, false, &pre_buf, now())
+            .into_iter()
+            .map(|f| (f, false)),
+    );
+    let pre_n = frames.len() - post_n;
+    for (i, (f, _)) in frames.iter().enumerate() {
+        if !hub.session_alive(info) {
+            return None;
+        }
+        if !send(wr, shared, f).await {
+            return Some(Ended::Lost);
+        }
+        if i % DUMP_CHUNK == DUMP_CHUNK - 1 {
+            if let Some(ended) = drain(wr, cfg, shared).await {
+                return Some(ended);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+    for post in [false, true]
+        .into_iter()
+        .filter(|p| cfg.monitor_out.wants(*p))
+    {
+        for &(afi, safi) in &families {
+            // Pre-policy Out is unicast only.
+            if !post && safi != 1 {
+                continue;
+            }
+            let pdu = bgp_pdu(BgpMessage::EndOfRib { afi, safi });
+            let a = if post { a } else { false };
+            for f in out_frames(scope, info, post, a, &pdu, now()) {
+                if !send_as(wr, shared, &f, true).await {
+                    return Some(Ended::Lost);
+                }
+            }
+        }
+    }
+    info!(peer = %info.peer, pre = pre_n, post = post_n, station = %cfg.name, "bmp adj-rib-out dump sent");
     None
 }
 

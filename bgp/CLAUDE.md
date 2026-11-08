@@ -2,7 +2,7 @@
 
 BGP-4 implementation for NOS (binary `nos-bgpd`, one process per `BgpInstance`, dynamically spawned by `nos-watchdog` — see `docs/architecture/supervision.md`).
 
-Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (log lines, `ponytail:` ceilings, walk-throughs) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. Only the editing rules are kept here.
+Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (log lines, `ponytail:` ceilings) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. Only editing rules are kept here.
 
 ## Scope
 
@@ -10,7 +10,7 @@ Resolves peers and VRF from `nos-configd`, runs the FSM over VRF-scoped TCP, exc
 
 ## VRF resolution
 
-`BgpInstance.routing_table` is a reflexive field (`docs/schema-reference.md`); `nos-bgpd` resolves it to a Linux VRF name through `ServiceRef::RibTable` + `RibRequest::GetVrfName` (`session::VrfRequirement`):
+`BgpInstance.routing_table` is a reflexive field (`docs/schema-reference.md`); `nos-bgpd` resolves it to a Linux VRF name through `ServiceRef::RibTable` + `RibRequest::GetVrfName` (`VrfRequirement`):
 - `Invalid` (no owning table): a config error, never a "default VRF" fallback; nothing is opened, error logged every resync.
 - `Pending` (table exists, VRF not yet created): transient, `debug` log, retried by the 10s tick (VRF readiness is no config diff).
 - `Resolved(name)`: the only state in which anything opens.
@@ -81,7 +81,7 @@ Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers wh
 
 ## BMP (#878)
 
-`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy is the received UPDATE; post-policy is a tap at every Adj-RIB-In mutation, all families (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Stats: a new drop site bumps `PeerStats`.
+`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy = the received UPDATE; post-policy = a tap at every Adj-RIB-In mutation (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Stats: a new drop site bumps `PeerStats`. Out (#867): `fsm::write_update`.
 
 ## Graceful restart (#12)
 

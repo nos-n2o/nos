@@ -322,6 +322,35 @@ pub(super) fn well_known_blocks(best: &RibRoute, outbox: &PeerOutbox) -> bool {
         || (!outbox.is_ibgp && has(COMMUNITY_NO_EXPORT_SUBCONFED))
 }
 
+/// The part of `build_advertisement` that decides whether `best` is a
+/// candidate for `peer` at all, before any policy: family negotiated, no echo
+/// to the source peer, iBGP split horizon / RFC 4456 reflection. `Some(r)`
+/// with `r` = whether it is reflected. Shared with BMP's pre-policy
+/// Adj-RIB-Out (RFC 8671 section 5.2) so the two candidate sets cannot drift.
+pub(super) fn eligibility(
+    family: AddressFamily,
+    best: &RibRoute,
+    peer: IpAddr,
+    outbox: &PeerOutbox,
+    source_is_rr_client: bool,
+) -> Option<bool> {
+    if !outbox.negotiated_afs.contains(&family) {
+        return None;
+    }
+    if best.origin == RouteOrigin::Peer(peer) {
+        // Never echo a route back to the peer it came from.
+        return None;
+    }
+    // RFC 4456 §6: a route learned via iBGP is reflected to another iBGP
+    // peer only when the source or the destination is a configured
+    // route-reflector client — otherwise the standard iBGP split-horizon
+    // rule (no reflection, full mesh assumed) still applies unchanged.
+    let ibgp_to_ibgp =
+        matches!(best.origin, RouteOrigin::Peer(_)) && best.learned_via_ibgp && outbox.is_ibgp;
+    let reflecting = ibgp_to_ibgp && (source_is_rr_client || outbox.is_rr_client);
+    (!ibgp_to_ibgp || reflecting).then_some(reflecting)
+}
+
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
 /// it for that destination. `None` covers every ineligibility case
 /// (split-horizon, source-peer echo, family not negotiated by this peer, no
@@ -344,23 +373,7 @@ pub(super) fn build_advertisement(
     flow: Option<(AddressFamily, &nos_rpl::CompiledPolicy, Option<[u8; 8]>)>,
 ) -> Option<AdvertisedRoute> {
     let family = flow.map_or_else(|| family_of(prefix), |(f, ..)| f);
-    if !outbox.negotiated_afs.contains(&family) {
-        return None;
-    }
-    if best.origin == RouteOrigin::Peer(peer) {
-        // Never echo a route back to the peer it came from.
-        return None;
-    }
-    // RFC 4456 §6: a route learned via iBGP is reflected to another iBGP
-    // peer only when the source or the destination is a configured
-    // route-reflector client — otherwise the standard iBGP split-horizon
-    // rule (no reflection, full mesh assumed) still applies unchanged.
-    let ibgp_to_ibgp =
-        matches!(best.origin, RouteOrigin::Peer(_)) && best.learned_via_ibgp && outbox.is_ibgp;
-    let reflecting = ibgp_to_ibgp && (source_is_rr_client || outbox.is_rr_client);
-    if ibgp_to_ibgp && !reflecting {
-        return None;
-    }
+    let reflecting = eligibility(family, best, peer, outbox, source_is_rr_client)?;
     // RFC 1997, on the stored (post-import-policy) route and before the
     // export policy, so only an import policy can lift it.
     if well_known_blocks(best, outbox) {

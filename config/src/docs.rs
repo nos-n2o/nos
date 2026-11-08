@@ -1987,6 +1987,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Reset the view to `both`.",
             ),
         ),
+        Topic::BgpInstanceBmpStationMonitorOut => (
+            "Choose which Adj-RIB-Out views (RFC 8671) the BMP station gets.",
+            concat!(
+                "`none` (default), `pre-policy` (unicast candidates before the export policy, \
+             next hop zero), `post-policy` (exactly the UPDATEs put on the wire, every family) \
+             or `both`. Costs one encode per advertised prefix for a monitored peer. Changing \
+             it restarts the station and re-dumps.",
+                " ",
+                "Reset to `none`.",
+            ),
+        ),
     };
     CommandDoc {
         topic,

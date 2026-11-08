@@ -113,7 +113,11 @@ fn counters_reset_on_a_new_session_and_go_with_the_peer() {
     feed(&mut rib, &u);
     rib.peer_disconnected(addr(PEER), Disconnect::Hard);
     assert_eq!(stats(&rib), PeerStats::default());
-    assert!(rib.bmp_stats(addr(PEER), rib.loc_totals()).len() >= 9);
+    assert!(
+        rib.bmp_stats(addr(PEER), rib.loc_totals(), nos_proto::BmpMonitorOut::None)
+            .len()
+            >= 9
+    );
 }
 
 fn gauge(stats: &[Stat], t: u16) -> Option<u64> {
@@ -137,7 +141,7 @@ fn gauges_total_the_adj_rib_in_and_the_loc_rib() {
         &mut rib,
         &ebgp_update(vec![P, "198.51.101.0/24"], vec![65001], "192.0.2.1"),
     );
-    let s = rib.bmp_stats(addr(PEER), rib.loc_totals());
+    let s = rib.bmp_stats(addr(PEER), rib.loc_totals(), nos_proto::BmpMonitorOut::None);
     assert_eq!(gauge(&s, 7), Some(2));
     assert_eq!(gauge(&s, 8), Some(2));
     assert_eq!(per_family(&s, 9, 1), Some(2));
