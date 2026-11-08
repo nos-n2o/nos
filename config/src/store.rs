@@ -219,13 +219,19 @@ pub struct ConfigStore(Arc<Inner>);
 
 impl ConfigStore {
     pub fn new(initial: Config, config_path: Option<PathBuf>) -> Self {
+        Self::with_broadcast_capacity(initial, config_path, BROADCAST_CAPACITY)
+    }
+
+    /// `new` with an explicit broadcast capacity; only tests pass anything but
+    /// `BROADCAST_CAPACITY` (a test that must not lag, #976).
+    fn with_broadcast_capacity(initial: Config, config_path: Option<PathBuf>, cap: usize) -> Self {
         let mut initial = initial;
         sync_routing_table_refs(&mut initial);
         // A name loaded from the file is PRECIS-normalized before a clear-text
         // password seeded in the file (or by `seed_default_user`) is hashed here.
         normalize_names(&mut initial.users);
         hash_clear_passwords(&mut initial.users, &[]);
-        let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (tx, _) = broadcast::channel(cap);
         Self(Arc::new(Inner {
             running: RwLock::new(Arc::new(initial)),
             transactions: Mutex::new(HashMap::new()),
@@ -997,12 +1003,14 @@ mod tests {
     /// #631: commits and hash upgrades racing end with the subscriber on running.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_commits_broadcast_in_swap_order() {
-        let store = ConfigStore::new(
+        // 40 broadcasts at most: a capacity above that makes lag impossible (#976).
+        let store = ConfigStore::with_broadcast_capacity(
             Config {
                 users: vec![user("a")],
                 ..Config::default()
             },
             None,
+            64,
         );
         let (out, mut rx) = mpsc::channel(1024);
         let (first, task) = store.subscribe_config(Role::Watchdog, out).await;
@@ -1040,12 +1048,24 @@ mod tests {
             h.await.unwrap();
         }
         let last = store.running_snapshot().await.for_role(Role::Watchdog);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut seen = None;
-        while let Ok(Event::Config(c)) = rx.try_recv().map_err(|_| ()) {
-            seen = Some(c);
+        // Every task is joined, so `last` is final: wait for the chain to reach
+        // it. Users only grow (commits add, upgrades keep the count), so a
+        // shrinking count would be out-of-order delivery.
+        let mut len = 0;
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("timed out waiting for the final config")
+                .expect("channel closed");
+            let Event::Config(c) = ev else {
+                panic!("unexpected event (lagged?)")
+            };
+            assert!(c.users.len() >= len, "out-of-order delivery");
+            len = c.users.len();
+            if c.users == last.users {
+                break;
+            }
         }
-        assert_eq!(seen.expect("an update").users, last.users);
         task.abort();
     }
 
@@ -1083,7 +1103,6 @@ mod tests {
             tokio::task::yield_now().await;
         }
         writer.await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
         let n = |c: &Config| {
             let d: String = c.hostname.chars().filter(char::is_ascii_digit).collect();
             if d.is_empty() {
@@ -1095,11 +1114,19 @@ mod tests {
         for (first, mut rx, task) in subs {
             let Event::Config(c) = first else { panic!() };
             let mut cur = n(&c);
-            while let Ok(Event::Config(c)) = rx.try_recv().map_err(|_| ()) {
+            while cur < 12 {
+                let ev = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                    .await
+                    .expect("timed out waiting for the final config")
+                    .expect("channel closed");
+                let Event::Config(c) = ev else {
+                    panic!("lagged?")
+                };
                 assert_eq!(n(&c), cur + 1, "gap or duplicate");
                 cur += 1;
             }
             assert_eq!(cur, 12);
+            assert!(rx.try_recv().is_err(), "update past the last commit");
             task.abort();
         }
     }
