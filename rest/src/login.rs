@@ -27,7 +27,7 @@ use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::ipc::Daemons;
 
 /// A failed login costs the account this much before the next attempt on it.
-// Per-username only; `MAX_INFLIGHT_LOGINS` caps the rest (many usernames at
+// Per (source address, username); `MAX_INFLIGHT_LOGINS` caps the rest (many usernames at
 // once), and `nos-watchdogd` is the authoritative bound on argon2 work (#381).
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
@@ -60,8 +60,10 @@ const MAX_INFLIGHT_LOGINS: usize = 8;
 pub struct LoginGate {
     inflight: Arc<tokio::sync::Semaphore>,
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Per username: failures so far and when the window opened.
-    failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per (source address, username): failures so far and when the window
+    /// opened. Keyed on the address too so an attacker can't lock the real
+    /// user out from elsewhere (#635).
+    failures: Mutex<HashMap<(IpAddr, String), (u32, Instant)>>,
     /// Per source address: failures so far and when the window opened.
     failures_by_ip: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
@@ -93,10 +95,10 @@ impl LoginGate {
             })
     }
 
-    /// Seconds until `user` may try again, if it is locked out.
-    fn retry_after(&self, user: &str) -> Option<u64> {
+    /// Seconds until `user` may try again from `ip`, if it is locked out.
+    fn retry_after(&self, ip: IpAddr, user: &str) -> Option<u64> {
         let failures = self.failures.lock().expect("login gate lock");
-        let &(count, since) = failures.get(user)?;
+        let &(count, since) = failures.get(&(ip, user.to_string()))?;
         let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
         (count >= MAX_FAILED_LOGINS).then(|| left.as_secs() + 1)
     }
@@ -124,18 +126,27 @@ impl LoginGate {
         e.0 += 1;
     }
 
-    fn record_failure(&self, user: &str) {
+    fn record_failure(&self, ip: IpAddr, user: &str) {
         let mut failures = self.failures.lock().expect("login gate lock");
-        // Drop expired windows so made-up usernames can't grow the map forever.
-        failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
-        failures
-            .entry(user.to_string())
-            .or_insert((0, Instant::now()))
-            .0 += 1;
+        let key = (ip, user.to_string());
+        if failures.len() >= MAX_TRACKED_IPS && !failures.contains_key(&key) {
+            failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+            if failures.len() >= MAX_TRACKED_IPS {
+                failures.clear();
+            }
+        }
+        let e = failures.entry(key).or_insert((0, Instant::now()));
+        if e.1.elapsed() >= FAILED_LOGIN_WINDOW {
+            *e = (0, Instant::now());
+        }
+        e.0 += 1;
     }
 
-    fn clear(&self, user: &str) {
-        self.failures.lock().expect("login gate lock").remove(user);
+    fn clear(&self, ip: IpAddr, user: &str) {
+        self.failures
+            .lock()
+            .expect("login gate lock")
+            .remove(&(ip, user.to_string()));
     }
 
     fn lock_for(&self, user: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -238,7 +249,9 @@ pub async fn login(
     ip: Option<Extension<ClientIp>>,
     Json(body): Json<LoginRequest>,
 ) -> ApiResult<Json<Certificate>> {
+    // No `ClientIp` only in tests that skip the TLS listener: one shared key.
     let ip = ip.map(|Extension(ClientIp(ip))| ip);
+    let key_ip = ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     if let Some(retry_after_secs) = ip.and_then(|ip| d.login_gate.retry_after_ip(ip)) {
         return Err(ApiError::TooManyRequests {
             detail: "too many failed logins from this address".into(),
@@ -249,7 +262,7 @@ pub async fn login(
     let _slot = d.login_gate.try_slot()?;
     let gate = d.login_gate.lock_for(&body.user);
     let held = gate.lock().await;
-    if let Some(retry_after_secs) = d.login_gate.retry_after(&body.user) {
+    if let Some(retry_after_secs) = d.login_gate.retry_after(key_ip, &body.user) {
         drop(held);
         d.login_gate.release(&body.user, &gate);
         return Err(ApiError::TooManyRequests {
@@ -265,13 +278,13 @@ pub async fn login(
         })
         .await;
     if matches!(&reply, Ok(WatchdogEvent::Denied(m)) if m == INVALID_CREDENTIALS) {
-        d.login_gate.record_failure(&body.user);
+        d.login_gate.record_failure(key_ip, &body.user);
         if let Some(ip) = ip {
             d.login_gate.record_failure_ip(ip);
         }
         tokio::time::sleep(FAILED_LOGIN_DELAY).await;
     } else if matches!(&reply, Ok(WatchdogEvent::Issued { .. })) {
-        d.login_gate.clear(&body.user);
+        d.login_gate.clear(key_ip, &body.user);
     }
     drop(held);
     d.login_gate.release(&body.user, &gate);
@@ -326,18 +339,35 @@ mod tests {
     }
 
     #[test]
-    fn lockout_after_max_failures_until_cleared() {
+    fn lockout_after_max_failures_until_cleared_per_address_and_user() {
         let gate = LoginGate::default();
+        let (a, b): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
         for _ in 0..MAX_FAILED_LOGINS - 1 {
-            gate.record_failure("u");
+            gate.record_failure(a, "u");
         }
-        assert_eq!(gate.retry_after("u"), None);
-        gate.record_failure("u");
+        assert_eq!(gate.retry_after(a, "u"), None);
+        gate.record_failure(a, "u");
         // A fresh window: 60s minus a sliver, rounded up to whole seconds.
-        assert_eq!(gate.retry_after("u"), Some(60));
-        assert_eq!(gate.retry_after("other"), None);
-        gate.clear("u");
-        assert_eq!(gate.retry_after("u"), None);
+        assert_eq!(gate.retry_after(a, "u"), Some(60));
+        assert_eq!(gate.retry_after(a, "other"), None);
+        assert_eq!(gate.retry_after(b, "u"), None);
+        // Clearing is per pair too.
+        for _ in 0..MAX_FAILED_LOGINS {
+            gate.record_failure(b, "u");
+        }
+        gate.clear(a, "u");
+        assert_eq!(gate.retry_after(a, "u"), None);
+        assert!(gate.retry_after(b, "u").is_some());
+    }
+
+    #[test]
+    fn user_lockout_map_is_bounded() {
+        let gate = LoginGate::default();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        for i in 0..MAX_TRACKED_IPS + 10 {
+            gate.record_failure(ip, &format!("u{i}"));
+        }
+        assert!(gate.failures.lock().unwrap().len() <= MAX_TRACKED_IPS);
     }
 
     #[test]
