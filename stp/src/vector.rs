@@ -47,6 +47,13 @@ impl BridgeId {
         self.mac
     }
 
+    /// Same bridge address, priority and extension ignored: the identity
+    /// 802.1Q 13.29 `rcvInfo` / 13.30 `updtRolesTree` compare, while the
+    /// derived `Ord`/`PartialEq` stay the full 13.10 order.
+    pub fn same_address(&self, other: &Self) -> bool {
+        self.mac == other.mac
+    }
+
     pub fn to_bytes(&self) -> [u8; 8] {
         let mut b = [0; 8];
         b[..2].copy_from_slice(&(self.priority | self.ext).to_be_bytes());
@@ -89,6 +96,11 @@ impl PortId {
 
     pub fn number(&self) -> u16 {
         self.number
+    }
+
+    /// Same port number, priority ignored (sender identity, 13.29 `rcvInfo`).
+    pub fn same_number(&self, other: &Self) -> bool {
+        self.number == other.number
     }
 
     pub fn to_u16(&self) -> u16 {

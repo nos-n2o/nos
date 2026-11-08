@@ -306,6 +306,17 @@ mod tests {
     }
 
     #[test]
+    fn upstream_priority_worsening_reaches_downstream_without_waiting() {
+        // #661: a changed sender priority is the same sender, so the worse
+        // vector replaces the stored one at the next BPDU, not at rcvdInfoWhile.
+        let mut s = started(&[4096, 32768], &[p2p(0, 1)]);
+        s.converge(60).unwrap();
+        s.bridges[0].set_bridge_id(BridgeId::new(8192, 0, [0, 0, 0, 0, 0, 1]).unwrap());
+        s.settle();
+        assert_eq!(s.bridges[1].root_id.priority(), 8192, "{}", s.dump());
+    }
+
+    #[test]
     fn link_cut_reconverges_over_the_alternate() {
         let mut s = started(&[4096, 32768, 36864], &[p2p(0, 1), p2p(1, 2), p2p(0, 2)]);
         s.converge(60).unwrap();

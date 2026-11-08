@@ -146,6 +146,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 - DESIGNATED_DISCARD is tested before DESIGNATED_SYNCED: a forwarding port must stop forwarding before it counts as synced.
 - A down port never transmits (`PTX` requires `portEnabled`).
 - `rcvInfo` treats a Designated BPDU from the same bridge/port as the stored info but with different values (e.g. a larger cost) as superior, so upstream changes are accepted.
+- Sender identity (`rcvInfo`) and the own-bridge tests in `updtRolesTree` are bridge MAC plus port number only; priority and system-id extension are excluded, so a neighbor that changes its priority is the same sender with new info, not an inferior BPDU (#661). `BridgeId`/`PortId` ordering stays the full 13.10 order.
 - A BPDU whose message age is already at max age is dropped in `PRX` (9.3.4).
 
 ## Legacy 802.1D compatibility (#319)

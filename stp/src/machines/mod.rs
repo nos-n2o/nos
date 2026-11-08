@@ -385,8 +385,15 @@ pub(crate) fn rcv_info(p: &mut Port) -> RcvdInfo {
     p.msg_times = Times::from_params(&pr);
     match role {
         PortRole::Designated => {
-            let same_sender = p.msg_priority.designated_bridge == p.port_priority.designated_bridge
-                && p.msg_priority.designated_port == p.port_priority.designated_port;
+            // Sender identity is bridge address + port number; a priority
+            // change is the same sender with new info (13.29 rcvInfo).
+            let same_sender = p
+                .msg_priority
+                .designated_bridge
+                .same_address(&p.port_priority.designated_bridge)
+                && p.msg_priority
+                    .designated_port
+                    .same_number(&p.port_priority.designated_port);
             let same_all = p.msg_priority == p.port_priority && p.msg_times == p.port_times;
             if p.msg_priority.better_than(&p.port_priority) || (same_sender && !same_all) {
                 RcvdInfo::SuperiorDesignated
