@@ -39,7 +39,7 @@ Resolves peers and VRF from `nos-configd`, runs the FSM over VRF-scoped TCP, exc
 - `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (handled in `run`'s read branch, only once `Established`).
 - Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
 - Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), in the read branch.
-- Timer defaults and floors live in `nos_proto`; OPEN check order: internals page.
+- Timer defaults/floors: `nos_proto`; OPEN order: internals. OpenSent wait 240 s at hold 0 (#665).
 - The `PeerSlot` command channel is polled only while `Established`, so one task contends for it.
 - 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; a peer without it gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN is emitted only above 255 bytes.
 
