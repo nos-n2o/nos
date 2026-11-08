@@ -3,6 +3,7 @@
 //! peer, exchange a route, and go through the config changes `reconcile`
 //! handles — restart, shutdown, removal, MD5.
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -130,9 +131,10 @@ impl Router {
             .await;
             // A free port here means nobody (the router included) holds it.
             let bind = std::net::TcpListener::bind(("0.0.0.0", port)).map(drop);
-            out += &format!(
-                " {name}-listener:{port}=connect:{:?} bind:{bind:?}",
-                r.map(|c| c.map(drop))
+            let connect = r.map(|c| c.map(drop));
+            let _ = write!(
+                out,
+                " {name}-listener:{port}=connect:{connect:?} bind:{bind:?}"
             );
         }
         out

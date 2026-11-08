@@ -26,7 +26,9 @@ static TAKEN: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 /// If no port is found after 1000 attempts.
 #[must_use]
 pub fn free_port() -> u16 {
-    let mut taken = TAKEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut taken = TAKEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let taken = taken.get_or_insert_with(HashSet::new);
     for _ in 0..1000 {
         let r = std::hash::RandomState::new().hash_one(std::time::Instant::now());
