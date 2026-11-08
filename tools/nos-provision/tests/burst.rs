@@ -9,16 +9,24 @@ use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, WatchdogEvent, WatchdogRequest, LOGIN_BUSY};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-/// Serves `logins` logins: the first is answered busy, the rest `reply`.
-async fn broker(listener: nos_pki::Listener, reply: fn() -> WatchdogEvent, logins: usize) -> usize {
+/// Serves logins until aborted: the first is answered busy, the rest `reply`.
+/// A connection that fails mid-handshake or sends no login is skipped (the
+/// tool cancels the loser of a concurrent burst), and the listener stays up so
+/// a retry never meets a refused connect (#921).
+async fn broker(listener: nos_pki::Listener, reply: fn() -> WatchdogEvent) {
     let mut seen = 0;
-    while seen < logins {
-        let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+    loop {
+        let Ok(conn) = listener.accept().await else {
+            continue;
+        };
+        let Ok((stream, _)) = conn.handshake().await else {
+            continue;
+        };
         let (r, w) = tokio::io::split(stream);
         let mut reader = FramedRead::new(r, IpcCodec::<WatchdogRequest>::default());
         let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogEvent>::default());
         let Some(Ok(WatchdogRequest::Login { user, .. })) = reader.next().await else {
-            panic!("expected a login");
+            continue;
         };
         assert_eq!(user, "burster");
         let event = if seen == 0 {
@@ -27,12 +35,11 @@ async fn broker(listener: nos_pki::Listener, reply: fn() -> WatchdogEvent, login
             reply()
         };
         seen += 1;
-        writer.send(event).await.unwrap();
+        let _ = writer.send(event).await;
     }
-    seen
 }
 
-async fn run_burst(reply: fn() -> WatchdogEvent, logins: usize, n: &str) -> (bool, String) {
+async fn run_burst(reply: fn() -> WatchdogEvent, n: &str) -> (bool, String) {
     let pki = nos_pki::testing::shared();
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("watchdog.sock");
@@ -42,7 +49,7 @@ async fn run_burst(reply: fn() -> WatchdogEvent, logins: usize, n: &str) -> (boo
         .identity("watchdog", "")
         .listen_optional_client_auth(&sock)
         .unwrap();
-    let server = tokio::spawn(broker(listener, reply, logins));
+    let server = tokio::spawn(broker(listener, reply));
     let (sock, ca, n) = (sock.clone(), ca.clone(), n.to_string());
     let out = tokio::task::spawn_blocking(move || {
         std::process::Command::new(env!("CARGO_BIN_EXE_nos-provision"))
@@ -68,13 +75,11 @@ async fn run_burst(reply: fn() -> WatchdogEvent, logins: usize, n: &str) -> (boo
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_burst_logs_in_n_times_and_retries_a_busy_broker() {
-    // 3 logins + the one answered busy and retried.
     let (ok, out) = run_burst(
         || WatchdogEvent::Issued {
             cert_der: Vec::new(),
             lifetime_secs: 60,
         },
-        4,
         "3",
     )
     .await;
@@ -84,12 +89,7 @@ async fn a_burst_logs_in_n_times_and_retries_a_busy_broker() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_burst_login_fails_the_tool() {
-    let (ok, out) = run_burst(
-        || WatchdogEvent::Denied("invalid credentials".into()),
-        2,
-        "2",
-    )
-    .await;
+    let (ok, out) = run_burst(|| WatchdogEvent::Denied("invalid credentials".into()), "2").await;
     assert!(!ok);
     assert!(out.contains("burst login failed"), "{out}");
 }
