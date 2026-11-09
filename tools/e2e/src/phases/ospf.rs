@@ -519,6 +519,7 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     // Link State ID is router-b's bridge address: ours under a stale
     // router-id, so the restarted router-b flushes it. Then the id is restored.
     let stale0 = b.count("ospf stale network lsa flushed");
+    let base1 = p2p_baseline(a, OSPF_ROUTER_ID_B);
     log("renumbering router-b's router-id; it must flush its previous incarnation's network-lsa");
     b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B_RENUMBERED)))
         .await?;
@@ -526,6 +527,11 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     w.dock.kill_process("router-b", "nos-ospfd").await?;
     b.wait_new("ospf stale network lsa flushed", stale0, 90)
         .await?;
+    // #956: on the point-to-point link the renumbered router-b comes from the
+    // same address, so router-a evicts the old entry at once (never on the
+    // broadcast bridge) and the sweep frees it one dead interval (40s) later.
+    p2p_replaced(a, OSPF_ROUTER_ID_B, OSPF_ROUTER_ID_B_RENUMBERED, base1).await?;
+    let base2 = p2p_baseline(a, OSPF_ROUTER_ID_B_RENUMBERED);
     let full0 = a.count(&format!(
         "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}"
     ));
@@ -535,6 +541,38 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(
         &format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}"),
         full0,
+        90,
+    )
+    .await?;
+    p2p_replaced(a, OSPF_ROUTER_ID_B_RENUMBERED, OSPF_ROUTER_ID_B, base2).await
+}
+
+/// Log counts of `r`'s eviction and removal lines for neighbor `old`.
+fn p2p_baseline(r: &crate::router::Router, old: &str) -> (usize, usize) {
+    (
+        r.count(&format!("ospf neighbor evicted.*neighbor={old} ")),
+        r.count(&format!("ospf neighbor entry removed.*neighbor={old}")),
+    )
+}
+
+/// #956: `r`'s point-to-point neighbor `old` was replaced by `new` from the
+/// same address: evicted on the first Hello, entry removed after the dead
+/// interval.
+async fn p2p_replaced(
+    r: &crate::router::Router,
+    old: &str,
+    new: &str,
+    (evicted0, removed0): (usize, usize),
+) -> anyhow::Result<()> {
+    r.wait_new(
+        &format!("ospf neighbor evicted.*neighbor={old} replaced_by={new}"),
+        evicted0,
+        60,
+    )
+    .await?;
+    r.wait_new(
+        &format!("ospf neighbor entry removed.*neighbor={old}"),
+        removed0,
         90,
     )
     .await

@@ -388,10 +388,12 @@ async fn adjacency_survives_lost_hellos(network_type: NetworkType) {
 
     wire.cut.lock().unwrap().insert(Ipv4Addr::new(10, 0, 0, 1));
     settle(40 + 2).await;
-    assert_eq!(
-        b.neighbor_summaries().await[0].state,
-        OspfNeighborState::Down
-    );
+    // Down, then removed in the same sweep (broadcast shows no row, p2p the placeholder).
+    assert!(b
+        .neighbor_summaries()
+        .await
+        .iter()
+        .all(|n| n.state == OspfNeighborState::Down));
 }
 
 fn crypto(key: &[u8], extended: bool) -> LinkAuthConfig {
