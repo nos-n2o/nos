@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::supervisor::wait_or_shutdown;
+use crate::tickets::Tickets;
 use crate::users_client;
 
 pub struct Pki {
@@ -66,6 +67,8 @@ pub struct Pki {
     /// Hashes the broker itself re-hashed at login (user → new hash): that
     /// `Modified` user diff is not a password change and revokes nothing.
     rehashed: Mutex<HashMap<String, String>>,
+    /// Outstanding login tickets (#990); `revoke_user` drops a user's.
+    pub tickets: Tickets,
 }
 
 /// One REST certificate: whose, when the password login behind it happened
@@ -122,6 +125,7 @@ impl Pki {
             rest_sessions: Mutex::default(),
             rest_session_max: AtomicU64::new(REST_SESSION_MAX.as_secs()),
             rehashed: Mutex::default(),
+            tickets: Tickets::default(),
         }))
     }
 
@@ -175,6 +179,7 @@ impl Pki {
     /// REST ones (which `nos-restd` then refuses).
     pub fn revoke_user(&self, user: &str) {
         lock(&self.rest_sessions).retain(|_, s| s.user != user);
+        self.tickets.forget_user(user);
         let serials = lock(&self.users).remove(user).unwrap_or_default();
         self.revoke(Role::User, user, serials);
     }

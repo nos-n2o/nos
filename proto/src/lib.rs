@@ -63,8 +63,9 @@ pub use bgp::{
     VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
 };
 pub use broker::{
-    Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,
-    SESSION_EXPIRED,
+    ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,
+    INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_ENV, LOGIN_TICKET_LEN,
+    LOGIN_TICKET_TTL, SESSION_EXPIRED,
 };
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;

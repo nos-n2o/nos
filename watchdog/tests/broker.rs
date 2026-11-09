@@ -708,3 +708,156 @@ async fn a_weak_hash_is_upgraded_on_login_once() {
         "no second upgrade"
     );
 }
+
+fn ticket_login(user: &str, password: &str) -> WatchdogRequest {
+    WatchdogRequest::LoginTicket {
+        user: user.to_string(),
+        password: password.to_string(),
+    }
+}
+
+fn redeem(ticket: Vec<u8>, csr: Vec<u8>) -> WatchdogRequest {
+    WatchdogRequest::RedeemTicket {
+        ticket,
+        csr_der: csr,
+    }
+}
+
+async fn get_ticket(e: &Env, user: &str, password: &str) -> Vec<u8> {
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    match ask(&mut conn, ticket_login(user, password)).await {
+        WatchdogEvent::Ticket { ticket, ttl_secs } => {
+            assert_eq!((ticket.len(), ttl_secs), (32, 60));
+            ticket
+        }
+        other => panic!("ticket refused: {other:?}"),
+    }
+}
+
+fn is_invalid_ticket(event: &WatchdogEvent) -> bool {
+    matches!(event, WatchdogEvent::Denied(m) if m == nos_proto::INVALID_TICKET)
+}
+
+#[tokio::test]
+async fn a_ticket_is_redeemed_once_for_a_certificate_on_the_redeemers_key() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let ticket = get_ticket(&e, "alice", "s3cret").await;
+    // A different connection redeems it (PAM mints, `nos` redeems).
+    let id = e.anonymous();
+    let (csr, key) = generate_csr().unwrap();
+    let mut conn = dial(&id, &e.broker).await;
+    let WatchdogEvent::Issued {
+        cert_der,
+        lifetime_secs,
+    } = ask(&mut conn, redeem(ticket.clone(), csr.clone())).await
+    else {
+        panic!("redeem refused");
+    };
+    assert_eq!(lifetime_secs, 120);
+    id.set_certificate(cert_der, key).unwrap();
+    assert_eq!(id.peer(), Some(PeerId::new("user", "alice")));
+
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    assert!(is_invalid_ticket(
+        &ask(&mut conn, redeem(ticket, csr)).await
+    ));
+}
+
+#[tokio::test]
+async fn a_bad_ticket_password_looks_like_a_bad_login() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let started = Instant::now();
+    let wrong = ask(&mut conn, ticket_login("alice", "nope")).await;
+    let unknown = ask(&mut conn, ticket_login("mallory", "s3cret")).await;
+    let (WatchdogEvent::Denied(a), WatchdogEvent::Denied(b)) = (wrong, unknown) else {
+        panic!("a bad login was accepted");
+    };
+    assert_eq!(a, nos_proto::INVALID_CREDENTIALS);
+    assert_eq!(a, b);
+    assert!(started.elapsed() >= Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn three_bad_redeems_drop_the_connection() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    for _ in 0..3 {
+        let event = ask(&mut conn, redeem(vec![9; 32], csr.clone())).await;
+        assert!(is_invalid_ticket(&event));
+    }
+    conn.1.send(redeem(vec![9; 32], csr)).await.ok();
+    assert!(conn.0.next().await.is_none_or(|r| r.is_err()));
+}
+
+#[tokio::test]
+async fn a_ticket_for_a_user_deleted_meanwhile_is_refused() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let ticket = get_ticket(&e, "alice", "s3cret").await;
+    e.users.lock().unwrap().clear();
+    let (csr, _) = generate_csr().unwrap();
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    assert!(is_invalid_ticket(
+        &ask(&mut conn, redeem(ticket, csr)).await
+    ));
+}
+
+#[tokio::test]
+async fn a_password_change_drops_an_unredeemed_ticket() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let ticket = get_ticket(&e, "alice", "s3cret").await;
+    e.pki.revoke_user("alice"); // what the user-delete / password-change paths call
+    let (csr, _) = generate_csr().unwrap();
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    assert!(is_invalid_ticket(
+        &ask(&mut conn, redeem(ticket, csr)).await
+    ));
+}
+
+#[tokio::test]
+async fn deleting_the_user_revokes_a_certificate_obtained_by_ticket() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let ticket = get_ticket(&e, "alice", "s3cret").await;
+    let id = e.anonymous();
+    let (csr, key) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut dial(&id, &e.broker).await, redeem(ticket, csr)).await
+    else {
+        panic!("redeem refused");
+    };
+    id.set_certificate(cert_der, key).unwrap();
+    let resolve = || async {
+        let watchdog = PeerId::new(Role::Watchdog.as_str(), "");
+        // A TLS 1.3 client learns of a refused certificate on its first read.
+        let Ok(s) = id.connect(&e.broker, &watchdog).await else {
+            return false;
+        };
+        let (r, w) = split(s);
+        let mut conn = (
+            FramedRead::new(r, IpcCodec::<WatchdogEvent>::default()),
+            FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default()),
+        );
+        let req = WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Config,
+        };
+        conn.1.send(req).await.is_ok()
+            && matches!(conn.0.next().await, Some(Ok(WatchdogEvent::Endpoint(_))))
+    };
+    assert!(resolve().await);
+    e.pki.revoke_user("alice");
+    assert!(!resolve().await);
+}
+
+#[tokio::test]
+async fn ticket_requests_are_open_to_anonymous_and_daemon_peers() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let (csr, _) = generate_csr().unwrap();
+    for id in [e.anonymous(), e.daemon(Role::Bgpd, "r1")] {
+        let mut conn = dial(&id, &e.broker).await;
+        let event = ask(&mut conn, ticket_login("alice", "s3cret")).await;
+        assert!(matches!(event, WatchdogEvent::Ticket { .. }), "{event:?}");
+        let event = ask(&mut conn, redeem(vec![1; 32], csr.clone())).await;
+        assert!(is_invalid_ticket(&event));
+    }
+}

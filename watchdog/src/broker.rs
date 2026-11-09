@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
-    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY,
-    SESSION_EXPIRED,
+    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET,
+    LOGIN_BUSY, LOGIN_TICKET_TTL, SESSION_EXPIRED,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -111,15 +111,20 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
                 break;
             }
         };
-        // Only a direct `Login` is throttled here: `RestLogin` comes over
+        // Only direct logins are throttled here: `RestLogin` comes over
         // `nos-restd`'s shared connection, which does its own per-user delay.
-        let is_login = matches!(request, WatchdogRequest::Login { .. });
+        let is_login = matches!(
+            request,
+            WatchdogRequest::Login { .. }
+                | WatchdogRequest::LoginTicket { .. }
+                | WatchdogRequest::RedeemTicket { .. }
+        );
         // An anonymous peer may only log in: answer its first other request
         // (one warn in `dispatch`) and hang up, so it can't flood the log.
         let hang_up = peer.is_none() && !allowed(None, &request);
         let event = dispatch(&ctx, peer.as_ref(), request).await;
-        let rejected_login =
-            is_login && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS);
+        let rejected_login = is_login
+            && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS || m == INVALID_TICKET);
         if rejected_login {
             failed_logins += 1;
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
@@ -135,8 +140,11 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
 fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
     let role = peer.map(|p| p.role.as_str());
     match request {
-        // The one thing an unauthenticated peer may do.
-        WatchdogRequest::Login { .. } => true,
+        // The only things an unauthenticated peer may do: turn a password (or
+        // a ticket a password bought) into a certificate.
+        WatchdogRequest::Login { .. }
+        | WatchdogRequest::LoginTicket { .. }
+        | WatchdogRequest::RedeemTicket { .. } => true,
         WatchdogRequest::ResolveEndpoint { .. } => peer.is_some(),
         WatchdogRequest::RenewCert { .. } => role == Some(Role::User.as_str()),
         // `nos-restd` vouches for REST clients: it has verified their certificate
@@ -163,6 +171,43 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
             password,
             csr_der,
         } => login(ctx, &user, password, &csr_der, Realm::Ipc).await,
+        WatchdogRequest::LoginTicket { user, password } => {
+            if let Err(denied) = verify_password(ctx, &user, password).await {
+                if matches!(&denied, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS) {
+                    info!(reason = "bad-password", "login ticket refused");
+                }
+                return denied;
+            }
+            let ticket = ctx.pki.tickets.issue(&user, Instant::now());
+            info!(user = ?user, "login ticket issued");
+            WatchdogEvent::Ticket {
+                ticket,
+                ttl_secs: LOGIN_TICKET_TTL.as_secs(),
+            }
+        }
+        WatchdogRequest::RedeemTicket { ticket, csr_der } => {
+            let Some(user) = ctx.pki.tickets.redeem(&ticket, Instant::now()) else {
+                info!(reason = "unknown-ticket", "login ticket refused");
+                return WatchdogEvent::Denied(INVALID_TICKET.to_string());
+            };
+            match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
+                Ok(users) if users.iter().any(|u| u.name == user) => {
+                    let event = issue(ctx, &user, &csr_der, Realm::Ipc, Instant::now());
+                    if matches!(event, WatchdogEvent::Issued { .. }) {
+                        info!(user = ?user, "login ticket redeemed");
+                    }
+                    event
+                }
+                Ok(_) => {
+                    info!(reason = "user-gone", "login ticket refused");
+                    WatchdogEvent::Denied(INVALID_TICKET.to_string())
+                }
+                Err(e) => {
+                    warn!(error = %e, "cannot read users from nos-configd, refusing ticket");
+                    WatchdogEvent::Denied("login unavailable".to_string())
+                }
+            }
+        }
         WatchdogRequest::ResolveEndpoint { service } => {
             let s = &ctx.sockets;
             let resolved = ctx
@@ -275,11 +320,23 @@ async fn login(
     csr_der: &[u8],
     realm: Realm,
 ) -> WatchdogEvent {
+    if let Err(denied) = verify_password(ctx, user, password).await {
+        return denied;
+    }
+    let event = issue(ctx, user, csr_der, realm, Instant::now());
+    if matches!(event, WatchdogEvent::Issued { .. }) {
+        info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
+    }
+    event
+}
+
+/// The password half of a login: `Err` carries the reply to send.
+async fn verify_password(ctx: &Ctx, user: &str, password: String) -> Result<(), WatchdogEvent> {
     let users = match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) => users,
         Err(e) => {
             warn!(error = %e, "cannot read users from nos-configd, refusing login");
-            return WatchdogEvent::Denied("login unavailable".to_string());
+            return Err(WatchdogEvent::Denied("login unavailable".to_string()));
         }
     };
     let stored = users
@@ -301,11 +358,11 @@ async fn login(
     .await
     else {
         warn!(user = %user, "login refused: too many password checks in flight");
-        return WatchdogEvent::Denied(LOGIN_BUSY.to_string());
+        return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string()));
     };
     if !ok {
         info!(user = ?user, "login rejected");
-        return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
+        return Err(WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string()));
     }
     if let (Some(old), Some(new)) = (old, upgraded) {
         // Best effort: never fail a correct login over an upgrade. Noted first,
@@ -324,11 +381,7 @@ async fn login(
             Err(e) => warn!(user = ?user, error = %e, "could not upgrade password hash"),
         }
     }
-    let event = issue(ctx, user, csr_der, realm, Instant::now());
-    if matches!(event, WatchdogEvent::Issued { .. }) {
-        info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
-    }
-    event
+    Ok(())
 }
 
 /// A still-valid certificate is proof enough — but a user deleted since must

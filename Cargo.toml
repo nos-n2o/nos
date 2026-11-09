@@ -58,6 +58,7 @@ libc                = "0.2"
 md-5                = "0.10"
 sha1                = "0.10"
 sha2                = "0.10"
+getrandom           = "0.2"
 hmac                = "0.12"
 axum                = "0.8"
 utoipa              = { version = "6", features = ["axum_extras"] }
