@@ -411,6 +411,8 @@ pub const RLFA_LOOPBACK_PREFIX: &str = "10.62.0";
 /// The ring's routing table is every router's first (`rt1`), kernel table
 /// id 100 (see `LOOPBACK_DEVICE`), so its VRF and tunnel device names are fixed.
 pub const RLFA_VRF: &str = "vrf100";
+/// `bfd` (#660): router-a's only table is `rt1`, kernel table 100, so the VRF is `vrf100` too.
+pub const BFD_VRF: &str = RLFA_VRF;
 pub const RLFA_DEVICE: &str = "rlfa100";
 /// `next-hop-reachability`: what router-b advertises with its own loopback
 /// (`OSPF_SPF_LOOPBACK_ADDRESS`) as NEXT_HOP — a TEST-NET-2 sub-block, so a
