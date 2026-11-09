@@ -32,6 +32,8 @@ pub enum Protocol {
     Llc802_2,
     Ip,
     Ipv6,
+    /// 802.1Q: tagged frames only, and the only protocol `vlan_id` accepts.
+    Dot1Q,
 }
 
 impl Protocol {
@@ -41,6 +43,7 @@ impl Protocol {
             Self::Llc802_2 => ETH_P_802_2,
             Self::Ip => ETH_P_IP,
             Self::Ipv6 => ETH_P_IPV6,
+            Self::Dot1Q => ETH_P_8021Q,
         }
     }
 
@@ -80,6 +83,9 @@ pub struct FlowerKeys {
     /// two ECN bits are never matched. Needs `Protocol::Ip`/`Ipv6`. Flower
     /// has no IPv6 flow-label key on Linux 7.2: that match is unsupported.
     pub ip_tos: Option<u8>,
+    /// The VLAN id (`0..=4094`); needs `Protocol::Dot1Q`, which refuses L3/L4
+    /// keys (`KEY_VLAN_ETH_TYPE` is not modelled).
+    pub vlan_id: Option<u16>,
     /// The tunnel's outer source (needs tunnel metadata on the device).
     pub enc_src_ip: Option<IpAddr>,
 }
@@ -172,6 +178,11 @@ pub enum ActionKind {
         unit: RateUnit,
     },
     Pedit(Pedit),
+    /// `act_mirred` egress redirect to `ifindex` (non-zero), verdict
+    /// `TC_ACT_STOLEN`.
+    Mirred {
+        ifindex: u32,
+    },
 }
 
 /// One action; a non-empty `cookie` (at most 16 bytes) is read back by
@@ -270,7 +281,8 @@ fn check(f: &Filter) -> io::Result<()> {
         }
         match a.kind {
             ActionKind::Gact(v) | ActionKind::Skbedit { verdict: v, .. } => check_verdict(v)?,
-            ActionKind::Sample { .. } => {}
+            ActionKind::Mirred { ifindex: 0 } => return Err(invalid("mirred ifindex 0")),
+            ActionKind::Sample { .. } | ActionKind::Mirred { .. } => {}
             ActionKind::Police { rate, burst, .. } => {
                 if rate == 0 || burst == 0 {
                     return Err(invalid("police rate and burst must be above 0"));
@@ -290,6 +302,26 @@ fn check(f: &Filter) -> io::Result<()> {
         check_prefix(k.dst_ip)?;
         if k.ip_tos.is_some_and(|d| d > 63) {
             return Err(invalid("dscp over 63"));
+        }
+        if k.vlan_id.is_some_and(|v| v > 4094) {
+            return Err(invalid("vlan id over 4094"));
+        }
+        if k.vlan_id.is_some() && f.protocol != Protocol::Dot1Q {
+            return Err(invalid("a vlan id needs Protocol::Dot1Q"));
+        }
+        if f.protocol == Protocol::Dot1Q
+            && (k.ip_proto.is_some()
+                || k.src_ip.is_some()
+                || k.dst_ip.is_some()
+                || k.src_port.is_some()
+                || k.dst_port.is_some()
+                || k.tcp_flags.is_some()
+                || k.icmp_type.is_some()
+                || k.icmp_code.is_some()
+                || k.flags.is_some()
+                || k.ip_tos.is_some())
+        {
+            return Err(invalid("Dot1Q with an L3/L4 key is not modelled"));
         }
     }
     Ok(())
@@ -441,6 +473,7 @@ fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
             ActionKind::Sample { .. } => "sample",
             ActionKind::Police { .. } => "police",
             ActionKind::Pedit(_) => "pedit",
+            ActionKind::Mirred { .. } => "mirred",
         };
         nla(act, TCA_ACT_KIND, &cstr(name));
         nested(act, TCA_ACT_OPTIONS, |p| match a.kind {
@@ -462,6 +495,13 @@ fn action(tab: &mut Vec<u8>, index: u16, a: &Action) {
             }
             ActionKind::Police { rate, burst, unit } => police(p, rate, burst, unit),
             ActionKind::Pedit(Pedit::Dscp { value, family }) => pedit(p, value, family),
+            ActionKind::Mirred { ifindex } => {
+                // struct tc_mirred: tc_gen, eaction, ifindex.
+                let mut v = tc_gen(TC_ACT_STOLEN);
+                v.extend_from_slice(&TCA_EGRESS_REDIR.to_ne_bytes());
+                v.extend_from_slice(&ifindex.to_ne_bytes());
+                nla(p, TCA_MIRRED_PARMS, &v);
+            }
         });
         if !a.cookie.is_empty() {
             nla(act, TCA_ACT_COOKIE, &a.cookie);
@@ -547,9 +587,13 @@ fn flower(o: &mut Vec<u8>, k: &FlowerKeys, protocol: Protocol) {
     }
     // Flower reads its L3 keys only once `n_proto` is set, which comes from
     // this key, not from the filter's protocol (iproute2 sends both too).
-    if matches!(protocol, Protocol::Ip | Protocol::Ipv6) {
+    if matches!(protocol, Protocol::Ip | Protocol::Ipv6 | Protocol::Dot1Q) {
         let ethertype = protocol.ethertype().to_be_bytes();
         nla(o, TCA_FLOWER_KEY_ETH_TYPE, &ethertype);
+    }
+    if let Some(v) = k.vlan_id {
+        // host order (u16 in cls_flower, iproute2 addattr16); proven by tests/kernel.rs
+        nla(o, TCA_FLOWER_KEY_VLAN_ID, &v.to_ne_bytes());
     }
     if let Some(p) = k.ip_proto {
         nla(o, TCA_FLOWER_KEY_IP_PROTO, &[p]);

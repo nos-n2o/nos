@@ -955,3 +955,63 @@ fn pedit_dscp_rewrites_v4_and_v6_packets() {
     assert!(shown.contains("pedit") && shown.contains("csum"), "{shown}");
     assert_eq!(ip_hdr_errors(), before, "IPv4 header checksum still valid");
 }
+
+/// `Dot1Q` + `vlan_id` + `mirred` (#955): the kernel reads the vlan key (byte
+/// order!), redirects a tagged frame to another device and counts it.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn dot1q_vlan_id_mirred_redirect_reads_back_and_counts() {
+    let (_, b) = pair("m0", "m1", 25);
+    run(&["ip", "link", "add", "mt", "type", "dummy"]);
+    run(&["ip", "link", "set", "mt", "up"]);
+    let mt = idx("mt");
+    run(&[
+        "ip", "link", "add", "link", "m0", "name", "m0.10", "type", "vlan", "id", "10",
+    ]);
+    run(&["ip", "link", "set", "m0.10", "up"]);
+    run(&["ip", "addr", "add", "203.0.113.1/24", "dev", "m0.10"]);
+    run(&[
+        "ip",
+        "neigh",
+        "add",
+        "203.0.113.9",
+        "lladdr",
+        "02:00:00:00:19:02",
+        "dev",
+        "m0.10",
+        "nud",
+        "permanent",
+    ]);
+    let keys = FlowerKeys {
+        vlan_id: Some(10),
+        ..FlowerKeys::default()
+    };
+    add(
+        b,
+        0,
+        3,
+        Protocol::Dot1Q,
+        keys,
+        vec![Action::new(ActionKind::Mirred { ifindex: mt })],
+    );
+    let shown = show("m1", "ingress");
+    println!("MIRRED {shown}");
+    assert!(shown.contains("vlan_id 10"), "{shown}");
+    assert!(shown.contains("802.1Q"), "{shown}");
+    assert!(
+        shown.contains("mirred (Egress Redirect to device mt)"),
+        "{shown}"
+    );
+
+    let sock = UdpSocket::bind("203.0.113.1:0").unwrap();
+    sock.send_to(b"tagged", ("203.0.113.9", 7200)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // At least ours: the vlan device may add its own tagged IPv6 ND frame.
+    assert!(
+        pkts(b, 0, 3, 1) >= 1,
+        "the tagged frame matched and redirected"
+    );
+    if std::env::var_os("NOS_TC_CAPTURE").is_some() {
+        println!("MIRRED_DUMP_REPLY {}", hex(&raw_dump(b, 0)));
+    }
+}

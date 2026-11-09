@@ -237,3 +237,28 @@ fn flower_rows_are_one_per_action_with_cookie_and_counters() {
         ]
     );
 }
+
+/// A real kernel (7.2) reply to a dump of chain 0 holding one filter (prio 3,
+/// handle 1, `flower protocol 802.1Q vlan_id 10`) with one `mirred egress
+/// redirect` action that has seen traffic. Regenerate with `NOS_TC_CAPTURE=1`
+/// (the `MIRRED_DUMP_REPLY` line of `dot1q_vlan_id_mirred_redirect_...`).
+const MIRRED_DUMP_REPLY: &str = "380000002c0002000100000065662500000000000300000000000000f2ffffff810003000b000100666c6f776572000008000b0000000000fc0000002c0002000100000065662500000000000300000001000000f2ffffff810003000b000100666c6f776572000008000b0000000000c4000200060017000a00000008001600080000000800560000000000a8000300a40001000b0001006d6972726564000044000400140001006e000000000000000200000000000000140007000000000000000000000000000000000018000300000000000000000000000000000000000000000008000a00000000004800020020000200010000000000000004000000010000000100000001000000050000002400010014000000000000001400000000000000000000000000000014000000000000001400000003000200010000006566250000000000";
+
+#[test]
+#[cfg(target_endian = "little")]
+fn a_captured_mirred_dump_decodes_into_one_row() {
+    let mut out = Vec::new();
+    assert!(dump_part(&unhex(MIRRED_DUMP_REPLY), &mut out).unwrap());
+    assert_eq!(
+        out,
+        [FilterStats {
+            chain: 0,
+            prio: 3,
+            handle: 1,
+            action: "mirred".into(),
+            cookie: vec![],
+            packets: 2,
+            bytes: 110,
+        }]
+    );
+}
