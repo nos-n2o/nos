@@ -203,6 +203,9 @@ struct Port {
     rx_limiter: TxLimiter,
     /// LACPDUs dropped since the last accepted one (warned once per burst).
     rx_dropped: u64,
+    /// Whether the loopback warning already fired for the current run of
+    /// looped LACPDUs (reset by the next accepted one).
+    loopback_logged: bool,
     /// LACPDUs with an unsupported Version byte (`show lacp`).
     unsupported_version_pdus: u64,
     churn: Churn,
@@ -246,6 +249,7 @@ impl Port {
             marker_limiter: TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW),
             rx_limiter: TxLimiter::new(Instant::now(), MAX_RX_PER_WINDOW),
             rx_dropped: 0,
+            loopback_logged: false,
             unsupported_version_pdus: 0,
             churn,
             partner_view_matches: true,
@@ -420,6 +424,18 @@ impl Port {
             self.report();
             return;
         };
+        // Our own system id on the wire: a looped link (the source-MAC filter
+        // cannot catch members that keep their own MACs). Never a partner.
+        if pdu.actor.system == self.config.actor_system_id {
+            if self.loopback_logged {
+                debug!(interface = %self.config.interface, "lacp loopback LACPDU ignored");
+            } else {
+                self.loopback_logged = true;
+                warn!(interface = %self.config.interface, "lacp loopback detected, ignoring own LACPDUs");
+            }
+            return;
+        }
+        self.loopback_logged = false;
         let before = (self.receive_state, self.mux_state, self.partner);
         // update_Selected: a changed partner identity deselects the port at
         // once (mux leaves Collecting/Distributing); selection re-runs from

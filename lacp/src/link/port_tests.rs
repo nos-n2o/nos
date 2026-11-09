@@ -677,3 +677,32 @@ fn matching_compares_the_key() {
         &ours
     ));
 }
+
+#[test]
+fn own_system_id_lacpdus_are_dropped_and_warn_once() {
+    let mut r = rig(true, LacpRate::Fast);
+    r.port.on_selection(true, &r.sink);
+    let before = r.observed();
+    let sent = r.sink.count();
+    // Same system id, another priority: still ours (#658).
+    let looped = |prio| {
+        encode(&Lacpdu {
+            actor: PortInfo {
+                system: [1; 6],
+                system_priority: prio,
+                ..partner_info(ACTIVE_PARTNER)
+            },
+            partner: our_view(),
+            collector_max_delay: 0,
+        })
+    };
+    r.port.on_frame(&looped(100), &r.sink);
+    assert!(r.port.loopback_logged);
+    r.port.on_frame(&looped(5), &r.sink);
+    assert_eq!(r.observed(), before);
+    assert!(r.port.partner.is_none());
+    assert_eq!(r.sink.count(), sent);
+    r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
+    assert!(!r.port.loopback_logged);
+    assert!(r.port.partner.is_some());
+}

@@ -180,6 +180,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 - Any other Version byte is dropped without a log line and counted: `show lacp` ends each member's line with `unsupported-version PDUs <n>`; `GET /v1/lacp` has `"unsupported_version_pdus"`.
 - A count that keeps growing means the partner sends a version other than 1 or 2: check its LACP configuration. The count restarts at 0 when the member's link task restarts (member re-added, `nos-lacpd` restart).
+- A `lacp loopback detected interface=<member>` warning means the member hears LACPDUs carrying this router's own system id: the link is cabled back to this host (another member or aggregate). Such PDUs are ignored, so the member never joins the aggregate; fix the cabling.
 
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 
