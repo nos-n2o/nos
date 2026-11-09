@@ -3,6 +3,7 @@ pub mod instances;
 pub mod pki;
 pub mod registry;
 pub mod supervisor;
+pub mod tickets;
 pub mod uids;
 pub mod users_client;
 

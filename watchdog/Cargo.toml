@@ -21,6 +21,8 @@ futures            = { workspace = true }
 tokio-util         = { workspace = true }
 nos-pki            = { workspace = true }
 nos-password       = { workspace = true }
+getrandom          = { workspace = true }
+sha2               = { workspace = true }
 
 [[bin]]
 name = "nos-watchdogd"

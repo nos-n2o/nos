@@ -11,6 +11,11 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Operator view: [docs
 
 A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925 TCP-AO with key rotation — see `docs/protocols/bgp-internals.md`'s "Session authentication" for the wire-level detail). Neither mechanism has a maintained Rust binding, so the raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_*)` calls live in their own crate, `tcp-auth/` (`nos-tcp-auth`) — no NOS dependencies, like `nos-proto`, and the one crate in the workspace whose whole purpose is `unsafe` FFI (every other crate stays within the workspace's `unsafe_code = "warn"` default). Secrets are stored **clear-text** in config, like every other field — this system has no encryption-at-rest anywhere. They are not shown, though: see "Secrets and the admin keystore" below.
 
+## Login ticket (#990)
+
+- A caller that holds the password but cannot (or should not) hold the key, such as PAM during an ssh login, trades it for a ticket with `WatchdogRequest::LoginTicket`; `nos`, started later, redeems it (`RedeemTicket`) for a certificate on its own key. No certificate is issued until redemption, and the redeem time is the session start (#637).
+- The ticket travels in the `NOS_LOGIN_TICKET` environment variable (unpadded base64url). Accepted exposure: it is readable through `/proc/<pid>/environ` by the same uid and root for at most 60 s, once.
+
 ## Secrets and the admin keystore (#383, #507)
 
 - `Config.admin` is a keystore of `label -> secret`; sections that need a key reference the label (BGP MD5/TCP-AO and RPKI cache auth do since #508; OSPFv2/OSPFv3 simple and crypto keys, incl. virtual links, since #509; BFD profile auth since #510). `nos-bgpd`, `nos-ospfd`, `nos-ospfv3d` and `nos-bfdd` resolve their labels themselves, subscribed to `DiffScope::Admin`. It is the one place daemons read a secret from, via `Config::key`.

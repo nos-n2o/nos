@@ -1,6 +1,10 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 
 use serde::{Deserialize, Serialize};
 
@@ -210,6 +214,30 @@ pub const LOGIN_BUSY: &str = "login busy";
 /// session hit its renewal cap: `nos-restd` answers 401.
 pub const SESSION_EXPIRED: &str = "session expired";
 
+/// `Denied` text for a login ticket that is unknown, expired, already used or
+/// whose user is gone: one opaque message, so `nos` falls back to the prompt.
+pub const INVALID_TICKET: &str = "invalid ticket";
+
+/// Environment variable carrying a login ticket (`ticket_to_env`) from PAM to `nos`.
+pub const LOGIN_TICKET_ENV: &str = "NOS_LOGIN_TICKET";
+
+/// Length of a login ticket in bytes.
+pub const LOGIN_TICKET_LEN: usize = 32;
+
+/// How long an unredeemed login ticket stays valid.
+pub const LOGIN_TICKET_TTL: Duration = Duration::from_secs(60);
+
+/// Encodes a ticket for `LOGIN_TICKET_ENV`: unpadded URL-safe base64.
+pub fn ticket_to_env(ticket: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(ticket)
+}
+
+/// Decodes `ticket_to_env`; `None` unless it is exactly `LOGIN_TICKET_LEN` bytes.
+pub fn ticket_from_env(s: &str) -> Option<Vec<u8>> {
+    let b = URL_SAFE_NO_PAD.decode(s.trim()).ok()?;
+    (b.len() == LOGIN_TICKET_LEN).then_some(b)
+}
+
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -282,6 +310,22 @@ pub enum WatchdogRequest {
         /// Hex serial of the presented certificate.
         serial: String,
     },
+    /// Anonymous like `Login`: verify the password but issue no certificate;
+    /// answered with a single-use `Ticket` that `RedeemTicket` trades for one.
+    LoginTicket {
+        /// Login name.
+        user: String,
+        /// Cleartext password, verified against the local-user hash.
+        password: String,
+    },
+    /// Anonymous: trade a `Ticket` for a user certificate on the key in
+    /// `csr_der`. Answered with `Issued` or `Denied(INVALID_TICKET)`.
+    RedeemTicket {
+        /// The secret ticket bytes.
+        ticket: Vec<u8>,
+        /// DER-encoded certificate signing request.
+        csr_der: Vec<u8>,
+    },
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -318,12 +362,20 @@ impl fmt::Debug for WatchdogRequest {
                 .field("user", user)
                 .field("serial", serial)
                 .finish(),
+            WatchdogRequest::LoginTicket { user, .. } => f
+                .debug_struct("LoginTicket")
+                .field("user", user)
+                .field("password", &"<hidden>")
+                .finish_non_exhaustive(),
+            WatchdogRequest::RedeemTicket { .. } => {
+                f.debug_struct("RedeemTicket").finish_non_exhaustive()
+            }
         }
     }
 }
 
 /// Messages sent from `nos-watchdogd` to a broker client.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum WatchdogEvent {
     /// The service is currently reachable at this Unix socket path.
     Endpoint(PathBuf),
@@ -354,6 +406,48 @@ pub enum WatchdogEvent {
         /// Validity of the issued certificate, in seconds.
         lifetime_secs: u64,
     },
+    /// Reply to `LoginTicket`: a single-use secret, valid for `ttl_secs`.
+    Ticket {
+        /// The secret ticket bytes.
+        ticket: Vec<u8>,
+        /// Seconds until it expires unredeemed.
+        ttl_secs: u64,
+    },
+}
+
+// Manual `Debug`: a `Ticket` is a credential.
+impl fmt::Debug for WatchdogEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WatchdogEvent::Endpoint(p) => f.debug_tuple("Endpoint").field(p).finish(),
+            WatchdogEvent::NotAvailable => f.write_str("NotAvailable"),
+            WatchdogEvent::Issued {
+                cert_der,
+                lifetime_secs,
+            } => f
+                .debug_struct("Issued")
+                .field("cert_der", cert_der)
+                .field("lifetime_secs", lifetime_secs)
+                .finish(),
+            WatchdogEvent::Denied(m) => f.debug_tuple("Denied").field(m).finish(),
+            WatchdogEvent::Ok => f.write_str("Ok"),
+            WatchdogEvent::RestServerCert {
+                cert_der,
+                ca_der,
+                lifetime_secs,
+            } => f
+                .debug_struct("RestServerCert")
+                .field("cert_der", cert_der)
+                .field("ca_der", ca_der)
+                .field("lifetime_secs", lifetime_secs)
+                .finish(),
+            WatchdogEvent::Ticket { ttl_secs, .. } => f
+                .debug_struct("Ticket")
+                .field("ticket", &"<hidden>")
+                .field("ttl_secs", ttl_secs)
+                .finish(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,5 +494,49 @@ mod tests {
         };
         let shown = format!("{req:?}");
         assert!(shown.contains("alice") && !shown.contains("hunter2"));
+    }
+
+    #[test]
+    fn ticket_messages_round_trip_and_never_print_secrets() {
+        let ticket = vec![0xAB; LOGIN_TICKET_LEN];
+        let reqs = [
+            WatchdogRequest::LoginTicket {
+                user: "alice".into(),
+                password: "hunter2".into(),
+            },
+            WatchdogRequest::RedeemTicket {
+                ticket: ticket.clone(),
+                csr_der: vec![1, 2],
+            },
+        ];
+        for r in &reqs {
+            let bytes = postcard::to_allocvec(r).unwrap();
+            let back: WatchdogRequest = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(format!("{r:?}"), format!("{back:?}"));
+            let shown = format!("{r:?}");
+            assert!(!shown.contains("hunter2") && !shown.contains("171"));
+        }
+        let ev = WatchdogEvent::Ticket {
+            ticket: ticket.clone(),
+            ttl_secs: 60,
+        };
+        let back: WatchdogEvent =
+            postcard::from_bytes(&postcard::to_allocvec(&ev).unwrap()).unwrap();
+        assert!(matches!(back, WatchdogEvent::Ticket { ttl_secs: 60, ticket: t } if t == ticket));
+        let shown = format!("{ev:?}");
+        assert!(
+            shown.contains("60")
+                && !shown.contains("171")
+                && !shown.contains(&ticket_to_env(&ticket))
+        );
+    }
+
+    #[test]
+    fn ticket_env_form_round_trips_and_rejects_bad_input() {
+        let t = vec![7u8; LOGIN_TICKET_LEN];
+        assert_eq!(ticket_from_env(&ticket_to_env(&t)), Some(t));
+        assert_eq!(ticket_from_env(&ticket_to_env(&[1u8; 31])), None);
+        assert_eq!(ticket_from_env("not base64!"), None);
+        assert_eq!(ticket_from_env(""), None);
     }
 }
