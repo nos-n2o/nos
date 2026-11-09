@@ -281,6 +281,7 @@ mod tests {
         let split = b.len() - 16;
         let mut key = [0u8; 16];
         key[..KEY.len()].copy_from_slice(KEY);
+        // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- independent oracle for the RFC 2328 D.3 keyed MD5 the CA-TLV must use.
         let mut h = Md5::new();
         h.update(&b[..split]);
         h.update(key);
