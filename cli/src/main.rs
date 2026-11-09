@@ -63,6 +63,7 @@ fn refuse_command(args: &Args) -> Option<&'static str> {
 fn take_login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
     let raw = std::env::var_os(nos_proto::LOGIN_TICKET_ENV);
     // SAFETY: only called from `main` before any thread exists.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::env::remove_var(nos_proto::LOGIN_TICKET_ENV) };
     login::parse_ticket(raw)
 }
@@ -181,6 +182,9 @@ fn main() -> anyhow::Result<()> {
         eprintln!("{msg}");
         std::process::exit(2);
     }
+    // argv[0] only selects the mode; a forged one gains nothing (the ticket
+    // is still verified by the watchdog and the prompt remains the fallback).
+    // nosemgrep: rust.lang.security.args-os.args-os
     let argv0 = std::env::args_os().next().unwrap_or_default();
     let ticket = if login::login_shell_mode(&argv0, args.login_shell) {
         take_login_ticket()
