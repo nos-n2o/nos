@@ -519,6 +519,7 @@ fn initial_dd_sequence_number() -> u32 {
 fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyData, DbdPacket) {
     let seed = initial_dd_sequence_number();
     let dbd = DbdPacket {
+        lls: None,
         router_id: local_router_id,
         area_id: cfg.area_id,
         interface_mtu: cfg.mtu,

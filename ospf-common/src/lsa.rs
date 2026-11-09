@@ -57,6 +57,8 @@ pub fn reflected_self_lsas<H: LsaHeader>(installed: &[H], router_id: Ipv4Addr) -
 /// A whole LSA: a header plus a family-specific body the database never reads.
 pub trait Lsa: Clone + Debug + PartialEq {
     type Header: LsaHeader;
+    /// Extra per-packet data a DBD carries (RFC 5613 LLS for v2, `()` for v3).
+    type Lls: Clone + Debug + PartialEq;
     fn header(&self) -> &Self::Header;
     fn header_mut(&mut self) -> &mut Self::Header;
 }
@@ -103,6 +105,7 @@ pub(crate) mod test_lsa {
 
     impl Lsa for L {
         type Header = H;
+        type Lls = ();
         fn header(&self) -> &H {
             &self.0
         }

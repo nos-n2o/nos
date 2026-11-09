@@ -422,6 +422,7 @@ impl nos_ospf_common::lsa::LsaHeader for LsaHeader {
 
 impl nos_ospf_common::lsa::Lsa for Lsa {
     type Header = LsaHeader;
+    type Lls = ();
     fn header(&self) -> &LsaHeader {
         &self.header
     }

@@ -253,6 +253,7 @@ pub(super) fn send_hello(
     drop(current);
 
     let pkt = packet::HelloPacket {
+        lls: None,
         router_id: local_router_id,
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
