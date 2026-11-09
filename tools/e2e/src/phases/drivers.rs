@@ -452,6 +452,27 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         "the v3 LACPDU must not reach the Receive machine"
     );
 
+    // #658: a LACPDU carrying router-a's own system id (a looped link) is
+    // dropped with a warning and never becomes a partner.
+    log("router-a ignores an injected LACPDU carrying its own system id");
+    let loop_pattern = "lacp loopback detected interface=eth1";
+    let loop_base = a.count(loop_pattern);
+    let own_partner =
+        "lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 1\\]";
+    let own_base = a.count(own_partner);
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("lacp_loop.py")],
+        )
+        .await?;
+    a.wait_new(loop_pattern, loop_base, 15).await?;
+    anyhow::ensure!(
+        a.count(own_partner) == own_base,
+        "the looped LACPDU must not be recorded as a partner"
+    );
+
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
     // nos-lacpd must detect the silence via its real Receive Machine timeout
     // and nos-interfaced must release eth2 — proving the enslavement is
