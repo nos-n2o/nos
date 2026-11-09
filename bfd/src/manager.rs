@@ -28,6 +28,11 @@ use crate::unsolicited::{self, Decision};
 /// not known to `nos-ribd` yet, no route to the peer, ...).
 const OPEN_RETRY: Duration = Duration::from_secs(1);
 
+/// How long a retiring session may take to put its `AdminDown` on the wire:
+/// twice its tx interval, within these bounds (#659).
+const GRACE_MIN: Duration = Duration::from_millis(300);
+const GRACE_MAX: Duration = Duration::from_secs(2);
+
 /// Opens the transmit path of a session and makes sure its receive socket
 /// runs. The real one is `socket::UdpNet`.
 #[async_trait]
@@ -495,9 +500,60 @@ impl Manager {
     /// Drops the session `key` whatever clients hold it.
     fn release_all(&self, sessions: &mut HashMap<SessionKey, Entry>, key: &SessionKey) {
         if let Some(e) = sessions.remove(key) {
+            self.retire(e, key);
+        }
+    }
+
+    /// Takes the session out of the receive path now; a classic or micro one
+    /// first tells the peer `AdminDown` (RFC 5880 §6.8.16, RFC 5882 §3.2: no
+    /// detection-time expiry on its side) and its task is aborted after
+    /// `grace`. S-BFD initiators and unaffiliated echo have no Control
+    /// packet to send and are aborted at once. Needs a tokio runtime.
+    fn retire(&self, e: Entry, key: &SessionKey) {
+        self.forget(&e, key);
+        info!(peer = %key.peer, table = %key.table, "bfd session removed");
+        let Some(grace) = self.announce_down(&e, key) else {
             e.task.abort();
-            self.forget(&e, key);
-            info!(peer = %key.peer, table = %key.table, "bfd session removed");
+            return;
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            e.task.abort();
+        });
+    }
+
+    /// Sends the `AdminDown` command; the time the task needs to put it on the
+    /// wire (`None` when the session has no Control packets).
+    fn announce_down(&self, e: &Entry, key: &SessionKey) -> Option<Duration> {
+        if e.profile.mode == BfdMode::Sbfd || e.profile.echo_mode == EchoMode::Unaffiliated {
+            return None;
+        }
+        let profile = BfdProfile {
+            shutdown: true,
+            ..e.profile.clone()
+        };
+        let resolved = self.resolve(&profile);
+        e.cmd.try_send((profile, resolved)).ok()?;
+        info!(peer = %key.peer, table = %key.table, "bfd session admin down sent");
+        let tx = Duration::from_micros(u64::from(e.status.borrow().tx_interval_us));
+        Some((tx * 2).clamp(GRACE_MIN, GRACE_MAX))
+    }
+
+    /// Daemon shutdown: every session announces `AdminDown`, one wait for all.
+    pub async fn shutdown_all(&self) {
+        let entries: Vec<(SessionKey, Entry)> = self.sessions.lock().unwrap().drain().collect();
+        let mut grace = Duration::ZERO;
+        let mut tasks = Vec::new();
+        for (k, e) in entries {
+            self.forget(&e, &k);
+            if let Some(g) = self.announce_down(&e, &k) {
+                grace = grace.max(g);
+            }
+            tasks.push(e.task);
+        }
+        tokio::time::sleep(grace).await;
+        for t in tasks {
+            t.abort();
         }
     }
 
@@ -518,9 +574,7 @@ impl Manager {
         e.clients.remove(&client);
         if e.clients.is_empty() {
             let e = sessions.remove(key).expect("just seen");
-            e.task.abort();
-            self.forget(&e, key);
-            info!(peer = %key.peer, table = %key.table, "bfd session removed");
+            self.retire(e, key);
         }
     }
 
@@ -545,11 +599,13 @@ impl Manager {
     /// RFC 9468: a packet that matched no session. Creates a passive session
     /// when a rule of `table` covers `src` and `unsolicited::decide` agrees.
     fn unsolicited_rx(&self, table: &str, src: IpAddr, ttl: Option<u8>, p: &Packet) -> bool {
+        // Sessions first, as `set_unsolicited` does: a rule dropped meanwhile
+        // must not create a session after its sessions were released (#659).
+        let mut sessions = self.sessions.lock().unwrap();
         let Some(rule) = unsolicited::rule_for(&self.rules.lock().unwrap(), table, src).cloned()
         else {
             return false;
         };
-        let mut sessions = self.sessions.lock().unwrap();
         let existing = sessions
             .iter()
             .filter(|(k, e)| {
@@ -806,6 +862,73 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         false
+    }
+
+    fn admin_downs(sent: &Sent) -> usize {
+        sent.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| packet::decode(b).is_ok_and(|p| p.state == BfdState::AdminDown))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn last_deregister_sends_admin_down_then_aborts_after_grace() {
+        let (m, sent, demux) = mgr(false);
+        let (c, k) = (m.new_client(), key("192.0.2.1"));
+        m.register(c, &k, &BfdProfile::default());
+        assert!(until(|| !sent.0.lock().unwrap().is_empty()).await);
+        let old = m.sessions(None)[0].local_discriminator;
+        m.deregister(c, &k);
+        assert_eq!(m.sessions(None).len(), 0);
+        assert!(demux.0.lock().unwrap().by_disc.is_empty(), "no rx slot");
+        assert!(
+            until(|| admin_downs(&sent) == 1).await,
+            "AdminDown on the wire"
+        );
+        // Re-register during the grace: a fresh session.
+        m.register(c, &k, &BfdProfile::default());
+        let new = m.sessions(None)[0].local_discriminator;
+        assert_ne!(old, new);
+        assert!(demux.0.lock().unwrap().by_disc.contains_key(&new));
+    }
+
+    #[tokio::test]
+    async fn drop_client_and_shutdown_all_announce_admin_down() {
+        let (m, sent, _) = mgr(false);
+        let c = m.new_client();
+        for p in ["192.0.2.1", "192.0.2.2", "192.0.2.3"] {
+            m.register(c, &key(p), &BfdProfile::default());
+        }
+        assert!(until(|| sent.0.lock().unwrap().len() >= 3).await);
+        m.drop_client(c);
+        assert!(until(|| admin_downs(&sent) == 3).await);
+
+        let (m, sent, _) = mgr(false);
+        for p in ["192.0.2.1", "192.0.2.2"] {
+            m.register(c, &key(p), &BfdProfile::default());
+        }
+        assert!(until(|| sent.0.lock().unwrap().len() >= 2).await);
+        let t = Instant::now();
+        m.shutdown_all().await;
+        assert!(t.elapsed() < Duration::from_secs(3), "one grace, not two");
+        assert_eq!(admin_downs(&sent), 2);
+        assert_eq!(m.sessions(None).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn sbfd_aborts_without_a_grace() {
+        let (m, sent, _) = mgr(false);
+        let p = BfdProfile {
+            mode: BfdMode::Sbfd,
+            ..BfdProfile::default()
+        };
+        m.register(m.new_client(), &key("192.0.2.1"), &p);
+        let t = Instant::now();
+        m.shutdown_all().await;
+        assert!(t.elapsed() < Duration::from_millis(250));
+        assert_eq!(admin_downs(&sent), 0);
     }
 
     #[tokio::test]

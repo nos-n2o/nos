@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
     info!("shutdown signal received");
     let _ = shutdown_tx.send(true);
     server_task.abort();
+    manager.shutdown_all().await;
     sweep_task.abort();
     let _ = tokio::join!(micro_task, interface_task);
     info!("shutting down");
