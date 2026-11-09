@@ -33,6 +33,7 @@ pub const HOOK_EGRESS: u32 = 0xFFFF_FFF3;
 pub const ETH_P_ALL: u16 = 0x0003;
 pub const ETH_P_802_2: u16 = 0x0004;
 pub const ETH_P_IP: u16 = 0x0800;
+pub const ETH_P_8021Q: u16 = 0x8100;
 pub const ETH_P_IPV6: u16 = 0x86DD;
 
 // include/uapi/linux/pkt_cls.h: actions
@@ -45,6 +46,7 @@ pub const TC_ACT_UNSPEC: i32 = -1;
 pub const TC_ACT_OK: i32 = 0;
 pub const TC_ACT_SHOT: i32 = 2;
 pub const TC_ACT_PIPE: i32 = 3;
+pub const TC_ACT_STOLEN: i32 = 4;
 /// `__TC_ACT_EXT(2)`: the opcode above bit 28, the chain in the low 28 bits.
 pub const TC_ACT_GOTO_CHAIN: u32 = 2 << 28;
 pub const TC_ACT_EXT_VAL_MASK: u32 = (1 << 28) - 1;
@@ -67,6 +69,7 @@ pub const TCA_FLOWER_KEY_TCP_SRC: u16 = 18;
 pub const TCA_FLOWER_KEY_TCP_DST: u16 = 19;
 pub const TCA_FLOWER_KEY_UDP_SRC: u16 = 20;
 pub const TCA_FLOWER_KEY_UDP_DST: u16 = 21;
+pub const TCA_FLOWER_KEY_VLAN_ID: u16 = 23;
 pub const TCA_FLOWER_KEY_ENC_IPV4_SRC: u16 = 27;
 pub const TCA_FLOWER_KEY_ENC_IPV6_SRC: u16 = 31;
 pub const TCA_FLOWER_KEY_IP_TOS: u16 = 73;
@@ -115,6 +118,10 @@ pub const TCA_PEDIT_CMD_SET: u16 = 0;
 // include/uapi/linux/tc_act/tc_csum.h
 pub const TCA_CSUM_PARMS: u16 = 1;
 pub const TCA_CSUM_UPDATE_FLAG_IPV4HDR: u32 = 1;
+
+// include/uapi/linux/tc_act/tc_mirred.h
+pub const TCA_MIRRED_PARMS: u16 = 2;
+pub const TCA_EGRESS_REDIR: i32 = 1;
 
 // include/uapi/linux/tc_act/tc_sample.h
 pub const TCA_SAMPLE_PARMS: u16 = 2;

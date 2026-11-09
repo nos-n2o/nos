@@ -802,3 +802,90 @@ fn police_pedit_and_tos_refusals() {
     one(Protocol::Ip, none(), police(1, 1));
     one(Protocol::Ip, none(), dscp(63));
 }
+
+fn mirred(ifindex: u32) -> ActionKind {
+    ActionKind::Mirred { ifindex }
+}
+
+fn vlan(v: Option<u16>) -> FlowerKeys {
+    FlowerKeys {
+        vlan_id: v,
+        ..FlowerKeys::default()
+    }
+}
+
+fn dot1q(keys: FlowerKeys, actions: Vec<Action>) -> Vec<u8> {
+    add(filter(Protocol::Dot1Q, Kind::Flower(keys), actions))
+}
+
+#[test]
+fn dot1q_vlan_mirred_golden_bytes() {
+    let m = dot1q(vlan(Some(10)), vec![Action::new(mirred(7))]);
+    // tcm_info: prio 1, htons(0x8100).
+    assert_eq!(
+        u32_at(&m, 32),
+        1 << 16 | u32::from(u16::from_ne_bytes([0x81, 0x00]))
+    );
+    let k = keys(&m);
+    assert_eq!(k[0], (TCA_FLOWER_KEY_ETH_TYPE, vec![0x81, 0x00]));
+    assert_eq!(k[1], (TCA_FLOWER_KEY_VLAN_ID, 10u16.to_ne_bytes().to_vec()));
+    let act = action_attrs(&m, 0);
+    assert_eq!(act[0].1, b"mirred\0");
+    let opts = attrs(&act[1].1);
+    assert_eq!(opts[0].0, TCA_MIRRED_PARMS);
+    // tc_gen (action = TC_ACT_STOLEN), eaction = egress redirect, ifindex.
+    let want = format!(
+        "{}{}{}",
+        "0000000000000000",
+        hex(&TC_ACT_STOLEN.to_ne_bytes()) + "0000000000000000",
+        hex(&1i32.to_ne_bytes()) + &hex(&7u32.to_ne_bytes())
+    );
+    assert_eq!(hex(opts[0].1), want);
+    assert_eq!(opts[0].1.len(), 28);
+}
+
+#[test]
+fn dot1q_without_vlan_still_sends_the_ethertype() {
+    let m = dot1q(vlan(None), vec![Action::new(mirred(7))]);
+    assert_eq!(keys(&m), [(TCA_FLOWER_KEY_ETH_TYPE, vec![0x81, 0x00])]);
+}
+
+#[test]
+fn mirred_in_a_table_keeps_index_and_cookie() {
+    let acts = vec![
+        Action::new(ActionKind::Gact(Verdict::Pipe)),
+        Action {
+            kind: mirred(9),
+            cookie: vec![1, 2],
+        },
+    ];
+    let m = dot1q(vlan(Some(1)), acts);
+    let top = attrs(&m[36..]);
+    let opts = attrs(top.iter().find(|(k, _)| *k == TCA_OPTIONS).unwrap().1);
+    let table = opts.iter().find(|(k, _)| *k == TCA_FLOWER_ACT).unwrap().1;
+    let idx: Vec<u16> = attrs(table).iter().map(|a| a.0).collect();
+    assert_eq!(idx, [1, 2]);
+    let second = action_attrs(&m, 1);
+    assert_eq!(second[0].1, b"mirred\0");
+    assert_eq!(second.last().unwrap(), &(TCA_ACT_COOKIE, vec![1, 2]));
+}
+
+#[test]
+fn vlan_and_mirred_refusals_and_edges() {
+    let g = || ActionKind::Gact(Verdict::Ok);
+    let bad = io::ErrorKind::InvalidInput;
+    for v in [4095, 65535] {
+        assert_eq!(refused(Protocol::Dot1Q, vlan(Some(v)), g()), bad);
+    }
+    for p in [Protocol::All, Protocol::Ip] {
+        assert_eq!(refused(p, vlan(Some(10)), g()), bad);
+    }
+    assert_eq!(refused(Protocol::Dot1Q, vlan(None), mirred(0)), bad);
+    let l4 = FlowerKeys {
+        ip_proto: Some(6),
+        ..vlan(Some(10))
+    };
+    assert_eq!(refused(Protocol::Dot1Q, l4, g()), bad);
+    one(Protocol::Dot1Q, vlan(Some(0)), g());
+    one(Protocol::Dot1Q, vlan(Some(4094)), mirred(1));
+}
