@@ -53,6 +53,20 @@ pub(super) async fn session_is(
     )
 }
 
+/// #659: router-a retiring its session tells router-b AdminDown, so b logs
+/// `neighbor-signaled-session-down` and never waits out its detection time.
+async fn graceful_down(
+    b: &crate::router::Router,
+    trigger: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let signaled = format!("bfd session down peer={IP_A} diag=neighbor-signaled-session-down");
+    let expired = format!("bfd session down peer={IP_A} diag=control-detection-time-expired");
+    let (n_sig, n_exp) = (b.count(&signaled), b.count(&expired));
+    trigger.await?;
+    b.wait_new(&signaled, n_sig, 5).await?;
+    b.assert_quiet(&expired, n_exp, 2).await
+}
+
 /// `bfd`, self-contained. Each router has a static route to a test prefix via
 /// the other, guarded by `bfd-profile fast` (100 ms x 3): the route is
 /// installed only once the session is Up. A `tc` filter in router-a's
@@ -125,6 +139,20 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     // The diag is whatever last took the session down: it sticks while Up,
     // so Up is only asserted without one.
     session_is(a, IP_B, "Up", None, 5).await?;
+
+    log("#659: router-a's last client leaves: router-b sees AdminDown, not a timeout");
+    graceful_down(b, a.provision(&["--remove-static-route", BFD_PREFIX_B])).await?;
+    let n_up_b = b.count(&up_b);
+    a.provision(&bfd_route(BFD_PREFIX_B, IP_B)).await?;
+    b.wait_new(&up_b, n_up_b, 30).await?;
+
+    log("#659: nos-bfdd on router-a stops on SIGTERM: router-b sees AdminDown");
+    graceful_down(b, async {
+        w.dock.signal_process("router-a", "nos-bfdd", "-TERM").await
+    })
+    .await?;
+    // The watchdog restarts it and ribd registers the route's session again.
+    b.wait_new(&up_b, n_up_b + 1, 60).await?;
 
     log("interop: FRR bfdd reaches Up with router-a");
     let conf = format!(
@@ -285,16 +313,15 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     a.established().await?;
     session_is(a, IP_B, "Up", None, 30).await?;
 
-    log("removing bfd from the peer-group resets nothing");
-    let (cease_a, cease_b, est_a, est_b) =
-        (a.count(cease), b.count(cease), a.count(est), b.count(est));
-    a.provision(&["--no-bfd-bgp"]).await?;
+    // #659: router-a retires its session first and says AdminDown, so
+    // router-b's BGP closes on `neighbor-signaled-session-down` (before this
+    // change b waited out its detection time, usually beaten by its own
+    // removal below). Removing bfd on one side is therefore not silent.
+    log("removing bfd on router-a alone: router-b sees AdminDown, not a detection timeout");
+    graceful_down(b, a.provision(&["--no-bfd-bgp"])).await?;
     b.provision(&["--no-bfd-bgp"]).await?;
-    a.assert_quiet(cease, cease_a, 3).await?;
-    b.assert_quiet(cease, cease_b, 0).await?;
-    a.assert_quiet(est, est_a, 0).await?;
-    b.assert_quiet(est, est_b, 0).await?;
-    a.established().await
+    a.established().await?;
+    b.established().await
 }
 
 /// `bfd-padded`, self-contained (RFC 9764, #293). Both routers run `bfd-profile

@@ -458,6 +458,12 @@ impl Core {
             p.final_,
         );
         let changed = self.apply(Event::RxState(p.state));
+        if p.state == BfdState::AdminDown {
+            // The peer retired this session (#659): its discriminator is
+            // stale, and a peer that comes back (or an unsolicited one,
+            // RFC 9468) is only heard with Your Discriminator 0.
+            self.remote_disc = 0;
+        }
         let polled = self.sync_echo(now);
         if out.reply_final || changed || polled {
             self.timers.schedule_tx(now, self.state, rand_pct);
@@ -1206,6 +1212,11 @@ mod tests {
         Pair::deliver(p.now, true, &mut p.a, &mut p.b, pkt);
         assert_eq!(p.b.state, BfdState::Down);
         assert_eq!(p.b.diag, BfdDiag::NeighborSignaledSessionDown);
+        assert_eq!(
+            p.b.packet(false).your_discriminator,
+            0,
+            "stale remote forgotten"
+        );
         // AdminDown ignores the peer; removal brings it back to Down.
         assert!(p.a.on_packet(p.now, &p.b.packet(false), 100).is_none());
         p.a.update_profile(profile(100, 100), rk(&profile(100, 100)), p.now, 100);
