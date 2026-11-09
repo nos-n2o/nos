@@ -457,9 +457,8 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     log("router-a ignores an injected LACPDU carrying its own system id");
     let loop_pattern = "lacp loopback detected interface=eth1";
     let loop_base = a.count(loop_pattern);
-    let own_partner =
-        "lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 1\\]";
-    let own_base = a.count(own_partner);
+    let released = "removed interface from master enslavement interface=eth1";
+    let released_base = a.count(released);
     w.dock
         .in_netns(
             PYTHON_HELPER_IMAGE,
@@ -468,10 +467,15 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         )
         .await?;
     a.wait_new(loop_pattern, loop_base, 15).await?;
+    // No partner recorded from the injected id: eth1 still shows router-b's
+    // configured system id and keeps Distributing (and so its enslavement).
+    let eth1 = lacp_port(a, "eth1").await?;
     anyhow::ensure!(
-        a.count(own_partner) == own_base,
-        "the looped LACPDU must not be recorded as a partner"
+        eth1["partner_system_id"] == serde_json::json!([2, 0, 0, 0, 0x0b, 1])
+            && eth1["mux_state"] == "Distributing",
+        "the looped LACPDU disturbed eth1: {eth1}"
     );
+    a.assert_quiet(released, released_base, 5).await?;
 
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
     // nos-lacpd must detect the silence via its real Receive Machine timeout
