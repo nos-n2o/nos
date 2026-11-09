@@ -1250,6 +1250,40 @@ fn gr_cap() -> Capability {
     Capability::GracefulRestart(gr::our_cap(120, &[AddressFamily::Ipv4Unicast], false, true))
 }
 
+/// #965: the winner's `on_open` took this loser's record while its KEEPALIVE
+/// was already in flight (`clear` stands in, without the `cease` permit that
+/// `select!` would pick at random): the session must not register or
+/// publish `Established`, and ends as a collision loser with a Cease.
+#[tokio::test]
+async fn a_loser_whose_record_is_gone_never_registers() {
+    let mut s = start(rpeer(), peer_open(90, vec![]), false).await;
+    assert_eq!(s.peer.recv().await, BgpMessage::Keepalive);
+    let mut status = s.slot.status_receiver();
+    within("open-confirm", async {
+        while status.borrow_and_update().state != PeerState::OpenConfirm {
+            status.changed().await.unwrap();
+        }
+    })
+    .await;
+    s.slot.clear(Role::Active).await;
+    s.peer.send(BgpMessage::Keepalive).await;
+    let n = s.peer.notification().await;
+    assert_eq!(
+        (n.error_code, n.error_subcode),
+        (
+            ErrorCode::Cease as u8,
+            CeaseSubcode::ConnectionCollisionResolution as u8
+        )
+    );
+    let slot = s.slot.clone();
+    assert!(matches!(s.outcome().await, FsmOutcome::CollisionLost));
+    assert_ne!(
+        slot.status_receiver().borrow().state,
+        PeerState::Established
+    );
+    assert!(!slot.is_established().await);
+}
+
 #[tokio::test]
 async fn a_cease_command_goes_out_as_that_cease() {
     let mut s = start(rpeer(), peer_open(90, vec![]), true).await;

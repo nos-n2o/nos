@@ -597,12 +597,28 @@ impl PeerSlot {
     /// `gr_capable`: the peer advertised graceful restart (and it's on
     /// here), which lets a later connection replace this one (RFC 4724
     /// §4.2), signalled through `replaced`.
-    pub async fn mark_established(&self, role: Role, gr_capable: bool, replaced: Arc<Notify>) {
+    ///
+    /// Returns `false` when this connection's record is gone: the other role
+    /// won the §6.8 collision (`on_open` took the record and signalled
+    /// `cease`) while this one was already on its way to `Established`, so
+    /// `select!` handed the KEEPALIVE to the FSM before the `cease` permit.
+    /// The caller must then not register with the RIB (#965): `BgpRib` is
+    /// keyed by peer address, and the winner owns that entry. The check and
+    /// the winner's `on_open` share the state lock, so exactly one of
+    /// "loser lands in `Established`" and "winner is known" happens first.
+    pub async fn mark_established(
+        &self,
+        role: Role,
+        gr_capable: bool,
+        replaced: Arc<Notify>,
+    ) -> bool {
         let mut state = self.state.lock().await;
-        if let Some(conn) = role_state_mut(&mut state, role).connection.as_mut() {
-            conn.stage = Stage::Established;
-            conn.established = Some((Instant::now(), gr_capable, replaced));
-        }
+        let Some(conn) = role_state_mut(&mut state, role).connection.as_mut() else {
+            return false;
+        };
+        conn.stage = Stage::Established;
+        conn.established = Some((Instant::now(), gr_capable, replaced));
+        true
     }
 
     pub async fn clear(&self, role: Role) {
@@ -763,6 +779,56 @@ mod tests {
             )
             .await;
         assert!(matches!(decision, Decision::Proceed));
+    }
+
+    /// #965: the loser's OPEN passed `on_open` first; the winner's `on_open`
+    /// then took its record and signalled `cease`; the loser's KEEPALIVE won
+    /// the `select!` against that permit, so it reaches `Established` with
+    /// the winner already known. It must be told so, and must not become the
+    /// slot's established connection.
+    #[tokio::test]
+    async fn a_loser_reaching_established_after_the_winner_is_known_is_refused() {
+        let slot = peer_slot();
+        // Local 1.1.1.1 < remote 2.2.2.2: the passive connection wins.
+        let (local_id, remote_id) = (addr(1, 1, 1, 1), addr(2, 2, 2, 2));
+        let active_cease = Arc::new(Notify::new());
+        let d = slot
+            .on_open(
+                Role::Active,
+                local_id,
+                remote_id,
+                active_cease.clone(),
+                false,
+            )
+            .await;
+        assert!(matches!(d, Decision::Proceed));
+        let d = slot
+            .on_open(
+                Role::Passive,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
+            .await;
+        assert!(matches!(d, Decision::Proceed));
+        // The loser has been told (a stored permit), but races ahead.
+        tokio::time::timeout(Duration::from_secs(1), active_cease.notified())
+            .await
+            .expect("cease permit");
+        assert!(
+            !slot
+                .mark_established(Role::Active, true, Arc::new(Notify::new()))
+                .await,
+            "the loser must not register"
+        );
+        assert!(!slot.is_established().await);
+        // The winner is unaffected.
+        assert!(
+            slot.mark_established(Role::Passive, true, Arc::new(Notify::new()))
+                .await
+        );
+        assert!(slot.is_established().await);
     }
 
     #[tokio::test]

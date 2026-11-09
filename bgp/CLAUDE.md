@@ -57,7 +57,7 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Collision resolution
 
-`collision::PeerSlot` is shared by both roles. An already-`Established` connection beats an ID compare; a tie keeps the first registered. `fsm::run` calls `BgpRib::peer_disconnected` **only if it registered** (its `registered` flag), or a collision loser wipes the winner's `adj_rib_in`/`peer_outbox`; guarded by `handshake.rs`'s `collision_leaves_exactly_one_side_running`.
+`collision::PeerSlot` is shared by both roles. An already-`Established` connection beats an ID compare; a tie keeps the first registered. `fsm::run` calls `BgpRib::peer_disconnected` **only if it registered** (its `registered` flag), or a collision loser wipes the winner's `adj_rib_in`/`peer_outbox`. A displaced loser (`mark_established` false) must not register (#965).
 
 ## Administrative shutdown
 

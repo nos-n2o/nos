@@ -4,7 +4,9 @@
 #![cfg(feature = "fakes")]
 
 mod fakes;
+mod ports;
 pub use fakes::*;
+pub use ports::free_port;
 
 #[cfg(test)]
 mod tests;
