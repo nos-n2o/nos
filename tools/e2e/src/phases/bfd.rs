@@ -154,6 +154,29 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     // The watchdog restarts it and ribd registers the route's session again.
     b.wait_new(&up_b, n_up_b + 1, 60).await?;
 
+    // #660: the VRF device deleted and recreated (a new ifindex) leaves the
+    // session's transmit and the table's receive sockets on the dead index.
+    log("#660: router-a's VRF deleted and recreated: sockets rebuilt, the session returns");
+    let (n_tx, n_rx, n_up_a) = (
+        a.count("bfd transmit socket recreated"),
+        a.count("bfd receive socket recreated table="),
+        a.count(&up_a),
+    );
+    // `nos-ribd` and `nos-interfaced` put the VRF and the enslavement back.
+    w.dock
+        .ip(
+            NETNS_HELPER_IMAGE,
+            Some("router-a"),
+            false,
+            &["link", "del", BFD_VRF],
+        )
+        .await?;
+    a.wait_new("bfd transmit socket recreated", n_tx, 30)
+        .await?;
+    a.wait_new("bfd receive socket recreated table=", n_rx, 30)
+        .await?;
+    a.wait_new(&up_a, n_up_a, 30).await?;
+
     log("interop: FRR bfdd reaches Up with router-a");
     let conf = format!(
         "frr defaults traditional\nhostname router-f\n!\nbfd\n peer {IP_A}\n  \

@@ -18,8 +18,9 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use nos_proto::{RibEvent, RibRequest, Role, ServiceRef, SessionKey};
@@ -191,6 +192,7 @@ async fn socket_loop(
     sock: AsyncFd<Socket>,
     mut remake: impl FnMut(&mut Option<AsyncFd<Socket>>) -> io::Result<()>,
     mut step: impl FnMut(&AsyncFd<Socket>) -> io::Result<()>,
+    mut stale: impl FnMut() -> bool,
 ) {
     let mut sock = Some(sock);
     let mut dead = false;
@@ -209,7 +211,13 @@ async fn socket_loop(
             dead = true;
             continue;
         };
-        let mut guard = match s.readable().await {
+        // A socket bound to a deleted-and-recreated device goes silent without
+        // an error: `stale` is asked every `IFINDEX_CHECK` of silence (#660).
+        let Ok(ready) = tokio::time::timeout(IFINDEX_CHECK, s.readable()).await else {
+            dead = stale();
+            continue;
+        };
+        let mut guard = match ready {
             Ok(g) => g,
             Err(e) => {
                 b.fail(&what, &e).await;
@@ -235,6 +243,7 @@ async fn rx_loop(
     demux: Demux,
 ) {
     let mut buf = [0u8; 128];
+    let mut have = ifindex(&vrf);
     socket_loop(
         format!("udp table={table} v6={v6} multihop={multihop}"),
         sock,
@@ -252,15 +261,138 @@ async fn rx_loop(
             debug!(peer = %d.src, ttl = ?d.ttl, delivered = ok, "bfd packet received");
             Ok(())
         },
+        || {
+            // The VRF was recreated (a `nos-ribd` restart): its index changed.
+            let now = ifindex(&vrf);
+            let changed = now != 0 && now != have;
+            if changed {
+                have = now;
+            }
+            changed
+        },
     )
     .await;
 }
 
-struct UdpTx(Socket);
+/// Whether a transmit socket must be rebuilt: its device or VRF has another
+/// index than at open, checked once per `IFINDEX_CHECK` or right after a send
+/// error (#660).
+fn needs_rebuild(have: (u32, u32), now: (u32, u32), since: Duration, err: bool) -> bool {
+    have != now && now.0 != 0 && now.1 != 0 && (err || since >= IFINDEX_CHECK)
+}
+
+struct TxState {
+    sock: Arc<Socket>,
+    /// (device, VRF) indexes the socket was made for.
+    have: (u32, u32),
+    last_check: Instant,
+    /// The last send failed (not `EMSGSIZE`).
+    err: bool,
+    /// One `warn!` per failing streak.
+    warned: bool,
+    /// Bumped on each rebuild: S-BFD's receive loop follows it.
+    epoch: u32,
+}
+
+/// A connected UDP transmit socket that survives its device (or VRF) being
+/// deleted and recreated, as a `nos-ribd` restart does: the old socket is
+/// bound to the dead index and every send fails (#660).
+struct UdpTx {
+    device: String,
+    vrf: String,
+    key: SessionKey,
+    dport: u16,
+    /// Rebind the same source port on a rebuild (S-BFD's reflections return to it).
+    keep_port: bool,
+    st: Mutex<TxState>,
+}
+
+impl UdpTx {
+    fn new(
+        device: &str,
+        vrf: &str,
+        key: &SessionKey,
+        dport: u16,
+        keep_port: bool,
+    ) -> io::Result<Self> {
+        let have = (ifindex(device), ifindex(vrf));
+        let sock = Arc::new(tx_socket(device, vrf, key, dport, None)?);
+        Ok(UdpTx {
+            device: device.to_string(),
+            vrf: vrf.to_string(),
+            key: key.clone(),
+            dport,
+            keep_port,
+            st: Mutex::new(TxState {
+                sock,
+                have,
+                last_check: Instant::now(),
+                err: false,
+                warned: false,
+                epoch: 0,
+            }),
+        })
+    }
+
+    fn socket(&self) -> Arc<Socket> {
+        self.st.lock().unwrap().sock.clone()
+    }
+
+    fn generation(&self) -> u32 {
+        self.st.lock().unwrap().epoch
+    }
+
+    /// Rebuilds the socket when due and the indexes changed; a failed rebuild
+    /// keeps the old socket and retries on the next send.
+    fn refresh(&self, st: &mut TxState) {
+        let since = st.last_check.elapsed();
+        if !st.err && since < IFINDEX_CHECK {
+            return;
+        }
+        st.last_check = Instant::now();
+        let now = (ifindex(&self.device), ifindex(&self.vrf));
+        if !needs_rebuild(st.have, now, since, st.err) {
+            return;
+        }
+        let port = if self.keep_port {
+            st.sock
+                .local_addr()
+                .ok()
+                .and_then(|a| a.as_socket())
+                .map(|a| a.port())
+        } else {
+            None
+        };
+        match tx_socket(&self.device, &self.vrf, &self.key, self.dport, port) {
+            Ok(s) => {
+                st.sock = Arc::new(s);
+                st.have = now;
+                st.epoch = st.epoch.wrapping_add(1);
+                st.err = false;
+                info!(peer = %self.key.peer, table = %self.key.table, "bfd transmit socket recreated");
+            }
+            Err(e) => {
+                debug!(peer = %self.key.peer, error = %e, "bfd transmit socket not recreated");
+            }
+        }
+    }
+}
 
 impl Tx for UdpTx {
     fn send(&self, bytes: &[u8]) -> io::Result<()> {
-        self.0.send(bytes).map(|_| ())
+        let mut st = self.st.lock().unwrap();
+        self.refresh(&mut st);
+        let r = st.sock.send(bytes).map(|_| ());
+        st.err = matches!(&r, Err(e) if e.raw_os_error() != Some(libc::EMSGSIZE));
+        match &r {
+            Err(e) if st.err && !st.warned => {
+                st.warned = true;
+                warn!(peer = %self.key.peer, error = %e, "bfd send failing");
+            }
+            Ok(()) => st.warned = false,
+            _ => {}
+        }
+        r
     }
 }
 
@@ -300,8 +432,8 @@ fn local_for(peer: IpAddr, vrf: &str, interface: Option<&str>) -> Option<(IpAddr
 /// The source address the kernel would use towards `peer` in `vrf`: a
 /// connected UDP socket's local address is a route lookup, nothing is sent.
 /// RFC 5883 §4 wants the multihop local address fixed; a client that does
-/// not name one gets this one. ponytail: not refreshed if the route's source
-/// changes while the session lives.
+/// not name one gets this one. ponytail: re-derived only when `UdpTx`
+/// rebuilds its socket, not if the route's source changes alone.
 fn kernel_source(peer: IpAddr, vrf: &str) -> Option<IpAddr> {
     let s = Socket::new(domain(peer.is_ipv6()), Type::DGRAM, Some(Protocol::UDP)).ok()?;
     s.bind_device(Some(vrf.as_bytes())).ok()?;
@@ -311,7 +443,13 @@ fn kernel_source(peer: IpAddr, vrf: &str) -> Option<IpAddr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
-fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Result<UdpTx> {
+fn tx_socket(
+    device: &str,
+    vrf: &str,
+    key: &SessionKey,
+    dport: u16,
+    prefer_port: Option<u16>,
+) -> io::Result<Socket> {
     let v6 = key.peer.is_ipv6();
     let s = Socket::new(domain(v6), Type::DGRAM, Some(Protocol::UDP))?;
     s.bind_device(Some(device.as_bytes()))?;
@@ -349,10 +487,13 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
             }
         })
         .ok_or_else(|| io::Error::other("no local address towards the peer yet"))?;
+    let mut prefer_port = prefer_port;
     let mut bound = false;
     let mut err = io::Error::other("no free source port");
     for _ in 0..32 {
-        let port = 49152 + u16::try_from(rand_u32() % 16384).unwrap_or(0);
+        let port = prefer_port
+            .take()
+            .unwrap_or_else(|| 49152 + u16::try_from(rand_u32() % 16384).unwrap_or(0));
         match s.bind(&SocketAddr::new(local, port).into()) {
             Ok(()) => {
                 bound = true;
@@ -372,7 +513,7 @@ fn tx_socket(device: &str, vrf: &str, key: &SessionKey, dport: u16) -> io::Resul
     };
     s.connect(&peer)?;
     s.set_nonblocking(true)?;
-    Ok(UdpTx(s))
+    Ok(s)
 }
 
 /// Echo packets out through the neighbour: its MAC is kept fresh by a task.
@@ -586,22 +727,20 @@ async fn micro_rx_loop(
 /// back to its source port) and hands them to the session with their TTL.
 async fn sbfd_rx_loop(
     sock: AsyncFd<Socket>,
+    tx: Arc<UdpTx>,
     peer: IpAddr,
     out: tokio::sync::mpsc::Sender<sbfd::Reflection>,
 ) {
     let mut buf = [0u8; 128];
+    let seen = AtomicU32::new(tx.generation());
     socket_loop(
         format!("sbfd peer={peer}"),
         sock,
         |old| {
-            // A new socket would get another source port and the reflections
-            // would never find it: re-register a dup of the same one.
-            let fd = old
-                .as_ref()
-                .ok_or_else(|| io::Error::other("no sbfd socket"))?
-                .get_ref()
-                .try_clone()?;
-            *old = Some(register_fd(fd)?);
+            // Reflections come back to the transmit socket's source port:
+            // follow it (`UdpTx` swaps it when its device is recreated).
+            seen.store(tx.generation(), Ordering::Relaxed);
+            *old = Some(register_fd(tx.socket().try_clone()?)?);
             info!(peer = %peer, "bfd sbfd receive socket recreated");
             Ok(())
         },
@@ -623,6 +762,7 @@ async fn sbfd_rx_loop(
             }
             Err(e) => Err(e),
         },
+        || tx.generation() != seen.load(Ordering::Relaxed),
     )
     .await;
 }
@@ -678,6 +818,7 @@ async fn reflect_loop(sock: AsyncFd<Socket>, vrf: String, v6: bool, reflector: A
             }
             Ok(())
         },
+        || false, // `ReflectorNet::apply` follows the VRF's index
     )
     .await;
 }
@@ -825,7 +966,7 @@ impl UdpNet {
         ));
         let kick = if unaffiliated {
             let device = key.interface.as_deref().unwrap_or(&vrf);
-            Some(tx_socket(device, &vrf, key, echo::ECHO_PORT)?)
+            Some(UdpTx::new(device, &vrf, key, echo::ECHO_PORT, false)?)
         } else {
             None
         };
@@ -924,7 +1065,13 @@ impl Net for UdpNet {
             .as_deref()
             .filter(|_| !key.multihop)
             .unwrap_or(&vrf);
-        Ok(Arc::new(tx_socket(device, &vrf, key, port(key.multihop))?))
+        Ok(Arc::new(UdpTx::new(
+            device,
+            &vrf,
+            key,
+            port(key.multihop),
+            false,
+        )?))
     }
 
     async fn listen(&self, table: &str, v6: bool) -> io::Result<()> {
@@ -945,12 +1092,12 @@ impl Net for UdpNet {
             .unwrap_or(&vrf);
         // Its own source port (never 7784, unique per session: `bind` fails
         // on a port in use) so the reflections find their way back.
-        let tx = tx_socket(device, &vrf, key, sbfd::PORT)?;
-        let rx = register_fd(tx.0.try_clone()?)?;
+        let tx = Arc::new(UdpTx::new(device, &vrf, key, sbfd::PORT, true)?);
+        let rx = register_fd(tx.socket().try_clone()?)?;
         let (out, rx_chan) = tokio::sync::mpsc::channel(64);
-        let task = tokio::spawn(sbfd_rx_loop(rx, key.peer, out));
+        let task = tokio::spawn(sbfd_rx_loop(rx, tx.clone(), key.peer, out));
         Ok(SbfdPath {
-            tx: Arc::new(tx),
+            tx,
             rx: rx_chan,
             task: task.abort_handle(),
         })
@@ -986,5 +1133,16 @@ mod tests {
         assert!(b.ok());
         assert!(!b.ok());
         assert_eq!(b.failed(), (true, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn rebuild_needs_a_changed_index_and_a_reason() {
+        let s = Duration::from_millis(100);
+        let l = Duration::from_secs(1);
+        assert!(!needs_rebuild((3, 4), (3, 4), l, true));
+        assert!(!needs_rebuild((3, 4), (3, 9), s, false));
+        assert!(needs_rebuild((3, 4), (3, 9), l, false));
+        assert!(needs_rebuild((3, 4), (3, 9), s, true));
+        assert!(!needs_rebuild((3, 4), (3, 0), l, true));
     }
 }
