@@ -6,7 +6,7 @@ Research output of #890 (parent #865). Input for #892 (knobs), #893 (codec), #89
 
 ## Verdict up front
 
-- **No v2 evidence exists from SR Linux.** SR Linux v26.7.2 sends version-1 LACPDUs only, exposes no algorithm/conversation/Link_Number knob, and drops version-2 PDUs received (see Experiments). Decision 3 of the plan applies: #893/#894/#895 stay blocked until a v2 source appears (the standard text, or a v2-capable peer such as a recent Linux `bonding`, Cumulus/FRR-class NOS, or a hardware capture).
+- **No v2 evidence exists from SR Linux.** SR Linux v26.7.2 sends version-1 LACPDUs only, exposes no algorithm/conversation/Link_Number knob, and drops version-2 PDUs received (see Experiments). Decision 3 of the plan applies and the owner has parked v2 (see Owner decisions): #893/#894/#895 stay blocked until a v2 source appears (the standard text, or a v2-capable peer such as a recent Linux `bonding`, Cumulus/FRR-class NOS, or a hardware capture).
 - What the capture *does* give: a byte-exact, third-party v1 reference (golden files) that our `lacp/src/packet.rs` can be diffed against, and a data point on how a real implementation treats version 2 and unknown TLVs.
 - Everything about the v2 TLVs below is **UNVERIFIED recollection** of the 802.1AX-2014 layout, not read from the standard and not observed on the wire. Do not implement from it without a source.
 
@@ -104,12 +104,12 @@ Not observed. Written from memory of 802.1AX-2014 so the owner can check against
 - #894 (machines): all rules UNVERIFIED; blocked. One firm constraint: send v1 until v2 is seen from the partner (SR Linux drops v2).
 - #895 (masks): mask semantics UNVERIFIED; blocked.
 
-## Open questions for the owner
+## Owner decisions (#890)
 
-1. Source for v2: can you obtain the 802.1AX-2014 text, or a capture from a v2 peer (which vendor/OS)? Without one, #893-#895 cannot proceed.
-2. Accept the adaptive downgrade (v1 first, v2 after the partner is seen sending v2) as mandatory? The experiment supports it.
-3. Keep the research peer script out of the repo (doc-only, per plan decision 4)? The snippet below is enough to reproduce.
-4. Partner defaults when nothing is heard: SR Linux sends state `c2`. Should we align (`lacp.md` says state 0)? Wire-observable only.
+- **v2 is dropped for now.** No v2 source exists; #893, #894 and #895 are parked. The v2 TLV and CSCD sections above stay UNVERIFIED and are kept only as pointers for whoever picks this up with a source (standard text or a v2 peer capture).
+- **Requirement (mandatory): adaptive downgrade.** Send version 1 until the partner is seen sending version 2. SR Linux drops version-2 PDUs and PDUs with unknown TLVs, so this is needed for interop with v1-only peers. Applies to any future v2 work.
+- **Defaulted partner state: unchanged.** Note only: SR Linux advertises `c2` when no partner is heard; we keep state 0 as in `lacp.md`.
+- Research peer script stays out of the repo (doc-only reproduction below).
 
 ## Sources
 
