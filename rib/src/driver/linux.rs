@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -299,6 +300,9 @@ pub struct LinuxRibDriver {
     /// Underlay interfaces whose `net.mpls.conf.<if>.input` could not be
     /// set, warned about once each.
     input_warned: Mutex<HashSet<String>>,
+    /// Startup hold (#654): `apply` leaves kernel routes it has no desired
+    /// slot for alone (see `RibDriver::keep_stale`).
+    keep_stale: AtomicBool,
 }
 
 impl LinuxRibDriver {
@@ -316,6 +320,7 @@ impl LinuxRibDriver {
             mpls: Mutex::new(HashMap::new()),
             sysctl: Sysctl::default(),
             input_warned: Mutex::new(HashSet::new()),
+            keep_stale: AtomicBool::new(false),
         })
     }
 
@@ -884,6 +889,7 @@ impl LinuxRibDriver {
         &self,
         table_id: u32,
         best_routes: &HashMap<IpNet, RibEntry>,
+        keep_stale: bool,
     ) -> Result<(), DriverError> {
         let observed = self.dump_routes(table_id).await?;
         let observed_map: HashMap<Slot, Key> = observed
@@ -904,7 +910,11 @@ impl LinuxRibDriver {
             .map(|(slot, _, message)| (*slot, message.clone()))
             .collect();
 
-        let (to_add, to_remove) = diff_routes(&observed_map, &desired);
+        let (to_add, mut to_remove) = diff_routes(&observed_map, &desired);
+        if keep_stale {
+            // Only a slot we re-add (changed hops) goes: EEXIST otherwise.
+            to_remove.retain(|(slot, _)| desired.contains_key(slot));
+        }
         debug!(
             table_id,
             to_add = to_add.len(),
@@ -1030,7 +1040,16 @@ impl RibDriver for LinuxRibDriver {
         let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         self.ensure_vrf(&vrf_ifname, table_id).await?;
-        self.reconcile_routes(table_id, best_routes).await
+        self.reconcile_routes(
+            table_id,
+            best_routes,
+            self.keep_stale.load(Ordering::SeqCst),
+        )
+        .await
+    }
+
+    fn keep_stale(&self, on: bool) {
+        self.keep_stale.store(on, Ordering::SeqCst);
     }
 
     async fn apply_delta(
@@ -1052,7 +1071,8 @@ impl RibDriver for LinuxRibDriver {
             return Ok(());
         };
         self.remove_pop_route(table_name, table_id).await?;
-        self.reconcile_routes(table_id, &HashMap::new()).await?;
+        self.reconcile_routes(table_id, &HashMap::new(), false)
+            .await?;
         let l3 = self.l3.lock().unwrap().remove(&table_id);
         if let Some(l3) = l3 {
             self.remove_l3vni(l3.vni).await?;

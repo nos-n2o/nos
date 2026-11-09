@@ -408,7 +408,19 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
     let result = if full_replace {
         let routes = guard.best_routes_for_kernel();
         drop(guard);
-        ctx.driver.apply(&ctx.table, &routes).await
+        let r = ctx.driver.apply(&ctx.table, &routes).await;
+        if ctx.kernel.source_done(&gate, RouteSource::Vpn) {
+            ctx.kernel
+                .release_hold(
+                    &ctx.table,
+                    &ctx.rib,
+                    &gate,
+                    ctx.driver.as_ref(),
+                    "all sources re-pushed",
+                )
+                .await;
+        }
+        r
     } else {
         drop(guard);
         if deltas.is_empty() {
@@ -444,6 +456,11 @@ pub(crate) async fn apply_evpn_route_update(
                 guard.refresh_evpn();
             }
             crate::reconcile::apply_to_kernel(table, rib, kernel, &gate, driver).await;
+            if kernel.source_done(&gate, RouteSource::Evpn) {
+                kernel
+                    .release_hold(table, rib, &gate, driver, "all sources re-pushed")
+                    .await;
+            }
             return;
         }
         EvpnUpdate::Add(r) => (r.key.clone(), Some(r)),
@@ -492,7 +509,7 @@ pub(crate) async fn apply_evpn_route_update(
 /// queue a delta applied directly via `apply_delta` — never a whole-table
 /// recompute or a fresh kernel dump for an incremental push.
 async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
-    let _gate = ctx.kernel.lock().await;
+    let gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
     let mut full_replace = false;
@@ -539,6 +556,17 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
             ctx.kernel.mark_dirty();
         }
+        if ctx.kernel.source_done(&gate, RouteSource::Bgp) {
+            ctx.kernel
+                .release_hold(
+                    &ctx.table,
+                    &ctx.rib,
+                    &gate,
+                    ctx.driver.as_ref(),
+                    "all sources re-pushed",
+                )
+                .await;
+        }
     } else {
         drop(guard);
         if !deltas.is_empty() {
@@ -557,7 +585,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
 /// touched prefix's winner and `apply_delta` just that), since the two
 /// writers only ever touch disjoint `RouteSource` candidates.
 async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
-    let _gate = ctx.kernel.lock().await;
+    let gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
     let mut full_replace = false;
@@ -606,6 +634,17 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
         if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
             error!(table = %ctx.table, error = %e, "failed to apply ospf-pushed routes to kernel");
             ctx.kernel.mark_dirty();
+        }
+        if ctx.kernel.source_done(&gate, RouteSource::Ospf) {
+            ctx.kernel
+                .release_hold(
+                    &ctx.table,
+                    &ctx.rib,
+                    &gate,
+                    ctx.driver.as_ref(),
+                    "all sources re-pushed",
+                )
+                .await;
         }
     } else {
         drop(guard);

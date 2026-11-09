@@ -68,6 +68,13 @@ pub trait RibDriver: Send + Sync {
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError>;
 
+    /// Startup hold (#654): while `on`, `apply` only adds and replaces, and
+    /// leaves kernel routes it has no desired slot for (a crashed
+    /// predecessor's `Bgp`/`Ospf` routes, not yet re-pushed) in place. The
+    /// next `apply` after `keep_stale(false)` removes what is still stale.
+    /// The default does nothing.
+    fn keep_stale(&self, _on: bool) {}
+
     /// Deletes every route in `table_name`'s kernel table and the VRF
     /// device itself. Leaves any persisted table-id registry entry
     /// untouched, so a later `apply` for the same `table_name` (an
