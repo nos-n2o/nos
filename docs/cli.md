@@ -45,6 +45,14 @@ Error: too many failed login attempts
 
 If the router's login service cannot be reached, the shell refuses to start: nothing works without a login. On a freshly installed router the only user is `admin`, password `admin`. See [Concepts: Users and logging in](concepts.md#users-and-logging-in).
 
+### Using `nos` as an SSH login shell
+
+- When `argv[0]` starts with `-` (sshd/login(1) do this for a login shell) or with `--login-shell`, `nos` reads the PAM login ticket from `NOS_LOGIN_TICKET`, removes the variable, and redeems it for a certificate: no `login:`/`password:` prompt.
+- Ticket absent, malformed, expired, already used or refused: it prints `session ticket not accepted; please log in` (never the ticket or the reason) and shows the normal prompt. Watchdog unreachable: it exits (fail closed).
+- `nos -c <cmd>` (what `ssh host cmd` runs) is refused in every mode with exit status 2; use the REST API for scripted access. Only interactive sessions are supported.
+- A renewal that is denied later (user deleted, password changed, certificate cap) behaves as in a normal session: commands start failing; there is no re-prompt.
+- Unsetting the variable does not clear the initial environment block the kernel shows in `/proc/<pid>/environ`; see [auth](architecture/auth.md#login-ticket-990).
+
 ## The two modes
 
 The shell is always in one of two modes, and the prompt shows which.

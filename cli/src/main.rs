@@ -13,6 +13,7 @@ use nos_cli::actions::{
 use nos_cli::command::Command;
 use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
+use nos_cli::login;
 use nos_cli::session::{self, Mode};
 use nos_cli::{client, watchdog_client};
 use nos_pki::Identity;
@@ -36,6 +37,34 @@ struct Args {
     /// watchdog to this shell and grants nothing.
     #[arg(long, default_value = nos_proto::DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
+
+    /// Run as a login shell (implied by a leading `-` in `argv[0]`): redeem
+    /// the PAM login ticket instead of prompting first.
+    #[arg(long, hide = true)]
+    login_shell: bool,
+
+    /// Refused: sshd runs `ssh host cmd` as `<shell> -c cmd`; use the REST API.
+    #[arg(short = 'c', hide = true)]
+    command: Option<String>,
+}
+
+/// `nos -c <cmd>` is refused in every mode (checked before any watchdog contact).
+fn refuse_command(args: &Args) -> Option<&'static str> {
+    args.command.is_some().then_some(
+        "nos: running a command is not supported; use the API (REST) or an interactive session",
+    )
+}
+
+/// Takes `NOS_LOGIN_TICKET` out of the environment.
+#[allow(
+    unsafe_code,
+    reason = "single-threaded: runs in main before the tokio runtime and any other thread"
+)]
+fn take_login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    let raw = std::env::var_os(nos_proto::LOGIN_TICKET_ENV);
+    // SAFETY: only called from `main` before any thread exists.
+    unsafe { std::env::remove_var(nos_proto::LOGIN_TICKET_ENV) };
+    login::parse_ticket(raw)
 }
 
 /// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
@@ -144,9 +173,27 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
     Box::new(NosCompleter::new(mode.clone(), doc_source, config_source))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+// Not `#[tokio::main]`: the ticket variable must be removed while still
+// single-threaded (`remove_var` is only sound then).
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(msg) = refuse_command(&args) {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    }
+    let argv0 = std::env::args_os().next().unwrap_or_default();
+    let ticket = if login::login_shell_mode(&argv0, args.login_shell) {
+        take_login_ticket()
+    } else {
+        None
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(args, ticket))
+}
+
+async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow::Result<()> {
     let mut mode = Mode::Operational;
     let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -160,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
     nos_pki::install(identity.clone());
-    login(&args.watchdog_socket, &identity).await?;
+    login(&args.watchdog_socket, &identity, ticket).await?;
     let config_socket = resolve_config_socket(&args.watchdog_socket).await;
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
@@ -245,7 +292,24 @@ const LOGIN_ATTEMPTS: usize = 3;
 /// unreachable there is nobody to authenticate to, so the shell refuses to
 /// start. The password check no longer happens in this process at all, and the
 /// password hashes never leave the daemons.
-async fn login(watchdog_socket: &Path, identity: &Identity) -> anyhow::Result<()> {
+async fn login(
+    watchdog_socket: &Path,
+    identity: &Identity,
+    ticket: Option<zeroize::Zeroizing<Vec<u8>>>,
+) -> anyhow::Result<()> {
+    // SSH login shell: PAM already verified the password; a refused or
+    // missing ticket falls back to the prompt, an unreachable watchdog fails.
+    if let Some(ticket) = ticket
+        && let Some((issued, key)) = login::redeem_ticket(watchdog_socket, &ticket).await?
+    {
+        identity.set_certificate(issued.cert_der, key)?;
+        keep_certificate_fresh(
+            watchdog_socket.to_path_buf(),
+            identity.clone(),
+            issued.lifetime,
+        );
+        return Ok(());
+    }
     for _ in 0..LOGIN_ATTEMPTS {
         print!("login: ");
         std::io::stdout().flush()?;
@@ -371,5 +435,12 @@ mod tests {
             PathBuf::from(nos_proto::DEFAULT_WATCHDOG_SOCKET)
         );
         let _ = keybindings();
+    }
+
+    #[test]
+    fn dash_c_is_refused() {
+        let a = Args::try_parse_from(["nos", "-c", "show version"]).unwrap();
+        assert!(refuse_command(&a).unwrap().contains("not supported"));
+        assert!(refuse_command(&Args::try_parse_from(["nos"]).unwrap()).is_none());
     }
 }
