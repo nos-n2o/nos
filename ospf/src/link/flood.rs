@@ -282,33 +282,6 @@ pub(super) async fn flood_full_neighbors(
     }
 }
 
-/// Point-to-point only — `run()` only arms this branch when
-/// `cfg.network_type` is `PointToPoint`. At most one neighbor entry.
-pub(super) fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
-    let Some((old_state, grace)) = status
-        .borrow()
-        .neighbors
-        .values()
-        .next()
-        .map(|n| (n.state, n.grace_deadline))
-    else {
-        return;
-    };
-    if grace.is_some() {
-        return;
-    }
-    if old_state != NeighborState::Down {
-        warn!(link = %cfg.attach_point, "ospf neighbor state changed to down");
-    }
-    let new_state = neighbor::step(old_state, neighbor::Event::InactivityTimerExpired);
-    status.send_modify(|s| {
-        for info in s.neighbors.values_mut() {
-            info.state = new_state;
-            info.adjacency = None;
-        }
-    });
-}
-
 /// RFC 2328 §10.2 `KillNbr` for the neighbor at `address`, because BFD found
 /// its path down. The next Hello brings it back through Init; nothing waits
 /// on BFD to form an adjacency.
@@ -331,12 +304,7 @@ pub(super) fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address
 /// checks. ponytail: counts any destination, not only unicast / `AllSPFRouters`
 /// on point-to-point as the RFC words it — `recv_packet` doesn't return the
 /// destination (that needs `IP_PKTINFO`), and nos sends these unicast anyway.
-pub(super) fn note_alive(
-    cfg: &LinkConfig,
-    status: &StatusHandle,
-    router_id: Ipv4Addr,
-    p2p_dead_deadline: &mut Instant,
-) {
+pub(super) fn note_alive(status: &StatusHandle, router_id: Ipv4Addr) {
     let adjacent = status.borrow().neighbors.get(&router_id).is_some_and(|n| {
         matches!(
             n.state,
@@ -355,12 +323,9 @@ pub(super) fn note_alive(
             n.last_heard = now;
         }
     });
-    if cfg.network_type == NetworkType::PointToPoint {
-        *p2p_dead_deadline = now + Duration::from_secs(u64::from(cfg.dead_interval));
-    }
 }
 
-/// Broadcast and point-to-multipoint. Ages out any neighbor whose `last_heard` is
+/// Every network type. Ages out any neighbor whose `last_heard` is
 /// older than `cfg.dead_interval` — see `run()`'s `ponytail:` note on why
 /// this is a periodic sweep rather than per-neighbor timers.
 pub(super) fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
@@ -377,18 +342,42 @@ pub(super) fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
         })
         .map(|(id, _)| *id)
         .collect();
-    if expired.is_empty() {
+    if !expired.is_empty() {
+        for _ in &expired {
+            warn!(link = %cfg.attach_point, "ospf neighbor state changed to down");
+        }
+        status.send_modify(|s| {
+            for id in &expired {
+                if let Some(info) = s.neighbors.get_mut(id) {
+                    info.state =
+                        neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                    info.adjacency = None;
+                }
+            }
+        });
+    }
+    // A Down entry silent for a full dead interval has no use: free the slot
+    // (#956; else forged router IDs pin the neighbor cap for good).
+    let gone: Vec<Ipv4Addr> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, info)| {
+            info.state == NeighborState::Down
+                && info.grace_deadline.is_none()
+                && now.duration_since(info.last_heard) >= dead_interval
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if gone.is_empty() {
         return;
     }
-    for _ in &expired {
-        warn!(link = %cfg.attach_point, "ospf neighbor state changed to down");
-    }
     status.send_modify(|s| {
-        for id in &expired {
-            if let Some(info) = s.neighbors.get_mut(id) {
-                info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
-                info.adjacency = None;
-            }
+        for id in &gone {
+            s.neighbors.remove(id);
         }
     });
+    for id in &gone {
+        info!(link = %cfg.attach_point, neighbor = %id, "ospf neighbor entry removed");
+    }
 }

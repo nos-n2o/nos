@@ -11,8 +11,8 @@ mod grace;
 mod originate;
 mod rx;
 use self::flood::{
-    apply_dead_timer, flood_full_neighbors, flush_pending_acks, kill_bfd_neighbor, note_alive,
-    retransmit_pending, sweep_dead_neighbors,
+    flood_full_neighbors, flush_pending_acks, kill_bfd_neighbor, note_alive, retransmit_pending,
+    sweep_dead_neighbors,
 };
 use self::grace::{expire_grace, send_grace_lsas};
 use self::originate::local_subnet;
@@ -586,10 +586,6 @@ pub async fn run(
     hello_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let is_broadcast = cfg.network_type == NetworkType::Broadcast;
-    // RFC 2328 §9.5: several neighbors, no election — each one's dead timer is
-    // tracked by the 1s sweep below instead of the single p2p deadline.
-    let is_p2mp = cfg.network_type == NetworkType::PointToMultipoint;
-    let mut p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
     // ponytail: a 1s periodic sweep, not N precise per-neighbor timers — a
     // broadcast link's dead-interval tracking only needs to be accurate to
     // about a second, and this avoids a dynamically-sized set of timers
@@ -653,13 +649,13 @@ pub async fn run(
                             }
                             Ok(pkt) => {
                                 if !matches!(pkt, OspfPacket::Hello(_)) {
-                                    note_alive(&cfg, &status, packet::router_id(&pkt), &mut p2p_dead_deadline);
+                                    note_alive(&status, packet::router_id(&pkt));
                                 }
                                 match pkt {
                                     OspfPacket::Hello(hello) => {
                                         let left_waiting = handle_hello(
                                             &cfg, local_router_id, &status, source, &hello,
-                                            &mut p2p_dead_deadline, waiting, &mut warn_limiter,
+                                            waiting, &mut warn_limiter,
                                         );
                                         if left_waiting {
                                             waiting = false;
@@ -719,15 +715,8 @@ pub async fn run(
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospf recv error"),
                 }
             }
-            () = tokio::time::sleep_until(p2p_dead_deadline), if !is_broadcast && !is_p2mp => {
-                apply_dead_timer(&cfg, &status);
-                p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
-            }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
-                if !is_broadcast && !is_p2mp {
-                    continue;
-                }
                 sweep_dead_neighbors(&cfg, &status);
                 if is_broadcast && !waiting {
                     run_election(&cfg, local_router_id, &status);

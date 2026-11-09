@@ -93,14 +93,12 @@ fn handle_hello_accepts_a_matching_hello() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     handle_hello(
         &cfg,
         local_router_id,
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &matching_hello(&cfg, peer),
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -121,7 +119,6 @@ fn p2mp_handle_hello_keeps_several_neighbors_ignoring_mask_and_election() {
     let mut cfg = link("eth0.0", 10);
     cfg.network_type = NetworkType::PointToMultipoint;
     let (status, _rx) = watch::channel(LinkStatus::new(cfg.network_type));
-    let mut deadline = Instant::now();
     for (i, mask) in [(9u8, cfg.local_prefix_len), (10, 30)] {
         let peer = Ipv4Addr::new(9, 9, 9, i);
         let mut hello = matching_hello(&cfg, peer);
@@ -132,7 +129,6 @@ fn p2mp_handle_hello_keeps_several_neighbors_ignoring_mask_and_election() {
             &status,
             Ipv4Addr::new(10, 0, 0, i),
             &hello,
-            &mut deadline,
             false,
             &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
@@ -181,7 +177,6 @@ fn handle_hello_drops_mismatched_hello_interval() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     let mut hello = matching_hello(&cfg, peer);
     hello.hello_interval = 5;
     handle_hello(
@@ -190,7 +185,6 @@ fn handle_hello_drops_mismatched_hello_interval() {
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &hello,
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -203,7 +197,6 @@ fn handle_hello_drops_mismatched_dead_interval() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     let mut hello = matching_hello(&cfg, peer);
     hello.dead_interval = 41;
     handle_hello(
@@ -212,7 +205,6 @@ fn handle_hello_drops_mismatched_dead_interval() {
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &hello,
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -225,7 +217,6 @@ fn handle_hello_skips_network_mask_check_on_point_to_point() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     let mut hello = matching_hello(&cfg, peer);
     hello.network_mask = Ipv4Addr::new(255, 255, 0, 0); // wrong, but p2p ignores it
     handle_hello(
@@ -234,7 +225,6 @@ fn handle_hello_skips_network_mask_check_on_point_to_point() {
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &hello,
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -248,7 +238,6 @@ fn handle_hello_drops_mismatched_network_mask_on_broadcast() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::Broadcast));
-    let mut deadline = Instant::now();
     let mut hello = matching_hello(&cfg, peer);
     hello.network_mask = Ipv4Addr::new(255, 255, 0, 0);
     handle_hello(
@@ -257,7 +246,6 @@ fn handle_hello_drops_mismatched_network_mask_on_broadcast() {
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &hello,
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -270,7 +258,6 @@ fn handle_hello_drops_mismatched_e_bit() {
     let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     let mut hello = matching_hello(&cfg, peer);
     hello.options = 0;
     handle_hello(
@@ -279,7 +266,6 @@ fn handle_hello_drops_mismatched_e_bit() {
         &status,
         Ipv4Addr::new(10, 0, 0, 2),
         &hello,
-        &mut deadline,
         false,
         &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
     );
@@ -436,7 +422,6 @@ fn router_id(n: u32) -> Ipv4Addr {
 fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
     let cfg = link("eth0.0", 10);
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
     let mut limiter = nos_ospf_common::ratelimit::WarnLimiter::default();
     let mut send = |n: u32| {
         handle_hello(
@@ -445,7 +430,6 @@ fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
             &status,
             Ipv4Addr::new(10, 0, 0, 2),
             &matching_hello(&cfg, router_id(n)),
-            &mut deadline,
             false,
             &mut limiter,
         );
@@ -486,4 +470,169 @@ fn source_on_link_exempts_p2p_and_virtual_links_only() {
         ..bcast
     };
     assert!(source_on_link(&vlink, off));
+}
+
+fn hello_from(cfg: &LinkConfig, status: &StatusHandle, id: Ipv4Addr, src: Ipv4Addr) {
+    handle_hello(
+        cfg,
+        Ipv4Addr::new(1, 1, 1, 1),
+        status,
+        src,
+        &matching_hello(cfg, id),
+        false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
+    );
+}
+
+fn state_at(status: &StatusHandle, id: Ipv4Addr) -> Option<NeighborState> {
+    status.borrow().neighbors.get(&id).map(|n| n.state)
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_address_new_router_id_evicts_on_p2p_and_p2mp_only() {
+    let old = Ipv4Addr::new(9, 9, 9, 1);
+    let new = Ipv4Addr::new(9, 9, 9, 2);
+    let other = Ipv4Addr::new(9, 9, 9, 3);
+    let addr = Ipv4Addr::new(10, 0, 0, 2);
+    for (nt, evicts) in [
+        (NetworkType::PointToPoint, true),
+        (NetworkType::PointToMultipoint, true),
+        (NetworkType::Broadcast, false),
+    ] {
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = nt;
+        let (status, _rx) = watch::channel(LinkStatus::new(nt));
+        hello_from(&cfg, &status, old, addr);
+        hello_from(&cfg, &status, other, Ipv4Addr::new(10, 0, 0, 3));
+        status.send_modify(|s| s.neighbors.get_mut(&old).unwrap().state = NeighborState::Full);
+        hello_from(&cfg, &status, new, addr);
+        let expected = if evicts {
+            NeighborState::Down
+        } else {
+            NeighborState::Full
+        };
+        assert_eq!(state_at(&status, old), Some(expected), "{nt:?}");
+        assert_eq!(state_at(&status, new), Some(NeighborState::Init), "{nt:?}");
+        assert_eq!(
+            state_at(&status, other),
+            Some(NeighborState::Init),
+            "{nt:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn eviction_skips_grace_entries_and_other_addresses() {
+    let cfg = link("eth0.0", 10);
+    let old = Ipv4Addr::new(9, 9, 9, 1);
+    let (status, _rx) = watch::channel(LinkStatus::new(cfg.network_type));
+    hello_from(&cfg, &status, old, Ipv4Addr::new(10, 0, 0, 2));
+    status.send_modify(|s| {
+        let n = s.neighbors.get_mut(&old).unwrap();
+        n.state = NeighborState::Full;
+        n.grace_deadline = Some(Instant::now() + Duration::from_secs(60));
+    });
+    hello_from(
+        &cfg,
+        &status,
+        Ipv4Addr::new(9, 9, 9, 2),
+        Ipv4Addr::new(10, 0, 0, 2),
+    );
+    assert_eq!(state_at(&status, old), Some(NeighborState::Full));
+    // A different address never evicts.
+    status.send_modify(|s| s.neighbors.get_mut(&old).unwrap().grace_deadline = None);
+    hello_from(
+        &cfg,
+        &status,
+        Ipv4Addr::new(9, 9, 9, 3),
+        Ipv4Addr::new(10, 0, 0, 9),
+    );
+    assert_eq!(state_at(&status, old), Some(NeighborState::Full));
+}
+
+#[tokio::test(start_paused = true)]
+async fn dead_p2p_entry_is_removed_while_the_replacement_lives() {
+    let cfg = link("eth0.0", 10);
+    let old = Ipv4Addr::new(9, 9, 9, 1);
+    let new = Ipv4Addr::new(9, 9, 9, 2);
+    let (status, _rx) = watch::channel(LinkStatus::new(cfg.network_type));
+    hello_from(&cfg, &status, old, Ipv4Addr::new(10, 0, 0, 2));
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(10)).await;
+        hello_from(&cfg, &status, new, Ipv4Addr::new(10, 0, 0, 3));
+        sweep_dead_neighbors(&cfg, &status);
+    }
+    // Expired (Down), then removed once silent for dead_interval.
+    assert_eq!(state_at(&status, old), None);
+    assert_eq!(state_at(&status, new), Some(NeighborState::Init));
+}
+
+#[tokio::test(start_paused = true)]
+async fn forged_ids_fill_the_cap_then_free_after_a_dead_interval() {
+    let cfg = link("eth0.0", 10);
+    let (status, _rx) = watch::channel(LinkStatus::new(cfg.network_type));
+    for n in 0..70 {
+        hello_from(&cfg, &status, router_id(n), Ipv4Addr::new(10, 0, 0, 2));
+    }
+    let cap = nos_ospf_common::ratelimit::MAX_NEIGHBORS_PER_LINK;
+    assert_eq!(status.borrow().neighbors.len(), cap);
+    tokio::time::advance(Duration::from_secs(41)).await;
+    sweep_dead_neighbors(&cfg, &status);
+    assert!(status.borrow().neighbors.is_empty());
+    hello_from(&cfg, &status, router_id(99), Ipv4Addr::new(10, 0, 0, 2));
+    assert_eq!(state_at(&status, router_id(99)), Some(NeighborState::Init));
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_keeps_grace_and_fresh_bfd_killed_entries() {
+    let cfg = link("eth0.0", 10);
+    let (grace, bfd) = (Ipv4Addr::new(9, 9, 9, 1), Ipv4Addr::new(9, 9, 9, 2));
+    let mut s = LinkStatus::new(cfg.network_type);
+    let mut g = neighbor_info(NeighborState::Down, Ipv4Addr::new(10, 0, 0, 2));
+    g.grace_deadline = Some(Instant::now() + Duration::from_secs(600));
+    s.neighbors.insert(grace, g);
+    s.neighbors.insert(
+        bfd,
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 3)),
+    );
+    let (status, _rx) = watch::channel(s);
+    tokio::time::advance(Duration::from_secs(41)).await;
+    status.send_modify(|s| s.neighbors.get_mut(&bfd).unwrap().last_heard = Instant::now());
+    kill_bfd_neighbor(&cfg, &status, Ipv4Addr::new(10, 0, 0, 3));
+    sweep_dead_neighbors(&cfg, &status);
+    assert_eq!(state_at(&status, grace), Some(NeighborState::Down));
+    assert_eq!(state_at(&status, bfd), Some(NeighborState::Down));
+    tokio::time::advance(Duration::from_secs(41)).await;
+    sweep_dead_neighbors(&cfg, &status);
+    assert_eq!(state_at(&status, bfd), None);
+    assert!(status.borrow().neighbors.contains_key(&grace));
+}
+
+#[test]
+fn router_lsa_names_the_lowest_full_router_id_in_any_insert_order() {
+    let ids = [Ipv4Addr::new(9, 9, 9, 1), Ipv4Addr::new(9, 9, 9, 2)];
+    for order in [[0, 1], [1, 0]] {
+        for virtual_link in [false, true] {
+            let mut cfg = link("eth0.0", 10);
+            if virtual_link {
+                cfg.virtual_link = Some(VirtualLinkEnd {
+                    transit_area: Ipv4Addr::new(0, 0, 0, 1),
+                    endpoint: ids[0],
+                    neighbor: Ipv4Addr::new(10, 0, 0, 2),
+                });
+            }
+            let mut status = LinkStatus::new(cfg.network_type);
+            for i in order {
+                status.neighbors.insert(
+                    ids[i],
+                    neighbor_info(
+                        NeighborState::Full,
+                        Ipv4Addr::new(10, 0, 0, 2 + u8::try_from(i).unwrap()),
+                    ),
+                );
+            }
+            let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false, false);
+            assert_eq!(links[0].link_id, ids[0], "{order:?} vl={virtual_link}");
+        }
+    }
 }

@@ -20,7 +20,6 @@ fn handle_hello_matches_the_e_bit_to_the_stub_flag() {
             &status,
             Ipv4Addr::new(10, 0, 0, 2),
             &hello,
-            &mut Instant::now(),
             false,
             &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
@@ -57,7 +56,6 @@ fn handle_hello_matches_the_n_bit_to_the_nssa_flag() {
             &status,
             Ipv4Addr::new(10, 0, 0, 2),
             &hello,
-            &mut Instant::now(),
             false,
             &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );

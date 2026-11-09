@@ -93,7 +93,6 @@ async fn broadcast_adjacency_survives_lost_hellos() {
 
 #[test]
 fn note_alive_only_refreshes_an_adjacency() {
-    let cfg = link("eth0.0", 10);
     let peer = Ipv4Addr::new(9, 9, 9, 9);
     let addr = Ipv4Addr::new(10, 0, 0, 2);
     for (state, refreshed) in [
@@ -110,19 +109,14 @@ fn note_alive_only_refreshes_an_adjacency() {
         let mut s = LinkStatus::new(NetworkType::PointToPoint);
         s.neighbors.insert(peer, info);
         let (status, _rx) = watch::channel(s);
-        let mut deadline = past;
-        note_alive(&cfg, &status, peer, &mut deadline);
+        note_alive(&status, peer);
         let n = status.borrow().neighbors[&peer].clone();
         assert_eq!(n.last_heard > past, refreshed, "{state:?}");
-        assert_eq!(deadline > past, refreshed, "{state:?}");
         assert_eq!(n.last_hello_received, past, "{state:?}");
     }
     // An unknown router changes nothing.
     let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-    let mut deadline = Instant::now();
-    let before = deadline;
-    note_alive(&cfg, &status, peer, &mut deadline);
-    assert_eq!(deadline, before);
+    note_alive(&status, peer);
     assert!(status.borrow().neighbors.is_empty());
 }
 

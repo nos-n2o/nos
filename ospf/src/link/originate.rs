@@ -67,8 +67,9 @@ pub(super) fn router_lsa_links(
             if let Some(neighbor_id) = status
                 .neighbors
                 .iter()
-                .find(|(_, n)| n.state == NeighborState::Full)
+                .filter(|(_, n)| n.state == NeighborState::Full)
                 .map(|(id, _)| *id)
+                .min()
             {
                 result.push(RouterLink {
                     tos: Vec::new(),
@@ -85,10 +86,13 @@ pub(super) fn router_lsa_links(
                 // RFC 2328 §12.4.1.1: only a fully adjacent neighbor. A
                 // neighbor back in Init (one Hello after a BFD kill, #463)
                 // must not keep the link alive in our Router-LSA.
-                if let Some((neighbor_id, _)) = status
+                // Lowest router ID: never depend on HashMap order (#956).
+                if let Some(neighbor_id) = status
                     .neighbors
                     .iter()
-                    .find(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
+                    .filter(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
+                    .map(|(id, _)| id)
+                    .min()
                 {
                     result.push(RouterLink {
                         tos: Vec::new(),

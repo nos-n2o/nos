@@ -3,7 +3,6 @@ use super::*;
 #[tokio::test]
 async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
     let cfg = link("eth0.0", 10);
-    let mut deadline = Instant::now();
     for (grace, expected) in [
         (
             Some(Instant::now() + Duration::from_secs(60)),
@@ -18,7 +17,6 @@ async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
             &status,
             Ipv4Addr::new(10, 0, 0, 2),
             &matching_hello(&cfg, Ipv4Addr::new(9, 9, 9, 10)),
-            &mut deadline,
             false,
             &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
         );
@@ -26,11 +24,10 @@ async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn grace_suppresses_the_inactivity_timer_until_it_expires() {
     let cfg = link("eth0.0", 10);
     let status = grace_status(Some(Instant::now() + Duration::from_secs(60)));
-    apply_dead_timer(&cfg, &status);
     sweep_dead_neighbors(&cfg, &status);
     assert_eq!(state_of(&status), NeighborState::Full);
 
@@ -41,8 +38,12 @@ async fn grace_suppresses_the_inactivity_timer_until_it_expires() {
     });
     expire_grace(&cfg, &status);
     assert!(!in_grace(&status, Ipv4Addr::new(9, 9, 9, 10)));
-    apply_dead_timer(&cfg, &status);
-    assert_eq!(state_of(&status), NeighborState::Down);
+    tokio::time::advance(Duration::from_secs(u64::from(cfg.dead_interval))).await;
+    sweep_dead_neighbors(&cfg, &status);
+    assert!(
+        status.borrow().neighbors.is_empty(),
+        "expired, then removed"
+    );
 }
 
 #[tokio::test]

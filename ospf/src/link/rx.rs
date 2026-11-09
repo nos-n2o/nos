@@ -7,10 +7,10 @@ use super::grace::{in_grace, on_grace_lsa};
 use super::originate::local_netmask;
 use super::{
     debug, election, exchange, info, lsa, neighbor, packet, should_form_adjacency,
-    start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, Duration, HashMap, Instant,
-    InterfaceState, Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, LsAckPacket, LsaBody, Lsdb,
-    LsrPacket, LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket,
-    StatusHandle, SystemTime, UNIX_EPOCH,
+    start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, HashMap, Instant, InterfaceState,
+    Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, LsAckPacket, LsaBody, Lsdb, LsrPacket,
+    LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
+    SystemTime, UNIX_EPOCH,
 };
 
 /// `warn!` through the link's `WarnLimiter` (#394): a peer sending bad Hellos
@@ -299,7 +299,6 @@ pub(super) fn handle_hello(
     status: &StatusHandle,
     source: Ipv4Addr,
     hello: &packet::HelloPacket,
-    p2p_dead_deadline: &mut Instant,
     waiting: bool,
     limiter: &mut WarnLimiter,
 ) -> bool {
@@ -363,6 +362,13 @@ pub(super) fn handle_hello(
             "dropping ospf hello with mismatched n-bit"
         );
         return false;
+    }
+
+    // #956: a point-to-point / multipoint peer back under a new router ID from
+    // the same address supersedes its old entry at once. Grace entries are
+    // kept (RFC 3623); broadcast never evicts.
+    if cfg.network_type != NetworkType::Broadcast {
+        evict_same_address(cfg, status, source, hello.router_id);
     }
 
     // A segment peer cycling router-ids must not grow the table without bound
@@ -433,10 +439,6 @@ pub(super) fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::PointToPoint => {
-            *p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
-            false
-        }
         NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
             run_election(cfg, local_router_id, status);
             true
@@ -446,7 +448,9 @@ pub(super) fn handle_hello(
             false
         }
         // `last_heard` was refreshed above; the sweep expires it.
-        NetworkType::Broadcast | NetworkType::PointToMultipoint => false,
+        NetworkType::Broadcast | NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+            false
+        }
     }
 }
 
@@ -958,5 +962,26 @@ pub(super) fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: 
         s.dr = result.dr;
         s.bdr = result.bdr;
         s.interface_state = new_interface_state;
+    });
+}
+
+/// Steps every live, non-grace entry at `source` under another router ID to
+/// `Down`; the dead-neighbor sweep then removes it.
+fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv4Addr, new_id: Ipv4Addr) {
+    status.send_modify(|s| {
+        for (id, info) in &mut s.neighbors {
+            if *id != new_id
+                && info.address == source
+                && info.state != NeighborState::Down
+                && info.grace_deadline.is_none()
+            {
+                warn!(
+                    link = %cfg.attach_point, neighbor = %id, replaced_by = %new_id,
+                    "ospf neighbor evicted, same source address under a new router id"
+                );
+                info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                info.adjacency = None;
+            }
+        }
     });
 }
