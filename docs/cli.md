@@ -47,11 +47,11 @@ If the router's login service cannot be reached, the shell refuses to start: not
 
 ### Using `nos` as an SSH login shell
 
-- When `argv[0]` starts with `-` (sshd/login(1) do this for a login shell) or with `--login-shell`, `nos` reads the PAM login ticket from `NOS_LOGIN_TICKET`, removes the variable, and redeems it for a certificate: no `login:`/`password:` prompt.
+- When `NOS_LOGIN_TICKET` is set (PAM puts it in the session environment of an ssh login), `nos` redeems that PAM login ticket for a certificate: no `login:`/`password:` prompt. Without the variable nothing changes.
 - Ticket absent, malformed, expired, already used or refused: it prints `session ticket not accepted; please log in` (never the ticket or the reason) and shows the normal prompt. Watchdog unreachable: it exits (fail closed).
 - `nos -c <cmd>` (what `ssh host cmd` runs) is refused in every mode with exit status 2; use the REST API for scripted access. Only interactive sessions are supported.
 - A renewal that is denied later (user deleted, password changed, certificate cap) behaves as in a normal session: commands start failing; there is no re-prompt.
-- Unsetting the variable does not clear the initial environment block the kernel shows in `/proc/<pid>/environ`; see [auth](architecture/auth.md#login-ticket-990).
+- `nos` does not unset the variable (the kernel's `/proc/<pid>/environ` would still show it); see [auth](architecture/auth.md#login-ticket-990).
 
 ## The two modes
 

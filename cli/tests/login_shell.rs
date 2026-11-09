@@ -1,7 +1,6 @@
 //! The real `nos` binary in login-shell mode (#991).
 #![allow(clippy::disallowed_types, reason = "runs the built binary")]
 
-use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 
 const SECRET: &str = "SECRETTICKETVALUE";
@@ -22,10 +21,9 @@ fn dash_c_is_refused_with_exit_2() {
 }
 
 #[test]
-fn login_shell_with_no_watchdog_fails_closed_without_echoing_the_ticket() {
+fn ticket_with_no_watchdog_fails_closed_without_echoing_the_ticket() {
     let tmp = tempfile::tempdir().unwrap();
     let out = nos()
-        .arg0("-nos")
         .args(["--pki-ca", "/nonexistent/ca.crt", "--watchdog-socket"])
         .arg(tmp.path().join("w.sock"))
         .output()

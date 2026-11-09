@@ -1,19 +1,11 @@
 //! SSH login-shell mode (#991): `nos` as a user's shell, redeeming the PAM login ticket.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::Path;
 
 use zeroize::Zeroizing;
 
 use crate::watchdog_client::{self, Issued, WatchdogClientError};
-
-/// `argv[0]` basename starts with `-` (how login(1)/sshd mark a login shell), or `--login-shell`.
-pub fn login_shell_mode(argv0: &OsStr, flag: bool) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    flag || Path::new(argv0)
-        .file_name()
-        .is_some_and(|n| n.as_bytes().first() == Some(&b'-'))
-}
 
 /// Decodes the raw `NOS_LOGIN_TICKET` value; absent or malformed is `None`.
 /// The raw buffer is zeroized on the way out.
@@ -47,19 +39,6 @@ pub async fn redeem_ticket(
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt as _;
-
-    #[test]
-    fn login_shell_detection() {
-        for (argv0, flag, want) in [
-            ("-nos", false, true),
-            ("/usr/bin/-nos", false, true),
-            ("nos", false, false),
-            ("/usr/bin/nos", false, false),
-            ("nos", true, true),
-        ] {
-            assert_eq!(login_shell_mode(OsStr::new(argv0), flag), want, "{argv0}");
-        }
-    }
 
     #[test]
     fn ticket_parsing() {

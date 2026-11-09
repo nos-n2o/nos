@@ -38,11 +38,6 @@ struct Args {
     #[arg(long, default_value = nos_proto::DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
 
-    /// Run as a login shell (implied by a leading `-` in `argv[0]`): redeem
-    /// the PAM login ticket instead of prompting first.
-    #[arg(long, hide = true)]
-    login_shell: bool,
-
     /// Refused: sshd runs `ssh host cmd` as `<shell> -c cmd`; use the REST API.
     #[arg(short = 'c', hide = true)]
     command: Option<String>,
@@ -55,17 +50,11 @@ fn refuse_command(args: &Args) -> Option<&'static str> {
     )
 }
 
-/// Takes `NOS_LOGIN_TICKET` out of the environment.
-#[allow(
-    unsafe_code,
-    reason = "single-threaded: runs in main before the tokio runtime and any other thread"
-)]
-fn take_login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
-    let raw = std::env::var_os(nos_proto::LOGIN_TICKET_ENV);
-    // SAFETY: only called from `main` before any thread exists.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-    unsafe { std::env::remove_var(nos_proto::LOGIN_TICKET_ENV) };
-    login::parse_ticket(raw)
+/// The PAM login ticket (`NOS_LOGIN_TICKET`), if sshd's session carries one.
+// ponytail: the variable stays in this process's environment (removing it needs
+// `unsafe`); `nos` spawns no child but the `$EDITOR` one, which #1000 removes.
+fn login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    login::parse_ticket(std::env::var_os(nos_proto::LOGIN_TICKET_ENV))
 }
 
 /// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
@@ -174,27 +163,14 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
     Box::new(NosCompleter::new(mode.clone(), doc_source, config_source))
 }
 
-// Not `#[tokio::main]`: the ticket variable must be removed while still
-// single-threaded (`remove_var` is only sound then).
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(msg) = refuse_command(&args) {
         eprintln!("{msg}");
         std::process::exit(2);
     }
-    // argv[0] only selects the mode; a forged one gains nothing (the ticket
-    // is still verified by the watchdog and the prompt remains the fallback).
-    // nosemgrep: rust.lang.security.args-os.args-os
-    let argv0 = std::env::args_os().next().unwrap_or_default();
-    let ticket = if login::login_shell_mode(&argv0, args.login_shell) {
-        take_login_ticket()
-    } else {
-        None
-    };
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(args, ticket))
+    run(args, login_ticket()).await
 }
 
 async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow::Result<()> {
