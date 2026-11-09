@@ -87,6 +87,11 @@ struct Args {
     /// config field.
     #[arg(long, hide = true)]
     redistribute_chunk: Option<usize>,
+
+    /// Seconds the startup hold keeps a crashed predecessor's kernel routes
+    /// (#654). Unset: 120. Test-only, via `--ribd-arg`; never a config field.
+    #[arg(long, hide = true)]
+    startup_hold: Option<u64>,
 }
 
 #[tokio::main]
@@ -174,7 +179,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let rib = Arc::new(RwLock::new(Rib::new()));
-    let gate = Arc::new(reconcile::KernelGate::default());
+    let gate = Arc::new(reconcile::KernelGate::new(
+        args.startup_hold
+            .map_or(reconcile::STARTUP_HOLD, std::time::Duration::from_secs),
+    ));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),

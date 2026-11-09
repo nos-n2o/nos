@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use nos_proto::{
@@ -50,17 +50,82 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 /// It also carries the dirty flag: a failed kernel write calls `mark_dirty`
 /// and `run` answers with a full `apply` at once, rather than waiting for the
 /// next `REAPPLY_INTERVAL` tick.
-#[derive(Default)]
 pub struct KernelGate {
     lock: Mutex<()>,
     dirty: AtomicBool,
     notify: Notify,
+    hold: std::sync::Mutex<HoldState>,
+    hold_timeout: Duration,
+}
+
+impl Default for KernelGate {
+    fn default() -> Self {
+        Self::new(STARTUP_HOLD)
+    }
+}
+
+/// How long a restarted `nos-ribd` keeps the kernel routes a crashed
+/// predecessor left behind while it waits for its producers to re-push (#654).
+pub const STARTUP_HOLD: Duration = Duration::from_secs(120);
+
+/// Startup hold (#654): after a crash restart the kernel still has the old
+/// `Bgp`/`Ospf`/`Evpn`/`Vpn` routes, but the fresh `Rib` does not, so the
+/// first full `apply` would delete them until the producers reconnect and send
+/// their `Full`. Until every source this table is configured to have has sent
+/// one (or `deadline` passes), full applies only add.
+#[derive(Debug)]
+struct StartupHold {
+    pending: HashSet<RouteSource>,
+    deadline: Instant,
+}
+
+#[derive(Debug, Default)]
+enum HoldState {
+    /// The first resync has not run yet.
+    #[default]
+    Unarmed,
+    Holding(StartupHold),
+    /// Armed once, then over (or never needed).
+    Done,
+}
+
+/// The sources the running config says feed `table`.
+// ponytail: `ospf_instance` and `ospfv3_instance` both map to `Ospf`, so the
+// first of the two `Full`s ends the wait for both; a split key would need a
+// per-family tag on `PushOspfRoutes`.
+fn configured_sources(cfg: &Config, table: &str) -> HashSet<RouteSource> {
+    let mut s = HashSet::new();
+    if let Some(t) = cfg.routing_tables.iter().find(|t| t.name == table) {
+        let mut set = |on: bool, src| {
+            if on {
+                s.insert(src);
+            }
+        };
+        set(t.bgp_instance.is_some(), RouteSource::Bgp);
+        set(
+            t.ospf_instance.is_some() || t.ospfv3_instance.is_some(),
+            RouteSource::Ospf,
+        );
+        set(t.evpn.bgp_instance.is_some(), RouteSource::Evpn);
+        set(t.vpn.bgp_instance.is_some(), RouteSource::Vpn);
+    }
+    s
 }
 
 /// Proof that the gate is held.
 pub type GateGuard<'a> = MutexGuard<'a, ()>;
 
 impl KernelGate {
+    pub fn new(hold_timeout: Duration) -> Self {
+        Self {
+            lock: Mutex::default(),
+            dirty: AtomicBool::default(),
+            notify: Notify::default(),
+            hold: std::sync::Mutex::default(),
+            hold_timeout,
+        }
+    }
+
     pub async fn lock(&self) -> GateGuard<'_> {
         self.lock.lock().await
     }
@@ -75,6 +140,70 @@ impl KernelGate {
     #[cfg(test)]
     pub(crate) fn take_dirty_for_test(&self) -> bool {
         self.dirty.swap(false, Ordering::SeqCst)
+    }
+
+    /// First successful resync only: starts the hold when the table has
+    /// producers, and tells the driver. `true` when a hold began.
+    pub(crate) fn arm_hold(
+        &self,
+        _held: &GateGuard<'_>,
+        pending: HashSet<RouteSource>,
+        driver: &dyn RibDriver,
+        table: &str,
+    ) -> bool {
+        let mut h = self.hold.lock().unwrap();
+        if !matches!(*h, HoldState::Unarmed) {
+            return false;
+        }
+        if pending.is_empty() {
+            *h = HoldState::Done;
+            return false;
+        }
+        info!(table = %table, sources = ?pending, timeout = ?self.hold_timeout, "startup hold: keeping existing kernel routes");
+        driver.keep_stale(true);
+        *h = HoldState::Holding(StartupHold {
+            pending,
+            deadline: Instant::now() + self.hold_timeout,
+        });
+        true
+    }
+
+    /// `source` sent its closing `Full`. `true` when that ends the hold.
+    pub(crate) fn source_done(&self, _held: &GateGuard<'_>, source: RouteSource) -> bool {
+        match &mut *self.hold.lock().unwrap() {
+            HoldState::Holding(h) => {
+                h.pending.remove(&source);
+                h.pending.is_empty()
+            }
+            _ => false,
+        }
+    }
+
+    /// The deadline passed.
+    fn hold_expired(&self, now: Instant) -> bool {
+        matches!(&*self.hold.lock().unwrap(), HoldState::Holding(h) if now >= h.deadline)
+    }
+
+    /// Ends the hold (when one is running) and re-applies the whole table,
+    /// which now removes what is still stale. The caller holds the gate.
+    pub(crate) async fn release_hold(
+        &self,
+        table: &str,
+        rib: &RwLock<Rib>,
+        gate: &GateGuard<'_>,
+        driver: &dyn RibDriver,
+        reason: &str,
+    ) {
+        {
+            let mut h = self.hold.lock().unwrap();
+            if !matches!(*h, HoldState::Holding(_)) {
+                return;
+            }
+            *h = HoldState::Done;
+        }
+        driver.keep_stale(false);
+        info!(table = %table, reason, "startup hold released");
+        apply_to_kernel(table, rib, self, gate, driver).await;
     }
 
     async fn notified(&self) {
@@ -172,6 +301,10 @@ pub async fn run(
                             }
                         }
                         _ = reapply.tick() => {
+                            if kernel.hold_expired(Instant::now()) {
+                                let gate = kernel.lock().await;
+                                kernel.release_hold(&table, &rib, &gate, driver.as_ref(), "timeout").await;
+                            }
                             resync(&config_socket, &watchdog_socket, &table, &rib, &kernel, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx, &vpn, &bfd_target_tx, &bfd_up).await;
                         }
                         () = kernel.notified() => {
@@ -293,6 +426,7 @@ async fn resync(
             // Before the routes: the pop route gates the export, and a
             // labelled route needs the underlay `sync_mpls` records.
             vpn_export(&cfg, table, rib, driver, vpn).await;
+            kernel.arm_hold(&gate, configured_sources(&cfg, table), driver, table);
             apply_to_kernel(table, rib, kernel, &gate, driver).await;
             drop(gate);
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));

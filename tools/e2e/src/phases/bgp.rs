@@ -467,6 +467,44 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed_gr_b, removed_a, 60).await
 }
 
+/// #654: a crash-restarted `nos-ribd` keeps the kernel routes its predecessor
+/// left (the startup hold) until `nos-bgpd` re-pushes its `Full`. Needs
+/// `redistribute`. router-b redistributes a static, so router-a's kernel holds
+/// it as a BGP route; router-a's `nos-ribd` is SIGKILLed (no teardown): the
+/// new process holds, and releases once `nos-bgpd`'s `Full` is applied — the
+/// route is never removed from router-a's kernel meanwhile.
+pub async fn ribd_crash_hold(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let removed_gr_b = format!("removed route prefix={GR_B_PREFIX}");
+    let added_gr_b = format!("added route prefix={GR_B_PREFIX}");
+    let added_a = a.count(&added_gr_b);
+    b.provision(&[
+        "--static-route",
+        GR_B_PREFIX,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+    ])
+    .await?;
+    a.wait_new(&added_gr_b, added_a, 60).await?;
+
+    log("SIGKILL router-a's nos-ribd: the kernel keeps router-b's route through the hold");
+    let hold = "startup hold: keeping existing kernel routes";
+    let released = "startup hold released";
+    let (hold_a, released_a, removed_a) =
+        (a.count(hold), a.count(released), a.count(&removed_gr_b));
+    w.dock.kill_process("router-a", "nos-ribd").await?;
+    a.wait_new(hold, hold_a, 60).await?;
+    a.wait_new(released, released_a, 90).await?;
+    a.assert_quiet(&removed_gr_b, removed_a, 3).await?;
+    a.established().await?;
+
+    log("router-b stops redistributing its own prefix");
+    let removed_a = a.count(&removed_gr_b);
+    b.provision(&["--remove-static-route", GR_B_PREFIX]).await?;
+    a.wait_new(&removed_gr_b, removed_a, 60).await
+}
+
 /// `CHUNKED_ROUTES` /32s in 100.64.0.0/16, as repeated `<flag>` arguments.
 fn chunked_routes(flag: &str) -> Vec<String> {
     (0..CHUNKED_ROUTES)

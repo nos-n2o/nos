@@ -44,6 +44,8 @@ struct Rec {
     fail_tunnel: AtomicBool,
     fail_l3: AtomicBool,
     fail_teardown: AtomicBool,
+    /// Each `keep_stale` call, in order (#654).
+    keep: Mutex<Vec<bool>>,
 }
 
 impl Rec {
@@ -75,6 +77,9 @@ impl RibDriver for Rec {
             return Err(err());
         }
         Ok(())
+    }
+    fn keep_stale(&self, on: bool) {
+        self.keep.lock().unwrap().push(on);
     }
     async fn apply_delta(
         &self,
@@ -1117,4 +1122,72 @@ async fn a_kernel_that_keeps_failing_is_retried_at_most_once_a_second() {
     let n = r.env.rec.applies.lock().unwrap().len() - before;
     assert!((1..=7).contains(&n), "{n} applies in 5 s");
     r.stop().await;
+}
+
+// ------------------------------------------------- startup hold (#654)
+
+#[test]
+fn configured_sources_follow_the_table() {
+    let mut cfg = base_cfg();
+    assert_eq!(
+        configured_sources(&cfg, "rt1"),
+        HashSet::from([RouteSource::Bgp, RouteSource::Ospf])
+    );
+    cfg.routing_tables[0].bgp_instance = None;
+    cfg.routing_tables[0].ospf_instance = None;
+    cfg.routing_tables[0].evpn.bgp_instance = Some("b1".into());
+    cfg.routing_tables[0].vpn.bgp_instance = Some("b1".into());
+    assert_eq!(
+        configured_sources(&cfg, "rt1"),
+        HashSet::from([RouteSource::Ospf, RouteSource::Evpn, RouteSource::Vpn])
+    );
+    assert!(configured_sources(&cfg, "nope").is_empty());
+}
+
+#[tokio::test]
+async fn the_first_resync_holds_until_every_source_pushed() {
+    let e = Env::ready(base_cfg());
+    e.resync().await;
+    assert_eq!(*e.rec.keep.lock().unwrap(), [true]);
+    // A later resync does not re-arm.
+    e.resync().await;
+    assert_eq!(*e.rec.keep.lock().unwrap(), [true]);
+
+    let applies = e.rec.applies.lock().unwrap().len();
+    let gate = e.kernel.lock().await;
+    assert!(!e.kernel.source_done(&gate, RouteSource::Bgp));
+    assert!(e.kernel.source_done(&gate, RouteSource::Ospf));
+    e.kernel
+        .release_hold("rt1", &e.rib, &gate, e.rec.as_ref(), "test")
+        .await;
+    assert_eq!(*e.rec.keep.lock().unwrap(), [true, false]);
+    assert_eq!(e.rec.applies.lock().unwrap().len(), applies + 1);
+    // Released once only.
+    e.kernel
+        .release_hold("rt1", &e.rib, &gate, e.rec.as_ref(), "test")
+        .await;
+    assert_eq!(e.rec.applies.lock().unwrap().len(), applies + 1);
+}
+
+#[tokio::test]
+async fn a_table_without_producers_never_holds() {
+    let mut cfg = base_cfg();
+    cfg.routing_tables[0].bgp_instance = None;
+    cfg.routing_tables[0].ospf_instance = None;
+    cfg.routing_tables[0].ospfv3_instance = None;
+    let e = Env::ready(cfg);
+    e.resync().await;
+    assert!(e.rec.keep.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_hold_expires_at_its_deadline() {
+    let mut e = Env::ready(base_cfg());
+    e.kernel = Arc::new(KernelGate::new(Duration::from_secs(5)));
+    assert!(!e.kernel.hold_expired(Instant::now()));
+    e.resync().await;
+    assert!(!e.kernel.hold_expired(Instant::now()));
+    assert!(e
+        .kernel
+        .hold_expired(Instant::now() + Duration::from_secs(6)));
 }
