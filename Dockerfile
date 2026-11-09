@@ -125,7 +125,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-rtr-stub \
-    && setcap 'cap_setuid,cap_setgid,cap_chown=ep' /usr/local/bin/nos-watchdogd \
+    && setcap 'cap_setuid,cap_setgid,cap_chown,cap_kill=ep' /usr/local/bin/nos-watchdogd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
