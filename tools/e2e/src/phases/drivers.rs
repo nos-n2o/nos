@@ -72,7 +72,37 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
         "deleted loopback device interface=loopback-rt1 device={LOOPBACK_DEVICE}"
     ))
     .await?;
-    a.wait_new(&removed, removed_base, 30).await
+    a.wait_new(&removed, removed_base, 30).await?;
+
+    // #639: remove a routing table and re-add it at once. The watchdog must
+    // wait for the old `nos-ribd` to exit before starting the new one, or the
+    // old teardown deletes the new one's VRF.
+    let waiting = "waiting for previous nos-ribd to exit name=rt-drain";
+    let spawning = "spawning nos-ribd for new routing table name=rt-drain";
+    let (waiting_base, spawning_base) = (a.count(waiting), a.count(spawning));
+    let add = |c: &mut nos_proto::Config| {
+        c.routing_tables.push(nos_proto::RoutingTable {
+            name: "rt-drain".to_string(),
+            ..Default::default()
+        });
+        Ok(())
+    };
+    a.edit(add).await?;
+    a.wait_new(spawning, spawning_base, 30).await?;
+    a.edit(|c| {
+        c.routing_tables.retain(|t| t.name != "rt-drain");
+        Ok(())
+    })
+    .await?;
+    a.edit(add).await?;
+    a.wait_new(waiting, waiting_base, 30).await?;
+    a.wait_new(spawning, spawning_base + 1, 30).await?;
+    a.edit(|c| {
+        c.routing_tables.retain(|t| t.name != "rt-drain");
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
 /// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and

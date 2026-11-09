@@ -79,9 +79,22 @@ pub struct Managed {
     pub child_gid: Option<u32>,
 }
 
+/// Warn interval while a respawn waits on its predecessor (#639).
+const DRAIN_WARN: Duration = Duration::from_secs(10);
+
 struct InstanceHandle {
     shutdown_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
+}
+
+/// The live instances plus the stopped ones whose process may still be
+/// exiting (up to the supervisor's SIGINT grace). A same-name respawn must
+/// await its predecessor in `draining`: the old daemon's teardown would
+/// otherwise delete the new one's VRF/routes or hold its socket (#639).
+#[derive(Default)]
+struct Instances {
+    live: HashMap<String, InstanceHandle>,
+    draining: HashMap<String, JoinHandle<()>>,
 }
 
 /// Subscribes to `m.scope`'s diff stream and maintains one supervised
@@ -90,7 +103,7 @@ struct InstanceHandle {
 /// fires, then stops every still-running instance (same SIGINT-then-kill path
 /// `supervise_one` already uses) before returning.
 pub async fn manage(m: Managed, mut shutdown: watch::Receiver<bool>) {
-    let mut instances: HashMap<String, InstanceHandle> = HashMap::new();
+    let mut instances = Instances::default();
 
     while !*shutdown.borrow() {
         match users_client::subscribe_diff(&m.pki.identity, &m.config_socket, vec![m.scope]).await {
@@ -120,7 +133,7 @@ pub async fn manage(m: Managed, mut shutdown: watch::Receiver<bool>) {
 /// `false` if the stream ended and the caller should reconnect.
 async fn follow<R>(
     mut reader: R,
-    instances: &mut HashMap<String, InstanceHandle>,
+    instances: &mut Instances,
     m: &Managed,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool
@@ -182,11 +195,7 @@ fn wanted_when_added(m: &Managed, section: &SectionDiff) -> bool {
 /// Reconciles the full set of currently-wanted names (all `Added` by
 /// construction — see `manage`'s doc comment) against what's already
 /// supervised: spawns anything missing, stops anything no longer wanted.
-async fn sync_from_initial(
-    instances: &mut HashMap<String, InstanceHandle>,
-    sections: &[SectionDiff],
-    m: &Managed,
-) {
+async fn sync_from_initial(instances: &mut Instances, sections: &[SectionDiff], m: &Managed) {
     let wanted: HashSet<&str> = sections
         .iter()
         .filter(|s| wanted_when_added(m, s))
@@ -194,16 +203,18 @@ async fn sync_from_initial(
         .collect();
 
     let stale: Vec<String> = instances
+        .live
         .keys()
         .filter(|name| !wanted.contains(name.as_str()))
         .cloned()
         .collect();
+    instances.draining.retain(|_, t| !t.is_finished());
     for name in stale {
         stop_instance(instances, &name, m).await;
     }
 
     for name in wanted {
-        if !instances.contains_key(name) {
+        if !instances.live.contains_key(name) {
             spawn_instance(instances, name, m).await;
         }
     }
@@ -215,21 +226,17 @@ async fn sync_from_initial(
 /// and re-resolves its own state on each relevant diff, so a parameter change
 /// never needs a process restart here. The one exception is an opt-in family
 /// (`claim_label`): `Modified` that flips the claim spawns or stops.
-async fn apply_diff(
-    instances: &mut HashMap<String, InstanceHandle>,
-    sections: &[SectionDiff],
-    m: &Managed,
-) {
+async fn apply_diff(instances: &mut Instances, sections: &[SectionDiff], m: &Managed) {
     for section in sections {
         match section.status {
             DiffStatus::Added => {
-                if wanted_when_added(m, section) && !instances.contains_key(&section.name) {
+                if wanted_when_added(m, section) && !instances.live.contains_key(&section.name) {
                     spawn_instance(instances, &section.name, m).await;
                 }
             }
             DiffStatus::Removed => stop_instance(instances, &section.name, m).await,
             DiffStatus::Modified => match claim(m, section) {
-                Some(true) if !instances.contains_key(&section.name) => {
+                Some(true) if !instances.live.contains_key(&section.name) => {
                     spawn_instance(instances, &section.name, m).await;
                 }
                 Some(false) => stop_instance(instances, &section.name, m).await,
@@ -244,7 +251,19 @@ fn pass_through(flags: &[String], name: &str) -> Vec<String> {
     flags.iter().map(|f| f.replace("{name}", name)).collect()
 }
 
-async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &str, m: &Managed) {
+async fn spawn_instance(instances: &mut Instances, name: &str, m: &Managed) {
+    if let Some(mut old) = instances.draining.remove(name) {
+        info!(name = %name, "waiting for previous {} to exit", m.daemon);
+        loop {
+            if let Ok(res) = tokio::time::timeout(DRAIN_WARN, &mut old).await {
+                if let Err(e) = res {
+                    warn!(name = %name, error = %e, "supervised {} task panicked", m.daemon);
+                }
+                break;
+            }
+            warn!(name = %name, "previous {} still has not exited", m.daemon);
+        }
+    }
     let mut args = vec![
         m.name_flag.to_string(),
         name.to_string(),
@@ -269,11 +288,13 @@ async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &
         .with_role_uid(m.child_gid);
     info!(name = %name, "spawning {} for new {}", m.daemon, m.noun);
     let task = tokio::spawn(supervise_one(spec, m.policy, shutdown_rx));
-    instances.insert(name.to_string(), InstanceHandle { shutdown_tx, task });
+    instances
+        .live
+        .insert(name.to_string(), InstanceHandle { shutdown_tx, task });
 }
 
-async fn stop_instance(instances: &mut HashMap<String, InstanceHandle>, name: &str, m: &Managed) {
-    let Some(handle) = instances.remove(name) else {
+async fn stop_instance(instances: &mut Instances, name: &str, m: &Managed) {
+    let Some(handle) = instances.live.remove(name) else {
         return;
     };
     info!(name = %name, "{} removed from config, stopping {}", m.noun, m.daemon);
@@ -281,20 +302,18 @@ async fn stop_instance(instances: &mut HashMap<String, InstanceHandle>, name: &s
         m.registry.remove(endpoint.kind, name).await;
     }
     let _ = handle.shutdown_tx.send(true);
-    let (name, daemon) = (name.to_string(), m.daemon);
-    // Don't block reconciliation on this shutdown's up-to-10s grace period.
-    tokio::spawn(async move {
-        if let Err(e) = handle.task.await {
-            warn!(name = %name, error = %e, "supervised {daemon} task panicked");
-        }
-    });
+    instances.draining.insert(name.to_string(), handle.task);
 }
 
-async fn shutdown_all(instances: HashMap<String, InstanceHandle>, m: &Managed) {
+async fn shutdown_all(instances: Instances, m: &Managed) {
     let daemon = m.daemon;
-    futures::future::join_all(instances.into_iter().map(|(name, h)| async move {
+    let Instances { live, draining } = instances;
+    let live = live.into_iter().map(|(name, h)| {
         let _ = h.shutdown_tx.send(true);
-        if let Err(e) = h.task.await {
+        (name, h.task)
+    });
+    futures::future::join_all(live.chain(draining).map(|(name, task)| async move {
+        if let Err(e) = task.await {
             warn!(name = %name, error = %e, "supervised {daemon} task panicked");
         }
     }))
@@ -368,8 +387,8 @@ mod tests {
         }
     }
 
-    fn names(instances: &HashMap<String, InstanceHandle>) -> Vec<&str> {
-        let mut n: Vec<&str> = instances.keys().map(String::as_str).collect();
+    fn names(instances: &Instances) -> Vec<&str> {
+        let mut n: Vec<&str> = instances.live.keys().map(String::as_str).collect();
         n.sort_unstable();
         n
     }
@@ -389,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn opt_in_family_follows_the_claim_field() {
         let m = managed(Some("rest-api"));
-        let mut inst = HashMap::new();
+        let mut inst = Instances::default();
 
         // Initial snapshot: only the claimed table gets a process.
         sync_from_initial(
@@ -452,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn family_without_claim_label_still_spawns_per_section() {
         let m = managed(None);
-        let mut inst = HashMap::new();
+        let mut inst = Instances::default();
         apply_diff(
             &mut inst,
             &[section("rt1", DiffStatus::Added, Claim::Silent)],
@@ -467,5 +486,108 @@ mod tests {
         .await;
         assert_eq!(names(&inst), ["rt1"]);
         shutdown_all(inst, &m).await;
+    }
+
+    /// A daemon that takes a second to exit on SIGINT, logging `start` and
+    /// `exit` lines to a marker file.
+    fn slow_daemon(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = dir.join("marker");
+        let bin = dir.join("slow.sh");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho start >> {m}\ntrap 'sleep 1; echo exit >> {m}; exit 0' INT\nwhile :; do sleep 0.1; done\n",
+                m = marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, marker)
+    }
+
+    async fn starts(marker: &std::path::Path, n: usize) {
+        for _ in 0..100 {
+            let t = std::fs::read_to_string(marker).unwrap_or_default();
+            if t.matches("start").count() >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("daemon never started");
+    }
+
+    #[tokio::test]
+    async fn respawn_waits_for_the_previous_process_to_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, marker) = slow_daemon(dir.path());
+        let mut m = managed(None);
+        m.bin = bin;
+        let mut inst = Instances::default();
+
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Added, Claim::Silent)],
+            &m,
+        )
+        .await;
+        starts(&marker, 1).await;
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Removed, Claim::Silent)],
+            &m,
+        )
+        .await;
+        assert_eq!(inst.draining.len(), 1);
+
+        // A different name is not held up by rt1's drain.
+        let t = std::time::Instant::now();
+        apply_diff(
+            &mut inst,
+            &[section("rt2", DiffStatus::Added, Claim::Silent)],
+            &m,
+        )
+        .await;
+        assert!(t.elapsed() < Duration::from_millis(500));
+
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Added, Claim::Silent)],
+            &m,
+        )
+        .await;
+        starts(&marker, 3).await;
+        let log = std::fs::read_to_string(&marker).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        // rt1 start, rt2 start, rt1 exit, then rt1's replacement.
+        let exit = lines.iter().position(|l| *l == "exit").unwrap();
+        assert_eq!(lines[exit + 1], "start", "{lines:?}");
+        assert!(inst.draining.is_empty());
+
+        shutdown_all(inst, &m).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_awaits_draining_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, marker) = slow_daemon(dir.path());
+        let mut m = managed(None);
+        m.bin = bin;
+        let mut inst = Instances::default();
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Added, Claim::Silent)],
+            &m,
+        )
+        .await;
+        starts(&marker, 1).await;
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Removed, Claim::Silent)],
+            &m,
+        )
+        .await;
+        shutdown_all(inst, &m).await;
+        assert!(std::fs::read_to_string(&marker).unwrap().contains("exit"));
     }
 }
