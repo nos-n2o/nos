@@ -511,6 +511,10 @@ pub const OSPFV3_INSTANCE: &str = "ospfv3-1";
 pub const OSPFV3_ROUTER_ID: &str = "9.9.9.9";
 pub const OSPFV3_ROUTER_ID_B: &str = "9.9.9.10";
 pub const OSPFV3_ROUTER_ID_C: &str = "9.9.9.8";
+/// router-b's temporary router-id in `ospfv3-p2p-rid-change` (#957). A fixed
+/// value is deterministic: no other phase uses 9.9.9.11, and router-b is the
+/// only router that changes id, once, then back.
+pub const OSPFV3_ROUTER_ID_B_NEW: &str = "9.9.9.11";
 pub const OSPFV3_AREA: &str = "0.0.0.0";
 pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";

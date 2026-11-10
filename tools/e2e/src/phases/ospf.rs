@@ -2775,6 +2775,60 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
 }
 
+/// #957: router-b comes back under a new router-id from the same link-local
+/// address on the point-to-point link. router-a evicts the old neighbor on the
+/// first Hello, reaches Full with the new id, removes the old entry after the
+/// dead interval and installs router-b's loopback; then the id is restored for
+/// `ospfv3-bfd`/`-dr`/`-lfa`. Requires `ospfv3` to have run.
+pub async fn ospfv3_p2p_rid_change(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let link = "link=eth0.0";
+    let full = |n: &str| format!("ospfv3 neighbor reached full {link} neighbor={n}");
+    let evicted = |n: &str| {
+        format!("ospfv3 neighbor evicted, same address new router id {link} neighbor={n} ")
+    };
+    let removed = |n: &str| format!("ospfv3 neighbor entry removed {link} neighbor={n}");
+    let b_flags = |rid: &str, loopback: bool| {
+        let mut f = ospfv3(OSPFV3_ADDRESS_B, rid);
+        if loopback {
+            f.extend(strings(&[
+                "--ospfv3-loopback-address",
+                OSPFV3_LFA_LOOPBACK_ADDRESS,
+                "--ospfv3-loopback-profile",
+                OSPFV3_PROFILE,
+            ]));
+        }
+        f
+    };
+    let route = format!("added route prefix={OSPFV3_LFA_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
+
+    for (old, new, loopback) in [
+        (OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_B_NEW, true),
+        (OSPFV3_ROUTER_ID_B_NEW, OSPFV3_ROUTER_ID_B, false),
+    ] {
+        log(format!("router-b changes router-id {old} -> {new}"));
+        let (evicted0, removed0, full0, route0) = (
+            a.count(&evicted(old)),
+            a.count(&removed(old)),
+            a.count(&full(new)),
+            a.count(&route),
+        );
+        b.provision_flags(&with_base(B, b_flags(new, loopback)))
+            .await?;
+        // The running link keeps its router-id: restart so the new one is used
+        // (as `ospf-dr`'s renumbering does).
+        w.dock.kill_process("router-b", "nos-ospfv3d").await?;
+        a.wait_new(&evicted(old), evicted0, 60).await?;
+        a.wait_new(&full(new), full0, 90).await?;
+        // The old entry stays Down until a full dead interval of silence.
+        a.wait_new(&removed(old), removed0, 90).await?;
+        if loopback {
+            a.wait_new(&route, route0, 60).await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
