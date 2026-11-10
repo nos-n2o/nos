@@ -11,7 +11,7 @@ use nos_proto::{
 };
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::collision::FsmCommand;
 use crate::page::{Snapshot, PAGE_BYTES};
@@ -68,15 +68,8 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
 
 async fn accept_loop(listener: Listener, ctx: Ctx) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, ctx.clone()));
-            }
-            Err(e) => {
-                error!(instance = %ctx.0, error = %e, "BGP IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, ctx.clone()));
     }
 }
 

@@ -574,6 +574,58 @@ impl Listener {
             config: config.clone(),
         })
     }
+
+    /// `accept` that never fails: errors (EMFILE, ECONNABORTED, ...) are
+    /// retried with exponential backoff (50 ms to 1 s), so an accept loop
+    /// built on it can never end on a transient error.
+    pub async fn accept_resilient(&self) -> Incoming {
+        retry_forever("ipc accept", ACCEPT_RETRY_MIN, ACCEPT_RETRY_MAX, || {
+            self.accept()
+        })
+        .await
+    }
+}
+
+const ACCEPT_RETRY_MIN: std::time::Duration = std::time::Duration::from_millis(50);
+const ACCEPT_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Retries `f` until it succeeds: sleep `min`, doubling up to `max`, between
+/// failures. Warnings are rate-limited to one per second (`suppressed` counts
+/// the errors swallowed since the last one); the first error always warns.
+pub(crate) async fn retry_forever<T, F, Fut>(
+    what: &str,
+    min: std::time::Duration,
+    max: std::time::Duration,
+    mut f: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    let mut delay = min;
+    let mut last_warn: Option<std::time::Instant> = None;
+    let mut suppressed = 0u64;
+    loop {
+        match f().await {
+            Ok(v) => return v,
+            Err(e) => {
+                if last_warn.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+                    tracing::warn!(
+                        error = %e,
+                        suppressed,
+                        retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        "{what} failed, retrying"
+                    );
+                    last_warn = Some(std::time::Instant::now());
+                    suppressed = 0;
+                } else {
+                    suppressed += 1;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max);
+            }
+        }
+    }
 }
 
 /// An accepted connection before its TLS handshake; the caller handshakes in its own task.

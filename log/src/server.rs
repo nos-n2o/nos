@@ -6,7 +6,7 @@ use nos_proto::{IpcCodec, LogEvent, LogRequest, Role};
 use tokio::io::{split, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::store::LogStore;
 
@@ -36,15 +36,8 @@ fn allowed(role: Role, req: &LogRequest) -> bool {
 
 async fn accept_loop(listener: Listener, store: LogStore) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, store.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "log IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, store.clone()));
     }
 }
 

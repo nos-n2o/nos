@@ -6,7 +6,7 @@ use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{FdbEvent, FdbRequest, IpcCodec, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::fdb::Fdb;
 
@@ -41,15 +41,8 @@ fn allowed(role: Role, req: &FdbRequest) -> bool {
 
 async fn accept_loop(listener: Listener, ctx: Arc<Context>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, ctx.clone()));
-            }
-            Err(e) => {
-                error!(domain = %ctx.domain, error = %e, "FDB IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, ctx.clone()));
     }
 }
 

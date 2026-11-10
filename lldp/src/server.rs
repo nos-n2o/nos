@@ -11,7 +11,7 @@ use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{IpcCodec, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::link::SharedPorts;
 
@@ -44,15 +44,8 @@ async fn serve(incoming: Incoming, ports: SharedPorts) {
 
 async fn accept_loop(listener: Listener, ports: SharedPorts) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, ports.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "lldp IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, ports.clone()));
     }
 }
 

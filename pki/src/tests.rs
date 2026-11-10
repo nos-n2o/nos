@@ -873,3 +873,70 @@ async fn peer_serial_is_the_presented_leaf_serial() {
     assert_eq!(s.0.peer_serial(), Some(want));
     assert!(c.unwrap().peer_serial().is_some());
 }
+
+mod accept_retry {
+    use super::*;
+    use crate::identity::retry_forever;
+    use std::time::Instant;
+
+    /// Fails `fails` times (alternating error kinds), recording each call's time.
+    async fn run(fails: usize, min: u64, max: u64) -> (usize, Vec<Instant>) {
+        let mut calls = Vec::new();
+        let v = retry_forever(
+            "test",
+            Duration::from_millis(min),
+            Duration::from_millis(max),
+            || {
+                calls.push(Instant::now());
+                let n = calls.len();
+                async move {
+                    if n <= fails {
+                        let kind = if n % 2 == 0 {
+                            io::ErrorKind::ConnectionAborted
+                        } else {
+                            io::ErrorKind::Other
+                        };
+                        Err(io::Error::from(kind))
+                    } else {
+                        Ok(n)
+                    }
+                }
+            },
+        )
+        .await;
+        (v, calls)
+    }
+
+    #[tokio::test]
+    async fn retries_every_error_kind_until_success() {
+        let (v, calls) = run(5, 1, 4).await;
+        assert_eq!((v, calls.len()), (6, 6));
+    }
+
+    #[tokio::test]
+    async fn backoff_grows_then_caps_and_resets() {
+        let (_, calls) = run(5, 8, 32).await;
+        let gaps: Vec<_> = calls.windows(2).map(|w| w[1] - w[0]).collect();
+        // sleeps 8, 16, 32, 32, 32 ms: lower bounds only, never flaky
+        for (g, min) in gaps.iter().zip([8, 16, 32, 32, 32]) {
+            assert!(*g >= Duration::from_millis(min), "{gaps:?}");
+        }
+        // a fresh call starts again at min
+        let (_, calls) = run(1, 8, 32).await;
+        assert!(calls[1] - calls[0] >= Duration::from_millis(8));
+    }
+
+    #[tokio::test]
+    async fn accept_resilient_yields_a_working_connection() {
+        let pki = TestPki::new();
+        let (_g, path) = sock("r.sock");
+        let l = pki.identity("ribd", "rt1").listen(&path).unwrap();
+        let client = pki.identity("bgpd", "r1");
+        let expect = PeerId::new("ribd", "rt1");
+        let (c, s) = tokio::join!(client.connect(&path, &expect), async {
+            l.accept_resilient().await.handshake().await.unwrap()
+        });
+        assert!(c.is_ok());
+        assert_eq!(s.1, Some(PeerId::new("bgpd", "r1")));
+    }
+}

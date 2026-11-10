@@ -13,7 +13,7 @@ use tokio::io::split;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::pki::Pki;
 use crate::registry::EndpointRegistry;
@@ -77,15 +77,8 @@ pub fn start(
     });
     Ok(tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok(incoming) => {
-                    tokio::spawn(handle_connection(incoming, ctx.clone()));
-                }
-                Err(e) => {
-                    error!(error = %e, "broker IPC accept loop terminated");
-                    break;
-                }
-            }
+            let incoming = listener.accept_resilient().await;
+            tokio::spawn(handle_connection(incoming, ctx.clone()));
         }
     }))
 }
