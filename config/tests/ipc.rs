@@ -1720,17 +1720,23 @@ async fn instance_lists_and_rest_api_round_trip_for_restd_only() {
     ));
 }
 
-/// Commits `n` transactions of 20 new instances each, so a client that never
+/// Name padding: a bigger diff per instance, so fewer instances (the name
+/// collision check is quadratic in the list) still stall the socket.
+const PAD: &str = "lag-instance-padding-padding-padding-padding-padding";
+const PER_DIFF: usize = 1;
+
+/// Commits `n` transactions of `per` new instances each, so a client that never
 /// reads fills the socket buffers and stalls the forwarder.
-async fn commit_bulk(store: &ConfigStore, n: usize) {
+async fn commit_bulk(store: &ConfigStore, n: usize, per: usize) {
     for i in 0..n {
         let t = format!("bulk{i}");
         store
             .open_transaction(&t, TransactionBase::Current)
             .await
             .unwrap();
-        for j in 0..20 {
-            let n = format!("lag-instance-{i}-{j}");
+        for j in 0..per {
+            // Distinguishing part first (cheap name-collision compare), padding after.
+            let n = format!("{i}x{j}-{PAD}");
             store.apply_op(&t, ensure_op(&n)).await.unwrap();
             store.apply_op(&t, set_asn_op(&n, 65000)).await.unwrap();
         }
@@ -1740,7 +1746,7 @@ async fn commit_bulk(store: &ConfigStore, n: usize) {
 
 /// #632: a subscriber that falls behind the broadcast ring is sent a terminal
 /// `Error("lagged")` and disconnected; a fresh subscription is authoritative.
-async fn lagged_subscriber_is_disconnected(request: fn() -> Request, commits: usize) {
+async fn lagged_subscriber_is_disconnected(request: fn() -> Request, commits: usize, per: usize) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
     let store = ConfigStore::new(Config::default(), None);
@@ -1753,7 +1759,7 @@ async fn lagged_subscriber_is_disconnected(request: fn() -> Request, commits: us
     writer.send(request()).await.unwrap();
     next_event(&mut reader).await; // initial
                                    // Never read: the socket fills, the forwarder stalls, the ring overflows.
-    commit_bulk(&store, commits).await;
+    commit_bulk(&store, commits, per).await;
 
     let mut saw_lagged = false;
     loop {
@@ -1774,8 +1780,8 @@ async fn lagged_subscriber_is_disconnected(request: fn() -> Request, commits: us
     let (mut r2, mut w2) = connect(&path).await;
     w2.send(request()).await.unwrap();
     match next_event(&mut r2).await {
-        Event::Diff(d) => assert_eq!(d.bgp_instances.len(), commits * 20),
-        Event::Config(c) => assert_eq!(c.bgp_instances.len(), commits * 20),
+        Event::Diff(d) => assert_eq!(d.bgp_instances.len(), commits * per),
+        Event::Config(c) => assert_eq!(c.bgp_instances.len(), commits * per),
         other => panic!("unexpected {other:?}"),
     }
 }
@@ -1786,14 +1792,15 @@ async fn lagged_diff_subscriber_is_disconnected_and_resyncs() {
         || Request::SubscribeDiff {
             scopes: vec![DiffScope::BgpInstances],
         },
-        300,
+        40,
+        PER_DIFF,
     )
     .await;
 }
 
 #[tokio::test]
 async fn lagged_full_subscriber_is_disconnected() {
-    lagged_subscriber_is_disconnected(|| Request::Subscribe, 100).await;
+    lagged_subscriber_is_disconnected(|| Request::Subscribe, 100, 3).await;
 }
 
 /// #632: a client that keeps up is never disconnected.

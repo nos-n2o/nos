@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{
     ospf_profile_reference_valid, ospfv3_profile_reference_valid, routing_table_reference_valid,
-    unique_addresses, unique_in,
+    unique_addresses, unique_key_in,
 };
 
 use super::spanning_tree::{valid_bridge_priority, valid_timers};
@@ -26,7 +26,7 @@ pub struct BroadcastDomain {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.broadcast_domains, |d| &d.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.broadcast_domains, |d| &d.name))
     )]
     #[cli(key)]
     /// Domain name, 1 to 64 characters (letters, digits, `_`, `-`), unique among broadcast domains.

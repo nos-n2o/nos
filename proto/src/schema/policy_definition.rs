@@ -1,7 +1,7 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::Config;
 use nos_proto_derive::Cli;
@@ -42,7 +42,7 @@ fn valid_name(name: &String, ctx: &Config) -> garde::Result {
             "'{name}' is a reserved system policy name"
         )));
     }
-    unique_in(name, &ctx.policy_definitions, |p| &p.name)
+    unique_key_in(name, &ctx.policy_definitions, |p| &p.name)
 }
 
 /// Runs the real RPL compiler at commit time, so a syntactically or

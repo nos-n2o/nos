@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::{bfd_reference_valid, stp_port_profile_reference_valid, unique_in};
+use crate::validators::{bfd_reference_valid, stp_port_profile_reference_valid, unique_key_in};
 
 use super::interface::{
     switching_profile_reference_valid, valid_mtu, valid_subinterface_list, valid_subinterface_mtus,
@@ -299,7 +299,7 @@ fn valid_lacp_system_id(id: Option<&str>) -> garde::Result {
 }
 
 fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
-    unique_in(name, &ctx.port_aggregates, |a| &a.name)?;
+    unique_key_in(name, &ctx.port_aggregates, |a| &a.name)?;
     if name.contains('.') {
         return Err(garde::Error::new(
             "port aggregate name must not contain '.' (reserved for subinterface addressing, e.g. bond1.100)",

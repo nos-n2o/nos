@@ -1,7 +1,7 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::spanning_tree::valid_port_priority;
 use super::Config;
@@ -81,7 +81,7 @@ pub struct SwitchingProfile {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.switching_profiles, |p| &p.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.switching_profiles, |p| &p.name))
     )]
     #[cli(key)]
     /// Profile name, 1 to 64 characters (letters, digits, `_`, `-`), unique among switching profiles.

@@ -5,7 +5,7 @@ use precis_core::profile::PrecisFastInvocation;
 use precis_profiles::UsernameCasePreserved;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::Config;
 use nos_proto_derive::Cli;
@@ -23,7 +23,7 @@ pub const PASSWORD_HASH_PREFIX: &str = "$argon2id$";
 pub struct User {
     #[garde(
         length(min = 1, max = 64),
-        custom(|n: &String, ctx: &Config| valid_username(n).and_then(|()| unique_in(n, &ctx.users, |u| &u.name)))
+        custom(|n: &String, ctx: &Config| valid_username(n).and_then(|()| unique_key_in(n, &ctx.users, |u| &u.name)))
     )]
     #[cli(key)]
     /// Login name, 1 to 64 characters (letters, digits, `_`, `-`), unique among users.
@@ -53,7 +53,7 @@ impl fmt::Debug for User {
 /// own NFC-normalized, disallowed-code-point-free canonical form — the form
 /// `nos-config`'s `users::normalize_names` puts it in on every edit — so two
 /// Unicode representations of the same visible name can never both pass
-/// `unique_in` below as "different" users.
+/// `unique_key_in` below as "different" users.
 fn valid_username(n: &str) -> garde::Result {
     match UsernameCasePreserved::enforce(n) {
         Ok(ref enforced) if enforced == n => Ok(()),

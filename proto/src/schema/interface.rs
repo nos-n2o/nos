@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{
     bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_reference_valid,
-    routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses, unique_in,
+    routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
+    unique_key_in,
 };
 
 use super::{Config, LldpDestination, VlanTag};
@@ -404,7 +405,7 @@ pub(crate) fn valid_mtu(mtu: Option<u32>) -> garde::Result {
 /// pattern used where a field needs more than one rule (e.g.
 /// `BgpPeerGroup.auth`'s `valid_auth`).
 fn interface_name_valid(name: &String, ctx: &Config) -> garde::Result {
-    unique_in(name, &ctx.interfaces, |i| &i.name)?;
+    unique_key_in(name, &ctx.interfaces, |i| &i.name)?;
     if name.contains('.') {
         return Err(garde::Error::new(
             "interface name must not contain '.' (reserved for subinterface addressing, e.g. eth0.100)",

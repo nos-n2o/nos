@@ -91,7 +91,8 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 ## `validators`
 
-- Generic reusable validation helpers (e.g. `unique_in`, `unique_addresses`, `routing_table_reference_valid` — the latter two shared by `Interface`, `Subinterface`, and `BroadcastDomain`, each of which validates its own `addresses`/`routing_table` fields with them). Validators that need to search *across* a nested collection (e.g. peer-group name uniqueness scoped globally, not per-instance), or check a cross-reference specific to one schema type (e.g. `RoutingTable.bgp_instance` naming an existing instance claimed by at most one table), live next to their owning schema type instead.
+- Generic reusable validation helpers (e.g. `unique_key_in`, `unique_addresses`, `routing_table_reference_valid` — the latter two shared by `Interface`, `Subinterface`, and `BroadcastDomain`, each of which validates its own `addresses`/`routing_table` fields with them). Validators that need to search *across* a nested collection (e.g. peer-group name uniqueness scoped globally, not per-instance), or check a cross-reference specific to one schema type (e.g. `RoutingTable.bgp_instance` naming an existing instance claimed by at most one table), live next to their owning schema type instead.
+- Names of keyed lists are unique ignoring case, `-` and `_` (`unique_key_in`, the rule the selector uses, #633): a colliding pair (`pga`/`pg-a`) fails every commit, each member under its own field path, until one is renamed. No grandfathering of stored configs.
 
 ## `ops/`
 

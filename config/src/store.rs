@@ -1504,6 +1504,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_rejects_names_colliding_after_normalization() {
+        let store = ConfigStore::new(Config::default(), None);
+        store
+            .open_transaction("t1", TransactionBase::Blank)
+            .await
+            .unwrap();
+        for n in ["vrf-a", "vrf_a"] {
+            store.apply_op("t1", ensure_op(n)).await.unwrap();
+            store.apply_op("t1", set_asn_op(n, 65000)).await.unwrap();
+        }
+        let err = store.commit_transaction("t1", None).await.unwrap_err();
+        assert!(err.to_string().contains("collides with"), "{err}");
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
+    }
+
+    #[tokio::test]
     async fn commit_missing_transaction_returns_error() {
         let store = ConfigStore::new(Config::default(), None);
         assert!(matches!(

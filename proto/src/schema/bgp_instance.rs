@@ -4,7 +4,7 @@ use garde::Validate;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::bgp_peer_group;
 use super::{sugar, BgpAuth, BgpPeer, BgpPeerGroup, Config};
@@ -18,7 +18,7 @@ pub struct BgpInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.bgp_instances, |i| &i.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.bgp_instances, |i| &i.name))
     )]
     #[cli(key)]
     /// Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among BGP instances.
@@ -303,6 +303,10 @@ fn valid_bmp_stations(stations: &[BmpStation]) -> garde::Result {
         if stations[..i].iter().any(|o| o.name == s.name) {
             return Err(garde::Error::new("bmp-station names must be unique"));
         }
+        crate::validators::no_normalized_collision(
+            &s.name,
+            stations.iter().map(|o| o.name.as_str()),
+        )?;
     }
     Ok(())
 }
@@ -754,6 +758,13 @@ mod tests {
     fn duplicate_name_fails() {
         let cfg = config_with(vec![instance("vrf-a", 65001), instance("vrf-a", 65002)]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn normalized_name_collision_fails() {
+        let cfg = config_with(vec![instance("vrf-a", 65001), instance("VRF_a", 65002)]);
+        let e = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(e.contains("collides with"), "{e}");
     }
 
     #[test]

@@ -27,7 +27,7 @@ Three rules catch people out:
 
 - **Both policies default to `deny-all`.** A peer-group with no `import-policy` accepts no routes, and one with no `export-policy` advertises none. The session still comes up, so nothing looks wrong until you check the routes. Set both, to `accept-all` or to one of your own policies (see [Routing policy](routing-policy.md)).
 - **Changing a peer-group resets its sessions.** Any change to a peer-group, or to a policy it uses, except `bfd` (see [BFD](#bfd-rfc-5882-rfc-9384)) and, with [soft reconfiguration inbound](#keeping-received-routes-soft-reconfiguration-inbound), an import-policy change, closes its established sessions with a Cease NOTIFICATION (RFC 4486 subcode 6, Other Configuration Change) and opens them again with the new settings. Plan changes to production peer-groups accordingly.
-- **Names are global.** Peer-group names and peer addresses must be unique across all BGP instances, not just within one.
+- **Names are global.** Peer-group names and peer addresses must be unique across all BGP instances, not just within one. Peer-group names also collide ignoring case, `-` and `_` (`pga` and `pg-a` cannot coexist).
 
 ## Bringing up a session
 

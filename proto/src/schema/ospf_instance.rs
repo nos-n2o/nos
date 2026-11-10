@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::{Config, OspfArea};
 use nos_proto_derive::Cli;
@@ -21,7 +21,7 @@ pub struct OspfInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.ospf_instances, |i| &i.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.ospf_instances, |i| &i.name))
     )]
     #[cli(key)]
     /// Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among `OSPFv2` instances.

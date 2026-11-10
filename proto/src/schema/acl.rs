@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::interface::loopback_table_name;
 use super::Config;
 use crate::cli::{CliValue, Kind};
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 /// What a matching rule (or the end of the list) does with the packet.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -232,7 +232,7 @@ pub struct Acl {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.acls, |a| &a.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.acls, |a| &a.name))
     )]
     #[cli(key)]
     /// ACL name, 1 to 64 characters (letters, digits, `_`, `-`); the key.
@@ -259,6 +259,7 @@ fn valid_rules(rules: &[AclRule]) -> garde::Result {
                 r.name
             )));
         }
+        crate::validators::no_normalized_collision(&r.name, rules.iter().map(|o| o.name.as_str()))?;
         valid_rule(r).map_err(|why| garde::Error::new(format!("rule '{}': {why}", r.name)))?;
     }
     Ok(())

@@ -946,16 +946,13 @@ pub(crate) fn valid_auth(auth: Option<&BgpAuth>, cfg: &Config) -> garde::Result 
 /// name collision is a real conflict regardless of which instance either
 /// group belongs to.
 fn unique_name(name: &str, ctx: &Config) -> garde::Result {
-    let count = ctx
-        .bgp_instances
-        .iter()
-        .flat_map(|i| &i.peer_groups)
-        .filter(|g| g.name == name)
-        .count();
-    if count > 1 {
-        return Err(garde::Error::new("must be unique"));
-    }
-    Ok(())
+    crate::validators::unique_name_in(
+        name,
+        ctx.bgp_instances
+            .iter()
+            .flat_map(|i| &i.peer_groups)
+            .map(|x| x.name.as_str()),
+    )
 }
 
 fn non_empty_no_duplicate_afs(afs: &[AddressFamily]) -> garde::Result {
@@ -1248,6 +1245,22 @@ mod tests {
             ),
         ]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn normalized_collision_fails_across_instances() {
+        let cfg = config_with(vec![
+            instance_with_groups(
+                "r1",
+                vec![group("pga", 65001, vec![AddressFamily::Ipv4Unicast])],
+            ),
+            instance_with_groups(
+                "r2",
+                vec![group("pg-a", 65002, vec![AddressFamily::Ipv4Unicast])],
+            ),
+        ]);
+        let e = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(e.contains("collides with 'pg"), "{e}");
     }
 
     #[test]
