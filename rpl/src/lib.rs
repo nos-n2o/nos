@@ -52,6 +52,20 @@ impl fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// Longest accepted script source in bytes, enforced by [`compile`],
+/// [`unconditional_next_hop`] and called-policy compilation.
+pub const MAX_SOURCE_LEN: usize = 16 * 1024;
+
+pub(crate) fn check_source_len(src: &str) -> Result<(), CompileError> {
+    if src.len() > MAX_SOURCE_LEN {
+        return Err(CompileError::new(
+            1,
+            format!("source longer than {MAX_SOURCE_LEN} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 /// Compiles RPL source into bytecode: lex -> parse -> termination/
 /// reachability check -> type-checked codegen. Called both by
 /// `nos-config` (commit-time validation of `PolicyDefinition.source`,
@@ -60,6 +74,7 @@ impl std::error::Error for CompileError {}
 /// `community-group`/`prefix-list` object — pass `&Symbols::EMPTY` when none
 /// are in scope.
 pub fn compile(src: &str, symbols: &Symbols) -> Result<CompiledPolicy, CompileError> {
+    check_source_len(src)?;
     let tokens = lexer::lex(src)?;
     let policy = parser::parse(&tokens)?;
     check::check_termination(&policy)?;
@@ -73,6 +88,7 @@ pub fn compile(src: &str, symbols: &Symbols) -> Result<CompiledPolicy, CompileEr
 /// and is deliberately not reported; the BGP runtime guard covers it.
 pub fn unconditional_next_hop(src: &str) -> Option<std::net::IpAddr> {
     use ast::{ExprKind, Postfix, StmtKind};
+    check_source_len(src).ok()?;
     let policy = parser::parse(&lexer::lex(src).ok()?).ok()?;
     let mut found = None;
     for stmt in &policy {
@@ -147,6 +163,175 @@ pub const DENY_ALL_NAME: &str = "deny-all";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `f` on a deliberately small (2 MiB) stack: an unbounded
+    /// recursion aborts the process instead of failing the assertion.
+    fn small_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn compiles(src: &str) -> Result<(), CompileError> {
+        compile(src, &Symbols::EMPTY).map(|_| ())
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_not_overflowed() {
+        small_stack(|| {
+            let n = 10_000;
+            let parens = format!(
+                "if {}1 == 1{}:\n  accept\nelse:\n  reject\n",
+                "(".repeat(n),
+                ")".repeat(n)
+            );
+            let nots = format!(
+                "if {}1 == 1:\n  accept\nelse:\n  reject\n",
+                "not ".repeat(n)
+            );
+            let nest = |k: usize| {
+                let mut ifs = String::new();
+                for i in 0..k {
+                    ifs.push_str(&"  ".repeat(i));
+                    ifs.push_str("if 1 == 1:\n");
+                }
+                ifs
+            };
+            let ifs = nest(n);
+            for src in [parens, nots] {
+                assert!(compiles(&src).is_err());
+            }
+            assert!(compiles(&ifs).is_err());
+            // Under the source cap too, so the depth check itself fires.
+            let nots = format!(
+                "if {}1 == 1:\n  accept\nelse:\n  reject\n",
+                "not ".repeat(1000)
+            );
+            assert!(compiles(&nots).unwrap_err().message.contains("nesting"));
+            let ifs = nest(100);
+            assert!(compiles(&ifs).unwrap_err().message.contains("nesting"));
+        });
+    }
+
+    #[test]
+    fn long_left_chains_are_rejected_not_overflowed() {
+        small_stack(|| {
+            for (op, w) in [("or", "1 == 1"), ("and", "1 == 1"), ("+", "1")] {
+                let sep = format!(" {op} ");
+                let chain = vec![w; 1_000].join(&sep);
+                let src = if op == "+" {
+                    format!("set this.bgp.local_pref = {chain}\naccept\n")
+                } else {
+                    format!("if {chain}:\n  accept\nelse:\n  reject\n")
+                };
+                assert!(src.len() < MAX_SOURCE_LEN);
+                assert!(
+                    compiles(&src).unwrap_err().message.contains("nesting"),
+                    "{op}"
+                );
+            }
+        });
+    }
+
+    type Case<'a> = (&'a str, usize, Box<dyn Fn(usize) -> String>);
+
+    /// For each construct, the largest `k` that compiles is exactly `max`
+    /// (depth 64 compiles) and `max + 1` fails with the nesting error.
+    #[test]
+    fn depth_limit_is_exact_per_construct() {
+        small_stack(|| {
+            let cond = |c: String| format!("if {c}:\n  accept\nelse:\n  reject\n");
+            let chain = |op: &str, n: usize| vec!["1 == 1"; n].join(&format!(" {op} "));
+            let nest = |k: usize| {
+                let mut src = String::new();
+                for i in 0..k {
+                    src.push_str(&"  ".repeat(i));
+                    src.push_str("if 1 == 1:\n");
+                }
+                src.push_str(&"  ".repeat(k));
+                src.push_str("accept\n");
+                src.push_str("accept\n");
+                src
+            };
+            let cases: Vec<Case> = vec![
+                // `1 == 1` is depth 2, each `not`/paren adds 1.
+                (
+                    "not",
+                    62,
+                    Box::new(move |k| cond(format!("{}1 == 1", "not ".repeat(k)))),
+                ),
+                (
+                    "parens",
+                    62,
+                    Box::new(move |k| {
+                        format!(
+                            "if {}1 == 1{}:\n  accept\nelse:\n  reject\n",
+                            "(".repeat(k),
+                            ")".repeat(k)
+                        )
+                    }),
+                ),
+                // k comparisons joined by `or`/`and`: depth k + 1.
+                (
+                    "or",
+                    63,
+                    Box::new(move |k| {
+                        format!("if {}:\n  accept\nelse:\n  reject\n", chain("or", k))
+                    }),
+                ),
+                (
+                    "and",
+                    63,
+                    Box::new(move |k| {
+                        format!("if {}:\n  accept\nelse:\n  reject\n", chain("and", k))
+                    }),
+                ),
+                // k leaves joined by `+`: depth k.
+                (
+                    "+",
+                    64,
+                    Box::new(|k| {
+                        format!(
+                            "set this.bgp.local_pref = {}\naccept\n",
+                            vec!["1"; k].join(" + ")
+                        )
+                    }),
+                ),
+                // k nested `if` suites: the innermost condition sits at nest k - 1 with depth 2.
+                ("if", 63, Box::new(nest)),
+            ];
+            for (name, max, build) in cases {
+                let r = compiles(&build(max));
+                assert!(r.is_ok(), "{name} at {max}: {r:?}");
+                let err = compiles(&build(max + 1)).unwrap_err();
+                assert!(err.message.contains("nesting"), "{name} at {}", max + 1);
+            }
+            // Comparisons add no chain depth: `a == b` is one node.
+            assert!(compiles(&cond("1 == 1".into())).is_ok());
+        });
+    }
+
+    #[test]
+    fn oversize_source_is_rejected() {
+        let big = format!("{}accept\n", "# pad\n".repeat(MAX_SOURCE_LEN / 6 + 1));
+        assert!(big.len() > MAX_SOURCE_LEN);
+        assert!(compiles(&big).unwrap_err().message.contains("longer"));
+        assert_eq!(
+            unconditional_next_hop(&format!("set this.bgp.next_hop = 192.0.2.1\n{big}")),
+            None
+        );
+        let syms = Symbols {
+            policies: &[("big", big.as_str())],
+            ..Symbols::EMPTY
+        };
+        assert!(compile("call big\naccept\n", &syms)
+            .unwrap_err()
+            .message
+            .contains("longer"));
+    }
 
     #[test]
     fn unconditional_next_hop_cases() {
