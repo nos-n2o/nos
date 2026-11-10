@@ -112,6 +112,7 @@ impl Codegen<'_> {
             let wrap = |e: CompileError| {
                 CompileError::new(line, format!("in called policy '{name}': {e}"))
             };
+            crate::check_source_len(src).map_err(wrap)?;
             let tokens = crate::lexer::lex(src).map_err(wrap)?;
             let callee = crate::parser::parse(&tokens).map_err(wrap)?;
             crate::check::check_termination(&callee).map_err(wrap)?;

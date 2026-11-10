@@ -2,19 +2,59 @@ use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind
 use crate::lexer::{SpannedToken, Token};
 use crate::CompileError;
 
+/// Maximum AST depth (statement nesting plus expression depth) and parser
+/// recursion depth: bounds the stack of every recursive pass (check,
+/// codegen, `Drop`) over the tree, which a left-deep `a or a or ...` chain
+/// would otherwise blow without any parser recursion.
+const MAX_DEPTH: usize = 64;
+
 struct Parser<'a> {
     tokens: &'a [SpannedToken],
     pos: usize,
+    /// Statement-suite nesting of the node being parsed.
+    nest: usize,
+    /// Parser recursion depth (suites, `not`, parentheses).
+    rec: usize,
+    /// Depth of the expression most recently returned (a leaf is 1).
+    d: usize,
 }
 
 pub fn parse(tokens: &[SpannedToken]) -> Result<Policy, CompileError> {
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        nest: 0,
+        rec: 0,
+        d: 0,
+    };
     let policy = p.parse_block_body()?;
     p.expect(&Token::Eof)?;
     Ok(policy)
 }
 
 impl Parser<'_> {
+    fn too_deep(&self) -> CompileError {
+        CompileError::new(self.line(), format!("nesting deeper than {MAX_DEPTH}"))
+    }
+
+    /// Enters a recursive construct, failing past `MAX_DEPTH`.
+    fn enter(&mut self) -> Result<(), CompileError> {
+        self.rec += 1;
+        if self.rec > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        Ok(())
+    }
+
+    /// Records the depth of a new expression node and enforces the cap.
+    fn node(&mut self, d: usize) -> Result<(), CompileError> {
+        self.d = d;
+        if self.nest + d > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        Ok(())
+    }
+
     fn peek(&self) -> &Token {
         &self.tokens[self.pos].token
     }
@@ -73,7 +113,14 @@ impl Parser<'_> {
         self.expect(&Token::Colon)?;
         self.expect(&Token::Newline)?;
         self.expect(&Token::Indent)?;
+        self.enter()?;
+        self.nest += 1;
+        if self.nest > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
         let body = self.parse_block_body()?;
+        self.nest -= 1;
+        self.rec -= 1;
         self.expect(&Token::Dedent)?;
         Ok(body)
     }
@@ -204,8 +251,10 @@ impl Parser<'_> {
         let mut lhs = self.parse_and()?;
         while matches!(self.peek(), Token::Or) {
             let line = self.line();
+            let ld = self.d;
             self.advance();
             let rhs = self.parse_and()?;
+            self.node(ld.max(self.d) + 1)?;
             lhs = Expr {
                 kind: ExprKind::Binary(BinOp::Or, Box::new(lhs), Box::new(rhs)),
                 line,
@@ -218,8 +267,10 @@ impl Parser<'_> {
         let mut lhs = self.parse_not()?;
         while matches!(self.peek(), Token::And) {
             let line = self.line();
+            let ld = self.d;
             self.advance();
             let rhs = self.parse_not()?;
+            self.node(ld.max(self.d) + 1)?;
             lhs = Expr {
                 kind: ExprKind::Binary(BinOp::And, Box::new(lhs), Box::new(rhs)),
                 line,
@@ -232,7 +283,10 @@ impl Parser<'_> {
         if matches!(self.peek(), Token::Not) {
             let line = self.line();
             self.advance();
+            self.enter()?;
             let inner = self.parse_not()?;
+            self.rec -= 1;
+            self.node(self.d + 1)?;
             Ok(Expr {
                 kind: ExprKind::Unary(UnaryOp::Not, Box::new(inner)),
                 line,
@@ -255,8 +309,10 @@ impl Parser<'_> {
             Token::In => BinOp::In,
             _ => return Ok(lhs),
         };
+        let ld = self.d;
         self.advance();
         let rhs = self.parse_sum()?;
+        self.node(ld.max(self.d) + 1)?;
         Ok(Expr {
             kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
             line,
@@ -272,8 +328,10 @@ impl Parser<'_> {
                 Token::Minus => BinOp::Sub,
                 _ => break,
             };
+            let ld = self.d;
             self.advance();
             let rhs = self.parse_postfix()?;
+            self.node(ld.max(self.d) + 1)?;
             lhs = Expr {
                 kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
                 line,
@@ -288,6 +346,7 @@ impl Parser<'_> {
         let ExprKind::This(mut segments) = atom.kind else {
             return Ok(atom);
         };
+        let mut depth = 1;
         loop {
             if !matches!(self.peek(), Token::Dot) {
                 break;
@@ -299,9 +358,11 @@ impl Parser<'_> {
                 let mut args = Vec::new();
                 if !matches!(self.peek(), Token::RParen) {
                     args.push(self.parse_expr()?);
+                    depth = depth.max(self.d + 1);
                     while matches!(self.peek(), Token::Comma) {
                         self.advance();
                         args.push(self.parse_expr()?);
+                        depth = depth.max(self.d + 1);
                     }
                 }
                 self.expect(&Token::RParen)?;
@@ -310,6 +371,7 @@ impl Parser<'_> {
                 segments.push(Postfix::Field(name));
             }
         }
+        self.node(depth)?;
         Ok(Expr {
             kind: ExprKind::This(segments),
             line,
@@ -367,8 +429,12 @@ impl Parser<'_> {
             Token::Prefix(p) => ExprKind::PrefixLit(p),
             Token::IpAddr(a) => ExprKind::IpLit(a),
             Token::LParen => {
+                self.enter()?;
                 let inner = self.parse_expr()?;
+                self.rec -= 1;
                 self.expect(&Token::RParen)?;
+                // Parentheses add no node but still recurse: count them.
+                self.node(self.d + 1)?;
                 return Ok(inner);
             }
             Token::Ident(name) if name == "this" => ExprKind::This(Vec::new()),
@@ -394,6 +460,7 @@ impl Parser<'_> {
                 ))
             }
         };
+        self.node(1)?;
         Ok(Expr { kind, line })
     }
 }

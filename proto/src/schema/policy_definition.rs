@@ -24,7 +24,10 @@ pub struct PolicyDefinition {
     /// Policy name, unique, and never the reserved `accept-all` or `deny-all`.
     pub name: String,
 
-    #[garde(custom(|src: &String, ctx: &Config| valid_source(src, ctx)))]
+    #[garde(
+        length(max = nos_rpl::MAX_SOURCE_LEN),
+        custom(|src: &String, ctx: &Config| valid_source(src, ctx))
+    )]
     #[cli(topic = PolicyDefinitionSource)]
     /// RPL source text, compiled at commit time and again by each consumer.
     pub source: String,
@@ -167,6 +170,16 @@ mod tests {
     fn valid_policy_passes() {
         let cfg = config_with(vec![policy("p1", "accept\n")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn oversize_source_fails() {
+        let src = format!(
+            "{}accept\n",
+            "# pad\n".repeat(nos_rpl::MAX_SOURCE_LEN / 6 + 1)
+        );
+        let cfg = config_with(vec![policy("p1", &src)]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
