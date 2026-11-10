@@ -10,7 +10,7 @@ use nos_proto::{
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::driver::links::LinkEvent;
 use crate::driver::{InterfaceDriver, LinkWatch};
@@ -95,15 +95,8 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
 
 async fn accept_loop(listener: Listener, ctx: Arc<Context>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, ctx.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "interface IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, ctx.clone()));
     }
 }
 

@@ -9,7 +9,7 @@ use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{AclEvent, AclRequest, IpcCodec, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::driver::Driver;
 use crate::engine::Shared;
@@ -54,15 +54,8 @@ fn answer<D: Driver>(engine: &Shared<D>, request: AclRequest) -> AclEvent {
 
 async fn accept_loop<D: Driver>(listener: Listener, engine: Shared<D>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, engine.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "acl IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, engine.clone()));
     }
 }
 

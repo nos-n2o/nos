@@ -9,7 +9,7 @@ use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{IpcCodec, LacpEvent, LacpRequest, PortAggregateLacpSummary, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::reconcile::SharedAggregates;
 
@@ -42,15 +42,8 @@ async fn serve(incoming: Incoming, aggregates: SharedAggregates) {
 
 async fn accept_loop(listener: Listener, aggregates: SharedAggregates) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, aggregates.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "lacp IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, aggregates.clone()));
     }
 }
 

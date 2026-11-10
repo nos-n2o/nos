@@ -7,7 +7,7 @@ use nos_proto::chunk::FullStaging;
 use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3Request, RedistributeUpdate, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::link::LinkManager;
 
@@ -40,15 +40,8 @@ fn allowed(role: Role, req: &Ospfv3Request) -> bool {
 
 async fn accept_loop(listener: Listener, instance: String, links: Arc<LinkManager>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, instance.clone(), links.clone()));
-            }
-            Err(e) => {
-                error!(instance = %instance, error = %e, "OSPFv3 IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, instance.clone(), links.clone()));
     }
 }
 

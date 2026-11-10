@@ -13,7 +13,7 @@ use nos_proto::{BfdEvent, BfdRequest, IpcCodec, Role, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::authz::allowed;
 use crate::manager::Manager;
@@ -31,15 +31,8 @@ pub fn start(
 
 async fn accept_loop(listener: Listener, manager: Arc<Manager>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, manager.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "bfd IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, manager.clone()));
     }
 }
 

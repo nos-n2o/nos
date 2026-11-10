@@ -9,7 +9,7 @@ use nos_proto::{Event, IpcCodec, Request, Role};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::authz;
 use crate::store::ConfigStore;
@@ -71,15 +71,8 @@ pub fn start(
 
 async fn accept_loop(listener: Listener, store: ConfigStore) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, store.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, store.clone()));
     }
 }
 

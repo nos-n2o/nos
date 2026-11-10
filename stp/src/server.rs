@@ -11,7 +11,7 @@ use nos_proto::{IpcCodec, Role, StpEvent, StpRequest, StpSummary};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::authz::allowed;
 
@@ -45,15 +45,8 @@ pub fn start(
 
 async fn accept_loop(listener: Listener, snapshot: Snapshot, cmds: mpsc::Sender<Cmd>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, snapshot.clone(), cmds.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "stp IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, snapshot.clone(), cmds.clone()));
     }
 }
 

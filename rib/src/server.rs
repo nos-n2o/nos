@@ -100,15 +100,8 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
 
 async fn accept_loop(listener: Listener, ctx: Arc<Context>) {
     loop {
-        match listener.accept().await {
-            Ok(incoming) => {
-                tokio::spawn(serve(incoming, ctx.clone()));
-            }
-            Err(e) => {
-                error!(table = %ctx.table, error = %e, "RIB IPC accept loop terminated");
-                break;
-            }
-        }
+        let incoming = listener.accept_resilient().await;
+        tokio::spawn(serve(incoming, ctx.clone()));
     }
 }
 
