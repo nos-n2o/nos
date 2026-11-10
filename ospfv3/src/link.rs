@@ -371,8 +371,6 @@ pub async fn run(
     hello_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let is_broadcast = cfg.network_type == NetworkType::Broadcast;
-    let mut p2p_dead_deadline =
-        Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
     let mut dead_sweep = tokio::time::interval(std::time::Duration::from_secs(1));
     dead_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let wait_deadline =
@@ -427,13 +425,13 @@ pub async fn run(
                             }
                             Ok(pkt) => {
                                 if !matches!(pkt, OspfPacket::Hello(_)) {
-                                    note_alive(&cfg, &status, packet::router_id(&pkt), &mut p2p_dead_deadline);
+                                    note_alive(&status, packet::router_id(&pkt));
                                 }
                                 match pkt {
                                     OspfPacket::Hello(hello) => {
                                         let left_waiting = handle_hello(
                                             &socket, &cfg, local_router_id, &status, source, &hello,
-                                            &mut p2p_dead_deadline, waiting, &mut warn_limiter,
+                                            waiting, &mut warn_limiter,
                                         );
                                         if left_waiting {
                                             waiting = false;
@@ -485,17 +483,10 @@ pub async fn run(
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospfv3 recv error"),
                 }
             }
-            () = tokio::time::sleep_until(p2p_dead_deadline), if !is_broadcast => {
-                apply_dead_timer(&cfg, &status);
-                p2p_dead_deadline = Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
-            }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
-                if !is_broadcast {
-                    continue;
-                }
                 sweep_dead_neighbors(&cfg, &status);
-                if !waiting {
+                if is_broadcast && !waiting {
                     run_election(&socket, &cfg, local_router_id, &status);
                     advance_adjacencies(&socket, &cfg, local_router_id, &status);
                 }
@@ -620,7 +611,6 @@ fn handle_hello(
     status: &StatusHandle,
     source: Ipv6Addr,
     hello: &packet::HelloPacket,
-    p2p_dead_deadline: &mut Instant,
     waiting: bool,
     limiter: &mut nos_ospf_common::ratelimit::WarnLimiter,
 ) -> bool {
@@ -631,6 +621,13 @@ fn handle_hello(
             "dropping ospfv3 hello with mismatched area"
         );
         return false;
+    }
+
+    // #957: a point-to-point / multipoint peer back under a new router ID from
+    // the same address supersedes its old entry at once. Grace entries are
+    // kept (RFC 5187); broadcast never evicts.
+    if cfg.network_type != NetworkType::Broadcast {
+        evict_same_address(cfg, status, source, hello.router_id);
     }
 
     // A segment peer cycling router-ids must not grow the table without bound
@@ -706,11 +703,6 @@ fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
-            *p2p_dead_deadline =
-                Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
-            false
-        }
         NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
             run_election(socket, cfg, local_router_id, status);
             true
@@ -719,7 +711,10 @@ fn handle_hello(
             run_election(socket, cfg, local_router_id, status);
             false
         }
-        NetworkType::Broadcast => false,
+        // `last_heard` was refreshed above; the sweep expires it.
+        NetworkType::Broadcast | NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+            false
+        }
     }
 }
 
@@ -1418,38 +1413,8 @@ fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address: Ipv6Addr)
     });
 }
 
-fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
-    let Some((old_state, grace)) = status
-        .borrow()
-        .neighbors
-        .values()
-        .next()
-        .map(|n| (n.state, n.grace_deadline))
-    else {
-        return;
-    };
-    if grace.is_some() {
-        return;
-    }
-    if old_state != NeighborState::Down {
-        warn!(link = %cfg.attach_point, "ospfv3 neighbor state changed to down");
-    }
-    let new_state = neighbor::step(old_state, neighbor::Event::InactivityTimerExpired);
-    status.send_modify(|s| {
-        for info in s.neighbors.values_mut() {
-            info.state = new_state;
-            info.adjacency = None;
-        }
-    });
-}
-
 /// RFC 4222 §2 recommendation 2 — mirrors `ospf::link::flood::note_alive`.
-fn note_alive(
-    cfg: &LinkConfig,
-    status: &StatusHandle,
-    router_id: Ipv4Addr,
-    p2p_dead_deadline: &mut Instant,
-) {
+fn note_alive(status: &StatusHandle, router_id: Ipv4Addr) {
     let adjacent = status.borrow().neighbors.get(&router_id).is_some_and(|n| {
         matches!(
             n.state,
@@ -1468,9 +1433,6 @@ fn note_alive(
             n.last_heard = now;
         }
     });
-    if cfg.network_type == NetworkType::PointToPoint {
-        *p2p_dead_deadline = now + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
-    }
 }
 
 fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
@@ -1487,15 +1449,62 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
         })
         .map(|(id, _)| *id)
         .collect();
-    if expired.is_empty() {
+    if !expired.is_empty() {
+        for id in &expired {
+            warn!(link = %cfg.attach_point, neighbor = %id, "ospfv3 neighbor state changed to down");
+        }
+        status.send_modify(|s| {
+            for id in &expired {
+                if let Some(info) = s.neighbors.get_mut(id) {
+                    info.state =
+                        neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                    info.adjacency = None;
+                }
+            }
+        });
+    }
+    // A Down entry silent for a full dead interval has no use: free the slot
+    // (#957; else forged router IDs pin the neighbor cap for good). One tick
+    // after the Down step at the earliest, so both events are observable.
+    let gone: Vec<Ipv4Addr> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(id, info)| {
+            info.state == NeighborState::Down
+                && info.grace_deadline.is_none()
+                && !expired.contains(id)
+                && now.duration_since(info.last_heard) >= dead_interval
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    if gone.is_empty() {
         return;
     }
-    for _ in &expired {
-        warn!(link = %cfg.attach_point, "ospfv3 neighbor state changed to down");
-    }
     status.send_modify(|s| {
-        for id in &expired {
-            if let Some(info) = s.neighbors.get_mut(id) {
+        for id in &gone {
+            s.neighbors.remove(id);
+        }
+    });
+    for id in &gone {
+        info!(link = %cfg.attach_point, neighbor = %id, "ospfv3 neighbor entry removed");
+    }
+}
+
+/// Steps every live, non-grace entry at `source` under another router ID to
+/// `Down`; the dead-neighbor sweep then removes it.
+fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv6Addr, new_id: Ipv4Addr) {
+    status.send_modify(|s| {
+        for (id, info) in &mut s.neighbors {
+            if *id != new_id
+                && info.address == source
+                && info.state != NeighborState::Down
+                && info.grace_deadline.is_none()
+            {
+                warn!(
+                    link = %cfg.attach_point, neighbor = %id, new_neighbor = %new_id, address = %source,
+                    "ospfv3 neighbor evicted, same address new router id"
+                );
                 info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
                 info.adjacency = None;
             }
@@ -2952,10 +2961,12 @@ fn router_lsa_links(
             NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                 // RFC 5340 §4.4.3.2: only a fully adjacent neighbor (a
                 // neighbor back in Init after a BFD kill must drop out, #463).
+                // Lowest router ID: never depend on HashMap order (#957).
                 if let Some((neighbor_id, info)) = status
                     .neighbors
                     .iter()
-                    .find(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
+                    .filter(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
+                    .min_by_key(|(id, _)| **id)
                 {
                     result.push(RouterLsaLink {
                         link_type: LINK_TYPE_POINT_TO_POINT,
@@ -3363,12 +3374,11 @@ pub(crate) mod tests {
         assert!(!drops_non_link_local(&cfg, "fe80::2".parse().unwrap()));
     }
 
-    #[test]
-    fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
+    #[tokio::test(start_paused = true)]
+    async fn handle_hello_caps_neighbors_but_keeps_refreshing_known_ones() {
         use nos_ospf_common::ratelimit::{WarnLimiter, MAX_NEIGHBORS_PER_LINK};
         let cfg = link("eth0.0", 10);
         let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
-        let mut deadline = Instant::now();
         let mut limiter = WarnLimiter::default();
         let first = Ipv4Addr::from(0x0901_0000);
         let hello = |n: u32| packet::HelloPacket {
@@ -3383,27 +3393,36 @@ pub(crate) mod tests {
             backup_designated_router: Ipv4Addr::UNSPECIFIED,
             neighbors: vec![],
         };
-        let mut send = |n: u32| {
+        let send = |n: u32, limiter: &mut WarnLimiter| {
             handle_hello(
                 &mem_socket(&cfg),
                 &cfg,
                 Ipv4Addr::new(1, 1, 1, 1),
                 &status,
-                "fe80::2".parse().unwrap(),
+                Ipv6Addr::from(0xfe80_0000_0000_0000_0000_0000_0000_0000_u128 + u128::from(n)),
                 &hello(n),
-                &mut deadline,
                 false,
-                &mut limiter,
+                limiter,
             );
         };
         for n in 0..70 {
-            send(n);
+            send(n, &mut limiter);
         }
         assert_eq!(status.borrow().neighbors.len(), MAX_NEIGHBORS_PER_LINK);
         status.send_modify(|s| s.neighbors.get_mut(&first).unwrap().priority = 99);
-        send(0);
+        send(0, &mut limiter);
         assert_eq!(status.borrow().neighbors[&first].priority, 1);
         assert_eq!(limiter.take_suppressed(), 1);
+        // #957: forged IDs do not pin the table; each goes Down after the dead
+        // interval and its slot is freed on a later sweep.
+        tokio::time::advance(std::time::Duration::from_secs(41)).await;
+        sweep_dead_neighbors(&cfg, &status);
+        assert_eq!(status.borrow().neighbors.len(), MAX_NEIGHBORS_PER_LINK);
+        sweep_dead_neighbors(&cfg, &status);
+        assert!(status.borrow().neighbors.is_empty());
+        send(1000, &mut limiter);
+        assert_eq!(status.borrow().neighbors.len(), 1);
+        assert_eq!(limiter.take_suppressed(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3604,6 +3623,27 @@ pub(crate) mod tests {
         );
         let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(link("eth0.0", 10), status)]);
         assert!(links.is_empty(), "{links:?}");
+    }
+
+    /// #957: with a stale Full entry and a live one, the lowest ID is named.
+    #[test]
+    fn router_lsa_links_names_the_lowest_full_router_id() {
+        for _ in 0..8 {
+            let mut status = LinkStatus::new(NetworkType::PointToPoint);
+            for (id, state) in [
+                (Ipv4Addr::new(9, 9, 9, 30), NeighborState::Full),
+                (Ipv4Addr::new(9, 9, 9, 20), NeighborState::Full),
+                (Ipv4Addr::new(9, 9, 9, 10), NeighborState::Init),
+            ] {
+                status
+                    .neighbors
+                    .insert(id, neighbor_info(state, "fe80::2".parse().unwrap(), 7));
+            }
+            let links =
+                router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(link("eth0.0", 10), status)]);
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].neighbor_router_id, Ipv4Addr::new(9, 9, 9, 20));
+        }
     }
 
     #[test]
@@ -4331,7 +4371,6 @@ pub(crate) mod tests {
     async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
         let cfg = link("eth0.0", 10);
         let me = Ipv4Addr::new(1, 1, 1, 1);
-        let mut deadline = Instant::now();
         for (grace, expected) in [
             (
                 Some(Instant::now() + std::time::Duration::from_secs(60)),
@@ -4347,7 +4386,6 @@ pub(crate) mod tests {
                 &status,
                 "fe80::2".parse().unwrap(),
                 &restarted_hello(),
-                &mut deadline,
                 false,
                 &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
             );
@@ -4355,11 +4393,12 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn grace_suppresses_the_inactivity_timer_until_it_expires() {
         let cfg = link("eth0.0", 10);
         let status = grace_status(Some(Instant::now() + std::time::Duration::from_secs(60)));
-        apply_dead_timer(&cfg, &status);
+        tokio::time::advance(std::time::Duration::from_secs(41)).await;
+        sweep_dead_neighbors(&cfg, &status);
         assert_eq!(state_of(&status), NeighborState::Full);
 
         status.send_modify(|s| {
@@ -4369,8 +4408,140 @@ pub(crate) mod tests {
         });
         expire_grace(&cfg, &status);
         assert!(!in_grace(&status, Ipv4Addr::new(9, 9, 9, 10)));
-        apply_dead_timer(&cfg, &status);
+        // `expire_grace` restarts the inactivity clock.
+        tokio::time::advance(std::time::Duration::from_secs(41)).await;
+        sweep_dead_neighbors(&cfg, &status);
         assert_eq!(state_of(&status), NeighborState::Down);
+        // Removed on a later tick, never in the one that stepped it Down.
+        sweep_dead_neighbors(&cfg, &status);
+        assert!(status.borrow().neighbors.is_empty());
+    }
+
+    /// A grace-held neighbor is never removed, even long silent.
+    #[tokio::test(start_paused = true)]
+    async fn grace_neighbor_is_never_removed() {
+        let cfg = link("eth0.0", 10);
+        let status = grace_status(Some(Instant::now() + std::time::Duration::from_secs(600)));
+        status.send_modify(|s| {
+            for n in s.neighbors.values_mut() {
+                n.state = NeighborState::Down;
+            }
+        });
+        tokio::time::advance(std::time::Duration::from_secs(100)).await;
+        sweep_dead_neighbors(&cfg, &status);
+        assert_eq!(status.borrow().neighbors.len(), 1);
+    }
+
+    fn hello_from(cfg: &LinkConfig, id: Ipv4Addr) -> packet::HelloPacket {
+        packet::HelloPacket {
+            router_id: id,
+            area_id: cfg.area_id,
+            interface_id: 4,
+            router_priority: 1,
+            options: 0,
+            hello_interval: cfg.hello_interval,
+            dead_interval: cfg.dead_interval,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        }
+    }
+
+    fn hello_in(cfg: &LinkConfig, status: &StatusHandle, source: &str, id: Ipv4Addr) {
+        handle_hello(
+            &mem_socket(cfg),
+            cfg,
+            Ipv4Addr::new(1, 1, 1, 1),
+            status,
+            source.parse().unwrap(),
+            &hello_from(cfg, id),
+            false,
+            &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
+        );
+    }
+
+    /// #957: no shared deadline; the old ID dies on its own `last_heard` while
+    /// the new one stays, then its entry is removed on a later tick.
+    #[tokio::test(start_paused = true)]
+    async fn old_p2p_neighbor_dies_on_its_own_last_heard() {
+        let cfg = link("eth0.0", 10);
+        let (old, new) = (Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(9, 9, 9, 11));
+        let mut st = LinkStatus::new(NetworkType::PointToPoint);
+        st.neighbors.insert(
+            old,
+            neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 4),
+        );
+        st.neighbors.insert(
+            new,
+            neighbor_info(NeighborState::Full, "fe80::3".parse().unwrap(), 4),
+        );
+        let (status, _rx) = watch::channel(st);
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        status.send_modify(|s| s.neighbors.get_mut(&new).unwrap().last_heard = Instant::now());
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        sweep_dead_neighbors(&cfg, &status);
+        assert_eq!(status.borrow().neighbors[&old].state, NeighborState::Down);
+        assert_eq!(status.borrow().neighbors[&new].state, NeighborState::Full);
+        sweep_dead_neighbors(&cfg, &status);
+        assert!(!status.borrow().neighbors.contains_key(&old));
+        assert!(status.borrow().neighbors.contains_key(&new));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_address_new_router_id_evicts_on_p2p_and_p2mp_not_broadcast() {
+        let (old, new) = (Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(9, 9, 9, 11));
+        for (nt, evicted) in [
+            (NetworkType::PointToPoint, true),
+            (NetworkType::PointToMultipoint, true),
+            (NetworkType::Broadcast, false),
+        ] {
+            let mut cfg = link("eth0.0", 10);
+            cfg.network_type = nt;
+            let mut st = LinkStatus::new(nt);
+            let mut info = neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 4);
+            info.adjacency = Some(start_negotiation(&cfg, Ipv4Addr::new(1, 1, 1, 1)).0);
+            st.neighbors.insert(old, info);
+            let (status, _rx) = watch::channel(st);
+            hello_in(&cfg, &status, "fe80::2", new);
+            let s = status.borrow();
+            assert_eq!(s.neighbors[&new].state, NeighborState::Init, "{nt:?}");
+            if evicted {
+                assert_eq!(s.neighbors[&old].state, NeighborState::Down, "{nt:?}");
+                assert!(s.neighbors[&old].adjacency.is_none(), "{nt:?}");
+            } else {
+                assert_eq!(s.neighbors[&old].state, NeighborState::Full, "{nt:?}");
+            }
+        }
+    }
+
+    /// A restarting (grace) helper-mode neighbor is not evicted.
+    #[tokio::test(start_paused = true)]
+    async fn same_address_eviction_skips_a_grace_neighbor() {
+        let cfg = link("eth0.0", 10);
+        let status = grace_status(Some(Instant::now() + std::time::Duration::from_secs(60)));
+        hello_in(&cfg, &status, "fe80::2", Ipv4Addr::new(9, 9, 9, 99));
+        assert_eq!(state_of(&status), NeighborState::Full);
+    }
+
+    /// A BFD-killed neighbor (Init) goes Down on the dead interval, is removed after.
+    #[tokio::test(start_paused = true)]
+    async fn bfd_killed_neighbor_is_removed_once_idle() {
+        let cfg = link("eth0.0", 10);
+        let id = Ipv4Addr::new(9, 9, 9, 10);
+        let mut st = LinkStatus::new(NetworkType::PointToPoint);
+        st.neighbors.insert(
+            id,
+            neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 4),
+        );
+        let (status, _rx) = watch::channel(st);
+        kill_bfd_neighbor(&cfg, &status, "fe80::2".parse().unwrap());
+        assert_eq!(status.borrow().neighbors[&id].state, NeighborState::Down);
+        sweep_dead_neighbors(&cfg, &status);
+        assert!(status.borrow().neighbors.contains_key(&id));
+        tokio::time::advance(std::time::Duration::from_secs(41)).await;
+        sweep_dead_neighbors(&cfg, &status);
+        sweep_dead_neighbors(&cfg, &status);
+        assert!(status.borrow().neighbors.is_empty());
     }
 
     #[tokio::test]
@@ -4633,9 +4804,11 @@ pub(crate) mod tests {
 
         wire.cut.lock().unwrap().insert(a_addr);
         settle(40 + 2).await;
-        assert_eq!(
-            b.neighbor_summaries().await[0].state,
-            OspfNeighborState::Down
+        // Down at the 40s sweep, its entry gone a tick later (#957).
+        let n = b.neighbor_summaries().await;
+        assert!(
+            n.iter().all(|s| s.state == OspfNeighborState::Down),
+            "{n:?}"
         );
     }
 
@@ -4651,7 +4824,6 @@ pub(crate) mod tests {
 
     #[test]
     fn note_alive_only_refreshes_an_adjacency() {
-        let cfg = link("eth0.0", 10);
         let peer = Ipv4Addr::new(9, 9, 9, 9);
         for (state, refreshed) in [
             (NeighborState::Down, false),
@@ -4669,11 +4841,9 @@ pub(crate) mod tests {
             let mut s = LinkStatus::new(NetworkType::PointToPoint);
             s.neighbors.insert(peer, info);
             let (status, _rx) = watch::channel(s);
-            let mut deadline = past;
-            note_alive(&cfg, &status, peer, &mut deadline);
+            note_alive(&status, peer);
             let n = status.borrow().neighbors[&peer].clone();
             assert_eq!(n.last_heard > past, refreshed, "{state:?}");
-            assert_eq!(deadline > past, refreshed, "{state:?}");
             assert_eq!(n.last_hello_received, past, "{state:?}");
         }
     }
@@ -5086,13 +5256,14 @@ pub(crate) mod tests {
                 .any(|r| r.prefix == "2001:db8:ff::4/128".parse::<Ipv6Net>().unwrap()),
             "{routes:?}"
         );
-        // A DR-other dying is swept off the segment.
+        // A DR-other dying is swept off the segment (Down, then removed, #957).
         wire.cut.lock().unwrap().insert("fe80::2".parse().unwrap());
         settle(60).await;
         let one = segment[0].neighbor_summaries().await;
-        assert!(one
-            .iter()
-            .any(|n| n.neighbor_router_id == Some(id(2)) && n.state == OspfNeighborState::Down));
+        assert!(
+            one.iter().all(|n| n.neighbor_router_id != Some(id(2))),
+            "{one:?}"
+        );
     }
 
     /// #157: a DR that loses its only `Full` neighbor flushes its Network-LSA
