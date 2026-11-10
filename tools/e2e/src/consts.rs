@@ -615,3 +615,6 @@ pub const SYSLOG_HOSTNAME: &str = "e2e-a";
 /// inside the lifetime (the watchdog refuses a config where it doesn't).
 pub const PKI_LEAF_LIFETIME_SECS: u64 = 20;
 pub const PKI_ROTATE_EVERY_SECS: u64 = 6;
+/// `--pki-ipc-session-max` for `pki-rotation` (#637): short enough to pass
+/// during the phase's rotation wait, long enough for the first renewal.
+pub const PKI_IPC_SESSION_MAX_SECS: u64 = 15;

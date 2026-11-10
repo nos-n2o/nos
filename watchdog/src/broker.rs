@@ -98,6 +98,7 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
             return;
         }
     };
+    let serial = stream.peer_serial();
     let (read_half, write_half) = split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<WatchdogRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<WatchdogEvent>::default());
@@ -122,7 +123,7 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
         // An anonymous peer may only log in: answer its first other request
         // (one warn in `dispatch`) and hang up, so it can't flood the log.
         let hang_up = peer.is_none() && !allowed(None, &request);
-        let event = dispatch(&ctx, peer.as_ref(), request).await;
+        let event = dispatch(&ctx, peer.as_ref(), serial.as_deref(), request).await;
         let rejected_login = is_login
             && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS || m == INVALID_TICKET);
         if rejected_login {
@@ -156,7 +157,12 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
     }
 }
 
-async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) -> WatchdogEvent {
+async fn dispatch(
+    ctx: &Ctx,
+    peer: Option<&PeerId>,
+    serial: Option<&str>,
+    request: WatchdogRequest,
+) -> WatchdogEvent {
     if !allowed(peer, &request) {
         warn!(peer = ?peer, ?request, "refusing a broker request the caller may not make");
         return WatchdogEvent::Denied(if peer.is_none() {
@@ -234,14 +240,15 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
         }
         // `allowed` has already required a `user` peer.
         WatchdogRequest::RenewCert { csr_der } => {
-            renew(
-                ctx,
-                peer.map_or("", |p| &p.name),
-                &csr_der,
-                Realm::Ipc,
-                Instant::now(),
-            )
-            .await
+            // The serial comes from the verified TLS peer certificate, never
+            // from the client; renewals inherit the login time (#637).
+            let user = peer.map_or("", |p| &p.name);
+            if let Some(started) = serial.and_then(|s| ctx.pki.ipc_session(s, user)) {
+                renew(ctx, user, &csr_der, Realm::Ipc, started).await
+            } else {
+                info!(user = ?user, "renewal refused, ipc certificate unknown or past the session cap");
+                WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
+            }
         }
         WatchdogRequest::RestLogin {
             user,
@@ -414,7 +421,7 @@ async fn renew(
 
 fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) -> WatchdogEvent {
     let signed = match realm {
-        Realm::Ipc => ctx.pki.sign_user(csr_der, user),
+        Realm::Ipc => ctx.pki.sign_user(csr_der, user, started),
         Realm::Rest => ctx.pki.sign_rest_user(csr_der, user, started),
     };
     match signed {

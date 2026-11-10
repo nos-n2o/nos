@@ -345,6 +345,48 @@ async fn a_user_can_renew_until_they_are_deleted_and_daemons_cannot_renew_at_all
     assert!(matches!(gone, WatchdogEvent::Denied(_)), "{gone:?}");
 }
 
+/// Renewals inherit the login time, so they stop at the IPC session cap, and
+/// a fresh password login starts a new session.
+#[tokio::test]
+async fn ipc_renewals_stop_at_the_session_cap() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    e.pki.set_ipc_session_max(Duration::from_secs(3));
+    let id = e.anonymous();
+    let (csr, key) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(
+        &mut dial(&id, &e.broker).await,
+        login("alice", "s3cret", csr),
+    )
+    .await
+    else {
+        panic!("login refused");
+    };
+    id.set_certificate(cert_der, key).unwrap();
+
+    let (csr, key) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(
+        &mut dial(&id, &e.broker).await,
+        WatchdogRequest::RenewCert { csr_der: csr },
+    )
+    .await
+    else {
+        panic!("renewal inside the cap refused");
+    };
+    id.set_certificate(cert_der, key).unwrap();
+
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let (csr, _) = generate_csr().unwrap();
+    let late = ask(
+        &mut dial(&id, &e.broker).await,
+        WatchdogRequest::RenewCert { csr_der: csr },
+    )
+    .await;
+    assert!(
+        matches!(&late, WatchdogEvent::Denied(m) if m == nos_proto::SESSION_EXPIRED),
+        "{late:?}"
+    );
+}
+
 /// `revoke_user` locks out every IPC certificate the user was issued (the
 /// broker enforces the CRL at once), and `revoke` a daemon's, while other
 /// identities are untouched.

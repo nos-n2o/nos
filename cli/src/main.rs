@@ -320,6 +320,7 @@ async fn login(
 /// Renews the session's certificate at half its lifetime, with no password
 /// (the still-valid certificate is the proof), retrying every 30s if the
 /// watchdog can't be reached.
+// A refusal (the IPC session cap, #637) is final: say so once and stop.
 // ponytail: if renewal keeps failing until the certificate expires, commands
 // start failing with connection errors and the user restarts the shell. A
 // re-prompt for the password instead would need the prompt owned by the loop.
@@ -335,12 +336,25 @@ fn keep_certificate_fresh(
             tokio::time::sleep(next / 2).await;
             let renewed = async {
                 let (csr, key) = nos_pki::generate_csr().ok()?;
-                let issued = watchdog_client::renew(&watchdog_socket, csr).await.ok()?;
+                let issued = match watchdog_client::renew(&watchdog_socket, csr).await {
+                    Ok(issued) => issued,
+                    // The session cap (or a deleted user): retrying is pointless.
+                    Err(watchdog_client::WatchdogClientError::Denied(_)) => return Some(None),
+                    Err(_) => return None,
+                };
                 identity.set_certificate(issued.cert_der, key).ok()?;
-                Some(issued.lifetime)
+                Some(Some(issued.lifetime))
             }
             .await;
-            next = renewed.unwrap_or(RETRY);
+            let Some(renewed) = renewed else {
+                next = RETRY;
+                continue;
+            };
+            let Some(lifetime) = renewed else {
+                eprintln!("\nsession expired, run `nos` again to log in");
+                return;
+            };
+            next = lifetime;
         }
     });
 }
