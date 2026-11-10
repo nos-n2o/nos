@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use nos_proto::config_path::{
-    self, check_element_key, field_matches, find_field, key_matches, ListPosition, PathError,
+    self, check_element_key, field_matches, find_field, select_key, ListPosition, PathError,
 };
 use nos_proto::{Config, User};
 use serde::{de::DeserializeOwned, Serialize};
@@ -53,7 +53,7 @@ pub(crate) fn plan(
             top_list(
                 field,
                 &cfg.users,
-                |u, k| key_matches(&u.name, k),
+                |u, buf| buf.push_str(&u.name),
                 path,
                 value,
                 pos,
@@ -69,19 +69,13 @@ pub(crate) fn plan(
         }
         "static_routing_instances" if path.len() >= 4 && field_matches("routes", &path[2]) => {
             let instances = &cfg.static_routing_instances;
-            match instances
-                .iter()
-                .position(|s| key_matches(&s.name, &path[1]))
-            {
+            match select_key(instances, &path[1], |s, buf| buf.push_str(&s.name))? {
                 Some(i) => {
                     let name = instances[i].name.clone();
-                    let mut buf = String::new();
                     let edit = plan_list(
                         &instances[i].routes,
-                        |r, k| {
-                            buf.clear();
+                        |r, buf| {
                             let _ = write!(buf, "{}", r.subnet);
-                            key_matches(&buf, k)
                         },
                         path,
                         3,
@@ -197,7 +191,7 @@ fn plan_field<T: Serialize + DeserializeOwned>(
 fn top_list<E: Serialize + DeserializeOwned + Clone>(
     field: &str,
     items: &Vec<E>,
-    is: impl FnMut(&E, &str) -> bool,
+    key_of: impl FnMut(&E, &mut String),
     path: &[String],
     value: Option<Value>,
     pos: Option<&ListPosition>,
@@ -206,7 +200,7 @@ fn top_list<E: Serialize + DeserializeOwned + Clone>(
         return plan_field(field, items, path, value, pos).map(ListEdit::All);
     }
     let ptr = format!("/{field}/0");
-    plan_list(items, is, path, 1, value, pos, |e| wrap(field, e), &ptr)
+    plan_list(items, key_of, path, 1, value, pos, |e| wrap(field, e), &ptr)
 }
 
 /// The edit of list element `path[k]` of `items` (`is` says whether an
@@ -220,7 +214,7 @@ fn top_list<E: Serialize + DeserializeOwned + Clone>(
 )]
 fn plan_list<E: Serialize + DeserializeOwned>(
     items: &[E],
-    mut is: impl FnMut(&E, &str) -> bool,
+    mut key_of: impl FnMut(&E, &mut String),
     path: &[String],
     k: usize,
     value: Option<Value>,
@@ -229,7 +223,7 @@ fn plan_list<E: Serialize + DeserializeOwned>(
     ptr: &str,
 ) -> Result<ListEdit<E>, ConfigError> {
     let key = &path[k];
-    let own = items.iter().position(|e| is(e, key));
+    let own = select_key(items, key, &mut key_of)?;
     if path.len() > k + 1 {
         let i = own.ok_or_else(|| PathError::NotFound(path[..=k].join("/")))?;
         let mut doc = wrap(serde_json::to_value(&items[i])?);
@@ -244,7 +238,7 @@ fn plan_list<E: Serialize + DeserializeOwned>(
     check_element_key(&value, key)?;
     let at = match pos {
         None => None,
-        Some(p) => Some(position(items, &mut is, own, key, p)?),
+        Some(p) => Some(position(items, &mut key_of, own, p)?),
     };
     let value = serde_json::from_value(value)?;
     Ok(match (own, at) {
@@ -260,24 +254,20 @@ fn plan_list<E: Serialize + DeserializeOwned>(
 /// Where a positioned element lands once its own old slot (if any) is gone.
 fn position<E>(
     items: &[E],
-    is: &mut impl FnMut(&E, &str) -> bool,
+    key_of: &mut impl FnMut(&E, &mut String),
     own: Option<usize>,
-    key: &str,
     pos: &ListPosition,
 ) -> Result<usize, PathError> {
     let anchor = match pos {
         ListPosition::Before(a) | ListPosition::After(a) => {
-            if key_matches(a, key) {
+            let idx = select_key(items, a, &mut *key_of)?
+                .ok_or_else(|| PathError::NotFound(a.clone()))?;
+            if Some(idx) == own {
                 return Err(PathError::Invalid(
                     "cannot position an element relative to itself".to_string(),
                 ));
             }
-            Some(
-                items
-                    .iter()
-                    .position(|e| is(e, a))
-                    .ok_or_else(|| PathError::NotFound(a.clone()))?,
-            )
+            Some(idx)
         }
         _ => None,
     };
@@ -311,7 +301,7 @@ macro_rules! sections {
             match field {
                 $(stringify!($l) => {
                     let edit = top_list(
-                        field, &cfg.$l, |e, k| key_matches(&e.name, k), path, value, pos,
+                        field, &cfg.$l, |e, buf| buf.push_str(&e.name), path, value, pos,
                     )?;
                     Ok(Box::new(move |c: &mut Config| edit.apply(&mut c.$l)))
                 })*
@@ -325,12 +315,14 @@ macro_rules! sections {
 
         /// `{field: ...}` cut down to what `path` addresses: the section, or
         /// the one list element `path[1]` names (an empty list if none).
-        fn section_doc(cfg: &Config, field: &str, path: &[String]) -> serde_json::Result<Value> {
-            let elem = |v: Value| -> serde_json::Result<Value> { Ok(wrap(field, v)) };
+        fn section_doc(cfg: &Config, field: &str, path: &[String]) -> Result<Value, ConfigError> {
+            let elem = |v: Value| -> Result<Value, ConfigError> { Ok(wrap(field, v)) };
             match field {
                 $(stringify!($l) => match path.get(1) {
                     None => Ok(json_field(field, serde_json::to_value(&cfg.$l)?)),
-                    Some(k) => match cfg.$l.iter().find(|e| key_matches(&e.name, k)) {
+                    Some(k) => match select_key(&cfg.$l, k, |e, buf| buf.push_str(&e.name))?
+                        .map(|i| &cfg.$l[i])
+                    {
                         Some(e) => elem(serde_json::to_value(e)?),
                         None => Ok(json_field(field, Value::Array(Vec::new()))),
                     },
@@ -365,21 +357,18 @@ pub(crate) fn get(cfg: &Config, path: &[String]) -> Result<Value, ConfigError> {
         return Ok(serde_json::to_value(cfg)?);
     };
     let field = find_field(SECTIONS, seg).ok_or_else(|| PathError::NotFound(seg.clone()))?;
-    let route = (field == "static_routing_instances"
-        && path.len() >= 4
-        && field_matches("routes", &path[2]))
-    .then(|| {
-        let inst = cfg
-            .static_routing_instances
-            .iter()
-            .find(|s| key_matches(&s.name, &path[1]))?;
-        let r = inst
-            .routes
-            .iter()
-            .find(|r| key_matches(&r.subnet.to_string(), &path[3]))?;
-        Some((inst, r))
-    })
-    .flatten();
+    let mut route = None;
+    if field == "static_routing_instances" && path.len() >= 4 && field_matches("routes", &path[2]) {
+        let insts = &cfg.static_routing_instances;
+        if let Some(inst) =
+            select_key(insts, &path[1], |s, buf| buf.push_str(&s.name))?.map(|i| &insts[i])
+        {
+            route = select_key(&inst.routes, &path[3], |r, buf| {
+                let _ = write!(buf, "{}", r.subnet);
+            })?
+            .map(|i| (inst, &inst.routes[i]));
+        }
+    }
     let doc = match route {
         Some((inst, r)) => {
             let mut i = Map::new();
@@ -619,6 +608,49 @@ mod tests {
         assert_eq!(
             c.static_routing_instances[0],
             cfg.static_routing_instances[0]
+        );
+    }
+
+    #[test]
+    fn exact_key_wins_and_ambiguous_selector_fails_without_a_change() {
+        let mut cfg = start();
+        cfg.community_aliases = serde_json::from_value(json!([
+            {"name": "pga", "value": "65000:1"}, {"name": "pg-a", "value": "65000:2"}
+        ]))
+        .unwrap();
+        cfg.users = serde_json::from_value(json!([
+            {"name": "ua", "password": "$argon2id$x"}, {"name": "u-a", "password": "$argon2id$x"}
+        ]))
+        .unwrap();
+        for (seg, field) in [("community-alias", 0), ("user", 1)] {
+            let err = |sel: &str, value: Option<Value>| match plan(
+                &cfg,
+                &cfg,
+                &segs(&[seg, sel]),
+                value,
+                None,
+            ) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("{seg}/{sel} should be ambiguous"),
+            };
+            let alias = if field == 0 { "PGA" } else { "UA" };
+            let name = if field == 0 { "pg-a" } else { "u-a" };
+            assert!(err(alias, None).contains("ambiguous key"));
+            assert!(err(alias, Some(json!({"name": alias, "value": "65000:3"})))
+                .contains("ambiguous key"));
+            let c = typed(&cfg, &cfg, &segs(&[seg, name]), None, None).unwrap();
+            let left: Vec<String> = if field == 0 {
+                c.community_aliases.iter().map(|a| a.name.clone()).collect()
+            } else {
+                c.users.iter().map(|a| a.name.clone()).collect()
+            };
+            assert_eq!(left.len(), 1);
+            assert_ne!(left[0], name);
+        }
+        assert!(get(&cfg, &segs(&["community-alias", "PGA"])).is_err());
+        assert_eq!(
+            get(&cfg, &segs(&["community-alias", "pg-a"])).unwrap()["name"],
+            "pg-a"
         );
     }
 }

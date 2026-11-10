@@ -110,6 +110,58 @@ pub fn key_matches(text: &str, sel: &str) -> bool {
     text == sel || n(text).eq(n(sel))
 }
 
+/// Prefix of the [`select_key`] ambiguity message; `nos-restd` maps it to 409.
+pub const AMBIGUOUS_KEY_PREFIX: &str = "ambiguous key";
+
+/// The index of the list element `sel` selects. `key_of` writes element
+/// `e`'s key into the (cleared, reused) buffer. An element whose key equals
+/// `sel` byte for byte wins outright; otherwise a case/`-`/`_`-insensitive
+/// match ([`key_matches`]) is used only when it is the single candidate.
+///
+/// # Errors
+/// [`PathError::Invalid`] (`ambiguous key ...`) when several
+/// elements match only insensitively, naming a few of them.
+pub fn select_key<E>(
+    items: &[E],
+    sel: &str,
+    mut key_of: impl FnMut(&E, &mut String),
+) -> Result<Option<usize>, PathError> {
+    const SHOWN: usize = 4;
+    let mut buf = String::new();
+    for (i, e) in items.iter().enumerate() {
+        buf.clear();
+        key_of(e, &mut buf);
+        if buf == sel {
+            return Ok(Some(i));
+        }
+    }
+    let mut hits: Vec<String> = Vec::new();
+    let mut count = 0;
+    let mut first = None;
+    for (i, e) in items.iter().enumerate() {
+        buf.clear();
+        key_of(e, &mut buf);
+        if key_matches(&buf, sel) {
+            count += 1;
+            first.get_or_insert(i);
+            if hits.len() < SHOWN {
+                hits.push(format!("'{buf}'"));
+            }
+        }
+    }
+    match count {
+        0 => Ok(None),
+        1 => Ok(first),
+        _ => {
+            let more = if count > SHOWN { ", ..." } else { "" };
+            Err(PathError::Invalid(format!(
+                "{AMBIGUOUS_KEY_PREFIX} '{sel}': matches {}{more}",
+                hits.join(", ")
+            )))
+        }
+    }
+}
+
 /// The element-identifying field among `fields` (see [`ELEMENT_KEYS`]).
 pub fn key_field<'a>(fields: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
     let fields: Vec<&str> = fields.into_iter().collect();
@@ -135,14 +187,18 @@ fn scalar_text(v: &Value) -> Option<String> {
     }
 }
 
-fn find_element(items: &[Value], sel: &str) -> Option<usize> {
-    items.iter().position(|el| match el {
-        Value::Object(o) => element_key_field(o)
-            .and_then(|k| scalar_text(&o[k]))
-            .is_some_and(|t| key_matches(&t, sel)),
-        Value::String(s) => key_matches(s, sel),
-        Value::Number(n) => n.to_string() == sel,
-        _ => false,
+fn find_element(items: &[Value], sel: &str) -> Result<Option<usize>, PathError> {
+    // ponytail: numbers go through the insensitive pass too; harmless as no
+    // schema list holds negative numbers (the pass drops `-`).
+    select_key(items, sel, |el, buf| match el {
+        Value::Object(o) => {
+            if let Some(t) = element_key_field(o).and_then(|k| scalar_text(&o[k])) {
+                buf.push_str(&t);
+            }
+        }
+        Value::String(s) => buf.push_str(s),
+        Value::Number(n) => buf.push_str(&n.to_string()),
+        _ => {}
     })
 }
 
@@ -164,7 +220,7 @@ fn resolve(root: &Value, path: &[String]) -> Result<Located, PathError> {
         steps.push(Step::Key(key));
         i += 1;
         if let (Value::Array(items), true) = (cur, i < path.len()) {
-            match find_element(items, &path[i]) {
+            match find_element(items, &path[i])? {
                 Some(idx) => {
                     cur = &items[idx];
                     steps.push(Step::Index(idx));
@@ -286,16 +342,16 @@ pub fn set_at(
         }
         return Ok(());
     };
-    let own_key = &path[path.len() - 1];
     let anchor = match position {
         ListPosition::Before(a) | ListPosition::After(a) => {
-            if key_matches(a, own_key) {
+            // Resolve before mutating: an unknown or ambiguous anchor leaves the list as it was.
+            let idx = find_element(items, a)?.ok_or_else(|| PathError::NotFound(a.clone()))?;
+            if Some(idx) == own {
                 return Err(PathError::Invalid(
                     "cannot position an element relative to itself".to_string(),
                 ));
             }
-            // Resolve before mutating: an unknown anchor leaves the list as it was.
-            Some(find_element(items, a).ok_or_else(|| PathError::NotFound(a.clone()))?)
+            Some(idx)
         }
         _ => None,
     };
@@ -398,6 +454,61 @@ mod tests {
             "admin": {"keys": [{"label": "k1", "secret": "s"}]},
             "routing_tables": [{"name": "rt1", "redistribute": [{"from": "Static", "to": "Ospf"}]}],
         })
+    }
+
+    #[test]
+    fn exact_key_wins_and_ambiguous_fallback_is_an_error() {
+        let two =
+            || json!({"l": [{"name": "pga"}, {"name": "pg-a"}], "ss": ["x-y", "xy"], "n": [1, 2]});
+        // `l` has no ELEMENT_KEYS issue: lists are found by field name.
+        let d = two();
+        let name = |v: &Value| v["name"].as_str().unwrap().to_string();
+        assert_eq!(name(get(&d, &p("l/pg-a")).unwrap()), "pg-a");
+        assert_eq!(name(get(&d, &p("l/pga")).unwrap()), "pga");
+        for sel in ["PGA", "pg_a"] {
+            let e = get(&d, &p(&format!("l/{sel}"))).unwrap_err();
+            assert!(e.to_string().contains(AMBIGUOUS_KEY_PREFIX), "{e}");
+            assert!(e.to_string().contains("'pga', 'pg-a'"), "{e}");
+            let mut m = two();
+            assert!(set(&mut m, &p(&format!("l/{sel}")), json!({"name": sel})).is_err());
+            assert!(remove(&mut m, &p(&format!("l/{sel}"))).is_err());
+            assert_eq!(m, d, "ambiguous edits change nothing");
+        }
+        let mut m = two();
+        remove(&mut m, &p("l/pg-a")).unwrap();
+        assert_eq!(m["l"], json!([{"name": "pga"}]));
+        assert_eq!(name(get(&m, &p("l/PG-A")).unwrap()), "pga");
+        // Anchors use the same selector.
+        let mut m = json!({"l": [{"name": "pga"}, {"name": "pg-a"}, {"name": "z"}]});
+        let before = m.clone();
+        let anchor = |a: &str| Some(ListPosition::Before(a.to_string()));
+        assert!(set_at(
+            &mut m,
+            &p("l/z"),
+            json!({"name": "z"}),
+            anchor("PGA").as_ref()
+        )
+        .is_err());
+        assert_eq!(m, before);
+        set_at(
+            &mut m,
+            &p("l/z"),
+            json!({"name": "z"}),
+            anchor("pg-a").as_ref(),
+        )
+        .unwrap();
+        assert_eq!(m["l"][1]["name"], "z");
+        assert!(set_at(
+            &mut m,
+            &p("l/z"),
+            json!({"name": "z"}),
+            anchor("z").as_ref()
+        )
+        .is_err());
+        // Scalar lists and numbers.
+        assert_eq!(get(&d, &p("ss/x-y")).unwrap(), "x-y");
+        assert!(get(&d, &p("ss/X_Y")).is_err());
+        assert_eq!(get(&d, &p("n/2")).unwrap(), 2);
     }
 
     #[test]

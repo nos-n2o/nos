@@ -206,6 +206,8 @@ fn emit(out: &mut Map<String, Value>, path: &str, schema: &Value, what: &str, el
     let body = json!({ "required": true, "content": { "application/json": { "schema": schema } } });
     let not_found = json!({ "description": "no such transaction or config path",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } });
+    let conflict = json!({ "description": "the key matches several list elements and none exactly",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } });
     let ok = |desc: &str| {
         json!({ "description": desc,
         "content": { "application/json": { "schema": schema } } })
@@ -215,14 +217,14 @@ fn emit(out: &mut Map<String, Value>, path: &str, schema: &Value, what: &str, el
         json!({
             "parameters": parameters(path),
             "get": { "tags": ["transactions"], "summary": format!("Read: {what}"),
-                     "responses": { "200": ok("the current value"), "404": not_found } },
+                     "responses": { "200": ok("the current value"), "404": not_found, "409": conflict } },
             "put": { "tags": ["transactions"], "summary": format!("Set: {what}"),
                      "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
                      "parameters": if element { position_parameters() } else { Vec::new() },
                      "requestBody": body,
-                     "responses": { "200": ok("the stored value"), "400": { "description": "invalid body" }, "404": not_found } },
+                     "responses": { "200": ok("the stored value"), "400": { "description": "invalid body" }, "404": not_found, "409": conflict } },
             "delete": { "tags": ["transactions"], "summary": format!("Remove: {what}"),
-                        "responses": { "204": { "description": "removed" }, "404": not_found } },
+                        "responses": { "204": { "description": "removed" }, "404": not_found, "409": conflict } },
         }),
     );
 }
