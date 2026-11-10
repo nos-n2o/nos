@@ -114,6 +114,20 @@ pub async fn login(
     issued(ask(watchdog_socket, request).await?)
 }
 
+/// Trades a single-use login ticket (from PAM, #990) for a certificate on the
+/// key behind `csr_der`. A refused ticket is `Denied`; never logs the ticket.
+pub async fn redeem(
+    watchdog_socket: &Path,
+    ticket: &[u8],
+    csr_der: Vec<u8>,
+) -> Result<Issued, WatchdogClientError> {
+    let request = WatchdogRequest::RedeemTicket {
+        ticket: ticket.to_vec(),
+        csr_der,
+    };
+    issued(ask(watchdog_socket, request).await?)
+}
+
 /// Trades the current (still valid) certificate for a fresh one — no password.
 pub async fn renew(
     watchdog_socket: &Path,

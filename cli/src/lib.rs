@@ -13,6 +13,7 @@ pub mod interface_client;
 pub mod lacp_client;
 pub mod lldp_client;
 pub mod log_client;
+pub mod login;
 pub mod ospf_client;
 pub mod ospfv3_client;
 pub mod rib_client;

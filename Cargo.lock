@@ -1825,6 +1825,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "zeroize",
 ]
 
 [[package]]

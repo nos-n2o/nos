@@ -13,6 +13,7 @@ use nos_cli::actions::{
 use nos_cli::command::Command;
 use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
+use nos_cli::login;
 use nos_cli::session::{self, Mode};
 use nos_cli::{client, watchdog_client};
 use nos_pki::Identity;
@@ -36,6 +37,24 @@ struct Args {
     /// watchdog to this shell and grants nothing.
     #[arg(long, default_value = nos_proto::DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
+
+    /// Refused: sshd runs `ssh host cmd` as `<shell> -c cmd`; use the REST API.
+    #[arg(short = 'c', hide = true)]
+    command: Option<String>,
+}
+
+/// `nos -c <cmd>` is refused in every mode (checked before any watchdog contact).
+fn refuse_command(args: &Args) -> Option<&'static str> {
+    args.command.is_some().then_some(
+        "nos: running a command is not supported; use the API (REST) or an interactive session",
+    )
+}
+
+/// The PAM login ticket (`NOS_LOGIN_TICKET`), if sshd's session carries one.
+// ponytail: the variable stays in this process's environment (removing it needs
+// `unsafe`); `nos` spawns no child but the `$EDITOR` one, which #1000 removes.
+fn login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    login::parse_ticket(std::env::var_os(nos_proto::LOGIN_TICKET_ENV))
 }
 
 /// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
@@ -147,6 +166,14 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(msg) = refuse_command(&args) {
+        eprintln!("{msg}");
+        std::process::exit(2);
+    }
+    run(args, login_ticket()).await
+}
+
+async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow::Result<()> {
     let mut mode = Mode::Operational;
     let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -160,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
     nos_pki::install(identity.clone());
-    login(&args.watchdog_socket, &identity).await?;
+    login(&args.watchdog_socket, &identity, ticket).await?;
     let config_socket = resolve_config_socket(&args.watchdog_socket).await;
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
@@ -245,7 +272,24 @@ const LOGIN_ATTEMPTS: usize = 3;
 /// unreachable there is nobody to authenticate to, so the shell refuses to
 /// start. The password check no longer happens in this process at all, and the
 /// password hashes never leave the daemons.
-async fn login(watchdog_socket: &Path, identity: &Identity) -> anyhow::Result<()> {
+async fn login(
+    watchdog_socket: &Path,
+    identity: &Identity,
+    ticket: Option<zeroize::Zeroizing<Vec<u8>>>,
+) -> anyhow::Result<()> {
+    // SSH login shell: PAM already verified the password; a refused or
+    // missing ticket falls back to the prompt, an unreachable watchdog fails.
+    if let Some(ticket) = ticket
+        && let Some((issued, key)) = login::redeem_ticket(watchdog_socket, &ticket).await?
+    {
+        identity.set_certificate(issued.cert_der, key)?;
+        keep_certificate_fresh(
+            watchdog_socket.to_path_buf(),
+            identity.clone(),
+            issued.lifetime,
+        );
+        return Ok(());
+    }
     for _ in 0..LOGIN_ATTEMPTS {
         print!("login: ");
         std::io::stdout().flush()?;
@@ -371,5 +415,12 @@ mod tests {
             PathBuf::from(nos_proto::DEFAULT_WATCHDOG_SOCKET)
         );
         let _ = keybindings();
+    }
+
+    #[test]
+    fn dash_c_is_refused() {
+        let a = Args::try_parse_from(["nos", "-c", "show version"]).unwrap();
+        assert!(refuse_command(&a).unwrap().contains("not supported"));
+        assert!(refuse_command(&Args::try_parse_from(["nos"]).unwrap()).is_none());
     }
 }

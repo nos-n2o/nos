@@ -15,6 +15,7 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 
 - A caller that holds the password but cannot (or should not) hold the key, such as PAM during an ssh login, trades it for a ticket with `WatchdogRequest::LoginTicket`; `nos`, started later, redeems it (`RedeemTicket`) for a certificate on its own key. No certificate is issued until redemption, and the redeem time is the session start (#637).
 - The ticket travels in the `NOS_LOGIN_TICKET` environment variable (unpadded base64url). Accepted exposure: it is readable through `/proc/<pid>/environ` by the same uid and root for at most 60 s, once.
+- `nos` (#991) redeems the ticket whenever the variable is set, decoding it into a zeroizing buffer. It does not unset the variable: that needs `unsafe` (`remove_var`), and the kernel's `/proc/<pid>/environ` would show the initial block anyway. Single use plus the 60 s TTL is the mitigation, and per-user uids (#987) would remove the same-uid exposure. The one child `nos` can spawn (`$EDITOR`) inherits it until #1000 removes that launch. A refused ticket falls back to the prompt; an unreachable watchdog fails closed. `nos -c <cmd>` is refused in every mode.
 
 ## Secrets and the admin keystore (#383, #507)
 
