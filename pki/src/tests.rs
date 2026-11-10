@@ -853,3 +853,23 @@ async fn tls12_client_is_refused_on_ipc_and_rest() {
     assert!(res.is_err());
     assert!(srv.await.unwrap().is_err());
 }
+
+/// The server learns *which* certificate the client presented (#637).
+#[tokio::test]
+async fn peer_serial_is_the_presented_leaf_serial() {
+    let pki = TestPki::new();
+    let (_g, path) = sock("h.sock");
+    let l = pki.identity("ribd", "rt1").listen(&path).unwrap();
+    let bundle = pki
+        .ca()
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let client = crate::Identity::from_bundle(&bundle).unwrap();
+    let expect = PeerId::new("ribd", "rt1");
+    let (c, s) = tokio::join!(client.connect(&path, &expect), async {
+        l.accept().await.unwrap().handshake().await.unwrap()
+    });
+    let want = crate::ca::Serial::of(&bundle.cert).unwrap().to_string();
+    assert_eq!(s.0.peer_serial(), Some(want));
+    assert!(c.unwrap().peer_serial().is_some());
+}

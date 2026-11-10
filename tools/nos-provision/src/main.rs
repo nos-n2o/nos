@@ -65,6 +65,13 @@ struct Cli {
     /// list in the CRL when the user's password changes.
     #[arg(long, requires = "login_user", conflicts_with_all = ["pki_cert_in", "pki_cert_out"])]
     login_burst: Option<usize>,
+
+    /// Test fixture (`nos-e2e pki-rotation`, #637): present the
+    /// `--pki-cert-in` certificate to the watchdog's `RenewCert`, overwrite
+    /// that file with the renewed certificate and exit, without touching
+    /// `nos-configd`. A refusal exits non-zero and prints its reason.
+    #[arg(long, requires = "pki_cert_in")]
+    renew_probe: bool,
 }
 
 /// Logins in flight at once: the broker verifies two passwords at a time
@@ -169,11 +176,43 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
     }
 }
 
+/// One `RenewCert` over a connection that presents the saved certificate.
+async fn renew_probe(cli: &Cli) -> anyhow::Result<()> {
+    log_in(cli).await?;
+    let path = cli.pki_cert_in.as_ref().context("--pki-cert-in")?;
+    let (csr, key) = nos_pki::generate_csr()?;
+    let stream = nos_pki::connect(&cli.watchdog_socket, Role::Watchdog, "").await?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default());
+    writer
+        .send(WatchdogRequest::RenewCert { csr_der: csr })
+        .await?;
+    match reader.next().await {
+        Some(Ok(WatchdogEvent::Issued { cert_der, .. })) => {
+            let saved = Bundle {
+                ca: Vec::new(),
+                cert: cert_der,
+                key,
+                crl: Vec::new(),
+            };
+            std::fs::write(path, saved.encode())?;
+            println!("renewed");
+            Ok(())
+        }
+        Some(Ok(WatchdogEvent::Denied(reason))) => bail!("renew refused: {reason}"),
+        other => bail!("unexpected reply to renew: {other:?}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(n) = cli.login_burst {
         return burst(&cli, n).await;
+    }
+    if cli.renew_probe {
+        return renew_probe(&cli).await;
     }
     let args = &cli.args;
     let config_socket = args

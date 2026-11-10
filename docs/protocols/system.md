@@ -256,6 +256,7 @@ services:
 ```
 
 - `--pki-rest-session-max=<seconds>` (default 604800, 7 days): how long renewals can keep one REST login alive. Past it, `POST /v1/renew` answers 401 and the client logs in again with its password.
+- `--pki-ipc-session-max=<seconds>` (default 86400, 24 hours): how long renewals can keep one `nos`/`nos-provision` login alive. Past it, renewal is refused (`session expired`) and the user logs in again with the password.
 - `--pki-user-lifetime=<seconds>` (default 28800, 8 hours): how long a user certificate is valid, for the shell and for REST clients alike. Clients renew at half this time.
 - `--pki-leaf-lifetime=<seconds>` (default 86400) and `--pki-rotate-every=<seconds>` (default 28800): lifetime of the certificates the router's own services use between themselves, and how often they are renewed. The second must be shorter than the first. When a service stops or restarts (a crash, or its object removed from the configuration), its certificates are revoked at once rather than left valid until they expire.
 - `--pki-dir=<dir>` (default `/run/nos/pki`): where `ca.crt` and `rest-ca.crt` are published. If you change it, start the shell with `nos --pki-ca <dir>/ca.crt`.

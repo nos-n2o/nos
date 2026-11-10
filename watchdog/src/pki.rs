@@ -59,7 +59,10 @@ pub struct Pki {
     /// The IPC CA's current CRL (DER), for every child's identity pusher.
     crl: watch::Sender<Vec<u8>>,
     /// Every IPC certificate issued to each user, so they can be revoked.
-    users: Mutex<HashMap<String, Vec<Serial>>>,
+    /// Each with the time of the password login it descends from (#637).
+    users: Mutex<HashMap<String, Vec<(Serial, Instant)>>>,
+    /// Seconds an IPC login may be extended by renewals (`set_ipc_session_max`).
+    ipc_session_max: AtomicU64,
     /// Every live REST certificate (hex serial) and the login it belongs to.
     rest_sessions: Mutex<HashMap<String, RestSession>>,
     /// Seconds a REST login may be extended by renewals (`set_rest_session_max`).
@@ -78,6 +81,9 @@ struct RestSession {
     started: Instant,
     cert: Serial,
 }
+
+/// Default for `--pki-ipc-session-max`: 24 hours.
+pub const IPC_SESSION_MAX: Duration = Duration::from_hours(24);
 
 /// Default for `--pki-rest-session-max`: 7 days.
 pub const REST_SESSION_MAX: Duration = Duration::from_hours(168);
@@ -122,6 +128,7 @@ impl Pki {
             rotate_every,
             user_lifetime,
             users: Mutex::default(),
+            ipc_session_max: AtomicU64::new(IPC_SESSION_MAX.as_secs()),
             rest_sessions: Mutex::default(),
             rest_session_max: AtomicU64::new(REST_SESSION_MAX.as_secs()),
             rehashed: Mutex::default(),
@@ -137,15 +144,33 @@ impl Pki {
 
     /// Certifies the public key in a client's CSR as `user`. Returns the leaf
     /// certificate DER; the client keeps its private key.
-    pub fn sign_user(&self, csr_der: &[u8], user: &str) -> io::Result<Vec<u8>> {
+    /// `started` is the password login behind it; renewals pass it on.
+    pub fn sign_user(&self, csr_der: &[u8], user: &str, started: Instant) -> io::Result<Vec<u8>> {
         let cert = self
             .ca
             .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)?;
         let mut users = lock(&self.users);
         let issued = users.entry(user.to_string()).or_default();
-        issued.retain(|s| !s.expired());
-        issued.push(Serial::of(&cert)?);
+        issued.retain(|(s, _)| !s.expired());
+        issued.push((Serial::of(&cert)?, started));
         Ok(cert)
+    }
+
+    /// Caps how long renewals may extend one IPC password login.
+    pub fn set_ipc_session_max(&self, max: Duration) {
+        self.ipc_session_max.store(max.as_secs(), Ordering::Relaxed);
+    }
+
+    /// The login time behind the IPC certificate `serial` of `user`, if it is
+    /// still live: issued to that user, unexpired and within the session cap.
+    pub fn ipc_session(&self, serial: &str, user: &str) -> Option<Instant> {
+        let max = Duration::from_secs(self.ipc_session_max.load(Ordering::Relaxed));
+        lock(&self.users)
+            .get(user)?
+            .iter()
+            .find(|(s, _)| s.to_string() == serial)
+            .filter(|(s, started)| !s.expired() && started.elapsed() < max)
+            .map(|(_, started)| *started)
     }
 
     /// The current IPC CRL, and every change to it from now on.
@@ -180,7 +205,12 @@ impl Pki {
     pub fn revoke_user(&self, user: &str) {
         lock(&self.rest_sessions).retain(|_, s| s.user != user);
         self.tickets.forget_user(user);
-        let serials = lock(&self.users).remove(user).unwrap_or_default();
+        let serials = lock(&self.users)
+            .remove(user)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
         self.revoke(Role::User, user, serials);
     }
 
@@ -388,7 +418,8 @@ mod tests {
     }
 
     fn issue(pki: &Pki, user: &str) {
-        pki.sign_user(&generate_csr().unwrap().0, user).unwrap();
+        pki.sign_user(&generate_csr().unwrap().0, user, Instant::now())
+            .unwrap();
     }
 
     fn diff(name: &str, status: DiffStatus) -> SectionDiff {
@@ -472,6 +503,31 @@ mod tests {
 
         pki.set_rest_session_max(Duration::ZERO);
         assert!(pki.rest_session(&b, "bob").is_none(), "past the cap");
+    }
+
+    #[test]
+    fn ipc_sessions_follow_revocation_and_the_cap() {
+        let (_tmp, pki) = pki();
+        let sign = |user: &str, started| {
+            let cert = pki
+                .sign_user(&generate_csr().unwrap().0, user, started)
+                .unwrap();
+            Serial::of(&cert).unwrap().to_string()
+        };
+        let t0 = Instant::now();
+        let (a, b) = (sign("alice", t0), sign("bob", Instant::now()));
+        assert_eq!(pki.ipc_session(&a, "alice"), Some(t0));
+        assert!(pki.ipc_session(&a, "bob").is_none(), "wrong user");
+        assert!(pki.ipc_session("nope", "alice").is_none());
+        // A renewed certificate inherits the login time.
+        let a2 = sign("alice", t0);
+        assert_eq!(pki.ipc_session(&a2, "alice"), Some(t0));
+
+        pki.revoke_user("alice");
+        assert!(pki.ipc_session(&a, "alice").is_none());
+        assert!(pki.ipc_session(&b, "bob").is_some());
+        pki.set_ipc_session_max(Duration::ZERO);
+        assert!(pki.ipc_session(&b, "bob").is_none(), "past the cap");
     }
 
     #[tokio::test]

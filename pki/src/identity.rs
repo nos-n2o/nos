@@ -150,6 +150,18 @@ pub struct Negotiated {
 }
 
 impl Stream {
+    /// The verified peer leaf's serial (hex, as `Serial`'s `Display`), so a
+    /// server can tell *which* certificate a caller presented (#637).
+    pub fn peer_serial(&self) -> Option<String> {
+        let certs = match &self.0 {
+            TlsStream::Client(c) => c.get_ref().1.peer_certificates(),
+            TlsStream::Server(c) => c.get_ref().1.peer_certificates(),
+        };
+        crate::ca::Serial::of(certs?.first()?)
+            .ok()
+            .map(|s| s.to_string())
+    }
+
     /// What the finished handshake settled on (version, key exchange, suite, peer key algorithm).
     pub fn negotiated(&self) -> Negotiated {
         let (kx, certs) = match &self.0 {

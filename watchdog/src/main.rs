@@ -263,6 +263,11 @@ struct Args {
     /// renewals; after that the client logs in with its password again.
     #[arg(long, default_value_t = 7 * 24 * 3600)]
     pki_rest_session_max: u64,
+
+    /// Seconds an IPC login (`nos` shell, `nos-provision`) may be extended by
+    /// certificate renewals; after that the client logs in with its password.
+    #[arg(long, default_value_t = 24 * 3600)]
+    pki_ipc_session_max: u64,
 }
 
 #[tokio::main]
@@ -279,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .context("starting the ipc certificate authority")?;
     pki.set_rest_session_max(Duration::from_secs(args.pki_rest_session_max));
+    pki.set_ipc_session_max(Duration::from_secs(args.pki_ipc_session_max));
     tracing_subscriber::registry()
         // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
         // unfiltered behavior this process had before, so an unset
@@ -698,6 +704,7 @@ mod tests {
             (86_400, 28_800, 28_800)
         );
         assert_eq!(a.pki_rest_session_max, 604_800);
+        assert_eq!(a.pki_ipc_session_max, 86_400);
         assert_eq!(a.child_gid, None);
         assert_eq!(a.state_dir, PathBuf::from("/var/lib/nos"));
         let a = Args::try_parse_from(["x", "--child-gid", "992"]).unwrap();

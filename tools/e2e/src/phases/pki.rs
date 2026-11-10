@@ -351,8 +351,11 @@ const PUSHED_CRL: &str = "identity pushed process=[^ ]* crl_bytes=[1-9]";
 pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     let lifetime = format!("--pki-leaf-lifetime={PKI_LEAF_LIFETIME_SECS}");
     let rotate = format!("--pki-rotate-every={PKI_ROTATE_EVERY_SECS}");
-    w.up(&[&lifetime, &rotate]).await?;
+    let cap = format!("--pki-ipc-session-max={PKI_IPC_SESSION_MAX_SECS}");
+    w.up(&[&lifetime, &rotate, &cap]).await?;
     bgp::established(w).await?;
+    let logged_in = std::time::Instant::now();
+    ipc_session_cap_start(w).await?;
 
     let a = w.a()?;
     a.wait_new("ipc identity rotated", 0, PKI_ROTATE_EVERY_SECS * 3)
@@ -402,7 +405,58 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     // kernel — the whole path, on rotated identities.
     let a = w.a()?;
     a.wait_new(snapshot, snapshots, 60).await?;
-    a.wait_new("added route", kernel_routes, 60).await
+    a.wait_new("added route", kernel_routes, 60).await?;
+    ipc_session_cap_end(w, logged_in).await
+}
+
+/// Where the cap check keeps the shell user's certificate.
+const CAPPED_CERT: &str = "/tmp/capped-user.identity";
+const CAP_REFUSED: &str = "renewal refused, ipc certificate unknown or past the session cap";
+
+/// #637: log in, and renew inside the cap (the renewed certificate inherits
+/// the login time).
+async fn ipc_session_cap_start(w: &World) -> anyhow::Result<()> {
+    let (code, out) = run_provision(
+        w,
+        &[
+            "--login-user",
+            E2E_USER,
+            "--login-password",
+            E2E_PASSWORD,
+            "--pki-cert-out",
+            CAPPED_CERT,
+        ],
+    )
+    .await?;
+    if code != 0 {
+        bail!("login for the session-cap check failed: exit {code}: {out}");
+    }
+    let (code, out) = run_provision(w, &["--pki-cert-in", CAPPED_CERT, "--renew-probe"]).await?;
+    if code != 0 || !out.contains("renewed") {
+        bail!("a renewal inside the session cap was refused: exit {code}: {out}");
+    }
+    Ok(())
+}
+
+/// #637: once the cap since the login has passed, renewing the (already
+/// renewed) certificate is refused, and a fresh login starts a new session.
+async fn ipc_session_cap_end(w: &World, logged_in: std::time::Instant) -> anyhow::Result<()> {
+    let cap = std::time::Duration::from_secs(PKI_IPC_SESSION_MAX_SECS + 2);
+    if let Some(left) = cap.checked_sub(logged_in.elapsed()) {
+        tokio::time::sleep(left).await;
+    }
+    let a = w.a()?;
+    let refused = a.count(CAP_REFUSED);
+    let (code, out) = run_provision(w, &["--pki-cert-in", CAPPED_CERT, "--renew-probe"]).await?;
+    if code == 0 || !out.contains("renew refused") {
+        bail!("a renewal past the IPC session cap must be refused, got exit {code}: {out}");
+    }
+    a.wait_new(CAP_REFUSED, refused, 15).await?;
+    let (code, out) = provision_as(w, E2E_PASSWORD).await?;
+    if code != 0 {
+        bail!("a fresh login after the cap must work: exit {code}: {out}");
+    }
+    Ok(())
 }
 
 /// A throwaway user for `pki_crl` (router-a only).
