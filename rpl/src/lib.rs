@@ -236,19 +236,82 @@ mod tests {
         });
     }
 
+    type Case<'a> = (&'a str, usize, Box<dyn Fn(usize) -> String>);
+
+    /// For each construct, the largest `k` that compiles is exactly `max`
+    /// (depth 64 compiles) and `max + 1` fails with the nesting error.
     #[test]
-    fn depth_limit_is_exact_for_not() {
-        // `not` chain: the if is nest 1, `1 == 1` is depth 3 (two operands + node... leaf 1, cmp 2),
-        // so k nots reach 2 + k + nest.
-        let ok = |k: usize| {
-            compiles(&format!(
-                "if {}1 == 1:\n  accept\nelse:\n  reject\n",
-                "not ".repeat(k)
-            ))
-        };
-        let max = (1..64).take_while(|&k| ok(k).is_ok()).last().unwrap();
-        assert!(ok(max).is_ok() && ok(max + 1).is_err());
-        assert!(max > 50);
+    fn depth_limit_is_exact_per_construct() {
+        small_stack(|| {
+            let cond = |c: String| format!("if {c}:\n  accept\nelse:\n  reject\n");
+            let chain = |op: &str, n: usize| vec!["1 == 1"; n].join(&format!(" {op} "));
+            let nest = |k: usize| {
+                let mut src = String::new();
+                for i in 0..k {
+                    src.push_str(&"  ".repeat(i));
+                    src.push_str("if 1 == 1:\n");
+                }
+                src.push_str(&"  ".repeat(k));
+                src.push_str("accept\n");
+                src.push_str("accept\n");
+                src
+            };
+            let cases: Vec<Case> = vec![
+                // `1 == 1` is depth 2, each `not`/paren adds 1.
+                (
+                    "not",
+                    62,
+                    Box::new(move |k| cond(format!("{}1 == 1", "not ".repeat(k)))),
+                ),
+                (
+                    "parens",
+                    62,
+                    Box::new(move |k| {
+                        format!(
+                            "if {}1 == 1{}:\n  accept\nelse:\n  reject\n",
+                            "(".repeat(k),
+                            ")".repeat(k)
+                        )
+                    }),
+                ),
+                // k comparisons joined by `or`/`and`: depth k + 1.
+                (
+                    "or",
+                    63,
+                    Box::new(move |k| {
+                        format!("if {}:\n  accept\nelse:\n  reject\n", chain("or", k))
+                    }),
+                ),
+                (
+                    "and",
+                    63,
+                    Box::new(move |k| {
+                        format!("if {}:\n  accept\nelse:\n  reject\n", chain("and", k))
+                    }),
+                ),
+                // k leaves joined by `+`: depth k.
+                (
+                    "+",
+                    64,
+                    Box::new(|k| {
+                        format!(
+                            "set this.bgp.local_pref = {}\naccept\n",
+                            vec!["1"; k].join(" + ")
+                        )
+                    }),
+                ),
+                // k nested `if` suites: the innermost condition sits at nest k - 1 with depth 2.
+                ("if", 63, Box::new(nest)),
+            ];
+            for (name, max, build) in cases {
+                let r = compiles(&build(max));
+                assert!(r.is_ok(), "{name} at {max}: {r:?}");
+                let err = compiles(&build(max + 1)).unwrap_err();
+                assert!(err.message.contains("nesting"), "{name} at {}", max + 1);
+            }
+            // Comparisons add no chain depth: `a == b` is one node.
+            assert!(compiles(&cond("1 == 1".into())).is_ok());
+        });
     }
 
     #[test]
