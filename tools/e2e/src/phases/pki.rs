@@ -368,6 +368,7 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
         "waiting {wait}s: every certificate the daemons started with expires in {PKI_LEAF_LIFETIME_SECS}s"
     ));
     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    ipc_session_cap_end(w, logged_in).await?;
 
     // nos-bgpd is long-lived, so its handshake with the *restarted* nos-ribd
     // uses whatever certificate it holds now — which is only valid if the
@@ -405,8 +406,7 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     // kernel — the whole path, on rotated identities.
     let a = w.a()?;
     a.wait_new(snapshot, snapshots, 60).await?;
-    a.wait_new("added route", kernel_routes, 60).await?;
-    ipc_session_cap_end(w, logged_in).await
+    a.wait_new("added route", kernel_routes, 60).await
 }
 
 /// Where the cap check keeps the shell user's certificate.
