@@ -8,6 +8,8 @@ pub enum ApiError {
     /// No valid client certificate, or a login that failed.
     Unauthorized(String),
     NotFound(String),
+    /// A list key selector matches several elements and none exactly.
+    Conflict(String),
     /// RFC 6585 §4: too many failed logins; try again in `retry_after_secs`.
     TooManyRequests {
         detail: String,
@@ -37,6 +39,11 @@ impl ApiError {
             || msg.starts_with("config path: no such config path")
         {
             ApiError::NotFound(msg)
+        } else if msg.starts_with(&format!(
+            "config path: {}",
+            nos_proto::config_path::AMBIGUOUS_KEY_PREFIX
+        )) {
+            ApiError::Conflict(msg)
         } else if msg.starts_with("validation failed") {
             ApiError::Unprocessable(msg)
         } else if msg.starts_with("too many transactions") {
@@ -67,6 +74,7 @@ impl IntoResponse for ApiError {
                 return resp;
             }
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::TooManyRequests {
                 detail,
                 retry_after_secs,
@@ -210,6 +218,22 @@ mod tests {
         let st = r.status().as_u16();
         let b = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
         (st, String::from_utf8(b.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn ambiguous_key_is_409() {
+        let e = nos_config::error::ConfigError::from(
+            nos_proto::config_path::select_key(
+                &["pga", "pg-a"],
+                "PGA",
+                |e: &&str, b: &mut String| b.push_str(e),
+            )
+            .unwrap_err(),
+        );
+        assert!(matches!(
+            ApiError::from_config(e.to_string()),
+            ApiError::Conflict(_)
+        ));
     }
 
     #[test]

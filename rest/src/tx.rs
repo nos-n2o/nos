@@ -106,7 +106,10 @@ fn snapshot(ev: Event) -> ApiResult<TransactionSnapshot> {
 fn subsection(snap: &TransactionSnapshot, path: &[String]) -> ApiResult<Value> {
     config_path::get(&snap.config.redacted(), path)
         .cloned()
-        .map_err(|e| ApiError::NotFound(e.to_string()))
+        .map_err(|e| match e {
+            config_path::PathError::Invalid(m) => ApiError::Conflict(m),
+            e @ config_path::PathError::NotFound(_) => ApiError::NotFound(e.to_string()),
+        })
 }
 
 /// The snapshot as JSON with its config redacted: secrets never leave as clear text.

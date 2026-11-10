@@ -397,6 +397,48 @@ async fn put_with_a_position_query_inserts_or_moves_a_list_element() {
 }
 
 #[tokio::test]
+async fn an_ambiguous_list_key_is_409_and_the_exact_key_wins() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/t1?base=blank", None).await;
+    // A list PUT carries both: a keyed PUT of `pg-a` would resolve `pga` (the
+    // single insensitive candidate) and replace it.
+    let both = json!([bgp_instance("pga", 1), bgp_instance("pg-a", 2)]);
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t1/bgp-instance",
+        Some(both),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let base = "/v1/transactions/t1/bgp-instance";
+    let (s, v) = send(app, Method::GET, &format!("{base}/pg-a"), None).await;
+    assert_eq!((s, v["name"].as_str()), (StatusCode::OK, Some("pg-a")));
+    let (s, v) = send(app, Method::GET, &format!("{base}/PGA"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(
+        v["detail"].as_str().unwrap().contains("ambiguous key"),
+        "{v}"
+    );
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        &format!("{base}/PGA"),
+        Some(bgp_instance("PGA", 1)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = send(app, Method::DELETE, &format!("{base}/PGA"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = send(app, Method::DELETE, &format!("{base}/pg-a"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, v) = send(app, Method::GET, base, None).await;
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["name"], "pga");
+}
+
+#[tokio::test]
 async fn save_writes_the_running_config_to_disk() {
     let f = fixture_with(vec![], Some("config.yaml")).await;
     let app = &f.app;
