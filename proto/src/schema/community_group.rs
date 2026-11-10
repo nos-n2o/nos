@@ -1,7 +1,7 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::community_alias::valid_community_value;
 use super::Config;
@@ -21,7 +21,7 @@ pub struct CommunityGroup {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.community_groups, |g| &g.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.community_groups, |g| &g.name))
     )]
     #[cli(key)]
     /// Group name, 1 to 64 characters (letters, digits, `_`, `-`), unique among groups.

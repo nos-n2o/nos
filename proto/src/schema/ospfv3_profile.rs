@@ -128,17 +128,14 @@ fn valid_cost(cost: Option<u16>) -> garde::Result {
 /// Profile names are unique across the whole config — mirrors
 /// `ospf_profile::unique_name` exactly, over `ospfv3_instances` instead.
 fn unique_name(name: &str, ctx: &Config) -> garde::Result {
-    let count = ctx
-        .ospfv3_instances
-        .iter()
-        .flat_map(|i| &i.areas)
-        .flat_map(|a| &a.profiles)
-        .filter(|p| p.name == name)
-        .count();
-    if count > 1 {
-        return Err(garde::Error::new("must be unique"));
-    }
-    Ok(())
+    crate::validators::unique_name_in(
+        name,
+        ctx.ospfv3_instances
+            .iter()
+            .flat_map(|i| &i.areas)
+            .flat_map(|a| &a.profiles)
+            .map(|x| x.name.as_str()),
+    )
 }
 
 /// Mirrors `ospf_profile::valid_profile_timers` exactly.

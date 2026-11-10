@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::{Config, SourceAddress};
 use nos_proto_derive::Cli;
@@ -226,7 +226,7 @@ pub struct RoutingTable {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.routing_tables, |t| &t.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.routing_tables, |t| &t.name))
     )]
     #[cli(key)]
     /// Table name, 1 to 64 characters; also the VRF name.

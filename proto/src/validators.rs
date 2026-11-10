@@ -1,15 +1,54 @@
-/// Returns a `garde` error if `value` appears more than once in `items`
-/// as identified by the `key` extractor.
-///
-/// Reusable for any list in the config tree where elements must be unique.
-pub fn unique_in<T, K>(value: &K, items: &[T], key: impl Fn(&T) -> &K) -> garde::Result
-where
-    K: PartialEq,
-{
-    if items.iter().filter(|i| key(i) == value).count() > 1 {
+/// Errors when another name in `names` is a different string that selects the
+/// same list element (equal ignoring case, `-` and `_`, see
+/// [`crate::config_path::key_matches`]); the error names that sibling.
+pub fn no_normalized_collision<'a>(
+    name: &str,
+    mut names: impl Iterator<Item = &'a str>,
+) -> garde::Result {
+    match names.find(|o| *o != name && collides(o, name)) {
+        Some(other) => Err(garde::Error::new(format!(
+            "collides with '{other}': names are compared ignoring case, '-' and '_'"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `key_matches` with an ASCII byte fast path: validation compares every pair
+/// of a list, so the common (ASCII, mismatching early) case must stay cheap.
+fn collides(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        let n = |s: &str| {
+            s.bytes()
+                .filter(|c| *c != b'-' && *c != b'_')
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<Vec<u8>>()
+        };
+        // ponytail: allocates per pair; O(n^2) names per commit, fine for real lists.
+        return n(a) == n(b);
+    }
+    crate::config_path::key_matches(a, b)
+}
+
+/// `name` must appear once among `names` and collide with none of them
+/// (exact repeat: "must be unique"; normalized-only: [`no_normalized_collision`]).
+pub fn unique_name_in<'a>(
+    name: &str,
+    names: impl Iterator<Item = &'a str> + Clone,
+) -> garde::Result {
+    if names.clone().filter(|o| *o == name).count() > 1 {
         return Err(garde::Error::new("must be unique"));
     }
-    Ok(())
+    no_normalized_collision(name, names)
+}
+
+/// List-element names are unique ignoring case, `-` and `_` (the selector's
+/// rule, #633): a repeat or a collision with a sibling fails.
+pub fn unique_key_in<T>(
+    value: &(impl AsRef<str> + ?Sized),
+    items: &[T],
+    key: impl Fn(&T) -> &String,
+) -> garde::Result {
+    unique_name_in(value.as_ref(), items.iter().map(|i| key(i).as_str()))
 }
 
 /// No two addresses in the same list may repeat, mirroring
@@ -241,5 +280,24 @@ mod tests {
     #[test]
     fn hostname_charset_rejects_space() {
         assert!(hostname_charset("router 1").is_err());
+    }
+
+    fn names(v: &[&str], who: &str) -> garde::Result {
+        let items: Vec<String> = v.iter().map(ToString::to_string).collect();
+        unique_key_in(who, &items, |s| s)
+    }
+
+    #[test]
+    fn unique_key_in_rules() {
+        assert!(names(&["a", "b"], "a").is_ok());
+        assert!(names(&["a"], "a").is_ok());
+        assert!(names(&["pga", "x"], "pga").is_ok());
+        assert!(format!("{:?}", names(&["a", "a"], "a").unwrap_err()).contains("must be unique"));
+        for (a, b) in [("pga", "pg-a"), ("A_b", "ab"), ("Foo", "foo")] {
+            for (me, other) in [(a, b), (b, a)] {
+                let e = format!("{:?}", names(&[a, b, "zzz"], me).unwrap_err());
+                assert!(e.contains(&format!("collides with '{other}'")), "{e}");
+            }
+        }
     }
 }

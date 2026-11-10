@@ -10,7 +10,7 @@ use nos_proto_derive::Cli;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::render::HIDDEN;
-use crate::validators::{name_charset, unique_in};
+use crate::validators::{name_charset, unique_key_in};
 
 use super::Config;
 
@@ -37,7 +37,7 @@ pub struct AdminKey {
     #[garde(
         length(min = 1, max = 64),
         custom(|l: &String, _ctx: &Config| name_charset(l)),
-        custom(|l: &String, ctx: &Config| unique_in(l, &ctx.admin.keys, |k| &k.label))
+        custom(|l: &String, ctx: &Config| unique_key_in(l, &ctx.admin.keys, |k| &k.label))
     )]
     #[cli(key)]
     /// Label other sections reference, 1 to 64 characters (letters, digits, `_`, `-`), unique among keys.

@@ -1730,7 +1730,7 @@ async fn commit_bulk(store: &ConfigStore, n: usize) {
             .await
             .unwrap();
         for j in 0..20 {
-            let n = format!("lag-instance-{i}-{j}");
+            let n = format!("lag-instance-{i}x{j}");
             store.apply_op(&t, ensure_op(&n)).await.unwrap();
             store.apply_op(&t, set_asn_op(&n, 65000)).await.unwrap();
         }

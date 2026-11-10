@@ -1,7 +1,7 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::unique_key_in;
 
 use super::Config;
 use nos_proto_derive::Cli;
@@ -18,7 +18,7 @@ pub struct AsPathList {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n, ctx: &Config| unique_in(n, &ctx.as_path_lists, |l| &l.name))
+        custom(|n, ctx: &Config| unique_key_in(n, &ctx.as_path_lists, |l| &l.name))
     )]
     #[cli(key)]
     /// List name, 1 to 64 characters (letters, digits, `_`, `-`), unique among AS-path lists.

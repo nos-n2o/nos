@@ -8,7 +8,7 @@ use nos_proto_derive::Cli;
 use serde::{Deserialize, Serialize};
 
 use crate::log::LogLevel;
-use crate::validators::{routing_table_reference_valid, unique_in};
+use crate::validators::{routing_table_reference_valid, unique_key_in};
 
 use super::Config;
 
@@ -35,7 +35,7 @@ pub struct SyslogServer {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
-        custom(|n: &String, ctx: &Config| unique_in(n, &ctx.logging.syslog, |s| &s.name))
+        custom(|n: &String, ctx: &Config| unique_key_in(n, &ctx.logging.syslog, |s| &s.name))
     )]
     #[cli(key)]
     /// Collector name, unique among syslog servers.
