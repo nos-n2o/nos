@@ -362,6 +362,12 @@ impl nos_ospf_common::lsa::Lsa for Lsa {
     fn header_mut(&mut self) -> &mut LsaHeader {
         &mut self.header
     }
+    fn same_content(&self, other: &Self) -> bool {
+        self.body == other.body
+    }
+    fn is_topology(&self) -> bool {
+        (LSA_TYPE_ROUTER..=LSA_TYPE_AS_EXTERNAL).contains(&self.header.lsa_type)
+    }
 }
 
 pub(crate) fn encode_lsa_header(buf: &mut Vec<u8>, header: &LsaHeader) {

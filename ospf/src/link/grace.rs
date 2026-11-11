@@ -1,6 +1,8 @@
 //! RFC 3623 graceful restart and RFC 6987 max-metric.
 //! Moved verbatim out of `link.rs`.
 
+use nos_ospf_common::lsa::helper_deadline_secs;
+
 use super::rx::next_crypto_seq;
 use super::{
     info, lsa, packet, warn, Duration, GraceLsaBody, Instant, Ipv4Addr, LinkCommand, LinkConfig,
@@ -22,11 +24,10 @@ pub(super) fn in_grace(status: &StatusHandle, neighbor_id: Ipv4Addr) -> bool {
 /// router id, which is how neighbors are keyed here (the IP Interface
 /// Address TLV only matters where neighbors are keyed by address).
 ///
-/// ponytail: no RFC 3623 §3.2 (c) strict LSA checking — helping goes on
-/// through a topology change. Add it if a real topology change during a
-/// restart matters: with periodic full resend, "an LSA flooded to the
-/// restarter changed" means any type 1-5 content change in this area from
-/// anyone but the restarter.
+/// The grace period honoured is what the Grace-LSA has left (its period
+/// minus its age), at most `cfg.helper_max_grace_period`; one already used
+/// up is not helped (RFC 3623 §3.1). `exit_grace_on_topology_change` is the
+/// §3.2 (c) strict LSA check.
 pub(super) fn on_grace_lsa(
     cfg: &LinkConfig,
     status: &StatusHandle,
@@ -57,17 +58,67 @@ pub(super) fn on_grace_lsa(
         warn!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf helper: ignoring grace-lsa from a neighbor that is not full");
         return;
     }
+    let Some(effective) =
+        helper_deadline_secs(body.grace_period, header.age, cfg.helper_max_grace_period)
+    else {
+        warn!(
+            link = %cfg.attach_point, neighbor = %neighbor_id, grace_period = body.grace_period, age = header.age,
+            "ospf helper: grace-lsa not honoured, age >= grace period"
+        );
+        if deadline.is_some() {
+            status.send_modify(|s| {
+                if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
+                    n.grace_deadline = None;
+                }
+            });
+        }
+        return;
+    };
     if deadline.is_none() {
         info!(
             link = %cfg.attach_point, neighbor = %neighbor_id,
             grace_period = body.grace_period, restart_reason = body.restart_reason,
+            effective_grace = effective,
             "ospf helper: grace period entered"
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(u64::from(body.grace_period));
+    let deadline = Instant::now() + Duration::from_secs(u64::from(effective));
     status.send_modify(|s| {
         if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
             n.grace_deadline = Some(deadline);
+        }
+    });
+}
+
+/// RFC 3623 §3.2 (c) strict LSA checking: `origins` are the routers whose
+/// topology LSAs changed in this link's area. A neighbor in grace ends it
+/// when anyone but the neighbor itself changed one; it is then subject to the
+/// ordinary inactivity timer again, restarted from now.
+pub(super) fn exit_grace_on_topology_change(
+    cfg: &LinkConfig,
+    status: &StatusHandle,
+    origins: &[Ipv4Addr],
+) {
+    let exiting: Vec<Ipv4Addr> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(id, n)| n.grace_deadline.is_some() && origins.iter().any(|o| o != *id))
+        .map(|(id, _)| *id)
+        .collect();
+    if exiting.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for id in &exiting {
+        info!(link = %cfg.attach_point, neighbor = %id, "ospf helper: topology change, exiting grace");
+    }
+    status.send_modify(|s| {
+        for id in &exiting {
+            if let Some(n) = s.neighbors.get_mut(id) {
+                n.grace_deadline = None;
+                n.last_heard = now;
+            }
         }
     });
 }

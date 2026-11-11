@@ -61,6 +61,24 @@ pub trait Lsa: Clone + Debug + PartialEq {
     type Lls: Clone + Debug + PartialEq;
     fn header(&self) -> &Self::Header;
     fn header_mut(&mut self) -> &mut Self::Header;
+    /// Whether `other` (the same key) carries the same body — age, sequence
+    /// number and checksum are ignored, so a refresh compares equal.
+    fn same_content(&self, other: &Self) -> bool;
+    /// RFC 3623 §3.1 / RFC 5187 §4: a topology LSA, whose change during a
+    /// neighbor's grace period ends helping (v2 types 1-5; v3 function
+    /// codes 1-5, never link-local scope).
+    fn is_topology(&self) -> bool;
+}
+
+/// RFC 3623 §3.1: the seconds left of a restarting neighbor's grace period
+/// as seen by the helper — the Grace-LSA's `grace_period` minus its `age`,
+/// at most `cap`. `None` when the period is already used up (`age >=
+/// grace_period`), which means: do not help.
+pub fn helper_deadline_secs(grace_period: u32, lsa_age: u16, cap: u32) -> Option<u32> {
+    let left = grace_period
+        .checked_sub(u32::from(lsa_age))
+        .filter(|l| *l > 0)?;
+    Some(left.min(cap))
 }
 
 #[cfg(test)]
@@ -112,6 +130,14 @@ pub(crate) mod test_lsa {
         fn header_mut(&mut self) -> &mut H {
             &mut self.0
         }
+        /// Stand-in body: the checksum.
+        fn same_content(&self, other: &L) -> bool {
+            self.0.checksum == other.0.checksum
+        }
+        /// Id 0 is the non-topology type.
+        fn is_topology(&self) -> bool {
+            self.0.id != 0
+        }
     }
 
     pub fn lsa(seq: i32) -> L {
@@ -128,6 +154,17 @@ pub(crate) mod test_lsa {
 mod tests {
     use super::test_lsa::{lsa, H};
     use super::*;
+
+    #[test]
+    fn helper_deadline_is_remaining_grace_capped() {
+        assert_eq!(helper_deadline_secs(120, 0, 1800), Some(120));
+        assert_eq!(helper_deadline_secs(120, 30, 1800), Some(90));
+        assert_eq!(helper_deadline_secs(120, 30, 60), Some(60));
+        assert_eq!(helper_deadline_secs(120, 120, 1800), None);
+        assert_eq!(helper_deadline_secs(120, 500, 1800), None);
+        assert_eq!(helper_deadline_secs(u32::MAX, u16::MAX, 1800), Some(1800));
+        assert_eq!(helper_deadline_secs(0, 0, 1800), None);
+    }
 
     fn h(seq: i32, checksum: u16, age: u16) -> H {
         H {

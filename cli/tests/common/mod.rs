@@ -143,6 +143,7 @@ pub fn base_running() -> Config {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
             prefix_suppression: false,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
@@ -160,6 +161,7 @@ pub fn base_running() -> Config {
             redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
         }],
         ..Default::default()
     }

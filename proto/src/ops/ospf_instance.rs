@@ -32,6 +32,13 @@ pub enum OspfInstanceOp {
         /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
     },
+    /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
+    SetGracefulRestartHelperMaxGracePeriod {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Cap in seconds.
+        seconds: Option<u32>,
+    },
     /// Turns RFC 6860 prefix suppression on or off.
     SetPrefixSuppression {
         /// Name of the OSPF instance this op targets.
@@ -94,6 +101,7 @@ impl OspfInstanceOp {
                         routing_table: None,
                         redistribute_policy: None,
                         graceful_restart_grace_period: None,
+                        graceful_restart_helper_max_grace_period: None,
                         prefix_suppression: false,
                         max_metric_on_startup: None,
                         max_metric_on_shutdown: None,
@@ -108,6 +116,11 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetRouterId { name, router_id } => {
                 find_instance_mut(config, name)?.router_id = *router_id;
+                Ok(())
+            }
+            OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod { name, seconds } => {
+                find_instance_mut(config, name)?.graceful_restart_helper_max_grace_period =
+                    *seconds;
                 Ok(())
             }
             OspfInstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
@@ -173,6 +186,7 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
             prefix_suppression: false,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
@@ -182,6 +196,28 @@ mod tests {
             redistribute_metric: None,
             redistribute_metric_type: None,
         }
+    }
+
+    #[test]
+    fn set_helper_max_grace_period() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1")],
+            ..Default::default()
+        };
+        let op = |seconds| OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod {
+            name: "o1".to_string(),
+            seconds,
+        };
+        op(Some(60)).apply(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].graceful_restart_helper_max_grace_period,
+            Some(60)
+        );
+        op(None).apply(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].graceful_restart_helper_max_grace_period,
+            None
+        );
     }
 
     #[test]

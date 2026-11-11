@@ -166,7 +166,18 @@ mod tests {
             "--peer",
             "10.0.0.2",
         ];
-        Args::try_parse_from(base.into_iter().chain(flags.iter().copied())).unwrap()
+        let argv: Vec<String> = base
+            .into_iter()
+            .chain(flags.iter().copied())
+            .map(ToString::to_string)
+            .collect();
+        // Same big-stack parse as `lib.rs`'s test `parse`.
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || Args::try_parse_from(argv).unwrap())
+            .unwrap()
+            .join()
+            .unwrap()
     }
 
     fn names(c: &Config) -> Vec<&str> {

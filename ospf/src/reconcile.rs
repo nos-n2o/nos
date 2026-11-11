@@ -12,7 +12,10 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::interface_client;
-use crate::link::{AreaSettings, LinkAuthConfig, LinkConfig, LinkManager, VirtualLinkConfig};
+use crate::link::{
+    AreaSettings, LinkAuthConfig, LinkConfig, LinkManager, VirtualLinkConfig,
+    DEFAULT_HELPER_MAX_GRACE_PERIOD,
+};
 use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
 use crate::rib_client;
@@ -152,6 +155,16 @@ pub async fn run(
     info!(instance = %ctx.instance, "reconciliation loop stopped");
 }
 
+/// RFC 3623 helper cap on a neighbor's grace period, seconds
+/// (`graceful-restart helper max-grace-period`, default 1800).
+fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
+    cfg.ospf_instances
+        .iter()
+        .find(|i| i.name == instance)
+        .and_then(|i| i.graceful_restart_helper_max_grace_period)
+        .unwrap_or(DEFAULT_HELPER_MAX_GRACE_PERIOD)
+}
+
 /// What one resync pass reads (shared, immutable).
 #[derive(Clone, Copy)]
 struct Env<'a> {
@@ -275,6 +288,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             stub: area.area_type.is_stub(),
             nssa: area.area_type.is_nssa(),
             virtual_link: None,
+            helper_max_grace_period: helper_cap(cfg, instance),
         });
     }
 }
@@ -400,6 +414,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             stub: area.area_type.is_stub(),
             nssa: area.area_type.is_nssa(),
             virtual_link: None,
+            helper_max_grace_period: helper_cap(cfg, instance),
         });
     }
 }
@@ -439,6 +454,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
+        graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
         prefix_suppression = own.prefix_suppression,
         max_metric_on_startup = ?own.max_metric_on_startup,
         max_metric_on_shutdown = ?own.max_metric_on_shutdown,
@@ -1416,6 +1432,7 @@ mod tests {
             stub: false,
             nssa: false,
             virtual_link: None,
+            helper_max_grace_period: 1800,
         }
     }
 

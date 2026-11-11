@@ -1337,6 +1337,10 @@ pub struct Args {
     /// (requires `--ospf-instance`); `0` clears it.
     #[arg(long)]
     pub ospf_graceful_restart_grace_period: Option<u16>,
+    /// Helper-side cap (seconds) on a neighbor's grace period for that
+    /// instance; `0` clears it.
+    #[arg(long)]
+    pub ospf_graceful_restart_helper_max_grace_period: Option<u32>,
     /// RFC 6860 prefix suppression for that instance (requires
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
@@ -1480,6 +1484,10 @@ pub struct Args {
     /// (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_graceful_restart_grace_period: Option<u16>,
+    /// Helper-side cap (seconds) on a neighbor's grace period for that
+    /// instance; `0` clears it.
+    #[arg(long)]
+    pub ospfv3_graceful_restart_helper_max_grace_period: Option<u32>,
 
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -3824,6 +3832,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
+        if let Some(seconds) = args.ospf_graceful_restart_helper_max_grace_period {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
         if let Some(grace_period) = args.ospf_graceful_restart_grace_period {
             ops.push(ConfigOp::OspfInstance(
                 OspfInstanceOp::SetGracefulRestartGracePeriod {
@@ -4108,6 +4124,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: name.clone(),
                 enabled: true,
             }));
+        }
+        if let Some(seconds) = args.ospfv3_graceful_restart_helper_max_grace_period {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetGracefulRestartHelperMaxGracePeriod {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
         }
         if let Some(grace_period) = args.ospfv3_graceful_restart_grace_period {
             ops.push(ConfigOp::Ospfv3Instance(
@@ -5997,7 +6021,19 @@ mod tests {
     ];
 
     fn parse(extra: &[&str]) -> Args {
-        Args::try_parse_from(REQUIRED.iter().chain(extra.iter())).unwrap()
+        // clap's derive frames for `Args` (hundreds of flags) outgrow a test
+        // thread's 2 MiB stack under the pinned toolchain's debug build.
+        let argv: Vec<String> = REQUIRED
+            .iter()
+            .chain(extra.iter())
+            .map(ToString::to_string)
+            .collect();
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || Args::try_parse_from(argv).unwrap())
+            .unwrap()
+            .join()
+            .unwrap()
     }
 
     /// Every op's `Debug` text, joined: `shows` asserts one op by its rendering.
@@ -6389,6 +6425,8 @@ mod tests {
             "1.1.1.1",
             "--ospf-graceful-restart-grace-period",
             "0",
+            "--ospf-graceful-restart-helper-max-grace-period",
+            "60",
             "--ospf-remote-lfa",
             "true",
             "--ospf-prefix-suppression",
@@ -6442,6 +6480,7 @@ mod tests {
         .unwrap();
         for m in [
             "SetGracefulRestartGracePeriod { name: \"o\", grace_period: None }",
+            "SetGracefulRestartHelperMaxGracePeriod { name: \"o\", seconds: Some(60) }",
             "SetRemoteLfa",
             "SetPrefixSuppression",
             "SetMaxMetricOnStartup { name: \"o\", seconds: Some(30) }",

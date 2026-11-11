@@ -47,6 +47,9 @@ pub struct Lsdb<L: Lsa> {
     reflected: HashSet<Key<L>>,
     /// Woken by `mark_reflected` so the originator runs at once.
     reflect_notify: Option<Arc<tokio::sync::Notify>>,
+    /// Advertising routers whose topology LSA changed since the last
+    /// `take_topology_changes` — see `Lsa::is_topology`.
+    topology_changes: HashSet<Ipv4Addr>,
 }
 
 impl<L: Lsa> Default for Lsdb<L> {
@@ -58,6 +61,7 @@ impl<L: Lsa> Default for Lsdb<L> {
             last_received: HashMap::new(),
             reflected: HashSet::new(),
             reflect_notify: None,
+            topology_changes: HashSet::new(),
         }
     }
 }
@@ -128,6 +132,26 @@ impl<L: Lsa> Lsdb<L> {
         self.reflected.iter().copied().collect()
     }
 
+    /// RFC 3623 §3.2 (c): the advertising routers whose topology LSAs changed
+    /// (new, different body, or flushed) since the last call, clearing the set.
+    pub fn take_topology_changes(&mut self) -> Vec<Ipv4Addr> {
+        self.topology_changes.drain().collect()
+    }
+
+    /// Records `lsa`'s origin when installing it over `old` is a topology change.
+    fn note_topology(&mut self, lsa: &L, old: Option<&L>) {
+        let flush = lsa.header().age() >= MAX_AGE;
+        let changed = lsa.is_topology()
+            && match old {
+                None => !flush,
+                Some(o) => !o.same_content(lsa) || (flush && o.header().age() < MAX_AGE),
+            };
+        if changed {
+            self.topology_changes
+                .insert(lsa.header().advertising_router());
+        }
+    }
+
     fn kick(&self) {
         if let Some(n) = &self.notify {
             n.notify_one();
@@ -142,7 +166,9 @@ impl<L: Lsa> Lsdb<L> {
             Some(existing) if lsa.header().is_newer(existing.header()) != Ordering::Greater => {
                 InstallOutcome::Rejected
             }
-            Some(_) => {
+            Some(existing) => {
+                let existing = Arc::clone(existing);
+                self.note_topology(&lsa, Some(&existing));
                 // A fresh instance restarts the MaxAge hold; a flushed one
                 // (same sequence, age now MaxAge) starts it.
                 self.max_age_ticks.remove(&key);
@@ -151,6 +177,7 @@ impl<L: Lsa> Lsdb<L> {
                 InstallOutcome::Superseded
             }
             None => {
+                self.note_topology(&lsa, None);
                 self.entries.insert(key, Arc::new(lsa));
                 self.kick();
                 InstallOutcome::Installed
@@ -260,6 +287,37 @@ mod tests {
     use crate::lsa::test_lsa::{lsa, L};
 
     type Db = Lsdb<L>;
+
+    fn with(id: u32, seq: i32, checksum: u16, age: u16) -> L {
+        L(crate::lsa::test_lsa::H {
+            id,
+            seq,
+            age,
+            checksum,
+        })
+    }
+
+    #[test]
+    fn topology_changes_follow_content_not_refreshes() {
+        let mut db = Db::new();
+        let origin = Ipv4Addr::from(9);
+        db.install(with(9, 1, 5, 0));
+        assert_eq!(db.take_topology_changes(), vec![origin], "new LSA");
+        assert!(db.take_topology_changes().is_empty(), "drained once");
+        db.install(with(9, 2, 5, 0));
+        assert!(db.take_topology_changes().is_empty(), "identical refresh");
+        db.install(with(9, 3, 6, 0));
+        db.install(with(9, 4, 7, 0));
+        assert_eq!(
+            db.take_topology_changes(),
+            vec![origin],
+            "changed, deduplicated"
+        );
+        db.install(with(9, 4, 7, MAX_AGE));
+        assert_eq!(db.take_topology_changes(), vec![origin], "flush");
+        db.install(with(0, 1, 5, 0));
+        assert!(db.take_topology_changes().is_empty(), "not a topology LSA");
+    }
 
     fn key() -> u32 {
         lsa(1).header().key()

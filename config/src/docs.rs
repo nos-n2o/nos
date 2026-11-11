@@ -1128,6 +1128,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Announce an RFC 3623 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
         ),
+        Topic::OspfInstanceGracefulRestartHelperMaxGracePeriod => (
+            "Cap the grace period this router grants a restarting neighbor (RFC 3623 helper).",
+            "A neighbor's Grace-LSA is honoured for its remaining grace period (grace period minus the LSA's age) but never longer than this many seconds (1-3600, default 1800). Helping also ends at once when another router's type 1-5 LSA changes (strict LSA checking). `delete` restores the default.",
+        ),
         Topic::OspfInstancePrefixSuppression => (
             "Hide transit-only networks (RFC 6860 prefix suppression).",
             "Leaves every point-to-point link's subnet out of this router's Router-LSA and gives the Network-LSA it originates as DR a /32 mask, so the rest of the area installs no route to those transit networks while still routing through them. Loopbacks are never hidden. The setting is instance-wide; enable it on every router attached to a network to hide it fully. `delete` turns it off.",
@@ -1304,6 +1308,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::Ospfv3InstanceGracefulRestart => (
             "Announce an RFC 5187 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
+        ),
+        Topic::Ospfv3InstanceGracefulRestartHelperMaxGracePeriod => (
+            "Cap the grace period this router grants a restarting neighbor (RFC 5187 helper).",
+            "A neighbor's Grace-LSA is honoured for its remaining grace period (grace period minus the LSA's age) but never longer than this many seconds (1-3600, default 1800). Helping also ends at once when another router's topology LSA changes (strict LSA checking). `delete` restores the default.",
         ),
         Topic::Ospfv3Area => (
             "Create or delete an OSPFv3 area.",

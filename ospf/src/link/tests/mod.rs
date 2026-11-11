@@ -1,5 +1,5 @@
 use super::{
-    grace::{in_grace, on_grace_lsa},
+    grace::{exit_grace_on_topology_change, in_grace, on_grace_lsa},
     originate::{
         assign_link_state_ids, flush_stale_network_lsas, install_self_originated, local_netmask,
         network_lsa_mask, router_lsa_links, withdraw_self_originated,
@@ -38,6 +38,7 @@ fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
         stub: false,
         nssa: false,
         virtual_link: None,
+        helper_max_grace_period: 1800,
     }
 }
 

@@ -38,6 +38,13 @@ pub enum Ospfv3InstanceOp {
         /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
     },
+    /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
+    SetGracefulRestartHelperMaxGracePeriod {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Cap in seconds.
+        seconds: Option<u32>,
+    },
     /// Deletes the `OSPFv3` instance and everything nested under it.
     Delete {
         /// Name of the `OSPFv3` instance this op targets.
@@ -59,6 +66,7 @@ impl Ospfv3InstanceOp {
                         redistribute_policy: None,
                         extended_lsa: false,
                         graceful_restart_grace_period: None,
+                        graceful_restart_helper_max_grace_period: None,
                     });
                 }
                 Ok(())
@@ -69,6 +77,11 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
                 find_instance_mut(config, name)?.extended_lsa = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetGracefulRestartHelperMaxGracePeriod { name, seconds } => {
+                find_instance_mut(config, name)?.graceful_restart_helper_max_grace_period =
+                    *seconds;
                 Ok(())
             }
             Ospfv3InstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
@@ -111,6 +124,7 @@ mod tests {
             redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
         }
     }
 

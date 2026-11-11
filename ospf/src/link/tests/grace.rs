@@ -238,3 +238,120 @@ async fn announce_without_a_grace_period_still_flushes_on_shutdown() {
     assert_ne!(own, []);
     assert!(own.iter().all(|l| l.age == lsa::MAX_AGE));
 }
+
+fn grace_lsa_from(age: u16) -> (LsaHeader, GraceLsaBody) {
+    let header = LsaHeader {
+        age,
+        options: 0,
+        lsa_type: lsa::LSA_TYPE_OPAQUE_LINK,
+        link_state_id: lsa::GRACE_LINK_STATE_ID,
+        advertising_router: Ipv4Addr::new(9, 9, 9, 10),
+        sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+        checksum: 0,
+        length: 0,
+    };
+    let body = GraceLsaBody {
+        grace_period: 120,
+        restart_reason: lsa::RESTART_REASON_SOFTWARE,
+        interface_address: None,
+    };
+    (header, body)
+}
+
+fn grace_left(status: &StatusHandle) -> Option<Duration> {
+    let d = status.borrow().neighbors[&Ipv4Addr::new(9, 9, 9, 10)].grace_deadline?;
+    Some(d.saturating_duration_since(Instant::now()))
+}
+
+#[tokio::test(start_paused = true)]
+async fn helper_honours_what_the_grace_lsa_has_left_up_to_the_cap() {
+    let base = link("eth0.0", 10);
+    for (age, grace, cap, expected) in [
+        (30, 120, 1800, Some(90)),
+        (0, 120, 60, Some(60)),
+        (0, u32::MAX, 1800, Some(1800)),
+        (120, 120, 1800, None),
+        (500, 120, 1800, None),
+    ] {
+        let (header, mut body) = grace_lsa_from(age);
+        body.grace_period = grace;
+        let cfg = LinkConfig {
+            helper_max_grace_period: cap,
+            ..base.clone()
+        };
+        let status = grace_status(None);
+        on_grace_lsa(&cfg, &status, &header, body);
+        assert_eq!(grace_left(&status), expected.map(Duration::from_secs));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_grace_lsa_ends_a_running_grace() {
+    let cfg = link("eth0.0", 10);
+    let (header, body) = grace_lsa_from(0);
+    let status = grace_status(None);
+    on_grace_lsa(&cfg, &status, &header, body);
+    assert!(in_grace(&status, header.advertising_router));
+    let (stale, body) = grace_lsa_from(120);
+    on_grace_lsa(&cfg, &status, &stale, body);
+    assert!(!in_grace(&status, header.advertising_router));
+}
+
+#[tokio::test(start_paused = true)]
+async fn topology_change_ends_grace_unless_only_the_restarter_changed() {
+    let cfg = link("eth0.0", 10);
+    let restarter = Ipv4Addr::new(9, 9, 9, 10);
+    let other = Ipv4Addr::new(1, 1, 1, 1);
+    for (origins, exits) in [
+        (vec![restarter], false),
+        (vec![], false),
+        (vec![other], true),
+        (vec![restarter, other], true),
+    ] {
+        let status = grace_status(Some(Instant::now() + Duration::from_secs(60)));
+        exit_grace_on_topology_change(&cfg, &status, &origins);
+        assert_eq!(in_grace(&status, restarter), !exits, "{origins:?}");
+    }
+}
+
+/// RFC 3623 §3.2 (c): while A helps B, a new topology LSA from a third
+/// router ends the grace period on A's next aging tick.
+#[tokio::test(start_paused = true)]
+async fn helper_exits_grace_when_a_third_routers_topology_lsa_appears() {
+    let wire = Arc::new(wire::Wire::default());
+    let (a, b) = (router(&wire), router(&wire));
+    a.reconcile(
+        vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+        HashMap::new(),
+        id(1),
+    )
+    .await;
+    b.reconcile(
+        vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+        stub("192.0.2.2/32"),
+        id(2),
+    )
+    .await;
+    b.set_graceful_restart(Some(120));
+    settle(60).await;
+    b.announce_graceful_restart().await;
+    b.shutdown().await;
+    assert!(helping(&a, id(2)).await);
+
+    let store = a.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+    let mut other = (*store
+        .lock()
+        .await
+        .get(&LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: id(1),
+            advertising_router: id(1),
+        })
+        .unwrap())
+    .clone();
+    other.header.advertising_router = id(7);
+    other.header.link_state_id = id(7);
+    store.lock().await.install(other);
+    settle(2).await;
+    assert!(!helping(&a, id(2)).await);
+}

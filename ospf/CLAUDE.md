@@ -57,7 +57,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 ## Graceful restart
 
 - Only SIGTERM announces (`planned_restart` -> `announce_graceful_restart`, sets `restarting` so `shutdown` skips the flush); SIGINT still flushes. The restarter resyncs cold.
-- Helper is always on; the Grace-LSA is removed from the link store at once so it is never offered back. `<state-dir>/<instance>.gr` is read and deleted once at start and only skips RFC 6987 on-startup while `now < deadline <= now + u16::MAX`.
+- Helper is always on, capped (`LinkConfig.helper_max_grace_period`, `helper_deadline_secs`: remaining = grace - Grace-LSA age) and strict (RFC 3623 §3.2 (c)): `Lsdb::install` records the origin of every new/changed/flushed type 1-5 LSA, `age_lsdbs` hands them to the links (`LinkCommand::TopologyChanged`), the restarter's own never count; the Grace-LSA is removed from the link store at once so it is never offered back. `<state-dir>/<instance>.gr` is read and deleted once at start and only skips RFC 6987 on-startup while `now < deadline <= now + u16::MAX`.
 - Never apply RFC 6987 on-shutdown under a grace period (§3.2 (c)).
 
 ## Wiring and tests

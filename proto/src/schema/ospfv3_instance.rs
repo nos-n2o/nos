@@ -74,6 +74,15 @@ pub struct Ospfv3Instance {
     #[garde(range(min = 1, max = 1800))]
     #[cli(topic = Ospfv3InstanceGracefulRestart, words = "graceful-restart grace-period")]
     pub graceful_restart_grace_period: Option<u16>,
+
+    /// RFC 5187 helper side: the longest grace period this router honours for
+    /// a restarting neighbor, whatever the neighbor's Grace-LSA asks for
+    /// (seconds, 1-3600). `None` means 1800. Helping always stops early on a
+    /// topology change (strict LSA checking).
+    #[serde(default)]
+    #[garde(range(min = 1, max = 3600))]
+    #[cli(topic = Ospfv3InstanceGracefulRestartHelperMaxGracePeriod, words = "graceful-restart helper max-grace-period")]
+    pub graceful_restart_helper_max_grace_period: Option<u32>,
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -87,6 +96,7 @@ impl Default for Ospfv3Instance {
             redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
         }
     }
 }
@@ -125,6 +135,7 @@ mod tests {
             redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
         }
     }
 

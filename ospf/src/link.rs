@@ -14,7 +14,7 @@ use self::flood::{
     flood_full_neighbors, flush_pending_acks, kill_bfd_neighbor, note_alive, retransmit_pending,
     sweep_dead_neighbors,
 };
-use self::grace::{expire_grace, send_grace_lsas};
+use self::grace::{exit_grace_on_topology_change, expire_grace, send_grace_lsas};
 use self::originate::local_subnet;
 use self::rx::{
     accept_crypto_sequence, advance_adjacencies, execute_actions, handle_dbd, handle_hello,
@@ -239,7 +239,13 @@ pub struct LinkConfig {
     /// `neighbor`, a type-4 Router-LSA link. Resolved from the transit area's
     /// SPF (§16.7, `resolve_virtual_link`), never from an attach point.
     pub virtual_link: Option<VirtualLinkEnd>,
+    /// RFC 3623 helper: the most seconds of a neighbor's grace period this
+    /// link honours (`graceful-restart helper max-grace-period`).
+    pub helper_max_grace_period: u32,
 }
+
+/// `helper_max_grace_period` when the instance sets none.
+pub const DEFAULT_HELPER_MAX_GRACE_PERIOD: u32 = 1800;
 
 /// A virtual link's transit area, far endpoint's router id and its address
 /// in the transit area (where every packet is unicast to).
@@ -303,6 +309,7 @@ fn resolve_virtual_link(
             endpoint: v.endpoint,
             neighbor: end.address,
         }),
+        helper_max_grace_period: transit.helper_max_grace_period,
     })
 }
 
@@ -738,6 +745,7 @@ pub async fn run(
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
                 }
                 LinkCommand::BfdDown(address) => kill_bfd_neighbor(&cfg, &status, address),
+                LinkCommand::TopologyChanged(origins) => exit_grace_on_topology_change(&cfg, &status, &origins),
             },
             _ = rxmt_sweep.tick() => {
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
@@ -749,7 +757,7 @@ pub async fn run(
 }
 
 /// A request from `LinkManager` to one link task.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum LinkCommand {
     /// Send Grace-LSAs (the grace period, seconds).
     Grace(u32),
@@ -759,6 +767,9 @@ pub enum LinkCommand {
     /// `nos-bfdd` reports the path to this neighbor address down (RFC 2328
     /// §10.2 `KillNbr`).
     BfdDown(Ipv4Addr),
+    /// These routers' topology LSAs changed in this link's area: a helped
+    /// neighbor other than them leaves grace (RFC 3623 §3.2 (c)).
+    TopologyChanged(Vec<Ipv4Addr>),
 }
 
 struct LinkEntry {
@@ -1148,6 +1159,28 @@ impl LinkManager {
                     .collect::<Vec<_>>()
             })
             .collect();
+        // RFC 3623 §3.2 (c): tell the area's links which routers' topology
+        // LSAs changed, before aging (aging never changes content).
+        let area_stores: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
+            .collect();
+        for (area_id, lsdb) in area_stores {
+            let origins = lsdb.lock().await.take_topology_changes();
+            if origins.is_empty() {
+                continue;
+            }
+            for e in self.links.lock().await.values() {
+                if e.config.area_id == area_id {
+                    let _ = e
+                        .commands
+                        .send(LinkCommand::TopologyChanged(origins.clone()));
+                }
+            }
+        }
         let mut stores: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
             .lock()
@@ -1497,7 +1530,7 @@ impl LinkManager {
 
     async fn send_to_links(&self, command: LinkCommand) {
         for entry in self.links.lock().await.values() {
-            let _ = entry.commands.send(command);
+            let _ = entry.commands.send(command.clone());
         }
     }
 
