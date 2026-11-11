@@ -529,6 +529,9 @@ pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 /// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
+/// `ospfv3-graceful-restart`: a loopback added to router-b's OSPFv3 while it
+/// helps, so its own Intra-Area-Prefix-LSA changes (a topology change).
+pub const OSPFV3_GR_TOPOLOGY_LOOPBACK_ADDRESS: &str = "2001:db8:4::13/128";
 /// router-c's loopback for the `ospfv3-dr` multicast data-plane proof (#879).
 pub const OSPFV3_DR_LOOPBACK_ADDRESS_C: &str = "2001:db8:4::8/128";
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.

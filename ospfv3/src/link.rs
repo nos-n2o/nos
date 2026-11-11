@@ -173,7 +173,13 @@ pub struct LinkConfig {
     /// unset): stamped on every packet sent, and a received packet carrying
     /// another one is dropped.
     pub instance_id: u8,
+    /// RFC 3623 helper: the most seconds of a neighbor's grace period this
+    /// link honours (`graceful-restart helper max-grace-period`).
+    pub helper_max_grace_period: u32,
 }
+
+/// `helper_max_grace_period` when the instance sets none.
+pub const DEFAULT_HELPER_MAX_GRACE_PERIOD: u32 = 1800;
 
 /// The Options every self-originated LSA and packet carries: `V6`/`R`, and
 /// `E` since every area is a normal area (RFC 5340 §A.2 — no stub areas or
@@ -348,6 +354,7 @@ pub async fn run(
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     mut grace_rx: mpsc::UnboundedReceiver<u32>,
+    mut topology_rx: mpsc::UnboundedReceiver<Vec<Ipv4Addr>>,
     mut bfd_rx: mpsc::UnboundedReceiver<Ipv6Addr>,
 ) {
     let stores = Stores {
@@ -500,6 +507,7 @@ pub async fn run(
                 send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
             }
             Some(address) = bfd_rx.recv() => kill_bfd_neighbor(&cfg, &status, address),
+            Some(origins) = topology_rx.recv() => exit_grace_on_topology_change(&cfg, &status, &origins),
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
                 flush_pending_acks(&socket, &cfg, local_router_id, &status);
@@ -1548,17 +1556,66 @@ fn on_grace_lsa(cfg: &LinkConfig, status: &StatusHandle, header: &LsaHeader, bod
         warn!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospfv3 helper: ignoring grace-lsa from a neighbor that is not full");
         return;
     }
+    // RFC 3623 §3.1: what the Grace-LSA has left (period minus age), capped.
+    let Some(effective) = nos_ospf_common::lsa::helper_deadline_secs(
+        body.grace_period,
+        header.age,
+        cfg.helper_max_grace_period,
+    ) else {
+        warn!(
+            link = %cfg.attach_point, neighbor = %neighbor_id, grace_period = body.grace_period, age = header.age,
+            "ospfv3 helper: no grace left, exiting grace"
+        );
+        if deadline.is_some() {
+            status.send_modify(|s| {
+                if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
+                    n.grace_deadline = None;
+                }
+            });
+        }
+        return;
+    };
     if deadline.is_none() {
         info!(
             link = %cfg.attach_point, neighbor = %neighbor_id,
             grace_period = body.grace_period, restart_reason = body.restart_reason,
+            effective_grace = effective,
             "ospfv3 helper: grace period entered"
         );
     }
-    let deadline = Instant::now() + std::time::Duration::from_secs(u64::from(body.grace_period));
+    let deadline = Instant::now() + std::time::Duration::from_secs(u64::from(effective));
     status.send_modify(|s| {
         if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
             n.grace_deadline = Some(deadline);
+        }
+    });
+}
+
+/// RFC 3623 §3.2 item 3 strict LSA checking: `origins` are the routers whose
+/// topology LSAs changed in this link's scope. A neighbor in grace ends it
+/// when anyone but the neighbor itself changed one; it is then subject to the
+/// ordinary inactivity timer again, restarted from now.
+fn exit_grace_on_topology_change(cfg: &LinkConfig, status: &StatusHandle, origins: &[Ipv4Addr]) {
+    let exiting: Vec<Ipv4Addr> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(id, n)| n.grace_deadline.is_some() && origins.iter().any(|o| o != *id))
+        .map(|(id, _)| *id)
+        .collect();
+    if exiting.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for id in &exiting {
+        info!(link = %cfg.attach_point, neighbor = %id, "ospfv3 helper: topology change, exiting grace");
+    }
+    status.send_modify(|s| {
+        for id in &exiting {
+            if let Some(n) = s.neighbors.get_mut(id) {
+                n.grace_deadline = None;
+                n.last_heard = now;
+            }
         }
     });
 }
@@ -1753,6 +1810,9 @@ struct LinkEntry {
     grace_tx: mpsc::UnboundedSender<u32>,
     /// BFD found the path to this neighbor link-local address down.
     bfd_tx: mpsc::UnboundedSender<Ipv6Addr>,
+    /// Routers whose topology LSAs changed in this link's scope (RFC 3623
+    /// §3.2 item 3).
+    topology_tx: mpsc::UnboundedSender<Vec<Ipv4Addr>>,
 }
 
 /// Owns every `OSPFv3` link's driver task for one `nos-ospfv3d` process, plus
@@ -2070,6 +2130,28 @@ impl LinkManager {
     /// Ages every store — per-area and per-link alike (RFC 2328 §14 aging
     /// is scope-agnostic).
     async fn age_lsdbs(&self) {
+        // RFC 3623 §3.2 item 3: tell the links which routers' topology LSAs
+        // changed (before aging; aging never changes content). Area-scope
+        // changes reach that area's links, AS-scope ones every link.
+        let as_origins = self.as_lsdb.lock().await.take_topology_changes();
+        let area_stores: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
+            .collect();
+        let mut by_area = HashMap::new();
+        for (area_id, lsdb) in area_stores {
+            by_area.insert(area_id, lsdb.lock().await.take_topology_changes());
+        }
+        for e in self.links.lock().await.values() {
+            let mut origins = by_area.get(&e.config.area_id).cloned().unwrap_or_default();
+            origins.extend(as_origins.iter().copied());
+            if !origins.is_empty() {
+                let _ = e.topology_tx.send(origins);
+            }
+        }
         let hold: HashSet<Ipv4Addr> = self
             .links
             .lock()
@@ -2715,6 +2797,7 @@ impl LinkManager {
             let (status_tx, status_rx) = watch::channel(LinkStatus::new(cfg.network_type));
             let (grace_tx, grace_rx) = mpsc::unbounded_channel();
             let (bfd_tx, bfd_rx) = mpsc::unbounded_channel();
+            let (topology_tx, topology_rx) = mpsc::unbounded_channel();
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
@@ -2725,6 +2808,7 @@ impl LinkManager {
                 status_tx,
                 self.dbd_max_headers,
                 grace_rx,
+                topology_rx,
                 bfd_rx,
             ));
             links.insert(
@@ -2735,6 +2819,7 @@ impl LinkManager {
                     status: status_rx,
                     grace_tx,
                     bfd_tx,
+                    topology_tx,
                 },
             );
         }
@@ -3224,6 +3309,7 @@ pub(crate) mod tests {
             mtu_ignore: false,
             auth: None,
             instance_id: 0,
+            helper_max_grace_period: 1800,
         }
     }
 
@@ -4580,6 +4666,65 @@ pub(crate) mod tests {
         assert!(!in_grace(&status, header.advertising_router));
     }
 
+    fn grace_header(age: u16) -> LsaHeader {
+        LsaHeader {
+            age,
+            lsa_type: lsa::LSA_TYPE_GRACE,
+            link_state_id: lsa::interface_id_key(4),
+            advertising_router: Ipv4Addr::new(9, 9, 9, 10),
+            sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+            checksum: 0,
+            length: 0,
+        }
+    }
+
+    fn grace_left(status: &StatusHandle) -> Option<std::time::Duration> {
+        status.borrow().neighbors[&Ipv4Addr::new(9, 9, 9, 10)]
+            .grace_deadline
+            .map(|d| d - Instant::now())
+    }
+
+    /// RFC 3623 §3.1: the deadline is the period minus the LSA's age, capped.
+    #[tokio::test(start_paused = true)]
+    async fn grace_deadline_is_remaining_grace_capped() {
+        let mut cfg = link("eth0.0", 10);
+        let body = |grace_period| GraceLsaBody {
+            grace_period,
+            restart_reason: lsa::RESTART_REASON_SOFTWARE,
+        };
+        let secs = |s: &StatusHandle| grace_left(s).unwrap().as_secs();
+        let status = grace_status(None);
+        on_grace_lsa(&cfg, &status, &grace_header(100), body(120));
+        assert_eq!(secs(&status), 20, "120 - 100");
+        cfg.helper_max_grace_period = 30;
+        let status = grace_status(None);
+        on_grace_lsa(&cfg, &status, &grace_header(0), body(u32::MAX));
+        assert_eq!(secs(&status), 30, "capped");
+        // Nothing left: not entered; an already-helping neighbor leaves.
+        let status = grace_status(None);
+        on_grace_lsa(&cfg, &status, &grace_header(120), body(120));
+        assert!(!in_grace(&status, Ipv4Addr::new(9, 9, 9, 10)));
+        let status = grace_status(Some(Instant::now() + std::time::Duration::from_secs(60)));
+        on_grace_lsa(&cfg, &status, &grace_header(120), body(120));
+        assert!(!in_grace(&status, Ipv4Addr::new(9, 9, 9, 10)));
+    }
+
+    /// RFC 3623 §3.2 item 3: anyone but the restarter changing topology ends
+    /// the helped neighbor's grace.
+    #[tokio::test(start_paused = true)]
+    async fn topology_change_by_a_third_router_ends_grace() {
+        let cfg = link("eth0.0", 10);
+        let restarter = Ipv4Addr::new(9, 9, 9, 10);
+        let status = grace_status(Some(Instant::now() + std::time::Duration::from_secs(60)));
+        exit_grace_on_topology_change(&cfg, &status, &[restarter]);
+        assert!(in_grace(&status, restarter), "its own LSAs do not count");
+        exit_grace_on_topology_change(&cfg, &status, &[]);
+        assert!(in_grace(&status, restarter));
+        exit_grace_on_topology_change(&cfg, &status, &[restarter, Ipv4Addr::new(3, 3, 3, 3)]);
+        assert!(!in_grace(&status, restarter));
+        assert_eq!(state_of(&status), NeighborState::Full);
+    }
+
     /// An in-memory multi-access wire, mirroring `ospf::link`'s: every port
     /// on the same prefix hears every multicast, a unicast reaches only its
     /// destination, and an authenticated port signs like `OspfSocket` (#131).
@@ -4922,6 +5067,31 @@ pub(crate) mod tests {
         );
         // Past the grace period it is finally declared dead.
         settle(120).await;
+        assert_eq!(
+            b.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+        a.shutdown().await;
+    }
+
+    /// RFC 3623 §3.2 item 3 end to end: B helps restarting A, then originates
+    /// a new loopback (a topology change by a third party from A's view), so
+    /// the grace ends early and the dead interval, not the 120 s grace,
+    /// declares A down.
+    #[tokio::test(start_paused = true)]
+    async fn helper_leaves_grace_when_its_own_topology_changes() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = pair(&wire, None, None).await;
+        a.set_graceful_restart(Some(120));
+        a.announce_graceful_restart().await;
+        wire.cut.lock().unwrap().insert("fe80::1".parse().unwrap());
+        let mut lo = loopback(2);
+        lo.get_mut(&Ipv4Addr::UNSPECIFIED)
+            .unwrap()
+            .push(("2001:db8:ee::2/128".parse().unwrap(), 1));
+        b.reconcile(vec![wired_link(2, NetworkType::PointToPoint)], lo, id(2))
+            .await;
+        settle(80).await;
         assert_eq!(
             b.neighbor_summaries().await[0].state,
             OspfNeighborState::Down
