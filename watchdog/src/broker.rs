@@ -1,6 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -32,6 +32,28 @@ const MAX_FAILED_LOGINS: u32 = 3;
 const MAX_CONCURRENT_VERIFIES: usize = 2;
 const LOGIN_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
+/// Anonymous (no client certificate) connections may only `Login`, so they are
+/// capped and dropped when idle; authenticated peers are neither (#950).
+const MAX_ANON_CONNECTIONS: usize = 64;
+const IDLE_ANON: Duration = Duration::from_secs(30);
+
+/// Tunables of the anonymous-connection guard; `Default` is the production value.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub max_anonymous: usize,
+    /// How long an anonymous peer may wait before sending its next request.
+    pub anonymous_idle: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_anonymous: MAX_ANON_CONNECTIONS,
+            anonymous_idle: IDLE_ANON,
+        }
+    }
+}
+
 /// Where the singleton daemons listen — answered directly for their
 /// `ServiceRef`s, not through the registry.
 pub struct Sockets {
@@ -51,6 +73,10 @@ struct Ctx {
     sockets: Sockets,
     pki: Arc<Pki>,
     login_slots: Semaphore,
+    anon_slots: Arc<Semaphore>,
+    anonymous_idle: Duration,
+    /// When the over-cap warning last fired (at most one per second).
+    last_cap_warn: Mutex<Option<Instant>>,
 }
 
 /// Binds `listen_socket` and spawns the accept loop for the endpoint-broker
@@ -67,6 +93,17 @@ pub fn start(
     sockets: Sockets,
     pki: Arc<Pki>,
 ) -> io::Result<JoinHandle<()>> {
+    start_with_limits(listen_socket, registry, sockets, pki, Limits::default())
+}
+
+/// [`start`] with explicit [`Limits`] (tests).
+pub fn start_with_limits(
+    listen_socket: &Path,
+    registry: EndpointRegistry,
+    sockets: Sockets,
+    pki: Arc<Pki>,
+    limits: Limits,
+) -> io::Result<JoinHandle<()>> {
     let listener = pki.identity.listen_optional_client_auth(listen_socket)?;
     info!(listen_socket = %listen_socket.display(), "broker IPC listening");
     let ctx = Arc::new(Ctx {
@@ -74,6 +111,9 @@ pub fn start(
         sockets,
         pki,
         login_slots: Semaphore::new(MAX_CONCURRENT_VERIFIES),
+        anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
+        anonymous_idle: limits.anonymous_idle,
+        last_cap_warn: Mutex::new(None),
     });
     Ok(tokio::spawn(async move {
         loop {
@@ -91,13 +131,41 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
             return;
         }
     };
+    // Held for the connection's life; authenticated peers take none.
+    let _permit = if peer.is_none() {
+        if let Ok(p) = ctx.anon_slots.clone().try_acquire_owned() {
+            Some(p)
+        } else {
+            let mut last = ctx.last_cap_warn.lock().unwrap();
+            if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                warn!("too many anonymous broker connections, dropping one");
+                *last = Some(Instant::now());
+            }
+            return;
+        }
+    } else {
+        None
+    };
     let serial = stream.peer_serial();
     let (read_half, write_half) = split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<WatchdogRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<WatchdogEvent>::default());
     let mut failed_logins = 0;
 
-    while let Some(msg) = reader.next().await {
+    loop {
+        // The idle limit covers only the wait for the next request, never
+        // dispatch or the failed-login sleep.
+        let next = if peer.is_none() {
+            if let Ok(next) = tokio::time::timeout(ctx.anonymous_idle, reader.next()).await {
+                next
+            } else {
+                debug!("anonymous broker connection idle, closing");
+                break;
+            }
+        } else {
+            reader.next().await
+        };
+        let Some(msg) = next else { break };
         let request = match msg {
             Ok(request) => request,
             Err(e) => {

@@ -7,7 +7,7 @@ use nos_pki::{generate_csr, generate_csr_for, Identity, KeyAlg, PeerId};
 use nos_proto::{
     Config, Event, IpcCodec, Request, Role, ServiceRef, User, WatchdogEvent, WatchdogRequest,
 };
-use nos_watchdog::broker::{self, Sockets};
+use nos_watchdog::broker::{self, Limits, Sockets};
 use nos_watchdog::{EndpointKind, EndpointRegistry, Pki};
 use tokio::io::split;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -22,6 +22,10 @@ struct Env {
 /// A broker plus a stand-in `nos-configd` (a real TLS server holding the
 /// `configd` identity) answering `Get` with `users`.
 async fn env(users: Vec<User>) -> Env {
+    env_with_limits(users, Limits::default()).await
+}
+
+async fn env_with_limits(users: Vec<User>, limits: Limits) -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let pki = Pki::start(
         tmp.path(),
@@ -66,7 +70,7 @@ async fn env(users: Vec<User>) -> Env {
         )
         .await;
     let broker_socket = tmp.path().join("watchdog.sock");
-    let task = broker::start(
+    let task = broker::start_with_limits(
         &broker_socket,
         registry,
         Sockets {
@@ -80,6 +84,7 @@ async fn env(users: Vec<User>) -> Env {
             acl: PathBuf::from("/run/nos/acl.sock"),
         },
         pki.clone(),
+        limits,
     )
     .unwrap();
     std::mem::forget(task); // runs for the test's lifetime
@@ -901,5 +906,82 @@ async fn ticket_requests_are_open_to_anonymous_and_daemon_peers() {
         assert!(matches!(event, WatchdogEvent::Ticket { .. }), "{event:?}");
         let event = ask(&mut conn, redeem(vec![1; 32], csr.clone())).await;
         assert!(is_invalid_ticket(&event));
+    }
+}
+
+fn resolve_config() -> WatchdogRequest {
+    WatchdogRequest::ResolveEndpoint {
+        service: ServiceRef::Config,
+    }
+}
+
+/// True when the connection yields EOF or an error within `secs`.
+async fn closed_within(conn: &mut Conn, secs: u64) -> bool {
+    tokio::time::timeout(Duration::from_secs(secs), conn.0.next())
+        .await
+        .is_ok_and(|r| r.is_none_or(|r| r.is_err()))
+}
+
+#[tokio::test]
+async fn anonymous_connections_are_capped_and_authenticated_ones_are_not() {
+    let e = env_with_limits(
+        vec![],
+        Limits {
+            max_anonymous: 2,
+            anonymous_idle: Duration::from_secs(60),
+        },
+    )
+    .await;
+    let anon = e.anonymous();
+    let first = dial(&anon, &e.broker).await;
+    let _second = dial(&anon, &e.broker).await;
+    // Let the broker take both permits before the third dial.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut third = dial(&anon, &e.broker).await;
+    assert!(closed_within(&mut third, 5).await);
+
+    let mut daemon = dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await;
+    let event = ask(&mut daemon, resolve_config()).await;
+    assert!(matches!(event, WatchdogEvent::Endpoint(_)), "{event:?}");
+
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut again = dial(&anon, &e.broker).await;
+    let event = ask(&mut again, resolve_config()).await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+}
+
+#[tokio::test]
+async fn an_idle_anonymous_connection_is_closed_but_an_authenticated_one_is_not() {
+    let e = env_with_limits(
+        vec![],
+        Limits {
+            max_anonymous: 4,
+            anonymous_idle: Duration::from_millis(300),
+        },
+    )
+    .await;
+    let mut daemon = dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await;
+    let mut anon = dial(&e.anonymous(), &e.broker).await;
+    assert!(closed_within(&mut anon, 3).await);
+    let event = ask(&mut daemon, resolve_config()).await;
+    assert!(matches!(event, WatchdogEvent::Endpoint(_)), "{event:?}");
+}
+
+#[tokio::test]
+async fn an_active_anonymous_client_is_not_cut_by_the_idle_timeout() {
+    let e = env_with_limits(
+        vec![],
+        Limits {
+            max_anonymous: 4,
+            anonymous_idle: Duration::from_millis(300),
+        },
+    )
+    .await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    for _ in 0..2 {
+        let event = ask(&mut conn, login("nobody", "x", vec![])).await;
+        assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
