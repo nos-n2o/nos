@@ -1499,6 +1499,11 @@ pub struct Args {
     /// believes the profile's links have (`Ospfv3ProfileOp::SetMtu`).
     #[arg(long)]
     pub ospfv3_profile_mtu: Option<u16>,
+    /// If set (requires `--ospfv3-profile`), overrides the profile's
+    /// hello-interval (`Ospfv3ProfileOp::SetHelloInterval`) — for verifying
+    /// a Hello with a differing interval is dropped (#650).
+    #[arg(long)]
+    pub ospfv3_profile_hello_interval: Option<u16>,
     /// If set (requires `--ospfv3-profile`), toggles `mtu-ignore` on it
     /// (`Ospfv3ProfileOp::SetMtuIgnore`).
     #[arg(long)]
@@ -4172,6 +4177,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(hello_interval) = args.ospfv3_profile_hello_interval {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetHelloInterval {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    hello_interval,
+                }));
+            }
             if let Some(enabled) = args.ospfv3_mtu_ignore {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtuIgnore {
                     instance: instance.clone(),
@@ -4202,12 +4215,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
         } else if args.ospfv3_profile_mtu.is_some()
+            || args.ospfv3_profile_hello_interval.is_some()
             || args.ospfv3_mtu_ignore.is_some()
             || args.ospfv3_crypto_key.is_some()
             || args.ospfv3_instance_id.is_some()
         {
             bail!(
-                "--ospfv3-profile-mtu/--ospfv3-mtu-ignore/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
+                "--ospfv3-profile-mtu/--ospfv3-profile-hello-interval/--ospfv3-mtu-ignore/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
             );
         }
     } else if args.ospfv3_profile.is_some() {
@@ -4332,7 +4346,18 @@ mod tests {
             "--peer",
             "10.0.0.2",
         ];
-        build_ops(&Args::try_parse_from(base.iter().chain(extra))?)
+        let argv: Vec<String> = base
+            .iter()
+            .chain(extra.iter())
+            .map(ToString::to_string)
+            .collect();
+        // Same 2 MiB-stack workaround as `parse` below (a new flag tipped it).
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || build_ops(&Args::try_parse_from(argv)?))
+            .unwrap()
+            .join()
+            .unwrap()
     }
 
     fn err(extra: &[&str]) -> String {
@@ -5190,6 +5215,8 @@ mod tests {
             "p6",
             "--ospfv3-profile-mtu",
             "1280",
+            "--ospfv3-profile-hello-interval",
+            "3",
             "--ospfv3-instance-id",
             "7",
             "--ospfv3-crypto-key",
@@ -5219,6 +5246,15 @@ mod tests {
             &ConfigOp::Admin(AdminOp::SetKey {
                 label: "ospfv3-p6-key300".into(),
                 secret: "k".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetHelloInterval {
+                instance: "o3".into(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p6".into(),
+                hello_interval: 3,
             }),
         );
         has(
@@ -6530,6 +6566,7 @@ mod tests {
             ["--ospfv3-crypto-key", "1:hmac-sha1:k"],
             ["--ospfv3-instance-id", "1"],
             ["--ospfv3-profile-mtu", "1500"],
+            ["--ospfv3-profile-hello-interval", "3"],
         ] {
             assert!(err(&[&v3[..], &extra].concat()).contains("--ospfv3-profile"));
         }

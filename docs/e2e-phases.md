@@ -118,7 +118,7 @@ Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what i
 | `ospf-external-flood` | OSPFv2 | ospf-suite | self-contained | An ABR copies a Type-5 across areas and flushes it across the ABR on removal. |
 | `ospf-virtual-link` | OSPFv2 | ospf-suite | self-contained | A virtual link joins a backbone-less router through an ABR: Full, Type-4 and V bit, routes installed, dropped within the dead interval. |
 | `ospf-opaque` | OSPFv2 | ospf-suite | self-contained | RFC 5250 opaque LSAs against FRR: type-10/11 flooded, RFC 7770 RI LSA, E/B bits, Appendix E host bits, forwarding address, Grace-LSA helper. |
-| `ospfv3` | OSPFv3 | ospf-suite | - | Basic `Ospfv3Instance` reaches Full over IPv6, loopback /128 routed via SPF, RFC 8362 extended LSAs replace the legacy set. |
+| `ospfv3` | OSPFv3 | ospf-suite | - | Basic `Ospfv3Instance` reaches Full over IPv6, loopback /128 routed via SPF, RFC 8362 extended LSAs replace the legacy set; a Hello with a differing hello-interval is dropped before Init (#650). |
 | `ospfv3-asbr` | OSPFv3 | ospf-suite | `ospfv3` | IPv4 and IPv6 statics redistributed into `ospf` and `ospfv3` at once: both LSAs and kernel routes, removal flushes only its own; OSPFv3 acks are delayed. |
 | `ospfv3-abr` | OSPFv3 | ospf-suite | `ospfv3` | An IPv6 loopback in a second area makes an ABR with an Inter-Area-Prefix-LSA; route installed, flushed on removal. |
 | `ospfv3-graceful-restart` | OSPFv3 | ospf-suite | `ospfv3` | RFC 5187: Grace-LSA, helper keeps adjacency and loopback route across a `nos-ospfv3d` SIGTERM; helper cap (`effective_grace`) and strict LSA checking (topology change exits grace). |
