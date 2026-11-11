@@ -454,3 +454,43 @@ async fn lsr_and_lsu_ignored_below_exchange() {
         assert_eq!(got.is_some(), handled, "lsu {state:?}");
     }
 }
+
+/// RFC 2328 §12.4.1.2 end to end (#958): over a real broadcast segment each
+/// router advertises its subnet as a stub, never nothing, until Full with the
+/// DR, then swaps it for the transit link within an origination tick.
+#[tokio::test(start_paused = true)]
+async fn broadcast_subnet_is_a_stub_until_full_with_the_dr() {
+    let wire = Arc::new(wire::Wire::default());
+    let (a, b) = (router(&wire), router(&wire));
+    a.reconcile(
+        vec![wired_link([10, 0, 0, 1], 24, NetworkType::Broadcast)],
+        HashMap::new(),
+        id(1),
+    )
+    .await;
+    b.reconcile(
+        vec![wired_link([10, 0, 0, 2], 24, NetworkType::Broadcast)],
+        HashMap::new(),
+        id(2),
+    )
+    .await;
+    let mut seen = Vec::new();
+    for _ in 0..90 {
+        settle(1).await;
+        let lsdb = a.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: id(1),
+            advertising_router: id(1),
+        };
+        let held = lsdb.lock().await.get(&key);
+        if let Some(LsaBody::Router(body)) = held.as_deref().map(|l| &l.body) {
+            let mut t: Vec<u8> = body.links.iter().map(|l| l.link_type).collect();
+            t.sort_unstable();
+            assert!(!t.is_empty(), "subnet absent at t={}", seen.len());
+            seen.push(t);
+        }
+    }
+    assert!(seen.contains(&vec![LINK_TYPE_STUB_NETWORK]), "{seen:?}");
+    assert_eq!(seen.last().unwrap(), &vec![LINK_TYPE_TRANSIT_NETWORK]);
+}
