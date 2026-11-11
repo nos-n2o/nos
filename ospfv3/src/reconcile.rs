@@ -451,6 +451,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
+        graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
         redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
