@@ -432,11 +432,17 @@ impl nos_ospf_common::lsa::Lsa for Lsa {
     fn same_content(&self, other: &Self) -> bool {
         self.body == other.body
     }
-    /// RFC 5187 §4: function codes 1-5, never link-local scope (which the
-    /// Link-LSA, code 8, is anyway).
+    /// RFC 3623 §3.2 item 3 (inherited by RFC 5187): area- or AS-scope
+    /// function codes 1-5 and Intra-Area-Prefix (9), plus their RFC 8362
+    /// extended flavors; never link-local scope (Link-LSAs, Grace-LSAs).
     fn is_topology(&self) -> bool {
-        (1..=5).contains(&(self.header.lsa_type & 0x1fff)) && self.header.lsa_type & 0x6000 != 0
+        is_topology_type(self.header.lsa_type)
     }
+}
+
+/// See `Lsa::is_topology`.
+fn is_topology_type(lsa_type: u16) -> bool {
+    matches!(lsa_type & 0x1fff, 1..=5 | 9 | 0x21..=0x25 | 0x29) && lsa_type & 0x6000 != 0
 }
 
 pub(crate) fn encode_lsa_header(buf: &mut Vec<u8>, header: &LsaHeader) {
@@ -1297,6 +1303,34 @@ pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn topology_types_exclude_link_local_scope() {
+        for t in [
+            LSA_TYPE_ROUTER,
+            LSA_TYPE_NETWORK,
+            LSA_TYPE_INTER_AREA_PREFIX,
+            LSA_TYPE_INTER_AREA_ROUTER,
+            LSA_TYPE_AS_EXTERNAL,
+            LSA_TYPE_INTRA_AREA_PREFIX,
+            LSA_TYPE_E_ROUTER,
+            LSA_TYPE_E_NETWORK,
+            LSA_TYPE_E_INTER_AREA_PREFIX,
+            LSA_TYPE_E_INTER_AREA_ROUTER,
+            LSA_TYPE_E_AS_EXTERNAL,
+            LSA_TYPE_E_INTRA_AREA_PREFIX,
+        ] {
+            assert!(is_topology_type(t), "{t:#x}");
+        }
+        for t in [
+            LSA_TYPE_LINK,
+            LSA_TYPE_E_LINK,
+            LSA_TYPE_GRACE,
+            0x2000 | 0x0a,
+        ] {
+            assert!(!is_topology_type(t), "{t:#x}");
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::interface_client;
-use crate::link::{LinkConfig, LinkManager};
+use crate::link::{LinkConfig, LinkManager, DEFAULT_HELPER_MAX_GRACE_PERIOD};
 use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
 use nos_daemon::config;
@@ -147,6 +147,16 @@ pub async fn run(
     info!(instance = %ctx.instance, "reconciliation loop stopped");
 }
 
+/// RFC 3623 helper cap on a neighbor's grace period, seconds
+/// (`graceful-restart helper max-grace-period`, default 1800).
+fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
+    cfg.ospfv3_instances
+        .iter()
+        .find(|i| i.name == instance)
+        .and_then(|i| i.graceful_restart_helper_max_grace_period)
+        .unwrap_or(DEFAULT_HELPER_MAX_GRACE_PERIOD)
+}
+
 /// What one resync pass reads (shared, immutable).
 #[derive(Clone, Copy)]
 struct Env<'a> {
@@ -269,6 +279,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             mtu_ignore: profile.mtu_ignore,
             auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
+            helper_max_grace_period: helper_cap(cfg, instance),
         });
     }
 }
@@ -401,6 +412,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             mtu_ignore: profile.mtu_ignore,
             auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
+            helper_max_grace_period: helper_cap(cfg, instance),
         });
     }
 }
@@ -439,6 +451,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
+        graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
         redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
@@ -1220,6 +1233,7 @@ mod tests {
             mtu_ignore: false,
             auth: None,
             instance_id: 0,
+            helper_max_grace_period: 1800,
         }
     }
 

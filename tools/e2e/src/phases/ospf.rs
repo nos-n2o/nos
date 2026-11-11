@@ -3568,6 +3568,31 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // No link config changed, so the adjacency from `ospfv3` stays up.
     a.wait("ospfv3 instance config resolved.*graceful_restart_grace_period=Some(120)")
         .await?;
+    // router-b helps for at most 60s, whatever router-a's Grace-LSA asks for
+    // (a link-config change: the adjacency re-forms first).
+    let helper_cap = |extra: &[&str]| {
+        with_base(
+            B,
+            [
+                ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+                strings(&["--ospfv3-graceful-restart-helper-max-grace-period", "60"]),
+                strings(extra),
+            ]
+            .concat(),
+        )
+    };
+    let (again_b0, again_a0) = (b.count(&full_on_b), a.count(&full_on_a));
+    b.provision_flags(&helper_cap(&[])).await?;
+    b.wait("ospfv3 instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)")
+        .await?;
+    b.wait_new(&full_on_b, again_b0, 60).await?;
+    a.wait_new(&full_on_a, again_a0, 60).await?;
+    for _ in 0..60 {
+        if b.rt1_has(OSPFV3_LOOPBACK_ADDRESS, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 
     let torn = "ospfv3 neighbor adjacency torn down\\|ospfv3 neighbor state changed to down";
     let removed = format!("removed route prefix={OSPFV3_LOOPBACK_ADDRESS}");
@@ -3588,7 +3613,7 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     b.wait(&format!(
-        "ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID} grace_period=120 restart_reason=1"
+        "ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID} grace_period=120 restart_reason=1 effective_grace=60"
     ))
     .await?;
 
@@ -3601,7 +3626,42 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     b.assert_quiet(torn, torn_before, 0).await?;
-    b.assert_quiet(&removed, removed_before, 5).await
+    b.assert_quiet(&removed, removed_before, 5).await?;
+
+    // RFC 3623 §3.2 item 3: restart router-a again; while router-b helps, its
+    // own Intra-Area-Prefix-LSA gains a prefix (a topology change; the address is the one later phases use) and the
+    // grace period ends at once.
+    let entered =
+        format!("ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
+    let topology = format!(
+        "ospfv3 helper: topology change, exiting grace link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
+    );
+    let (entered0, topology0, full_b0, full_a0) = (
+        b.count(&entered),
+        b.count(&topology),
+        b.count(&full_on_b),
+        a.count(&full_on_a),
+    );
+    log("second SIGTERM to router-a's nos-ospfv3d; router-b changes topology meanwhile");
+    w.dock
+        .signal_process("router-a", "nos-ospfv3d", "-TERM")
+        .await?;
+    b.wait_new(&entered, entered0, 30).await?;
+    b.provision_flags(&helper_cap(&[
+        "--ospfv3-loopback-address",
+        OSPFV3_LFA_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]))
+    .await?;
+    b.wait_new(&topology, topology0, 30).await?;
+    b.wait_new(&full_on_b, full_b0, 90).await?;
+    a.wait_new(&full_on_a, full_a0, 90).await?;
+    // The loopback address stays on router-b (flags cannot remove one) and
+    // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
+    // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
+    b.provision_flags(&helper_cap(&["--clear-ospfv3-loopback-profile"]))
+        .await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
