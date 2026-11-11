@@ -922,6 +922,12 @@ fn run_dijkstra(
             if visited.contains(&next_vertex) {
                 continue;
             }
+            // RFC 2328 §16.1 step 2(b): the far side must link back, on
+            // every edge, or a one-sided forged LSA attracts routes.
+            // Virtual links were already checked in `neighbors`.
+            if !virtual_link && !back_link(vertex, next_vertex, routers, networks) {
+                continue;
+            }
             let candidate = d.saturating_add(edge_cost);
             let current = *dist.get(&next_vertex).unwrap_or(&u32::MAX);
             if candidate > current {
@@ -1007,6 +1013,29 @@ fn neighbors(
                 .map(|&r| (Vertex::Router(r), 0, false))
                 .collect()
         }
+    }
+}
+
+/// RFC 2328 §16.1 step 2(b): does `w` have a link back to `v`? Router to
+/// router needs a p2p link back, router to network needs the Network-LSA to
+/// list the router, network to router needs a transit link to the network.
+fn back_link(
+    v: Vertex,
+    w: Vertex,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+) -> bool {
+    match (v, w) {
+        (Vertex::Router(v), Vertex::Router(w)) => {
+            own_link(routers, w, LINK_TYPE_POINT_TO_POINT, v).is_some()
+        }
+        (Vertex::Router(v), Vertex::Network(n)) => networks
+            .get(&n)
+            .is_some_and(|net| net.attached_routers.contains(&v)),
+        (Vertex::Network(n), Vertex::Router(w)) => {
+            own_link(routers, w, LINK_TYPE_TRANSIT_NETWORK, n).is_some()
+        }
+        (Vertex::Network(_), Vertex::Network(_)) => false,
     }
 }
 
@@ -3250,5 +3279,62 @@ mod tests {
         assert_eq!(active, vec![(net("10.1.0.0/16"), 7)]);
         // No ranges: every route is summarized on its own.
         assert_eq!(apply_ranges(&routes, &[]).0.len(), 4);
+    }
+
+    /// root(1) - 2 symmetric; 2 claims a p2p link to 9, which links back
+    /// only when `back`; 9 holds a stub.
+    fn forged_chain(back: bool) -> Vec<Arc<Lsa>> {
+        let (root, x, far) = (router_id(1), router_id(2), router_id(9));
+        let mut far_links = vec![stub(addr(192, 0, 2, 0), addr(255, 255, 255, 0), 1)];
+        if back {
+            far_links.push(p2p(x, addr(10, 0, 1, 2), 1));
+        }
+        vec![
+            router_lsa(root, vec![p2p(x, addr(10, 0, 0, 1), 1)]),
+            router_lsa(
+                x,
+                vec![
+                    p2p(root, addr(10, 0, 0, 2), 1),
+                    p2p(far, addr(10, 0, 1, 1), 1),
+                ],
+            ),
+            router_lsa(far, far_links),
+        ]
+    }
+
+    /// RFC 2328 §16.1 step 2(b): a one-sided p2p edge from a non-root router
+    /// is not followed; with the link back it is.
+    #[test]
+    fn one_sided_p2p_edge_is_rejected() {
+        assert_eq!(compute(router_id(1), &forged_chain(false)), []);
+        let routes = compute(router_id(1), &forged_chain(true));
+        assert_eq!(route_to(&routes, "192.0.2.0/24").metric, 3);
+    }
+
+    /// Router to network needs the Network-LSA to list the router; network to
+    /// router needs the router's transit link to the network.
+    #[test]
+    fn one_sided_network_edges_are_rejected() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let net = addr(10, 9, 0, 2);
+        let build = |attached: Vec<Ipv4Addr>, mut r3_links: Vec<RouterLink>| {
+            r3_links.push(stub(addr(192, 0, 2, 0), addr(255, 255, 255, 0), 1));
+            vec![
+                router_lsa(r1, vec![transit(net, addr(10, 9, 0, 1), 1)]),
+                router_lsa(r2, vec![transit(net, net, 1)]),
+                router_lsa(r3, r3_links),
+                network_lsa(net, addr(255, 255, 255, 0), attached),
+            ]
+        };
+        let reaches_r3 = |lsas: Vec<Arc<Lsa>>| {
+            compute(r1, &lsas)
+                .iter()
+                .any(|r| r.prefix == "192.0.2.0/24".parse().unwrap())
+        };
+        let back = || vec![transit(net, addr(10, 9, 0, 3), 1)];
+        assert!(reaches_r3(build(vec![r1, r2, r3], back())));
+        assert!(!reaches_r3(build(vec![r1, r2, r3], vec![])));
+        assert!(!reaches_r3(build(vec![r1, r2], back())));
+        assert!(!reaches_r3(build(vec![r2, r3], back())));
     }
 }

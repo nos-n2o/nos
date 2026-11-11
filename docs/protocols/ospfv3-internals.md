@@ -81,6 +81,13 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
   - On point-to-point and point-to-multipoint (never broadcast) a Hello from a link-local address held by another live, non-grace entry puts that entry `Down` (adjacency cleared) before the cap check: `ospfv3 neighbor evicted, same address new router id`. Unlike #956 this covers p2mp too.
   - `router_lsa_links` names the lowest router ID among `Full`/grace entries, independent of map order.
   - Verified by `nos-e2e ospfv3-p2p-rid-change`; forged-Hello floods are unit-test only.
+- **Two-way check** (#959, RFC 5340 §4.8.1 = RFC 2328 §16.1 step 2(b)): `run_dijkstra` calls `spf::back_link(v, w)` on every edge, before the distance test and independent of `links`, so the distance-only LFA runs (`alternates`) are hardened too:
+  - Router to router (point-to-point): `w` has a point-to-point link whose `neighbor_router_id` is `v`.
+  - Router to network: the Network-LSA lists `v`.
+  - Network to router: `w` has a transit link whose `neighbor_interface_id` keys the network.
+  - Applies to root edges as in v2; there are no virtual links.
+  - Known limit, not worsened: the Network vertex key is the DR's interface id alone, so two DRs with equal interface ids collide.
+  - Verified by `nos-e2e ospf-forged-lsa` (a legacy Router-LSA fragment forged with Link State ID `0.0.0.99`).
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification
