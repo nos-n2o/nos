@@ -4489,3 +4489,185 @@ pub async fn ospfv3_bfd(w: &mut World) -> anyhow::Result<()> {
     )
     .await
 }
+
+// --- #959: SPF two-way connectivity check ---
+
+/// One protocol's run of `ospf_forged_lsa`.
+struct Forge {
+    /// `forged_lsa.py`'s mode.
+    mode: &'static str,
+    /// The daemon `comm` to freeze on router-b.
+    daemon: &'static str,
+    /// Log prefix (`ospf`/`ospfv3`).
+    log: &'static str,
+    database: &'static str,
+    a_rid: &'static str,
+    b_rid: &'static str,
+    forged: &'static str,
+    control: &'static str,
+}
+
+/// The highest sequence number of `advertiser`'s Router-LSA in `r`'s database.
+async fn router_lsa_seq(r: &Router, database: &str, advertiser: &str) -> anyhow::Result<i32> {
+    let body = r.rest_expect(Method::GET, database, None, 200).await?;
+    let report: serde_json::Value = serde_json::from_str(&body)?;
+    report[0]["result"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|l| l["lsa_type"] == 1 && l["advertising_router"] == advertiser)
+        .filter_map(|l| l["sequence_number"].as_i64())
+        .max()
+        .and_then(|s| i32::try_from(s).ok())
+        .ok_or_else(|| anyhow::anyhow!("no router-lsa of {advertiser} in {body}"))
+}
+
+/// RFC 2328 §16.1 step 2(b) / RFC 5340 §4.8.1 against real packets: router-b's
+/// daemon is frozen (`SIGSTOP`) so it cannot refute, and `forged_lsa.py` floods
+/// router-a a one-sided link from router-b to a router that does not exist.
+/// The LSAs are installed but no route follows; once the fake router links back
+/// (control) its prefix is routed; MaxAge flushes it. Always resumes router-b.
+async fn forge(w: &World, f: &Forge) -> anyhow::Result<()> {
+    let a = w.a()?;
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    // Let the adjacency's own LSA exchange settle: an LSA of router-b's
+    // installed just before the forged one would make MinLSArrival drop it.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let seq = if f.mode == "v2" {
+        // router-b's own copy is authoritative (router-a's may lag a flood);
+        // the margin covers one origination between this read and the freeze.
+        router_lsa_seq(w.b()?, f.database, f.b_rid).await? + 100
+    } else {
+        0
+    }
+    .to_string();
+    let b_ip = if f.mode == "v2" { IP_B } else { "-" };
+    let inject = |step: &'static str, prefix: &'static str| {
+        let args = [
+            "python3",
+            "-c",
+            include_str!("forged_lsa.py"),
+            f.mode,
+            step,
+            OSPF_AREA,
+            f.b_rid,
+            f.a_rid,
+            FORGED_ROUTER_ID,
+            &seq,
+            b_ip,
+            prefix,
+        ];
+        async move {
+            let out = w
+                .dock
+                .in_netns(PYTHON_HELPER_IMAGE, "router-b", &args)
+                .await?;
+            log(out.trim());
+            anyhow::Ok(())
+        }
+    };
+    let route = |p: &str| format!("added route prefix={p}.*source=Some(Ospf)");
+    let installed = format!(
+        "{} lsa installed.*advertising_router={FORGED_ROUTER_ID}",
+        f.log
+    );
+    let (i0, fr0, cr0) = (
+        a.count(&installed),
+        a.count(&route(f.forged)),
+        a.count(&route(f.control)),
+    );
+    let removed = format!("removed route prefix={}", f.control);
+    let rm0 = a.count(&removed);
+    let refuted = format!("{} lsa installed.*advertising_router={}", f.log, f.b_rid);
+    let refuted0 = a.count(&refuted);
+
+    log(format!(
+        "freezing router-b's {} (must stay << 40s)",
+        f.daemon
+    ));
+    w.dock.signal_process("router-b", f.daemon, "-STOP").await?;
+    let run = async {
+        inject("forged", f.forged).await?;
+        a.wait_new(&installed, i0, 20).await?;
+        if f.mode == "v2" {
+            // The replaced Router-LSA is held (not dropped by MinLSArrival).
+            a.wait_new(&refuted, refuted0, 5).await?;
+        }
+        a.assert_quiet(&route(f.forged), fr0, 6).await?;
+        inject("control", f.control).await?;
+        a.wait_new(&route(f.control), cr0, 20).await?;
+        // MinLSArrival (1s) would drop an instance sent right behind the last.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        inject("flush", f.control).await?;
+        a.wait_new(&removed, rm0, 20).await
+    }
+    .await;
+    // Always thaw, even when a check failed.
+    let held = a.count(&refuted);
+    let thaw = w.dock.signal_process("router-b", f.daemon, "-CONT").await;
+    run?;
+    thaw?;
+    if f.mode == "v2" {
+        // router-b sees its replaced Router-LSA flooded back and reoriginates.
+        a.wait_new(&refuted, held, 60).await?;
+    }
+    Ok(())
+}
+
+/// #959 (self-contained): OSPFv2 and OSPFv3 SPF reject an edge whose far side
+/// does not link back, so one forged LSA cannot attract routes (see `forge`).
+pub async fn ospf_forged_lsa(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    for (r, id, rid, addr, rid3) in [
+        (a, A, OSPF_ROUTER_ID, OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+        (b, B, OSPF_ROUTER_ID_B, OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ] {
+        let mut f = ospf(rid);
+        f.extend(ospfv3(addr, rid3));
+        r.provision_flags(&with_base(id, f)).await?;
+    }
+    both_full_p2p(a, b).await?;
+    for (x, peer) in [(a, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID)] {
+        x.wait(&format!(
+            "ospfv3 neighbor reached full link=eth0.0 neighbor={peer}"
+        ))
+        .await?;
+    }
+    forge(
+        w,
+        &Forge {
+            mode: "v2",
+            daemon: "nos-ospfd",
+            log: "ospf",
+            database: "/v1/ospf/database",
+            a_rid: OSPF_ROUTER_ID,
+            b_rid: OSPF_ROUTER_ID_B,
+            forged: FORGED_V4_PREFIX,
+            control: FORGED_V4_CONTROL,
+        },
+    )
+    .await?;
+    forge(
+        w,
+        &Forge {
+            mode: "v3",
+            daemon: "nos-ospfv3d",
+            log: "ospfv3",
+            database: "/v1/ospfv3/database",
+            a_rid: OSPFV3_ROUTER_ID,
+            b_rid: OSPFV3_ROUTER_ID_B,
+            forged: FORGED_V6_PREFIX,
+            control: FORGED_V6_CONTROL,
+        },
+    )
+    .await?;
+    a.established().await
+}

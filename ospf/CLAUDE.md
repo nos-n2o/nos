@@ -47,6 +47,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 ## SPF and routes
 
 - `spf::compute` derives next hops from the LSDB only (a neighbor's address comes from its own LSA's link back), never the neighbor table. Roots' directly attached destinations are filtered by `(link_id, link_data)`, not reachability. Equal-cost sets are unioned (`merge_equal`); `compute_routes` merges areas keeping the cheaper route, path classes per `spf::PathClass`.
+- `run_dijkstra` checks `back_link` on every edge (§16.1 2(b), #959); a new edge kind needs its reciprocal rule there.
 - Every route push goes through `rib_push_client::push` (`OspfRouteUpdate::frames_with`, a big `Full` becomes `FullPart`s + `Full`, #727); `--push-chunk` is test-only (`ospf-push-chunked`).
 - Every collector skips `advertising_router == root` (our own LSA must not route back through us). External collection runs after every Internal collector (forwarding address resolution).
 - ABR = attached to 2+ areas, derived, never configured (`lsdbs.len() >= 2` for summaries; `is_area_border_router` for the B bit, counting a virtual link as backbone). `intra_area_routes` feeds summarization and excludes inter-area/external routes, which prevents two-area loops.

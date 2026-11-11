@@ -626,3 +626,11 @@ pub const PKI_ROTATE_EVERY_SECS: u64 = 6;
 /// `--pki-ipc-session-max` for `pki-rotation` (#637): short enough to pass
 /// during the phase's rotation wait, long enough for the first renewal.
 pub const PKI_IPC_SESSION_MAX_SECS: u64 = 15;
+
+/// `ospf-forged-lsa` (#959): the router id of a router that does not exist,
+/// and the prefixes its forged (one-sided) and control (reciprocal) LSAs carry.
+pub const FORGED_ROUTER_ID: &str = "9.9.9.99";
+pub const FORGED_V4_PREFIX: &str = "198.18.110.0/24";
+pub const FORGED_V4_CONTROL: &str = "198.18.111.0/24";
+pub const FORGED_V6_PREFIX: &str = "2001:db8:99::/64";
+pub const FORGED_V6_CONTROL: &str = "2001:db8:98::/64";

@@ -460,6 +460,11 @@ fn run_dijkstra(
             if visited.contains(&next_vertex) {
                 continue;
             }
+            // RFC 5340 §4.8.1 / RFC 2328 §16.1 step 2(b): the far side must
+            // link back; also covers the distance-only (LFA) runs.
+            if !back_link(vertex, next_vertex, routers, networks) {
+                continue;
+            }
             let candidate = d.saturating_add(edge_cost);
             if candidate < *dist.get(&next_vertex).unwrap_or(&u32::MAX) {
                 // `links: None` is a distance-only run (LFA neighbors), which
@@ -521,6 +526,34 @@ fn neighbors(
                 .map(|&r| (Vertex::Router(r), 0))
                 .collect()
         }
+    }
+}
+
+/// Does `w` have a link back to `v`? Router to router needs a p2p link
+/// back, router to network needs the Network-LSA to list the router,
+/// network to router needs a transit link to the network.
+fn back_link(
+    v: Vertex,
+    w: Vertex,
+    routers: &Routers,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+) -> bool {
+    match (v, w) {
+        (Vertex::Router(v), Vertex::Router(w)) => routers.get(&w).is_some_and(|b| {
+            b.links
+                .iter()
+                .any(|l| l.link_type == LINK_TYPE_POINT_TO_POINT && l.neighbor_router_id == v)
+        }),
+        (Vertex::Router(v), Vertex::Network(n)) => networks
+            .get(&n)
+            .is_some_and(|net| net.attached_routers.contains(&v)),
+        (Vertex::Network(n), Vertex::Router(w)) => routers.get(&w).is_some_and(|b| {
+            b.links.iter().any(|l| {
+                l.link_type == LINK_TYPE_TRANSIT_NETWORK
+                    && lsa::interface_id_key(l.neighbor_interface_id) == n
+            })
+        }),
+        (Vertex::Network(_), Vertex::Network(_)) => false,
     }
 }
 
@@ -1621,5 +1654,72 @@ mod tests {
         ] {
             assert_eq!(merge_router_fragments(frags).options, 2);
         }
+    }
+
+    /// r1(root) - r2 symmetric; r2 claims a link to r9; r9 links back only
+    /// when `back`. r9 owns a prefix.
+    fn forged_chain(back: bool) -> Vec<Arc<Lsa>> {
+        let (r1, r2, r9) = (router_id(1), router_id(2), router_id(9));
+        vec![
+            router_lsa(r1, vec![p2p(r2, 1, 1, 1)]),
+            router_lsa(r2, vec![p2p(r1, 1, 1, 1), p2p(r9, 2, 1, 1)]),
+            router_lsa(r9, if back { vec![p2p(r2, 1, 2, 1)] } else { vec![] }),
+            link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(r9, vec![("2001:db8:9::/64".parse().unwrap(), 1)]),
+        ]
+    }
+
+    /// RFC 5340 §4.8.1: a one-sided p2p edge from a non-root router is not
+    /// followed; with the link back it is.
+    #[test]
+    fn one_sided_p2p_edge_is_rejected() {
+        assert_eq!(compute(router_id(1), &forged_chain(false)), []);
+        assert_eq!(compute(router_id(1), &forged_chain(true)).len(), 1);
+    }
+
+    /// The distance-only (LFA) run applies the same check.
+    #[test]
+    fn distance_only_run_rejects_one_sided_edge() {
+        let r9 = Vertex::Router(router_id(9));
+        let run = |back| {
+            let routers: Routers = forged_chain(back)
+                .iter()
+                .filter_map(|l| match &l.body {
+                    LsaBody::Router(b) => Some((l.header.advertising_router, b.clone())),
+                    _ => None,
+                })
+                .collect();
+            run_dijkstra(router_id(2), &routers, &HashMap::new(), None).0
+        };
+        assert!(!run(false).contains_key(&r9));
+        assert!(run(true).contains_key(&r9));
+    }
+
+    /// Router to network needs the Network-LSA to list the router; network to
+    /// router needs the router's transit link to the network.
+    #[test]
+    fn one_sided_network_edges_are_rejected() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let build = |attached: Vec<Ipv4Addr>, r3_links: Vec<RouterLsaLink>| {
+            vec![
+                router_lsa(r1, vec![transit(7, 1, r2, 1)]),
+                router_lsa(r2, vec![transit(7, 1, r2, 1)]),
+                router_lsa(r3, r3_links),
+                network_lsa(7, r2, attached),
+                link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+                link_lsa(r3, 1, "fe80::3".parse().unwrap()),
+                router_prefix_lsa(r3, vec![("2001:db8:3::/64".parse().unwrap(), 1)]),
+            ]
+        };
+        let reaches_r3 = |lsas: Vec<Arc<Lsa>>| {
+            compute(r1, &lsas)
+                .iter()
+                .any(|r| r.prefix == "2001:db8:3::/64".parse().unwrap())
+        };
+        let back = || vec![transit(7, 1, r2, 1)];
+        assert!(reaches_r3(build(vec![r1, r2, r3], back())));
+        assert!(!reaches_r3(build(vec![r1, r2, r3], vec![])));
+        assert!(!reaches_r3(build(vec![r1, r2], back())));
+        assert!(!reaches_r3(build(vec![r2, r3], back())));
     }
 }
