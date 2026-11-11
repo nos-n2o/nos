@@ -23,3 +23,13 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 - Check: `make e2e-preflight` exits 1 naming every missing module and the phases it blocks. Built-in modules count (`modules.builtin`). `NOS_E2E_PREFLIGHT_ASSUME_MISSING="cls_u32 psample"` makes it pretend those are absent, to see the message.
 - A failed `nos-e2e` run checks the same list on its own host and prints the missing modules that block the phases it ran (`tools/e2e/src/modules.rs`); no output means the modules are not the cause.
 - Add a module (a feature needing a new tc action, e.g. #865/#891's `act_mirred`): one row in the `table` of `tools/ci/e2e-preflight.sh` (the script and `nos-e2e` both read it), one row in the table of `docs/e2e-phases.md`, and the module in the `modprobe` line and snippet above. `cargo test -p nos-e2e` fails if a row names an unknown phase.
+
+## Diagnosing and measuring flaky checks
+
+- **Quiet checks** (`assert_quiet`): take the baseline with `Router::count_fresh` (waits for the log store to go quiet first), never baseline 0 (take `count` at phase start), scope the pattern (neighbor id, link, prefix), anchor the window to a real convergence event, and widen a window at most 2x with a comment saying why.
+- **Failure output**: `assert_quiet` lists each offending line as `+<ms>ms <line>` (offset from the baseline-th match, or the last stored line when the baseline is 0; max 10 lines, then "and N more") plus the window. `wait_new` and `assert_quiet` log `baseline=<n>` when they start; `wait_new`'s timeout error shows the last 3 matching lines, so a stale-line false pass is visible.
+- **`Logs::barrier`**: returns when the store length is unchanged for 2 consecutive 250ms polls (capped at 10s, then it warns and returns). It is quiescence, not a guarantee that every line was delivered.
+- **Soak**: `make e2e-soak GROUP=<g> N=<n>` (`tools/ci/e2e-soak.sh`) runs one group n times serially (groups create and tear down their own containers, so runs are independent). Groups: `base`, `drivers`, `rpl`, `ospf-suite`, `pki-suite`; `multi` is refused until the `evpn-l3-chunked` hang is fixed, and `all` is not accepted (record it by hand).
+  - It holds the lab lock `/tmp/nos-e2e.lock` for the whole loop and fails fast if it exists.
+  - Output goes to `$TMPDIR/e2e-soak/<group>-<ts>/`: `results.txt` (`<i> PASS|FAIL <secs>s`, plus the failing phase and error on FAIL) and the logs of the last 3 failed runs (passing runs' logs are deleted).
+  - The closing table counts failures per phase and error; paste it in the PR. Use N=10 to rank flaky checks; N=1 only proves the script.

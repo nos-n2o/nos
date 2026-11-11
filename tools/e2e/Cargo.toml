@@ -29,6 +29,9 @@ bytes         = { workspace = true }
 rcgen         = { workspace = true }
 sha2          = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [[bin]]
 name = "nos-e2e"
 path = "src/main.rs"

@@ -11,7 +11,7 @@ COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build \
-        e2e-preflight docs-fix claude-md-size
+        e2e-preflight e2e-soak docs-fix claude-md-size
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -131,3 +131,6 @@ docker-build: docker-lint ## Lint, then build the nos Docker image (every daemon
 
 e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
 	IMAGE=$(IMAGE) tools/ci/e2e-preflight.sh
+
+e2e-soak: ## Run one nos-e2e group N times under the lab lock: make e2e-soak GROUP=base N=10
+	GROUP="$(GROUP)" N="$(N)" tools/ci/e2e-soak.sh
