@@ -2884,10 +2884,31 @@ pub async fn ospfv3_p2p_rid_change(w: &mut World) -> anyhow::Result<()> {
 
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    // RFC 5340 §4.2.2.1 (#650): a Hello with a mismatched hello-interval is
+    // dropped before the neighbor reaches Init.
+    let hello_interval = |secs: u16| {
+        let mut f = ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B);
+        f.extend(strings(&[
+            "--ospfv3-profile-hello-interval",
+            &secs.to_string(),
+        ]));
+        with_base(B, f)
+    };
     a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
         .await?;
-    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+    b.provision_flags(&hello_interval(5)).await?;
+    a.wait("dropping ospfv3 hello with mismatched hello-interval")
         .await?;
+    log("confirming the mismatched-hello-interval ospfv3 neighbor never reaches init");
+    a.assert_quiet(
+        &format!("ospfv3 neighbor state changed to init link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        8,
+    )
+    .await?;
+    // Restore explicitly to the default (10s): a transaction builds on running config.
+    log("restoring router-b's matching ospfv3 hello-interval");
+    b.provision_flags(&hello_interval(10)).await?;
 
     a.wait(&format!(
         "ospfv3 instance config resolved instance={OSPFV3_INSTANCE}"

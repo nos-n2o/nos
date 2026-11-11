@@ -631,6 +631,26 @@ fn handle_hello(
         return false;
     }
 
+    // RFC 5340 §4.2.2.1 / RFC 2328 §10.5 (#650): differing timers discard the Hello.
+    if hello.hello_interval != cfg.hello_interval {
+        warn_limited!(
+            limiter,
+            link = %cfg.attach_point, hello_interval = hello.hello_interval,
+            expected = cfg.hello_interval,
+            "dropping ospfv3 hello with mismatched hello-interval"
+        );
+        return false;
+    }
+    if hello.dead_interval != cfg.dead_interval {
+        warn_limited!(
+            limiter,
+            link = %cfg.attach_point, dead_interval = hello.dead_interval,
+            expected = cfg.dead_interval,
+            "dropping ospfv3 hello with mismatched dead-interval"
+        );
+        return false;
+    }
+
     // #957: a point-to-point / multipoint peer back under a new router ID from
     // the same address supersedes its old entry at once. Grace entries are
     // kept (RFC 5187); broadcast never evicts.
@@ -3535,6 +3555,48 @@ pub(crate) mod tests {
         send(1000, &mut limiter);
         assert_eq!(status.borrow().neighbors.len(), 1);
         assert_eq!(limiter.take_suppressed(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handle_hello_drops_mismatched_timers() {
+        use nos_ospf_common::ratelimit::WarnLimiter;
+        let cfg = link("eth0.0", 10);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut limiter = WarnLimiter::default();
+        let hello = |hi: u16, di: u16| packet::HelloPacket {
+            router_id: Ipv4Addr::new(2, 2, 2, 2),
+            area_id: cfg.area_id,
+            interface_id: 4,
+            router_priority: 1,
+            options: 0,
+            hello_interval: hi,
+            dead_interval: di,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        };
+        let mut send = |h: packet::HelloPacket| {
+            handle_hello(
+                &mem_socket(&cfg),
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv6Addr::from(0xfe80_0000_0000_0000_0000_0000_0000_0001_u128),
+                &h,
+                false,
+                &mut limiter,
+            );
+        };
+        send(hello(cfg.hello_interval + 1, cfg.dead_interval));
+        send(hello(cfg.hello_interval, cfg.dead_interval + 1));
+        for _ in 0..5 {
+            send(hello(cfg.hello_interval + 1, cfg.dead_interval));
+        }
+        assert!(status.borrow().neighbors.is_empty());
+        send(hello(cfg.hello_interval, cfg.dead_interval));
+        assert_eq!(status.borrow().neighbors.len(), 1);
+        // Burst of 5 warnings, the other two drops were rate limited.
+        assert_eq!(limiter.take_suppressed(), 2);
     }
 
     #[tokio::test(start_paused = true)]
