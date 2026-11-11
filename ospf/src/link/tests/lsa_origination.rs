@@ -61,6 +61,10 @@ fn router_lsa_links_max_metric_raises_transit_links_only() {
     bcast.cost = 7;
     let mut bcast_status = LinkStatus::new(NetworkType::Broadcast);
     bcast_status.dr = Some(Ipv4Addr::new(1, 1, 1, 1));
+    bcast_status.neighbors.insert(
+        Ipv4Addr::new(9, 9, 9, 11),
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 1, 0, 2)),
+    );
     let links = router_lsa_links(
         Ipv4Addr::new(1, 1, 1, 1),
         &[(p2p, p2p_status), (bcast, bcast_status)],
@@ -99,6 +103,10 @@ fn prefix_suppression_hides_the_p2p_stub_and_the_network_mask() {
     let mut status = LinkStatus::new(NetworkType::Broadcast);
     status.interface_state = InterfaceState::Dr;
     status.dr = Some(local_router_id);
+    status.neighbors.insert(
+        Ipv4Addr::new(9, 9, 9, 10),
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
     let on = router_lsa_links(
         local_router_id,
         &[(bcast.clone(), status.clone())],
@@ -116,29 +124,98 @@ fn prefix_suppression_hides_the_p2p_stub_and_the_network_mask() {
     assert_eq!(network_lsa_mask(&cfg, true), Ipv4Addr::BROADCAST);
 }
 
-#[test]
-fn router_lsa_links_skips_broadcast_link_with_no_dr_yet() {
+const ME: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+const PEER: Ipv4Addr = Ipv4Addr::new(9, 9, 9, 10);
+
+fn bcast(dr: Option<Ipv4Addr>, neighbor: Option<NeighborState>) -> (LinkConfig, LinkStatus) {
     let mut cfg = link("bd1", 10);
     cfg.network_type = NetworkType::Broadcast;
-    let status = LinkStatus::new(NetworkType::Broadcast);
+    cfg.cost = 7;
+    let mut status = LinkStatus::new(NetworkType::Broadcast);
+    status.dr = dr;
+    if dr == Some(ME) {
+        status.interface_state = InterfaceState::Dr;
+    }
+    if let Some(state) = neighbor {
+        status
+            .neighbors
+            .insert(PEER, neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2)));
+    }
+    (cfg, status)
+}
+
+fn types(links: &[RouterLink]) -> Vec<u8> {
+    links.iter().map(|l| l.link_type).collect()
+}
+
+#[test]
+fn router_lsa_links_stub_for_broadcast_link_with_no_dr_yet() {
+    // RFC 2328 §12.4.1.2: no DR elected yet, so no transit link: a stub.
+    let (cfg, status) = bcast(None, None);
+    let links = router_lsa_links(ME, &[(cfg, status)], false, false);
     assert_eq!(
-        router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false, false),
-        []
+        links,
+        [RouterLink {
+            tos: Vec::new(),
+            link_id: Ipv4Addr::new(10, 0, 0, 0),
+            link_data: Ipv4Addr::new(255, 255, 255, 0),
+            link_type: LINK_TYPE_STUB_NETWORK,
+            metric: 7,
+        }]
     );
 }
 
 #[test]
-fn router_lsa_links_uses_own_address_when_self_is_dr() {
-    let mut cfg = link("bd1", 10);
-    cfg.network_type = NetworkType::Broadcast;
-    let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
-    let mut status = LinkStatus::new(NetworkType::Broadcast);
-    status.interface_state = InterfaceState::Dr;
-    status.dr = Some(local_router_id);
-    let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)], false, false);
-    assert_eq!(links.len(), 1);
+fn router_lsa_links_broadcast_stub_until_adjacent_to_dr() {
+    for state in [
+        NeighborState::Init,
+        NeighborState::TwoWay,
+        NeighborState::ExStart,
+        NeighborState::Exchange,
+        NeighborState::Loading,
+    ] {
+        let (cfg, status) = bcast(Some(PEER), Some(state));
+        let links = router_lsa_links(ME, &[(cfg, status)], false, false);
+        assert_eq!(types(&links), [LINK_TYPE_STUB_NETWORK], "{state:?}");
+    }
+    // The DR is not (yet) in the neighbor table at all.
+    let (cfg, status) = bcast(Some(PEER), None);
+    let links = router_lsa_links(ME, &[(cfg, status)], false, false);
+    assert_eq!(types(&links), [LINK_TYPE_STUB_NETWORK]);
+    // Full: the transit link only, no stub.
+    let (cfg, status) = bcast(Some(PEER), Some(NeighborState::Full));
+    let links = router_lsa_links(ME, &[(cfg, status)], false, false);
+    assert_eq!(types(&links), [LINK_TYPE_TRANSIT_NETWORK]);
+}
+
+#[test]
+fn router_lsa_links_dr_needs_a_full_neighbor_for_the_transit_link() {
+    let (cfg, status) = bcast(Some(ME), None);
+    let links = router_lsa_links(ME, &[(cfg, status)], false, false);
+    assert_eq!(types(&links), [LINK_TYPE_STUB_NETWORK]);
+    let (cfg, status) = bcast(Some(ME), Some(NeighborState::Loading));
+    let links = router_lsa_links(ME, &[(cfg, status)], false, false);
+    assert_eq!(types(&links), [LINK_TYPE_STUB_NETWORK]);
+    let (cfg, status) = bcast(Some(ME), Some(NeighborState::Full));
+    let links = router_lsa_links(ME, &[(cfg.clone(), status)], false, false);
+    assert_eq!(types(&links), [LINK_TYPE_TRANSIT_NETWORK]);
     assert_eq!(links[0].link_id, cfg.local_addr);
-    assert_eq!(links[0].link_type, 2);
+}
+
+#[test]
+fn router_lsa_links_broadcast_stub_honours_suppression_and_max_metric() {
+    let (cfg, status) = bcast(Some(PEER), Some(NeighborState::ExStart));
+    // RFC 6860 §2.1: no stub, hence no link at all.
+    assert_eq!(
+        router_lsa_links(ME, &[(cfg.clone(), status.clone())], true, false),
+        []
+    );
+    // RFC 6987 §2: the stub keeps its cost.
+    let links = router_lsa_links(ME, &[(cfg, status)], false, true);
+    assert_eq!(
+        (types(&links), links[0].metric),
+        (vec![LINK_TYPE_STUB_NETWORK], 7)
+    );
 }
 
 #[test]

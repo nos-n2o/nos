@@ -2442,7 +2442,11 @@ impl LinkManager {
 
             let mut router_prefixes: Vec<IntraAreaPrefixEntry> = links
                 .iter()
-                .filter(|(cfg, _)| cfg.network_type == NetworkType::PointToPoint)
+                .filter(|(cfg, status)| {
+                    cfg.network_type == NetworkType::PointToPoint
+                        || (cfg.network_type == NetworkType::Broadcast
+                            && !network_prefix_originated(status))
+                })
                 .map(|(cfg, _)| IntraAreaPrefixEntry {
                     options: 0,
                     metric: cfg.cost,
@@ -2477,16 +2481,8 @@ impl LinkManager {
             }
 
             for (cfg, status) in &links {
-                if cfg.network_type != NetworkType::Broadcast
-                    || status.interface_state != InterfaceState::Dr
+                if cfg.network_type != NetworkType::Broadcast || !network_prefix_originated(status)
                 {
-                    continue;
-                }
-                let has_full_neighbor = status
-                    .neighbors
-                    .values()
-                    .any(|n| n.state == NeighborState::Full);
-                if !has_full_neighbor {
                     continue;
                 }
                 let network_key = lsa::interface_id_key(cfg.interface_id);
@@ -3029,9 +3025,34 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
         .collect()
 }
 
+/// RFC 5340 §4.4.3.2: whether this router is adjacent to the segment's DR —
+/// the DR neighbor is `Full`, or we are the DR and at least one neighbor is
+/// `Full` (a graceful-restarting neighbor still counts, as on p2p).
+/// ponytail: mirror of `ospf::link::originate::adjacent_to_dr`.
+fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
+    let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+    match status.dr {
+        None => false,
+        Some(dr) if dr == local_router_id => status.neighbors.values().any(up),
+        Some(dr) => status.neighbors.get(&dr).is_some_and(up),
+    }
+}
+
+/// Whether the network-referenced Intra-Area-Prefix-LSA carries this
+/// broadcast link's prefix: we are the DR with a `Full` neighbor. Exactly
+/// complementary to the router-referenced LSA's broadcast prefixes
+/// (RFC 5340 §4.4.3.9), so a segment prefix is never absent nor doubled.
+fn network_prefix_originated(status: &LinkStatus) -> bool {
+    status.interface_state == InterfaceState::Dr
+        && status
+            .neighbors
+            .values()
+            .any(|n| n.state == NeighborState::Full)
+}
+
 /// RFC 5340 §4.4.3.2's Router-LSA link entries for every currently-running
 /// link in one area — one point-to-point entry per link with a fully adjacent
-/// neighbor, one transit-network entry per link with a resolved DR. Unlike
+/// neighbor, one transit-network entry per broadcast link adjacent to its DR. Unlike
 /// `ospf::link::originate::router_lsa_links`, never a stub-network entry: v3's
 /// Router-LSA has nowhere to carry a prefix at all (see the module doc
 /// comment) — every prefix instead comes from
@@ -3063,21 +3084,26 @@ fn router_lsa_links(
                 }
             }
             NetworkType::Broadcast => {
-                let Some(dr) = status.dr else { continue };
-                let (dr_router_id, dr_interface_id) = if dr == local_router_id {
-                    (local_router_id, cfg.interface_id)
+                // RFC 5340 §4.4.3.2: the transit link only once adjacent to
+                // the DR. The prefix meanwhile rides the router-referenced
+                // Intra-Area-Prefix-LSA (`network_prefix_originated`).
+                let Some(dr) = status
+                    .dr
+                    .filter(|_| adjacent_to_dr(local_router_id, status))
+                else {
+                    continue;
+                };
+                let dr_interface_id = if dr == local_router_id {
+                    cfg.interface_id
                 } else {
-                    match status.neighbors.get(&dr) {
-                        Some(n) => (dr, n.interface_id),
-                        None => continue,
-                    }
+                    status.neighbors[&dr].interface_id
                 };
                 result.push(RouterLsaLink {
                     link_type: LINK_TYPE_TRANSIT_NETWORK,
                     metric: cfg.cost,
                     interface_id: cfg.interface_id,
                     neighbor_interface_id: dr_interface_id,
-                    neighbor_router_id: dr_router_id,
+                    neighbor_router_id: dr,
                 });
             }
         }
@@ -3732,29 +3758,78 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn router_lsa_links_skips_broadcast_link_with_no_dr_yet() {
+    const ME: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+    const PEER: Ipv4Addr = Ipv4Addr::new(9, 9, 9, 10);
+
+    fn bcast(dr: Option<Ipv4Addr>, neighbor: Option<NeighborState>) -> (LinkConfig, LinkStatus) {
         let mut cfg = link("bd1", 10);
         cfg.network_type = NetworkType::Broadcast;
-        let status = LinkStatus::new(NetworkType::Broadcast);
-        assert_eq!(
-            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]),
-            []
-        );
+        let mut status = LinkStatus::new(NetworkType::Broadcast);
+        status.dr = dr;
+        if dr == Some(ME) {
+            status.interface_state = InterfaceState::Dr;
+        }
+        if let Some(state) = neighbor {
+            status
+                .neighbors
+                .insert(PEER, neighbor_info(state, "fe80::2".parse().unwrap(), 7));
+        }
+        (cfg, status)
     }
 
     #[test]
-    fn router_lsa_links_uses_own_interface_id_when_self_is_dr() {
-        let mut cfg = link("bd1", 10);
-        cfg.network_type = NetworkType::Broadcast;
-        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
-        let mut status = LinkStatus::new(NetworkType::Broadcast);
-        status.interface_state = InterfaceState::Dr;
-        status.dr = Some(local_router_id);
-        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)]);
+    fn router_lsa_links_omit_broadcast_link_until_adjacent_to_dr() {
+        // RFC 5340 §4.4.3.2 / RFC 2328 §12.4.1.2.
+        let (cfg, status) = bcast(None, None);
+        assert_eq!(router_lsa_links(ME, &[(cfg, status)]), []);
+        for state in [
+            NeighborState::Init,
+            NeighborState::TwoWay,
+            NeighborState::ExStart,
+            NeighborState::Exchange,
+            NeighborState::Loading,
+        ] {
+            let (cfg, status) = bcast(Some(PEER), Some(state));
+            assert_eq!(router_lsa_links(ME, &[(cfg, status)]), [], "{state:?}");
+        }
+        let (cfg, status) = bcast(Some(PEER), None);
+        assert_eq!(router_lsa_links(ME, &[(cfg, status)]), []);
+        let (cfg, status) = bcast(Some(PEER), Some(NeighborState::Full));
+        let links = router_lsa_links(ME, &[(cfg, status)]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].neighbor_interface_id, 7);
+        assert_eq!(links[0].neighbor_router_id, PEER);
+    }
+
+    #[test]
+    fn router_lsa_links_dr_needs_a_full_neighbor() {
+        for neighbor in [None, Some(NeighborState::Loading)] {
+            let (cfg, status) = bcast(Some(ME), neighbor);
+            assert_eq!(router_lsa_links(ME, &[(cfg, status)]), []);
+        }
+        let (cfg, status) = bcast(Some(ME), Some(NeighborState::Full));
+        let links = router_lsa_links(ME, &[(cfg.clone(), status)]);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].neighbor_interface_id, cfg.interface_id);
-        assert_eq!(links[0].neighbor_router_id, local_router_id);
+        assert_eq!(links[0].neighbor_router_id, ME);
+    }
+
+    #[test]
+    fn network_prefix_originated_only_for_the_dr_with_a_full_neighbor() {
+        for (dr, neighbor, want) in [
+            (Some(ME), None, false),
+            (Some(ME), Some(NeighborState::Loading), false),
+            (Some(ME), Some(NeighborState::Full), true),
+            (Some(PEER), Some(NeighborState::Full), false),
+            (None, None, false),
+        ] {
+            let (_, status) = bcast(dr, neighbor);
+            assert_eq!(
+                network_prefix_originated(&status),
+                want,
+                "{dr:?} {neighbor:?}"
+            );
+        }
     }
 
     #[test]
@@ -4063,7 +4138,9 @@ pub(crate) mod tests {
             .reconcile(vec![moved.clone()], HashMap::new(), me)
             .await;
         manager.originate_all(me).await;
-        assert_eq!(iap().await, Some(lsa::MAX_AGE));
+        // #958: the lone broadcast link, not adjacent to a DR, keeps its prefix
+        // in the router IAP (RFC 5340 §4.4.3.9) — only the p2p one left it.
+        assert!(iap().await.unwrap() < lsa::MAX_AGE);
         let store = manager.link_local_lsdb_for(&bd.attach_point).await;
         let store = store.lock().await;
         let link_age = |id| age_of(&store, lsa::LSA_TYPE_LINK, lsa::interface_id_key(id), me);
@@ -4071,6 +4148,12 @@ pub(crate) mod tests {
         assert!(link_age(8).unwrap() < lsa::MAX_AGE);
         let router = age_of(&*area.lock().await, lsa::LSA_TYPE_ROUTER, me, me);
         assert!(router.unwrap() < lsa::MAX_AGE);
+        drop(store);
+
+        // Nothing left at all: the router IAP is flushed.
+        manager.reconcile(Vec::new(), HashMap::new(), me).await;
+        manager.originate_all(me).await;
+        assert_eq!(iap().await, Some(lsa::MAX_AGE));
     }
 
     async fn set_redist(m: &LinkManager, ps: &[u16]) {
@@ -4909,6 +4992,79 @@ pub(crate) mod tests {
 
     async fn settle(secs: u64) {
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
+
+    /// RFC 5340 §4.4.3.9 end to end (#958): over a broadcast segment the
+    /// subnet's prefix is in A's LSDB at every sample — router-referenced
+    /// until the DR has a Full neighbor, then network-referenced only — and
+    /// the transit link appears only once adjacent to the DR.
+    #[tokio::test(start_paused = true)]
+    async fn broadcast_prefix_is_never_absent_while_the_transit_link_waits() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let mut la = wired_link(1, NetworkType::Broadcast);
+        la.priority = 10; // A is the DR, so its LSDB holds both flavours
+        let prefix = la.prefix;
+        a.reconcile(vec![la.clone()], HashMap::new(), id(1)).await;
+        b.reconcile(
+            vec![wired_link(2, NetworkType::Broadcast)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        let lsdb = a.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        let prefixes_of = |key: LsaKey| {
+            let lsdb = &lsdb;
+            async move {
+                match lsdb.lock().await.get(&key).as_deref().map(|l| &l.body) {
+                    Some(LsaBody::IntraAreaPrefix(b)) => {
+                        b.prefixes.iter().any(|p| p.prefix == prefix)
+                    }
+                    _ => false,
+                }
+            }
+        };
+        let router_ref = LsaKey {
+            lsa_type: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: id(1),
+        };
+        let router_lsa = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: id(1),
+            advertising_router: id(1),
+        };
+        let network_ref = LsaKey {
+            link_state_id: lsa::interface_id_key(la.interface_id),
+            ..router_ref
+        };
+        let (mut saw_router_ref, mut last) = (false, (false, false, false));
+        for t in 0..90 {
+            settle(1).await;
+            let (r, n) = (
+                prefixes_of(router_ref).await,
+                prefixes_of(network_ref).await,
+            );
+            let transit = match lsdb
+                .lock()
+                .await
+                .get(&router_lsa)
+                .as_deref()
+                .map(|l| &l.body)
+            {
+                Some(LsaBody::Router(b)) => !b.links.is_empty(),
+                _ => false,
+            };
+            if t > 3 {
+                // Never absent (a swap may briefly show both: MinLSInterval
+                // holds the router IAP update back); exact complements at rest.
+                assert!(r || n, "t={t} router-ref={r} network-ref={n}");
+            }
+            saw_router_ref |= r;
+            last = (r, n, transit);
+        }
+        assert!(saw_router_ref);
+        assert_eq!(last, (false, true, true));
     }
 
     async fn pair(

@@ -33,10 +33,23 @@ pub(super) fn network_lsa_mask(cfg: &LinkConfig, prefix_suppression: bool) -> Ip
     }
 }
 
+/// RFC 2328 §12.4.1.2: whether this router is adjacent to the segment's DR —
+/// the DR neighbor is `Full`, or we are the DR and at least one neighbor is
+/// `Full`. (A neighbor in a graceful restart still counts, as on p2p.)
+/// ponytail: mirrored in `nos-ospfv3` (no shared crate for the two daemons).
+pub(super) fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
+    let up = |n: &super::NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+    match status.dr {
+        None => false,
+        Some(dr) if dr == local_router_id => status.neighbors.values().any(up),
+        Some(dr) => status.neighbors.get(&dr).is_some_and(up),
+    }
+}
+
 /// RFC 2328 §12.4.1's Router-LSA link entries for every currently-running
 /// link in one area: one type-1 (point-to-point) entry per link with at
-/// least one neighbor, one type-2 (transit-network) entry per link with a
-/// resolved DR (broadcast), and — per RFC 2328 §12.4.1.1 — a type-3
+/// least one neighbor, one type-2 (transit-network) entry per broadcast link
+/// adjacent to its DR (`adjacent_to_dr`; otherwise a type-3 stub, §12.4.1.2), and — per RFC 2328 §12.4.1.1 — a type-3
 /// (stub-network) entry for every point-to-point link's own subnet
 /// *unconditionally*, independent of neighbor state (a numbered p2p
 /// interface always advertises its own subnet). Both ends of a p2p link
@@ -138,22 +151,38 @@ pub(super) fn router_lsa_links(
                 }
             }
             NetworkType::Broadcast => {
-                let Some(dr) = status.dr else { continue };
-                let dr_addr = if dr == local_router_id {
-                    cfg.local_addr
-                } else {
-                    match status.neighbors.get(&dr) {
-                        Some(n) => n.address,
-                        None => continue,
+                // RFC 2328 §12.4.1.2: the transit link only once adjacent to
+                // the DR; before that (or with no DR yet) the subnet is a stub.
+                match status
+                    .dr
+                    .filter(|_| adjacent_to_dr(local_router_id, status))
+                {
+                    Some(dr) => {
+                        let dr_addr = if dr == local_router_id {
+                            cfg.local_addr
+                        } else {
+                            status.neighbors[&dr].address
+                        };
+                        result.push(RouterLink {
+                            tos: Vec::new(),
+                            link_id: dr_addr,
+                            link_data: cfg.local_addr,
+                            link_type: LINK_TYPE_TRANSIT_NETWORK,
+                            metric: transit_cost,
+                        });
                     }
-                };
-                result.push(RouterLink {
-                    tos: Vec::new(),
-                    link_id: dr_addr,
-                    link_data: cfg.local_addr,
-                    link_type: LINK_TYPE_TRANSIT_NETWORK,
-                    metric: transit_cost,
-                });
+                    None => {
+                        if let Some(subnet) = local_subnet(cfg).filter(|_| !prefix_suppression) {
+                            result.push(RouterLink {
+                                tos: Vec::new(),
+                                link_id: subnet.network(),
+                                link_data: subnet.netmask(),
+                                link_type: LINK_TYPE_STUB_NETWORK,
+                                metric: cfg.cost,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
