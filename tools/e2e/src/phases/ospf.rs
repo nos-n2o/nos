@@ -3629,7 +3629,7 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.assert_quiet(&removed, removed_before, 5).await?;
 
     // RFC 3623 §3.2 item 3: restart router-a again; while router-b helps, its
-    // own Intra-Area-Prefix-LSA gains a prefix (a topology change) and the
+    // own Intra-Area-Prefix-LSA gains a prefix (a topology change; the address is the one later phases use) and the
     // grace period ends at once.
     let entered =
         format!("ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
@@ -3649,14 +3649,19 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&entered, entered0, 30).await?;
     b.provision_flags(&helper_cap(&[
         "--ospfv3-loopback-address",
-        OSPFV3_GR_TOPOLOGY_LOOPBACK_ADDRESS,
+        OSPFV3_LFA_LOOPBACK_ADDRESS,
         "--ospfv3-loopback-profile",
         OSPFV3_PROFILE,
     ]))
     .await?;
     b.wait_new(&topology, topology0, 30).await?;
     b.wait_new(&full_on_b, full_b0, 90).await?;
-    a.wait_new(&full_on_a, full_a0, 90).await
+    a.wait_new(&full_on_a, full_a0, 90).await?;
+    // The loopback address stays on router-b (flags cannot remove one) and
+    // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
+    // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
+    b.provision_flags(&helper_cap(&["--clear-ospfv3-loopback-profile"]))
+        .await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
