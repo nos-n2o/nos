@@ -429,6 +429,14 @@ impl nos_ospf_common::lsa::Lsa for Lsa {
     fn header_mut(&mut self) -> &mut LsaHeader {
         &mut self.header
     }
+    fn same_content(&self, other: &Self) -> bool {
+        self.body == other.body
+    }
+    /// RFC 5187 §4: function codes 1-5, never link-local scope (which the
+    /// Link-LSA, code 8, is anyway).
+    fn is_topology(&self) -> bool {
+        (1..=5).contains(&(self.header.lsa_type & 0x1fff)) && self.header.lsa_type & 0x6000 != 0
+    }
 }
 
 pub(crate) fn encode_lsa_header(buf: &mut Vec<u8>, header: &LsaHeader) {

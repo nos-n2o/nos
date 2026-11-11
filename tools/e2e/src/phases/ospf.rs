@@ -1218,6 +1218,39 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
+    // router-b helps for at most 60s, whatever router-a's Grace-LSA asks
+    // for (a link-config change: the adjacency re-forms first).
+    let helper_cap = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID_B,
+        ]);
+        f.extend(strings(extra));
+        with_base(B, f)
+    };
+    let full_again0 = b.count(&full_p2p(OSPF_ROUTER_ID));
+    let full_again_a0 = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    b.provision_flags(&helper_cap(&[
+        "--ospf-graceful-restart-helper-max-grace-period",
+        "60",
+    ]))
+    .await?;
+    b.wait("ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)")
+        .await?;
+    b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_again_a0, 60)
+        .await?;
+    // The restarted link's SPF run puts the route back a tick later.
+    for _ in 0..60 {
+        if b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
     let torn = "ospf neighbor adjacency torn down, back to init link=eth0.0\\|ospf neighbor state changed to down link=eth0.0";
     let flushed = format!("ospf lsa maxage flushed.*advertising_router={OSPF_ROUTER_ID}$");
     let flush_on_a = "ospf flushing self-originated lsas before shutdown";
@@ -1245,19 +1278,31 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         ))
         .await?;
         b.wait(&format!(
-            "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1"
+            "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1 effective_grace=60"
         ))
         .await?;
+        // RFC 3623 §3.2 (c): a topology change (router-b's own Router-LSA
+        // gains a stub link) ends helping on router-a's neighbor at once.
+        let topology = format!(
+            "ospf helper: topology change, exiting grace link=eth0.0 neighbor={OSPF_ROUTER_ID}"
+        );
+        let topology0 = b.count(&topology);
+        b.provision_flags(&helper_cap(&[
+            "--loopback-address",
+            OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS,
+            "--ospf-loopback-profile",
+            OSPF_PROFILE,
+        ]))
+        .await?;
+        b.wait_new(&topology, topology0, 30).await?;
         a.wait_new(marker, marker0, 30).await?;
         a.wait_new(skipped, skipped0, 90).await?;
         // The watchdog respawns router-a; the fresh process resynchronizes
         // with the neighbor that held it Full the whole time.
         b.wait_new(&full_on_b, full_b0, 90).await?;
         a.wait_new(&full_on_a, full_a0, 90).await?;
-        b.wait(&format!(
-            "ospf helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPF_ROUTER_ID}"
-        ))
-        .await?;
+        // The topology change already ended the grace period, so the reform
+        // is no longer logged as an early exit.
         tokio::time::sleep(Duration::from_secs(5)).await;
         anyhow::Ok(())
     };
@@ -1303,6 +1348,14 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
             "--clear-ospf-loopback-profile",
         ]),
     ))
+    .await?;
+    b.provision_flags(&helper_cap(&[
+        "--ospf-graceful-restart-helper-max-grace-period",
+        "0",
+        "--loopback-remove-address",
+        OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS,
+        "--clear-ospf-loopback-profile",
+    ]))
     .await?;
     b.wait_ospf_route_gone(OSPF_GR_LOOPBACK_ADDRESS, 5).await
 }

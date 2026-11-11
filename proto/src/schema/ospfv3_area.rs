@@ -65,6 +65,7 @@ mod tests {
             redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
         }
     }
 

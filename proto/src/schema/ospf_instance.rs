@@ -89,6 +89,15 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceGracefulRestart, words = "graceful-restart grace-period")]
     pub graceful_restart_grace_period: Option<u16>,
 
+    /// RFC 3623 helper side: the longest grace period this router honours for
+    /// a restarting neighbor, whatever the neighbor's Grace-LSA asks for
+    /// (seconds, 1-3600). `None` means 1800. Helping always stops early on a
+    /// topology change (strict LSA checking).
+    #[serde(default)]
+    #[garde(range(min = 1, max = 3600))]
+    #[cli(topic = OspfInstanceGracefulRestartHelperMaxGracePeriod, words = "graceful-restart helper max-grace-period")]
+    pub graceful_restart_helper_max_grace_period: Option<u32>,
+
     /// RFC 6860 prefix suppression: hide transit-only networks. Leaves every
     /// point-to-point link's subnet out of this router's Router-LSA and gives
     /// the Network-LSA it originates as DR a /32 mask, so other routers
@@ -159,6 +168,7 @@ impl Default for OspfInstance {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
             prefix_suppression: false,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
@@ -211,6 +221,7 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            graceful_restart_helper_max_grace_period: None,
             prefix_suppression: false,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
