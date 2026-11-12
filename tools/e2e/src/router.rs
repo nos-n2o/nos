@@ -1,5 +1,6 @@
 //! One router container, provisioned and observed purely over its REST API.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -562,6 +563,14 @@ impl Router {
         self.logs.count(pattern)
     }
 
+    /// `count` after the log store has gone quiet (#884): use for baselines so
+    /// lines still in flight from a previous step are not counted as new.
+    #[allow(dead_code, reason = "consumed by the #885-#887 baseline fixes")]
+    pub async fn count_fresh(&self, pattern: &str) -> usize {
+        self.logs.barrier().await;
+        self.count(pattern)
+    }
+
     /// Asserts (#190) that the first `after` line past `after_baseline` came
     /// under `max_ms` after the latest `before` line (both from this
     /// router's own logs, so no cross-host clock).
@@ -616,6 +625,10 @@ impl Router {
 
     /// Waits for more than `baseline` matches of the BRE `pattern`.
     pub async fn wait_new(&self, pattern: &str, baseline: usize, secs: u64) -> anyhow::Result<()> {
+        log(format!(
+            "{}: waiting for '{pattern}' baseline={baseline}",
+            self.name()
+        ));
         if self
             .logs
             .wait_over(pattern, baseline, Duration::from_secs(secs))
@@ -625,8 +638,9 @@ impl Router {
             Ok(())
         } else {
             bail!(
-                "{}: no new log line matching '{pattern}' within {secs}s (baseline {baseline})",
-                self.name()
+                "{}: no new log line matching '{pattern}' within {secs}s (baseline {baseline}); last matches: {:?}",
+                self.name(),
+                self.logs.tail(pattern, 3)
             )
         }
     }
@@ -638,16 +652,48 @@ impl Router {
         baseline: usize,
         secs: u64,
     ) -> anyhow::Result<()> {
+        log(format!(
+            "{}: quiet check '{pattern}' baseline={baseline}",
+            self.name()
+        ));
+        // Offsets are relative to the baseline-th match, or to the last line
+        // stored now when the baseline is 0.
+        let origin = self
+            .logs
+            .stamp_of(pattern, baseline.checked_sub(1))
+            .unwrap_or(0);
         tokio::time::sleep(Duration::from_secs(secs)).await;
-        let now = self.count(pattern);
-        if now > baseline {
-            bail!(
-                "{}: unexpected new log line matching '{pattern}' ({baseline} -> {now})",
-                self.name()
-            );
+        let new = self.logs.matches_since(pattern, baseline);
+        if new.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        bail!(
+            "{}",
+            quiet_failure(self.name(), pattern, secs, origin, &new)
+        )
     }
+}
+
+/// The `assert_quiet` failure text: each offending line as `+<ms>ms <line>`
+/// (capped at 10), and the window.
+fn quiet_failure(
+    name: &str,
+    pattern: &str,
+    secs: u64,
+    origin: u64,
+    new: &[(u64, String)],
+) -> String {
+    let mut s = format!(
+        "{name}: {} unexpected new log line(s) matching '{pattern}' within a {secs}s window:",
+        new.len()
+    );
+    for (t, l) in new.iter().take(10) {
+        let _ = write!(s, "\n  +{}ms {l}", t.saturating_sub(origin));
+    }
+    if new.len() > 10 {
+        let _ = write!(s, "\n  and {} more", new.len() - 10);
+    }
+    s
 }
 
 /// Largest body one batched `PUT` sends: under `nos-restd`'s 2 MiB default
@@ -712,6 +758,18 @@ fn plan_puts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_failure_lists_offsets_and_caps_at_ten() {
+        let new: Vec<_> = (0..12u64).map(|i| (1000 + i, format!("l{i}"))).collect();
+        let s = quiet_failure("a", "p", 5, 990, &new);
+        assert!(s.contains("12 unexpected"));
+        assert!(s.contains("5s window"));
+        assert!(s.contains("+10ms l0"));
+        assert!(s.contains("+19ms l9"));
+        assert!(!s.contains("l10"));
+        assert!(s.ends_with("and 2 more"));
+    }
 
     fn routes(n: usize) -> Vec<Value> {
         (0..n)

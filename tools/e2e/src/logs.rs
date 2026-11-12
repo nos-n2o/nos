@@ -84,14 +84,70 @@ impl Logs {
     /// Waits until the backlog has been read (the line count stops growing),
     /// so baselines taken right after attaching aren't racing the first fetch.
     pub async fn settle(&self) {
+        self.quiesce(1, 1, Duration::from_millis(400), Duration::from_secs(60))
+            .await;
+    }
+
+    /// Returns once the stored line count has been unchanged for 2 consecutive
+    /// 250ms polls (#884): quiescence, not a guarantee every line was
+    /// delivered. Capped at 10s so a chatty router cannot hang the harness;
+    /// on the cap it warns and returns.
+    #[allow(dead_code, reason = "reached via Router::count_fresh (#885-#887)")]
+    pub async fn barrier(&self) {
+        if !self
+            .quiesce(0, 2, Duration::from_millis(250), Duration::from_secs(10))
+            .await
+        {
+            crate::router::log("log barrier: store still growing after 10s, continuing");
+        }
+    }
+
+    /// Polls every `step` until the line count is `> min_lines` and unchanged
+    /// for `stable` consecutive polls; `false` if `cap` elapses first.
+    async fn quiesce(&self, min_lines: usize, stable: u32, step: Duration, cap: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + cap;
         let mut last = usize::MAX;
-        for _ in 0..150 {
+        let mut same = 0;
+        while tokio::time::Instant::now() < deadline {
             let now = self.store.lock().unwrap().lines.len();
-            if now > 0 && now == last {
-                return;
+            same = if now == last { same + 1 } else { 0 };
+            if now > min_lines && same >= stable {
+                return true;
             }
             last = now;
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(step).await;
+        }
+        false
+    }
+
+    /// `(timestamp_ms, line)` of every match past the first `baseline`.
+    pub fn matches_since(&self, pattern: &str, baseline: usize) -> Vec<(u64, String)> {
+        let re = bre(pattern);
+        let st = self.store.lock().unwrap();
+        st.lines
+            .iter()
+            .zip(&st.stamps)
+            .filter(|(l, _)| re.is_match(l))
+            .skip(baseline)
+            .map(|(l, t)| (*t, l.clone()))
+            .collect()
+    }
+
+    /// Timestamp of the `n`th (0-based) match of `pattern`, or, with `None`,
+    /// of the last stored line.
+    pub fn stamp_of(&self, pattern: &str, n: Option<usize>) -> Option<u64> {
+        let st = self.store.lock().unwrap();
+        match n {
+            None => st.stamps.last().copied(),
+            Some(n) => {
+                let re = bre(pattern);
+                st.lines
+                    .iter()
+                    .zip(&st.stamps)
+                    .filter(|(l, _)| re.is_match(l))
+                    .nth(n)
+                    .map(|(_, t)| *t)
+            }
         }
     }
 
@@ -234,6 +290,66 @@ fn parse_event(block: &str) -> Option<LogEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn logs_with(lines: &[(u64, &str)]) -> Logs {
+        let store = Arc::new(Mutex::new(Store::default()));
+        for (t, m) in lines {
+            let e = LogEntry {
+                timestamp_ms: *t,
+                level: nos_proto::LogLevel::Info,
+                source: "s".into(),
+                target: "t".into(),
+                message: (*m).into(),
+                fields: vec![],
+            };
+            push(&store, &e);
+        }
+        Logs {
+            store,
+            task: tokio::spawn(async {}),
+        }
+    }
+
+    #[tokio::test]
+    async fn matches_since_skips_baseline_and_keeps_stamps() {
+        let l = logs_with(&[(10, "up a"), (20, "down"), (30, "up b"), (45, "up c")]);
+        assert_eq!(
+            l.matches_since("up", 1),
+            vec![(30, "Info t: up b".into()), (45, "Info t: up c".into())]
+        );
+        assert_eq!(l.matches_since("up", 3).len(), 0);
+        assert_eq!(l.stamp_of("up", Some(1)), Some(30));
+        assert_eq!(l.stamp_of("up", None), Some(45));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn barrier_returns_once_pushes_stop() {
+        let l = logs_with(&[(1, "a")]);
+        let t0 = tokio::time::Instant::now();
+        l.barrier().await;
+        assert!(t0.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn barrier_is_capped_when_store_keeps_growing() {
+        let l = logs_with(&[(1, "a")]);
+        let store = l.store.clone();
+        let feeder = tokio::spawn(async move {
+            for i in 0..1000u64 {
+                {
+                    let mut s = store.lock().unwrap();
+                    s.lines.push(format!("x{i}"));
+                    s.stamps.push(i);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let t0 = tokio::time::Instant::now();
+        l.barrier().await;
+        let e = t0.elapsed();
+        feeder.abort();
+        assert!(e >= Duration::from_secs(10) && e < Duration::from_secs(11));
+    }
 
     #[test]
     fn bre_translates_grep_patterns() {
