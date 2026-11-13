@@ -176,8 +176,19 @@ async fn router_a_holds_two_lsas(a: &Router) -> anyhow::Result<()> {
 
 // --- phases ---
 
+/// Instant negative check (#886): lets lines still in flight land first, so a
+/// 0s window judges the settled log store, not the moment it was opened.
+async fn quiet_settled(r: &Router, pat: &str, baseline: usize) -> anyhow::Result<()> {
+    r.count_fresh(pat).await;
+    r.assert_quiet(pat, baseline, 0).await
+}
+
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    let age0 = a.count_fresh("ospf lsa installed.*age=0$").await;
+    let init_b =
+        format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
+    let init0 = a.count_fresh(&init_b).await;
 
     // RFC 2328 §10.5's Hello packet-validity check (issue #31): a mismatched
     // hello-interval must be dropped before the neighbor even reaches Init,
@@ -197,12 +208,7 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait("dropping ospf hello with mismatched hello-interval")
         .await?;
     log("confirming the mismatched-hello-interval neighbor never reaches init");
-    a.assert_quiet(
-        &format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}"),
-        0,
-        8,
-    )
-    .await?;
+    a.assert_quiet(&init_b, init0, 8).await?;
 
     // Restore explicitly to router-a's own default (10s, `HELLO_INTERVAL_DEFAULT`)
     // rather than just re-provisioning `ospf(...)` with no override — a
@@ -248,7 +254,7 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     // RFC 2328 §13.3: every LSA crosses the link with InfTransDelay added to
     // its age, so nothing ever lands at age 0 — not even a just-originated one.
     a.wait_new("ospf lsa installed.*age=[1-9]", 0, 15).await?;
-    a.assert_quiet("ospf lsa installed.*age=0$", 0, 0).await?;
+    quiet_settled(a, "ospf lsa installed.*age=0$", age0).await?;
 
     // The same profile on a broadcast (multi-access) link: each router's own
     // bd-ospf bridge, trunked from eth0 over dot1q. Equal priority, so the
@@ -511,8 +517,10 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     // route for it. The connected route wins: nos-ribd must leave the prefix
     // to the kernel — no add (which used to fail with EEXIST every 10s
     // reapply), no add-then-remove flap. Over 15s, more than one reapply tick.
-    c.assert_quiet(&format!("route prefix={SUBNET}"), 0, 15)
-        .await?;
+    // The baseline is taken once the previous steps' lines have landed (#886).
+    let subnet_pat = format!("route prefix={SUBNET}");
+    let subnet0 = c.count_fresh(&subnet_pat).await;
+    c.assert_quiet(&subnet_pat, subnet0, 15).await?;
 
     // RFC 2328 §13.4 (#731): router-b, the bridge's DR, restarts under
     // another router-id. router-a/c still hold its old Network-LSA, whose
@@ -1251,13 +1259,17 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let torn = "ospf neighbor adjacency torn down, back to init link=eth0.0\\|ospf neighbor state changed to down link=eth0.0";
+    // Scoped to the restarter on the p2p link: the bridge adjacency may log down on its own (#886).
+    let torn = format!(
+        "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
+    );
+    let torn = torn.as_str();
     let flushed = format!("ospf lsa maxage flushed.*advertising_router={OSPF_ROUTER_ID}$");
     let flush_on_a = "ospf flushing self-originated lsas before shutdown";
     let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
     let (torn0, flushed0, flush_a0, full_b0, full_a0) = (
-        b.count(torn),
-        b.count(&flushed),
+        b.count_fresh(torn).await,
+        b.count_fresh(&flushed).await,
         a.count(flush_on_a),
         b.count(&full_on_b),
         a.count(&full_on_a),
@@ -1327,9 +1339,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     log("router-b held its ospf route to router-a's loopback through the restart");
     // RFC 3623 §2: the restarter keeps its LSAs; the helper never tears the
     // adjacency down and never flushes them.
-    a.assert_quiet(flush_on_a, flush_a0, 0).await?;
-    b.assert_quiet(torn, torn0, 0).await?;
-    b.assert_quiet(&flushed, flushed0, 0).await?;
+    quiet_settled(a, flush_on_a, flush_a0).await?;
+    quiet_settled(b, torn, torn0).await?;
+    quiet_settled(b, &flushed, flushed0).await?;
     // Neither on-shutdown nor on-startup ever turned max-metric on.
     a.assert_quiet(max_metric_on, mm0, 10).await?;
 
@@ -1524,8 +1536,8 @@ pub async fn ospf_push_chunked(w: &mut World) -> anyhow::Result<()> {
     w.dock.kill_process("router-b", "nos-ribd").await?;
     b.wait_new(assembled, asm_b, 60).await?;
     // Only the assembled Full is applied: no half table, so no route removed.
-    b.assert_quiet("removed route", b.count("removed route"), 3)
-        .await?;
+    let removed0 = b.count_fresh("removed route").await;
+    b.assert_quiet("removed route", removed0, 3).await?;
     wait_ospf_count(b, 30, |n| n > OSPF_CHUNKED_ROUTES).await?;
 
     let redistributed = "assembled chunked redistribute snapshot instance=.* routes=8[0-9] parts=3";
@@ -1578,6 +1590,10 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
 
     // Area 1 a stub on router-a only: the Hello E-bits disagree.
     let mismatch = "dropping ospf hello with mismatched e-bit";
+    let init_b =
+        format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
+    let type5 = "ospf lsa installed.*lsa_type=5";
+    let (init0, type5_0) = (a.count_fresh(&init_b).await, a.count_fresh(type5).await);
     a.provision_flags(&with_base(A, on_eth0(OSPF_ROUTER_ID, "stub")))
         .await?;
     b.provision_flags(&with_base(B, asbr(on_eth0(OSPF_ROUTER_ID_B, "normal"))))
@@ -1601,12 +1617,7 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     b.wait(mismatch).await?;
     b.wait("ospf lsa originated.*lsa_type=5").await?;
     log("confirming the e-bit mismatch never reaches init");
-    a.assert_quiet(
-        &format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}"),
-        0,
-        8,
-    )
-    .await?;
+    a.assert_quiet(&init_b, init0, 8).await?;
 
     // Stub on both: Full; router-b (ABR) originates a default Type-3 and a
     // summary of its loopback; router-a installs both as kernel routes and
@@ -1623,8 +1634,7 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     log("confirming no as-external lsa reaches the stub area");
-    a.assert_quiet("ospf lsa installed.*lsa_type=5", 0, 10)
-        .await?;
+    a.assert_quiet(type5, type5_0, 10).await?;
 
     // A range over the loopback on area 0: router-a gets the range instead of
     // the /32 (flushed), and router-b installs a discard route for it.
@@ -1660,8 +1670,9 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     // next 10s reapply.
     log("confirming router-b's discard route survives a reapply");
     let failed = format!("failed to add route prefix={range}");
-    b.assert_quiet(&failed, b.count(&failed), 15).await?;
-    b.assert_quiet(&discard, 1, 0).await?;
+    let (failed0, discard0) = (b.count_fresh(&failed).await, b.count_fresh(&discard).await);
+    b.assert_quiet(&failed, failed0, 15).await?;
+    quiet_settled(b, &discard, discard0).await?;
 
     // not-advertise: the range Type-3 is flushed, router-a's route and
     // router-b's discard route removed.
@@ -1703,6 +1714,7 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     let removed = format!("removed route prefix={loopback}");
     let removed_before = a.count(&removed);
     let default_removed = "removed route prefix=0.0.0.0/0";
+    let default0 = a.count_fresh(default_removed).await;
     b.provision(&area(
         OSPF_ROUTER_ID_B,
         &["--ospf-area-type", "totally-stubby"],
@@ -1710,7 +1722,7 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&removed, removed_before, 60).await?;
     log("confirming the default route stays in the totally-stubby area");
-    a.assert_quiet(default_removed, 0, 10).await?;
+    a.assert_quiet(default_removed, default0, 10).await?;
     if !a.rt1_has("0.0.0.0/0", "Ospf").await? {
         bail!("router-a lost its default route in the totally-stubby area");
     }
@@ -1744,6 +1756,10 @@ pub async fn ospf_nssa(w: &mut World) -> anyhow::Result<()> {
         flags.extend(ospf_broadcast_profile(svi, OSPF_PROFILE_AREA1));
         flags
     };
+    // Baselines at phase start, before anything can originate/install a Type-5 (#886).
+    let a_type5 = "ospf lsa originated.*lsa_type=5";
+    let c_type5 = "ospf lsa installed.*lsa_type=5";
+    let (a_type5_0, c_type5_0) = (a.count_fresh(a_type5).await, c.count_fresh(c_type5).await);
     a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
         .await?;
     b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
@@ -1795,10 +1811,8 @@ pub async fn ospf_nssa(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     log("confirming router-a doesn't translate too and no type-5 enters the nssa");
-    let a_type5 = "ospf lsa originated.*lsa_type=5";
-    a.assert_quiet(a_type5, a.count(a_type5), 10).await?;
-    c.assert_quiet("ospf lsa installed.*lsa_type=5", 0, 0)
-        .await?;
+    a.assert_quiet(a_type5, a_type5_0, 10).await?;
+    quiet_settled(c, c_type5, c_type5_0).await?;
 
     // Redistribution removed: the Type-7 and the Type-5 translated from it
     // are both flushed (RFC 2328 §14.1) and router-a's route goes.
@@ -2894,18 +2908,16 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         ]));
         with_base(B, f)
     };
+    let init_b =
+        format!("ospfv3 neighbor state changed to init link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}");
+    let init0 = a.count_fresh(&init_b).await;
     a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
         .await?;
     b.provision_flags(&hello_interval(5)).await?;
     a.wait("dropping ospfv3 hello with mismatched hello-interval")
         .await?;
     log("confirming the mismatched-hello-interval ospfv3 neighbor never reaches init");
-    a.assert_quiet(
-        &format!("ospfv3 neighbor state changed to init link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
-        0,
-        8,
-    )
-    .await?;
+    a.assert_quiet(&init_b, init0, 8).await?;
     // Restore explicitly to the default (10s): a transaction builds on running config.
     log("restoring router-b's matching ospfv3 hello-interval");
     b.provision_flags(&hello_interval(10)).await?;
@@ -3388,6 +3400,11 @@ pub async fn ospfv3_lsinfinity(w: &mut World) -> anyhow::Result<()> {
             format!("added route prefix={OSPFV3_ABR_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
         let asbr_route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
         let gateway = OSPFV3_ADDRESS_A.trim_end_matches("/64");
+        // Baselines at phase start (#886), before either LSA can arrive.
+        let (abr0, asbr0) = (
+            a.count_fresh(&abr_route).await,
+            a.count_fresh(&asbr_route).await,
+        );
         a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
             .await?;
         b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
@@ -3416,8 +3433,8 @@ pub async fn ospfv3_lsinfinity(w: &mut World) -> anyhow::Result<()> {
         a.wait_new(&external_lsa, 0, 90).await?;
         if infinity {
             log("LSInfinity LSAs held; no route may be installed from them");
-            a.assert_quiet(&abr_route, 0, 20).await?;
-            a.assert_quiet(&asbr_route, 0, 1).await?;
+            a.assert_quiet(&abr_route, abr0, 20).await?;
+            a.assert_quiet(&asbr_route, asbr0, 1).await?;
         } else {
             a.wait_new(&abr_route, 0, 60).await?;
             a.wait_new(&asbr_route, 0, 60).await?;
@@ -3458,6 +3475,9 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
             .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C)
             .await?;
         let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+        let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
+        // Baseline at phase start (#886), before the LSAs can arrive.
+        let route0 = a.count_fresh(&route).await;
 
         // An eth1 attachment in area 1 (docker names the second NIC `eth1`).
         let area1 = |id: Id, v4: &str, v6: &str, router_id: &str| {
@@ -3553,10 +3573,9 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
             90,
         )
         .await?;
-        let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
         if infinity {
             log("LSInfinity Inter-Area-Router-LSA held; the external route must not be installed");
-            a.assert_quiet(&route, 0, 20).await?;
+            a.assert_quiet(&route, route0, 20).await?;
         } else {
             a.wait_new(&route, 0, 60).await?;
         }
@@ -3615,11 +3634,14 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let torn = "ospfv3 neighbor adjacency torn down\\|ospfv3 neighbor state changed to down";
+    // Scoped to the restarter on the p2p link (#886).
+    let torn = format!(
+        "ospfv3 neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPFV3_ROUTER_ID}\\|ospfv3 neighbor state changed to down link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
+    );
     let removed = format!("removed route prefix={OSPFV3_LOOPBACK_ADDRESS}");
     let (torn_before, removed_before, full_b_before, full_a_before) = (
-        b.count(torn),
-        b.count(&removed),
+        b.count_fresh(&torn).await,
+        b.count_fresh(&removed).await,
         b.count(&full_on_b),
         a.count(&full_on_a),
     );
@@ -3646,7 +3668,7 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "ospfv3 helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
     ))
     .await?;
-    b.assert_quiet(torn, torn_before, 0).await?;
+    quiet_settled(b, &torn, torn_before).await?;
     b.assert_quiet(&removed, removed_before, 5).await?;
 
     // RFC 3623 §3.2 item 3: restart router-a again; while router-b helps, its
@@ -4386,7 +4408,11 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     log("bfd on the shared profile must not reset the adjacency");
     let torn =
         format!("{daemon} neighbor adjacency torn down\\|{daemon} neighbor state changed to down");
-    let (torn_a, torn_b, full_a) = (a.count(&torn), b.count(&torn), a.count(&s.full_a));
+    let (torn_a, torn_b, full_a) = (
+        a.count_fresh(&torn).await,
+        b.count_fresh(&torn).await,
+        a.count_fresh(&s.full_a).await,
+    );
     let with = |base: &[String], extra: &[String]| {
         let mut f = base.to_vec();
         f.extend(extra.iter().cloned());
@@ -4400,8 +4426,8 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     b.wait("bfd session up peer=").await?;
     a.wait_new(&add, 0, 60).await?;
     a.assert_quiet(&torn, torn_a, 3).await?;
-    b.assert_quiet(&torn, torn_b, 0).await?;
-    a.assert_quiet(&s.full_a, full_a, 0).await?;
+    quiet_settled(b, &torn, torn_b).await?;
+    quiet_settled(a, &s.full_a, full_a).await?;
 
     log("UDP 3784 dropped on router-a: BFD Down kills the neighbor in under a second");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
