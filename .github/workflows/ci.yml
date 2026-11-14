@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: ["master", "main"]
+  # `labeled`: adding the `miri` label runs the `miri` job (it reruns the other jobs too).
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # `mutants` and the two canaries: the canaries float (newest stable / nightly), so
   # the cron finds drift within a day without anyone pushing. Every other job skips it.
   schedule:
@@ -172,10 +174,35 @@ jobs:
       # code scanning is off on this private repo, so it could never succeed.
       - run: semgrep scan --config p/rust --exclude target --error --metrics=off .
 
+  # Miri takes 17-31 min and the crates it runs have no `unsafe` (#1038): off the plain PR
+  # path. Runs on schedule/dispatch/push, and on a PR with the `miri` label or a Cargo.lock change.
+  miri-gate:
+    name: Miri gate
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: g
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELED: ${{ contains(github.event.pull_request.labels.*.name, 'miri') }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ] && [ "$LABELED" != true ]; then
+            git diff --name-only "origin/$BASE...HEAD" | grep -qx Cargo.lock || run=false
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "Miri: run=$run ($EVENT, label=$LABELED)"
+
   miri:
     name: Miri (UB check)
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
+    needs: miri-gate
+    if: needs.miri-gate.outputs.run == 'true'
     # Fail fast: with no cap a slow suite ran 5 h until GitHub cancelled it (#827).
     timeout-minutes: 45
     steps:
@@ -288,7 +315,7 @@ jobs:
   alert:
     name: Alert on red
     runs-on: ubuntu-latest
-    needs: [claude-md, fmt, clippy, clippy-canary, test, coverage, audit, deny, sast, miri, miri-canary, mutants, fuzz-smoke]
+    needs: [claude-md, fmt, clippy, clippy-canary, test, coverage, audit, deny, sast, miri-gate, miri, miri-canary, mutants, fuzz-smoke]
     if: >-
       always() && github.event_name != 'pull_request' &&
       (contains(needs.*.result, 'failure') ||
