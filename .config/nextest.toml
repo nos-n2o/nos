@@ -10,6 +10,10 @@ command = ["sh", "-c", 'ulimit -v "${NOS_MUTANTS_AS_KB:-6291456}"; exec "$0" "$@
 
 [profile.mutants]
 test-threads = 2
+# A resident-memory measurement over 66k routes: it exceeds even 120s under the
+# ulimit/CI load, so every shard's unmutated baseline failed on it (#1052). It
+# measures allocations, not logic: left out of the mutation run, kept in `make test`.
+default-filter = "not test(commit_and_put_cost_at_66k_routes)"
 # A mutant that kills a dispatcher/forwarder leaves its test awaiting a reply
 # forever; terminate it so it counts as caught rather than a Timeout (#374).
 slow-timeout = { period = "30s", terminate-after = 1 }
@@ -17,9 +21,3 @@ slow-timeout = { period = "30s", terminate-after = 1 }
 [[profile.mutants.scripts]]
 filter = "all()"
 run-wrapper = "mem-cap"
-
-# A resident-memory measurement over 66k routes: the unmutated baseline (every shard
-# runs it) timed out at the 30s cap above on a CI runner (#1052).
-[[profile.mutants.overrides]]
-filter = "test(commit_and_put_cost_at_66k_routes)"
-slow-timeout = { period = "120s", terminate-after = 1 }
