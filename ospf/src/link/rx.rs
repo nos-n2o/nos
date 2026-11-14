@@ -213,7 +213,18 @@ pub(super) fn accept_crypto_sequence(
         .neighbors
         .get(&router_id)
         .and_then(|n| n.last_crypto_seq.get(&slot).copied());
-    if last_seq.is_some_and(|last| seq <= last) {
+    // RFC 2328 D.4.3 drops only a number *less than* the stored one (equal
+    // is accepted: two packets sent in one tick may share it); RFC 7474 §3
+    // requires strictly greater per packet type. Our sender stays strictly
+    // increasing either way.
+    let replay = |last: u64| {
+        if cfg.auth.is_extended() {
+            seq <= last
+        } else {
+            seq < last
+        }
+    };
+    if last_seq.is_some_and(replay) {
         return false;
     }
     status.send_modify(|s| {
