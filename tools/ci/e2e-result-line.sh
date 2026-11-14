@@ -10,6 +10,6 @@ if [ "$rc" = 0 ]; then
 fi
 # The phase is the last "=== name ===" banner; the error is the harness's own
 # "FAILED: ..." line (first line only, anyhow chains continue below it).
-phase=$(sed -n 's/.*=== \(.*\) ===.*/\1/p' "$log" | tail -1)
+phase=$(grep -v 'docker logs' "$log" | sed -n 's/.*=== \(.*\) ===.*/\1/p' | tail -1)
 err=$(sed -n 's/.*\] [^ ]*: FAILED: //p' "$log" | head -1 | cut -c1-200)
 echo "$i FAIL ${secs}s $phase | $err"
