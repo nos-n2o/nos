@@ -24,7 +24,8 @@ fi
 # the STP BPDU trap (nos-interfaced); cls_u32 is the BFD phases' `tc` drop
 # filter; act_sample/psample are ACL `log` (#544); mpls_* is the L3VPN data
 # plane (/proc/sys/net/mpls exists only in netns created after mpls_router
-# loads). #865/#891 add act_mirred etc. below.
+# loads); act_mirred is the lacp conversation steering (#865/#891: tc flower
+# vlan_id + mirred redirect on the bond, docs/internals/lacp-dataplane-spike.md).
 table='
 vrf *
 dummy *
@@ -36,6 +37,7 @@ ipip ospf-remote-lfa
 cls_flower acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
 cls_fw evpn-esi,evpn-dataplane,evpn-single-active
 act_skbedit evpn-esi,evpn-dataplane,evpn-single-active
+act_mirred lacp
 act_gact acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
 sch_ingress acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
 cls_u32 bfd,bgp-bfd,bfd-unsolicited,bfd-echo,bfd-echo-unaffiliated,micro-bfd,ospf-bfd,ospfv3-bfd

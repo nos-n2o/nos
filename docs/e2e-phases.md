@@ -156,12 +156,12 @@ The docker host needs these (a container cannot `modprobe`); `make e2e-preflight
 | `ipip` | NBMA IP-in-IP tunnel for remote LFA (`nos-ribd`) | `ospf-remote-lfa` |
 | `cls_flower`, `act_gact`, `sch_ingress` | tc ingress filters: ACL and flowspec (`nos-acld`), EVPN local bias (`nos-fdbd`), STP BPDU trap (`nos-interfaced`) | `acl`, `flowspec-dataplane`, `evpn-esi`, `evpn-dataplane`, `evpn-single-active`, `stp` |
 | `cls_fw`, `act_skbedit` | EVPN local bias mark and drop (`nos-fdbd`) | `evpn-esi`, `evpn-dataplane`, `evpn-single-active` |
+| `act_mirred` | LACP conversation-to-link steering: `mirred egress redirect` from the bond to a member (#865, spike #891; encoder and daemon land in #895) | `lacp` |
 | `cls_u32` | the BFD phases' `tc` u32 filter dropping BFD packets | `bfd`, `bgp-bfd`, `bfd-unsolicited`, `bfd-echo`, `bfd-echo-unaffiliated`, `micro-bfd`, `ospf-bfd`, `ospfv3-bfd` |
 | `act_sample`, `psample` | ACL `log` rules (`nos-acld`, #544) | `acl` |
 | `mpls_router`, `mpls_iptunnel` | L3VPN data plane: pop routes, labelled routes (`nos-ribd`); missing, `nos-ribd` logs `MPLS is not available: load the mpls_router kernel module` | `vpn`, `vpn-export`, `vpn-export-chunked`, `vpn-dataplane`, `vpn-v6`, `vpn-multipath` |
 
 - Pulled in as dependencies, not listed: `ip_tunnel` (by `ipip`), `mpls_gso` (by `mpls_iptunnel`).
-- To come (#865/#891): `act_mirred`. Add its row here and in the script's `table`.
 - A run that fails also prints the missing modules blocking the phases it ran (`nos-e2e`, after `FAILED`): read it before suspecting a regression.
 
 ## BGP
