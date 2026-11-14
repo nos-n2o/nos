@@ -133,6 +133,14 @@ pub struct PortAggregateState {
     pub stp: StpPorts,
 }
 
+/// What `Interfaces::adopt_pushed` found changed under a resync.
+#[derive(Debug, Default)]
+pub struct Adopted {
+    pub interfaces: Vec<InterfaceState>,
+    pub aggregates: Vec<PortAggregateState>,
+    pub stp_writes: Vec<(BridgePortRef, StpPortState)>,
+}
+
 /// Every configured interface's desired state, rebuilt wholesale on every
 /// resync (see `crate::reconcile`) — mirrors `nos-rib`'s `Rib`.
 #[derive(Debug, Clone, Default)]
@@ -316,32 +324,65 @@ impl Interfaces {
         (None, None)
     }
 
-    /// Takes over `current` (a set that changed while a resync was building
-    /// this value) and returns the ports whose flag differs, for the caller
-    /// to apply again.
-    pub fn adopt_err_disabled(
-        &mut self,
-        current: &HashSet<String>,
-    ) -> (Vec<InterfaceState>, Vec<PortAggregateState>) {
+    /// Takes over every pushed map of `live` (the newest truth: a push only
+    /// lands through the write lock) that changed while a resync was building
+    /// this value, and returns what to apply again (#617). Pushes for an
+    /// aggregate or port no longer configured are not adopted.
+    pub fn adopt_pushed(&mut self, live: &Interfaces) -> Adopted {
+        let (mut interfaces, mut aggregates) = (Vec::new(), Vec::new());
         let changed: Vec<String> = self
             .err_disabled
-            .symmetric_difference(current)
+            .symmetric_difference(&live.err_disabled)
             .cloned()
             .collect();
-        let (mut ifaces, mut aggs) = (Vec::new(), Vec::new());
         for port in changed {
-            match self.set_err_disabled(&port, current.contains(&port)) {
-                (Some(i), _) => ifaces.push(i),
-                (_, Some(a)) => aggs.push(a),
+            match self.set_err_disabled(&port, live.err_disabled.contains(&port)) {
+                (Some(i), _) => interfaces.push(i),
+                (_, Some(a)) => aggregates.push(a),
                 _ => {}
             }
         }
-        (ifaces, aggs)
-    }
-
-    /// The ports `nos-stpd` holds down.
-    pub fn err_disabled_ports(&self) -> &HashSet<String> {
-        &self.err_disabled
+        let mut touched = Vec::new();
+        for (agg, members) in &live.lacp_active_members {
+            if self.by_port_aggregate.contains_key(agg)
+                && self.lacp_active_members.get(agg) != Some(members)
+            {
+                self.lacp_active_members
+                    .insert(agg.clone(), members.clone());
+                touched.push(agg.clone());
+            }
+        }
+        for (agg, members) in &live.bfd_up_members {
+            if self.by_port_aggregate.contains_key(agg)
+                && self.bfd_up_members.get(agg) != Some(members)
+            {
+                self.bfd_up_members.insert(agg.clone(), members.clone());
+                touched.push(agg.clone());
+            }
+        }
+        touched.sort();
+        touched.dedup();
+        for agg in touched {
+            interfaces.extend(self.recompute_members(&agg));
+        }
+        let assignments: Vec<StpPortAssignment> = live
+            .stp_port_states
+            .iter()
+            .filter(|(k, s)| {
+                (self.by_name.contains_key(&k.0) || self.by_port_aggregate.contains_key(&k.0))
+                    && self.stp_port_states.get(*k) != Some(*s)
+            })
+            .map(|((port, domain), state)| StpPortAssignment {
+                port: port.clone(),
+                domain: domain.clone(),
+                state: *state,
+            })
+            .collect();
+        Adopted {
+            interfaces,
+            aggregates,
+            stp_writes: self.set_stp_port_states(assignments),
+        }
     }
 
     /// Whether spanning tree is on (`spanning-tree mode` not `disabled`).
@@ -1381,12 +1422,51 @@ mod tests {
         let mut interfaces = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
         assert!(!interfaces.get("eth0").unwrap().stp.err_disabled);
         // A resync that raced a push adopts the live set and re-applies.
-        let live: HashSet<String> = ["eth0".to_string()].into();
-        let (ifaces, aggs) = interfaces.adopt_err_disabled(&live);
-        assert_eq!(ifaces.len(), 1);
-        assert!(ifaces[0].stp.err_disabled && aggs.is_empty());
-        let (again, _) = interfaces.adopt_err_disabled(&live);
-        assert_eq!(again.len(), 0);
+        let mut live = interfaces.clone();
+        live.set_err_disabled("eth0", true);
+        let a = interfaces.adopt_pushed(&live);
+        assert_eq!(a.interfaces.len(), 1);
+        assert!(a.interfaces[0].stp.err_disabled && a.aggregates.is_empty());
+        assert_eq!(interfaces.adopt_pushed(&live).interfaces.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn adopt_pushed_takes_lacp_bfd_and_stp_pushes_made_during_the_build() {
+        let config = bfd_config(PortAggregateMode::Lacp);
+        let mut live = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let mut new = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        live.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+        live.set_bfd_up_members("bond1", vec!["eth0".to_string()]);
+        let a = new.adopt_pushed(&live);
+        assert!(a.interfaces.iter().all(|i| i.port_aggregate_active));
+        assert_eq!(a.interfaces.len(), 1);
+        assert!(new.get("eth0").unwrap().port_aggregate_active);
+        // unchanged maps: nothing to re-apply
+        assert_eq!(new.adopt_pushed(&live).interfaces, Vec::new());
+
+        let config = stp_config(StpMode::Rstp);
+        let mut live = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let mut new = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        live.set_stp_port_states(vec![assignment("eth0", "bd1", StpPortState::Blocking)]);
+        let a = new.adopt_pushed(&live);
+        assert_eq!(a.stp_writes.len(), 1);
+        assert_eq!(a.stp_writes[0].1, StpPortState::Blocking);
+        assert_eq!(
+            new.get("eth0").unwrap().stp.states.get("bd1"),
+            Some(&StpPortState::Blocking)
+        );
+        assert_eq!(new.adopt_pushed(&live).stp_writes, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn adopt_pushed_drops_a_push_for_an_aggregate_no_longer_configured() {
+        let config = bfd_config(PortAggregateMode::Lacp);
+        let mut live = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        live.set_lacp_active_members("gone", vec!["eth0".to_string()]);
+        let mut new = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let a = new.adopt_pushed(&live);
+        assert_eq!(a.interfaces, Vec::new());
+        assert!(!new.lacp_active_members.contains_key("gone"));
     }
 
     #[tokio::test]

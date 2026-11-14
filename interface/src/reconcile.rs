@@ -113,20 +113,25 @@ async fn resync(
             let previous = interfaces.read().await.clone();
             let mut new_interfaces = build_from_config(&cfg, driver, &previous).await;
             debug!(count = cfg.interfaces.len(), "reconciled interfaces");
-            // `nos-stpd` may have (un)shut a port while the build ran: its
-            // newer set wins, and the stale `up` just written is undone.
+            // A push (lacpd, bfdd, stpd) may have landed while the build ran:
+            // `live` holds the newest, so it wins and is re-applied (#617).
             let mut live = interfaces.write().await;
-            let (ifaces, aggs) = new_interfaces.adopt_err_disabled(live.err_disabled_ports());
+            let adopted = new_interfaces.adopt_pushed(&live);
             *live = new_interfaces;
             drop(live);
-            for i in ifaces {
+            for i in adopted.interfaces {
                 if let Err(e) = driver.apply(&i).await {
-                    warn!(interface = %i.name, error = %e, "failed to re-apply err-disabled");
+                    warn!(interface = %i.name, error = %e, "failed to re-apply pushed state");
                 }
             }
-            for a in aggs {
+            for a in adopted.aggregates {
                 if let Err(e) = driver.ensure_port_aggregate(&a).await {
                     warn!(port_aggregate = %a.name, error = %e, "failed to re-apply err-disabled");
+                }
+            }
+            for (port, state) in adopted.stp_writes {
+                if let Err(e) = driver.set_bridge_port_state(&port, state).await {
+                    warn!(port = ?port, error = %e, "failed to re-apply bridge port state");
                 }
             }
         }
