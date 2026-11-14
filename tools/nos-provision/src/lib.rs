@@ -1571,6 +1571,11 @@ pub struct Args {
     /// a Hello with a differing interval is dropped (#650).
     #[arg(long)]
     pub ospfv3_profile_hello_interval: Option<u16>,
+    /// If set (requires `--ospfv3-profile`), the profile's interface output
+    /// cost (`Ospfv3ProfileOp::SetCost`) — moves an SPF next hop between two
+    /// links (#618).
+    #[arg(long)]
+    pub ospfv3_profile_cost: Option<u16>,
     /// If set (requires `--ospfv3-profile`), toggles `mtu-ignore` on it
     /// (`Ospfv3ProfileOp::SetMtuIgnore`).
     #[arg(long)]
@@ -4290,6 +4295,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(cost) = args.ospfv3_profile_cost {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCost {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    cost,
+                }));
+            }
             if let Some(hello_interval) = args.ospfv3_profile_hello_interval {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetHelloInterval {
                     instance: instance.clone(),
@@ -5330,6 +5343,8 @@ mod tests {
             "1280",
             "--ospfv3-profile-hello-interval",
             "3",
+            "--ospfv3-profile-cost",
+            "7",
             "--ospfv3-instance-id",
             "7",
             "--ospfv3-crypto-key",
@@ -5359,6 +5374,15 @@ mod tests {
             &ConfigOp::Admin(AdminOp::SetKey {
                 label: "ospfv3-p6-key300".into(),
                 secret: "k".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCost {
+                instance: "o3".into(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p6".into(),
+                cost: 7,
             }),
         );
         has(

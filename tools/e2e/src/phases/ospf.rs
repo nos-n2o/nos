@@ -3907,6 +3907,120 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// #618 (requires `ospfv3`): `eth1` (a veth) carries two VLAN subinterfaces,
+/// so router-b's link-local address is the same on both (they share the
+/// parent's MAC). router-a reaches router-b's loopback over VLAN 10; raising
+/// VLAN 10's cost moves the next hop to the same gateway over VLAN 20, which
+/// `nos-ribd` must install as one `NLM_F_REPLACE` (the slot key carries the
+/// interface of a link-local gateway), and nothing replaces it again.
+pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
+    w.link_veths().await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let t10 = OSPFV3_VLAN_TAGS[0];
+    let prefix = OSPFV3_VLAN_LOOPBACK_ADDRESS_B;
+    // `delete` removes the subinterface instead (cleanup).
+    let vlan = |id: Id, router_id: &str, tag: u16, cost: u16, delete: bool| {
+        let host = if id.rid == A.rid { 1 } else { 2 };
+        let profile = format!("vlan{tag}");
+        let mut f = strings(&[
+            "--interface",
+            "eth1",
+            "--subinterface-tag",
+            &tag.to_string(),
+            "--address",
+            &format!("10.78.{tag}.{host}/24"),
+            "--address6",
+            &format!("fd77:{tag}::{host}/64"),
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA,
+            "--ospfv3-profile",
+            &profile,
+            "--ospfv3-profile-cost",
+            &cost.to_string(),
+            "--ospfv3-interface-profile",
+            &profile,
+        ]);
+        if delete {
+            f.push("--delete-subinterface".into());
+        }
+        f
+    };
+    // Keep every other path (eth0.0, eth1.0) well behind the VLANs on router-a.
+    let other_cost = |cost: u16| {
+        with_base(
+            A,
+            [
+                ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+                strings(&["--ospfv3-profile-cost", &cost.to_string()]),
+            ]
+            .concat(),
+        )
+    };
+    a.provision_flags(&other_cost(OSPFV3_VLAN_OTHER_COST))
+        .await?;
+    for (tag, cost) in OSPFV3_VLAN_TAGS.into_iter().zip(OSPFV3_VLAN_COSTS) {
+        a.provision_flags(&vlan(A, OSPFV3_ROUTER_ID, tag, cost, false))
+            .await?;
+        b.provision_flags(&vlan(B, OSPFV3_ROUTER_ID_B, tag, cost, false))
+            .await?;
+    }
+    for tag in OSPFV3_VLAN_TAGS {
+        a.wait(&format!(
+            "ospfv3 neighbor reached full link=eth1.{tag} neighbor={OSPFV3_ROUTER_ID_B}"
+        ))
+        .await?;
+    }
+
+    let primary = format!("added route prefix={prefix}.*source=Some(Ospf) backup=false");
+    let p0 = a.count(&primary);
+    b.provision(&[
+        "--ospfv3-loopback-address",
+        prefix,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&primary, p0, 60).await?;
+
+    // The move: one replace of the installed route, then quiet.
+    let replaced = format!("added route prefix={prefix}.*backup=false.* replaced=true");
+    let r0 = a.count(&replaced);
+    a.provision_flags(&vlan(
+        A,
+        OSPFV3_ROUTER_ID,
+        t10,
+        OSPFV3_VLAN_MOVED_COST,
+        false,
+    ))
+    .await?;
+    a.wait_new(&replaced, r0, 60).await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let r1 = a.count(&replaced);
+    a.assert_quiet(&replaced, r1, 20).await?;
+
+    // Cleanup so the following phases see the lab they expect.
+    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    for tag in OSPFV3_VLAN_TAGS {
+        a.provision_flags(&vlan(A, OSPFV3_ROUTER_ID, tag, 1, true))
+            .await?;
+        b.provision_flags(&vlan(B, OSPFV3_ROUTER_ID_B, tag, 1, true))
+            .await?;
+    }
+    a.provision_flags(&other_cost(1)).await
+}
+
 /// #157, RFC 2328 §14.1 (requires `ospfv3-dr`): router-a and router-c leave
 /// the bridge, so router-b — its DR — loses its last `Full` neighbor there
 /// and prematurely ages its Network-LSA (legacy 0x2002 or, after `ospfv3`

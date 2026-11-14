@@ -224,14 +224,34 @@ fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, Hops)> {
 /// route; none is a discard (`RTN_BLACKHOLE`) route.
 type Hops = Vec<NextHop>;
 
-/// What a slot is compared by: its sorted `(gateway, labels)` pairs, since a
-/// dumped route carries no `interface_id` of ours to compare. The same
-/// gateway with two label stacks stays two hops, and a label-only change is
-/// a changed route (remove, then add).
-type Key = Vec<(IpAddr, Vec<u32>)>;
+/// What a slot is compared by: its sorted `(gateway, ifindex, labels)`
+/// triples. The ifindex is set only for a link-local IPv6 gateway (#618): the
+/// same fe80 address on two links is two different next hops, while for any
+/// other gateway the kernel's Oif is derived (underlay/VRF) and stays out.
+/// The same gateway with two label stacks stays two hops, and a label-only
+/// change is a changed route (replace).
+type Key = Vec<(IpAddr, Option<u32>, Vec<u32>)>;
+
+fn is_link_local(gateway: IpAddr) -> bool {
+    matches!(gateway, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfe80)
+}
+
+/// The interface a key carries for `gateway`: only a link-local one's.
+fn key_ifindex(gateway: IpAddr, ifindex: Option<u32>) -> Option<u32> {
+    ifindex.filter(|_| is_link_local(gateway))
+}
 
 fn key(hops: &[NextHop]) -> Key {
-    let mut out: Key = hops.iter().map(|h| (h.gateway, h.labels.clone())).collect();
+    let mut out: Key = hops
+        .iter()
+        .map(|h| {
+            (
+                h.gateway,
+                key_ifindex(h.gateway, h.interface_id),
+                h.labels.clone(),
+            )
+        })
+        .collect();
     out.sort_unstable();
     out
 }
@@ -698,7 +718,8 @@ impl LinuxRibDriver {
             info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, replaced = replace, "installed labelled route");
         } else {
             let discard = hops.is_empty();
-            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, "added route");
+            let interfaces: Vec<_> = hops.iter().filter_map(|h| h.interface_id).collect();
+            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, interfaces = ?interfaces, "added route");
         }
         Ok(true)
     }
@@ -757,7 +778,7 @@ impl LinuxRibDriver {
         backup: bool,
     ) -> Result<(), DriverError> {
         let key = key(hops);
-        let gateway = show_gateways(key.iter().map(|(gw, _)| gw));
+        let gateway = show_gateways(key.iter().map(|(gw, _, _)| gw));
         // No encap or onlink in the request: the kernel matches on what is
         // given, and duplicate gateways of a multipath route still match.
         let bare: Hops = hops
@@ -947,7 +968,7 @@ impl LinuxRibDriver {
             .collect();
         let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), key)| {
             let message = observed_by_slot.get(&(prefix, backup)).cloned();
-            let gateway = show_gateways(key.iter().map(|(gw, _)| gw));
+            let gateway = show_gateways(key.iter().map(|(gw, _, _)| gw));
             async move {
                 if let Some(mut message) = message {
                     // The kernel answers ESRCH to a delete that carries
@@ -1306,7 +1327,7 @@ impl LinuxRibDriver {
 }
 
 /// Extracts `((prefix, is_backup), key)` from a dumped `RouteMessage`: the
-/// sorted `(gateway, labels)` pairs (`Key`), or `None` for a route we don't
+/// sorted `(gateway, link-local ifindex, labels)` triples (`Key`), or `None` for a route we don't
 /// manage (no gateway — e.g. a kernel-internal entry a VRF device creates on
 /// its own, or an unsupported address family like MPLS). An ECMP route has no
 /// `RTA_GATEWAY` of its own: its gateways are inside `RTA_MULTIPATH`, one per
@@ -1346,14 +1367,22 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
         Some(hops) => hops
             .iter()
             .filter_map(|hop| {
+                let gw = gateway_of(&hop.attributes)?;
                 Some((
-                    gateway_of(&hop.attributes)?,
+                    gw,
+                    key_ifindex(gw, Some(hop.interface_index)),
                     mpls::labels_of(&hop.attributes),
                 ))
             })
             .collect(),
         None => gateway_of(&route.attributes)
-            .map(|gw| (gw, mpls::labels_of(&route.attributes)))
+            .map(|gw| {
+                let oif = route.attributes.iter().find_map(|a| match a {
+                    RouteAttribute::Oif(i) => Some(*i),
+                    _ => None,
+                });
+                (gw, key_ifindex(gw, oif), mpls::labels_of(&route.attributes))
+            })
             .into_iter()
             .collect(),
     };
@@ -1389,13 +1418,13 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
         .map(|prefix| ((prefix, backup), key))
 }
 
-/// The hops a dumped `key` stands for (no interface: a dump carries none of
-/// ours).
+/// The hops a dumped `key` stands for (an interface only for a link-local
+/// gateway).
 fn hops_of(key: &Key) -> Hops {
     key.iter()
-        .map(|(gateway, labels)| NextHop {
+        .map(|(gateway, ifindex, labels)| NextHop {
             gateway: *gateway,
-            interface_id: None,
+            interface_id: *ifindex,
             labels: labels.clone(),
         })
         .collect()
@@ -1404,12 +1433,12 @@ fn hops_of(key: &Key) -> Hops {
 /// The "removed route" log line, or "removed labelled route" (each hop's
 /// labels, in `key` order) for one that pushed labels.
 fn log_removed(prefix: IpNet, key: &Key, table_id: u32, backup: bool) {
-    let gateway = show_gateways(key.iter().map(|(gw, _)| gw));
-    if key.iter().all(|(_, l)| l.is_empty()) {
+    let gateway = show_gateways(key.iter().map(|(gw, _, _)| gw));
+    if key.iter().all(|(_, _, l)| l.is_empty()) {
         let discard = key.is_empty();
         info!(%prefix, %gateway, table_id, backup, discard, "removed route");
     } else {
-        let labels: Vec<_> = key.iter().map(|(_, l)| l).collect();
+        let labels: Vec<_> = key.iter().map(|(_, _, l)| l).collect();
         info!(%prefix, labels = ?labels, %gateway, table_id, "removed labelled route");
     }
 }
@@ -1563,7 +1592,10 @@ mod tests {
     }
 
     fn k(hops: &[(&str, &[u32])]) -> Key {
-        let mut k: Key = hops.iter().map(|(g, l)| (addr(g), l.to_vec())).collect();
+        let mut k: Key = hops
+            .iter()
+            .map(|(g, l)| (addr(g), None, l.to_vec()))
+            .collect();
         k.sort_unstable();
         k
     }
@@ -1594,6 +1626,31 @@ mod tests {
     fn hops_of_round_trips_a_key() {
         let key = k(&[("10.0.0.1", &[16, 17]), ("10.0.0.2", &[])]);
         assert_eq!(super::key(&hops_of(&key)), key);
+    }
+
+    /// #618: the same fe80 gateway on two links is two next hops (a replace),
+    /// a global gateway's interface is not part of the key, and a dump reads
+    /// the link-local ifindex back (single-hop Oif and multipath).
+    #[test]
+    fn a_link_local_next_hop_move_is_a_replace() {
+        let ll = |oif| key(&[hop("fe80::1", Some(oif), &[])]);
+        assert_ne!(ll(10), ll(20));
+        assert_eq!(slot_op(Some(&ll(10)), Some(&ll(20))), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&ll(10)), Some(&ll(10))), SlotOp::Keep);
+        let global = |oif| key(&[hop("2001:db8::1", Some(oif), &[])]);
+        assert_eq!(global(10), global(20));
+
+        let p = net("2001:db8:1::/64");
+        let single = build_route(p, &[hop("fe80::1", Some(20), &[])], 100, false, false).unwrap();
+        assert_eq!(extract_route(&wire(&single)), Some(((p, false), ll(20))));
+        // a dump on the stale interface differs from the desired key
+        let (_, dumped) = extract_route(&wire(&single)).unwrap();
+        assert_eq!(slot_op(Some(&dumped), Some(&ll(10))), SlotOp::Replace);
+        assert_eq!(hops_of(&dumped)[0].interface_id, Some(20));
+
+        let hops = vec![hop("fe80::1", Some(10), &[]), hop("fe80::1", Some(20), &[])];
+        let multi = build_route(p, &hops, 100, false, false).unwrap();
+        assert_eq!(extract_route(&wire(&multi)), Some(((p, false), key(&hops))));
     }
 
     #[test]
@@ -1730,7 +1787,10 @@ mod tests {
             extract_route(&wire(&route)),
             Some((
                 (p, false),
-                vec![(addr("10.0.0.2"), vec![]), (addr("10.0.0.9"), vec![])]
+                vec![
+                    (addr("10.0.0.2"), None, vec![]),
+                    (addr("10.0.0.9"), None, vec![])
+                ]
             ))
         );
     }
@@ -1744,7 +1804,10 @@ mod tests {
             extract_route(&wire(&route)),
             Some((
                 (p, false),
-                vec![(addr("2001:db8::2"), vec![]), (addr("2001:db8::9"), vec![])]
+                vec![
+                    (addr("2001:db8::2"), None, vec![]),
+                    (addr("2001:db8::9"), None, vec![])
+                ]
             ))
         );
     }
@@ -1778,9 +1841,9 @@ mod tests {
             .iter()
             .any(|a| matches!(a, RouteAttribute::Encap(_))));
         let want = vec![
-            (addr("10.0.0.2"), vec![100]),
-            (addr("10.0.0.2"), vec![300, 16]),
-            (addr("10.0.0.3"), vec![200]),
+            (addr("10.0.0.2"), None, vec![100]),
+            (addr("10.0.0.2"), None, vec![300, 16]),
+            (addr("10.0.0.3"), None, vec![200]),
         ];
         assert_eq!(key(&hops), want);
         assert_eq!(extract_route(&route), Some(((p, false), want.clone())));
@@ -1818,7 +1881,7 @@ mod tests {
         let route = build_route(p, &[plain("10.0.0.1")], 100, true, false).unwrap();
         assert_eq!(
             extract_route(&route),
-            Some(((p, true), vec![(addr("10.0.0.1"), vec![])]))
+            Some(((p, true), vec![(addr("10.0.0.1"), None, vec![])]))
         );
         assert!(!route.header.flags.contains(RouteFlags::Onlink));
         let onlink = build_route(p, &[plain("10.0.0.1")], 100, false, true).unwrap();
@@ -1876,7 +1939,7 @@ mod tests {
             let route = build_route(p, &[hop(gw, Some(4), &[2000])], 100, false, true).unwrap();
             assert_eq!(
                 extract_route(&wire(&route)),
-                Some(((p, false), vec![(addr(gw), vec![2000])]))
+                Some(((p, false), vec![(addr(gw), None, vec![2000])]))
             );
         }
     }
@@ -1903,7 +1966,7 @@ mod tests {
         );
         assert_eq!(
             extract_route(&route),
-            Some(((p, false), vec![(addr("10.50.0.3"), vec![1000])]))
+            Some(((p, false), vec![(addr("10.50.0.3"), None, vec![1000])]))
         );
         // Removal builds the same message from the IPv4 gateway, no labels.
         assert!(build_route(p, &[plain("10.50.0.3")], 100, false, false).is_some());
@@ -1911,7 +1974,7 @@ mod tests {
         let v6 = build_route(p, &[plain("fd18::1")], 100, false, false).unwrap();
         assert_eq!(
             extract_route(&v6),
-            Some(((p, false), vec![(addr("fd18::1"), vec![])]))
+            Some(((p, false), vec![(addr("fd18::1"), None, vec![])]))
         );
     }
 
@@ -1933,11 +1996,11 @@ mod tests {
         let (add, remove) = diff_routes(&old, &new);
         assert_eq!(
             add,
-            vec![((p, false), vec![(addr("10.0.0.2"), vec![2000])])]
+            vec![((p, false), vec![(addr("10.0.0.2"), None, vec![2000])])]
         );
         assert_eq!(
             remove,
-            vec![((p, false), vec![(addr("10.0.0.2"), vec![1000])])]
+            vec![((p, false), vec![(addr("10.0.0.2"), None, vec![1000])])]
         );
         assert_eq!(diff_routes(&old, &old), (vec![], vec![]));
         // An entry's hop order is not a change; one hop's labels are.
