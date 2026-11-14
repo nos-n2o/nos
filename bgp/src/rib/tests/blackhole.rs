@@ -89,3 +89,32 @@ fn withdraw_removes_the_discard() {
     learn(&mut rib, &w, &nos_rpl::ACCEPT_ALL);
     assert_eq!(pushed(&rib, HOST), None);
 }
+
+#[test]
+fn padded_announce_is_withdrawn_by_clean_withdraw() {
+    use crate::message::{BgpCodec, BgpMessage};
+    use bytes::BytesMut;
+    use tokio_util::codec::{Decoder, Encoder};
+    // #603: a peer announces 10.0.15.0/20 (host bits set) and withdraws 10.0.0.0/20.
+    let wire = |u: UpdateMessage| {
+        let mut buf = BytesMut::new();
+        BgpCodec::default()
+            .encode(BgpMessage::Update(u), &mut buf)
+            .unwrap();
+        match BgpCodec::default().decode(&mut buf).unwrap().unwrap() {
+            BgpMessage::Update(u) => u,
+            _ => unreachable!(),
+        }
+    };
+    let mut rib = setup(None);
+    let mut ann = update("10.0.0.0/20", false);
+    ann.nlri = vec!["10.0.15.0/20".parse().unwrap()];
+    learn(&mut rib, &wire(ann), &nos_rpl::ACCEPT_ALL);
+    assert!(rib.loc_rib.contains_key(&prefix("10.0.0.0/20")));
+    let mut w = update("10.0.0.0/20", false);
+    w.withdrawn_routes = vec!["10.0.0.0/20".parse().unwrap()];
+    w.nlri = vec![];
+    w.attributes = None;
+    learn(&mut rib, &wire(w), &nos_rpl::ACCEPT_ALL);
+    assert!(rib.loc_rib.is_empty());
+}
