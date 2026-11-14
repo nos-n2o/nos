@@ -27,6 +27,8 @@ use std::net::Ipv4Addr;
 pub struct Candidate {
     pub router_id: Ipv4Addr,
     pub priority: u8,
+    /// Router-ID space (`OSPFv3` Hellos carry router IDs on the wire; `OSPFv2`'s
+    /// carry interface addresses, which `nos-ospf` translates first, #608).
     /// `Ipv4Addr::UNSPECIFIED` if this candidate declares no DR.
     pub declared_dr: Ipv4Addr,
     /// `Ipv4Addr::UNSPECIFIED` if this candidate declares no BDR.
