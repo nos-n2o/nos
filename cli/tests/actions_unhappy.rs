@@ -95,6 +95,10 @@ fn lacp_summary(name: &str) -> nos_proto::PortAggregateLacpSummary {
         min_links: 1,
         min_links_met: true,
         ports: Vec::new(),
+        version: nos_proto::LacpVersion::V1,
+        port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
+        agreement: nos_proto::LacpAgreement::NotApplicable,
+        conversations_per_link: Vec::new(),
     }
 }
 

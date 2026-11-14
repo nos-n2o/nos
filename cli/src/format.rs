@@ -944,6 +944,32 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
+/// The version-2 line of `show lacp`: algorithm, agreement, per-link conversation counts.
+fn render_lacp_v2(s: &PortAggregateLacpSummary) -> String {
+    use nos_proto::{LacpAgreement, LacpPortAlgorithm};
+    let algorithm = match s.port_algorithm {
+        LacpPortAlgorithm::Unspecified => "unspecified",
+        LacpPortAlgorithm::CVlan => "c-vlan",
+        LacpPortAlgorithm::SVlan => "s-vlan",
+    };
+    let agreement = match s.agreement {
+        LacpAgreement::NotApplicable => "not-applicable",
+        LacpAgreement::Agreed => "agreed",
+        LacpAgreement::Mismatch => "mismatch",
+        LacpAgreement::V1Partner => "v1-partner",
+    };
+    let mut line = format!("  version 2, algorithm {algorithm}, agreement {agreement}");
+    if !s.conversations_per_link.is_empty() {
+        let per_link: Vec<String> = s
+            .conversations_per_link
+            .iter()
+            .map(|(m, n)| format!("{m} {n}"))
+            .collect();
+        line = format!("{line}, conversations {}", per_link.join(", "));
+    }
+    line
+}
+
 /// Render `nos-lacpd`'s per-aggregate LACP state, for `show lacp`.
 pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
     if summaries.is_empty() {
@@ -976,6 +1002,10 @@ pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
             }
             if s.ports.is_empty() {
                 lines.push("  no member ports".to_string());
+            }
+            // Version-1 output stays byte-identical to before #865.
+            if s.version == nos_proto::LacpVersion::V2 {
+                lines.push(render_lacp_v2(s));
             }
             lines.extend(s.ports.iter().map(render_lacp_port));
             lines.join("\n")
@@ -3014,6 +3044,8 @@ mod tests {
                     partner_churn: false,
                     individual: false,
                     unsupported_version_pdus: 0,
+                    partner_version: None,
+                    partner_port_algorithm: None,
                 },
                 nos_proto::LacpPortStatus {
                     interface: "eth2".to_string(),
@@ -3033,8 +3065,14 @@ mod tests {
                     partner_churn: true,
                     individual: true,
                     unsupported_version_pdus: 3,
+                    partner_version: None,
+                    partner_port_algorithm: None,
                 },
             ],
+            version: nos_proto::LacpVersion::V1,
+            port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
+            agreement: nos_proto::LacpAgreement::NotApplicable,
+            conversations_per_link: Vec::new(),
         };
         let out = render_lacp_summaries(&[summary]);
         assert!(out.contains(
@@ -3216,6 +3254,29 @@ mod tests {
     }
 
     #[test]
+    fn render_lacp_summaries_v2_line_only_for_version_2() {
+        let mut s = PortAggregateLacpSummary {
+            aggregate: "bond1".to_string(),
+            actor_system_id: [0; 6],
+            actor_key: 1,
+            actor_system_priority: 32768,
+            rate: LacpRate::Slow,
+            min_links: 1,
+            min_links_met: true,
+            ports: Vec::new(),
+            version: nos_proto::LacpVersion::V1,
+            port_algorithm: nos_proto::LacpPortAlgorithm::CVlan,
+            agreement: nos_proto::LacpAgreement::Agreed,
+            conversations_per_link: vec![("eth1".to_string(), 2048), ("eth2".to_string(), 2048)],
+        };
+        assert!(!render_lacp_summaries(&[s.clone()]).contains("version 2"));
+        s.version = nos_proto::LacpVersion::V2;
+        assert!(render_lacp_summaries(&[s]).contains(
+            "\n  version 2, algorithm c-vlan, agreement agreed, conversations eth1 2048, eth2 2048"
+        ));
+    }
+
+    #[test]
     fn render_lacp_port_names_every_state() {
         let port = |receive, mux, actor_churn, partner_churn| nos_proto::LacpPortStatus {
             interface: "eth1".to_string(),
@@ -3235,6 +3296,8 @@ mod tests {
             partner_churn,
             individual: false,
             unsupported_version_pdus: 0,
+            partner_version: None,
+            partner_port_algorithm: None,
         };
         for (p, want) in [
             (
@@ -3266,6 +3329,10 @@ mod tests {
             min_links: 1,
             min_links_met: true,
             ports: Vec::new(),
+            version: nos_proto::LacpVersion::V1,
+            port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
+            agreement: nos_proto::LacpAgreement::NotApplicable,
+            conversations_per_link: Vec::new(),
         };
         assert!(
             render_lacp_summaries(&[empty]).ends_with("system priority 32768\n  no member ports")

@@ -38,6 +38,8 @@ pub mod ospfv3_profile;
 pub mod policy_definition;
 /// Edits to port aggregates (`PortAggregateOp`).
 pub mod port_aggregate;
+/// Edits to a port aggregate's LACP conversation map (`PortAggregateConversationOp`).
+pub mod port_aggregate_conversation;
 /// Edits to port-aggregate subinterfaces (`PortAggregateSubinterfaceOp`).
 pub mod port_aggregate_subinterface;
 /// Edits to prefix lists (`PrefixListOp`).
@@ -77,6 +79,7 @@ pub use ospfv3_instance::Ospfv3InstanceOp;
 pub use ospfv3_profile::Ospfv3ProfileOp;
 pub use policy_definition::PolicyDefinitionOp;
 pub use port_aggregate::PortAggregateOp;
+pub use port_aggregate_conversation::PortAggregateConversationOp;
 pub use port_aggregate_subinterface::PortAggregateSubinterfaceOp;
 pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
@@ -165,6 +168,8 @@ pub enum ConfigOp {
     StpPortProfile(StpPortProfileOp),
     /// Delegates to a `AdminOp` edit.
     Admin(AdminOp),
+    /// Delegates to a `PortAggregateConversationOp` edit.
+    PortAggregateConversation(PortAggregateConversationOp),
 }
 
 impl ConfigOp {
@@ -202,6 +207,7 @@ impl ConfigOp {
             ConfigOp::BfdProfile(..) => "BfdProfile",
             ConfigOp::StpPortProfile(..) => "StpPortProfile",
             ConfigOp::Admin(..) => "Admin",
+            ConfigOp::PortAggregateConversation(..) => "PortAggregateConversation",
         }
     }
 
@@ -243,6 +249,7 @@ impl ConfigOp {
             ConfigOp::BfdProfile(op) => op.apply(config),
             ConfigOp::StpPortProfile(op) => op.apply(config),
             ConfigOp::Admin(op) => op.apply(config),
+            ConfigOp::PortAggregateConversation(op) => op.apply(config),
         }
     }
 }
@@ -322,6 +329,14 @@ pub enum OpError {
     /// No STP port profile matches the given name.
     #[error("stp port profile '{0}' not found")]
     StpPortProfileNotFound(String),
+    /// No LACP conversation range starts at `first` in the port aggregate.
+    #[error("lacp conversation range starting at {first} not found in port aggregate '{name}'")]
+    LacpConversationNotFound {
+        /// Name of the port aggregate.
+        name: String,
+        /// First conversation id that was looked up.
+        first: u16,
+    },
     /// No community alias matches the given name.
     #[error("community alias '{0}' not found")]
     CommunityAliasNotFound(String),

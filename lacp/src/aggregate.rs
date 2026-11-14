@@ -294,6 +294,9 @@ impl AggregateManager {
                         .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
                     actor_churn: obs.actor_churn == ChurnState::Churn,
                     partner_churn: obs.partner_churn == ChurnState::Churn,
+                    // #892: neutral until #894 reads the partner's v2 TLVs.
+                    partner_version: None,
+                    partner_port_algorithm: None,
                 }
             })
             .collect();
@@ -314,6 +317,11 @@ impl AggregateManager {
             min_links,
             min_links_met,
             ports,
+            // #892: neutral until #894 reads the knobs.
+            version: nos_proto::LacpVersion::default(),
+            port_algorithm: nos_proto::LacpPortAlgorithm::default(),
+            agreement: nos_proto::LacpAgreement::NotApplicable,
+            conversations_per_link: Vec::new(),
         }
     }
 

@@ -93,6 +93,25 @@ pub struct LacpPortStatus {
     /// memory only: restarts at 0 with the port's link task. Last field:
     /// postcard is positional (daemons and CLI ship together).
     pub unsupported_version_pdus: u64,
+    /// The partner's LACP version from its last LACPDU (appended, #892);
+    /// `None` until one is received.
+    pub partner_version: Option<u8>,
+    /// The partner's advertised Port Algorithm, if any.
+    pub partner_port_algorithm: Option<crate::schema::LacpPortAlgorithm>,
+}
+
+/// Whether both ends agreed on conversation-sensitive operation.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LacpAgreement {
+    /// Not running version 2 with an algorithm, or nothing negotiated yet.
+    NotApplicable,
+    /// Both ends v2 with the same algorithm and matching digests.
+    Agreed,
+    /// v2 on both ends but algorithm or digest differ: plain hashing.
+    Mismatch,
+    /// The partner speaks version 1: plain hashing.
+    V1Partner,
 }
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.
@@ -116,6 +135,14 @@ pub struct PortAggregateLacpSummary {
     pub min_links_met: bool,
     /// Member ports.
     pub ports: Vec<LacpPortStatus>,
+    /// The configured `lacp-version` (appended, #892).
+    pub version: crate::schema::LacpVersion,
+    /// The configured `lacp-port-algorithm`.
+    pub port_algorithm: crate::schema::LacpPortAlgorithm,
+    /// Conversation-sensitive agreement with the partner.
+    pub agreement: LacpAgreement,
+    /// Conversations carried per member link, `(member, count)`.
+    pub conversations_per_link: Vec<(String, u16)>,
 }
 
 /// Messages sent from a client to `nos-lacpd`'s IPC socket.

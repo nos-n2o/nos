@@ -123,6 +123,43 @@ impl From<PortAggregateModeArg> for PortAggregateMode {
     }
 }
 
+/// Clap-facing mirror of `nos_proto::LacpPortAlgorithm`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum LacpPortAlgorithmArg {
+    Unspecified,
+    #[value(name = "c-vlan")]
+    CVlan,
+    #[value(name = "s-vlan")]
+    SVlan,
+}
+
+impl From<LacpPortAlgorithmArg> for nos_proto::LacpPortAlgorithm {
+    fn from(a: LacpPortAlgorithmArg) -> Self {
+        match a {
+            LacpPortAlgorithmArg::Unspecified => Self::Unspecified,
+            LacpPortAlgorithmArg::CVlan => Self::CVlan,
+            LacpPortAlgorithmArg::SVlan => Self::SVlan,
+        }
+    }
+}
+
+/// A parsed `--lacp-conversation-map`: `(first, last, member)` ranges.
+#[derive(Clone, Debug)]
+pub struct ConversationMapArg(pub Vec<(u16, u16, String)>);
+
+fn parse_conversation_map(s: &str) -> Result<ConversationMapArg, String> {
+    let bad = |e: &str| format!("bad conversation range '{e}' (want FIRST-LAST:MEMBER)");
+    let mut out = Vec::new();
+    for entry in s.split(',').filter(|e| !e.is_empty()) {
+        let (range, member) = entry.split_once(':').ok_or_else(|| bad(entry))?;
+        let (first, last) = range.split_once('-').ok_or_else(|| bad(entry))?;
+        let first = first.parse().map_err(|_| bad(entry))?;
+        let last = last.parse().map_err(|_| bad(entry))?;
+        out.push((first, last, member.to_string()));
+    }
+    Ok(ConversationMapArg(out))
+}
+
 /// Clap-facing mirror of `nos_proto::EsRedundancy` (`all-active` /
 /// `single-active`), for the same reason as `PortAggregateModeArg`.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -204,6 +241,32 @@ impl From<BgpAoAlgorithmArg> for BgpAoAlgorithm {
             BgpAoAlgorithmArg::AesCmac => BgpAoAlgorithm::AesCmac96,
         }
     }
+}
+
+/// LACP v2 flags, all requiring `--port-aggregate`.
+#[derive(clap::Args)]
+pub struct LacpV2Args {
+    /// If set (requires `--port-aggregate`), sets the aggregate's LACP version
+    /// (`PortAggregateOp::SetLacpVersion`).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2))]
+    pub lacp_version: Option<u8>,
+
+    /// If set (requires `--port-aggregate`), sets the aggregate's LACP port
+    /// algorithm (`PortAggregateOp::SetLacpPortAlgorithm`).
+    #[arg(long, value_enum)]
+    pub lacp_port_algorithm: Option<LacpPortAlgorithmArg>,
+
+    /// If set (requires `--port-aggregate`), replaces the aggregate's explicit
+    /// conversation map: `FIRST-LAST:MEMBER,...` (`PortAggregateConversationOp`).
+    #[arg(long, value_parser = parse_conversation_map)]
+    pub lacp_conversation_map: Option<ConversationMapArg>,
+
+    /// If set (requires `--port-aggregate`), sets the LACP `Link_Number` of the
+    /// `--enslave-interface-into-port-aggregate` members, N for the first,
+    /// N+1 for the next, and so on, since link numbers are unique per
+    /// aggregate (`InterfaceOp::SetLacpLinkNumber`).
+    #[arg(long)]
+    pub lacp_link_number: Option<u16>,
 }
 
 #[derive(Parser)]
@@ -1170,6 +1233,10 @@ pub struct Args {
     /// (`InterfaceOp::SetLacpPortPriority`).
     #[arg(long)]
     pub lacp_port_priority: Option<u16>,
+
+    /// The LACP v2 flags (#892), flattened to keep `Args`' derive frame small.
+    #[command(flatten)]
+    pub lacp_v2: LacpV2Args,
 
     /// If set (requires `--port-aggregate`), sets the LACP mode of every
     /// `--enslave-interface-into-port-aggregate` member
@@ -3546,6 +3613,39 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 peer,
             }));
         }
+        if let Some(v) = args.lacp_v2.lacp_version {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetLacpVersion {
+                name: name.clone(),
+                version: if v == 1 {
+                    nos_proto::LacpVersion::V1
+                } else {
+                    nos_proto::LacpVersion::V2
+                },
+            }));
+        }
+        if let Some(algorithm) = args.lacp_v2.lacp_port_algorithm {
+            ops.push(ConfigOp::PortAggregate(
+                PortAggregateOp::SetLacpPortAlgorithm {
+                    name: name.clone(),
+                    algorithm: algorithm.into(),
+                },
+            ));
+        }
+        if let Some(map) = &args.lacp_v2.lacp_conversation_map {
+            ops.push(ConfigOp::PortAggregateConversation(
+                nos_proto::PortAggregateConversationOp::Clear { name: name.clone() },
+            ));
+            for (first, last, member) in &map.0 {
+                ops.push(ConfigOp::PortAggregateConversation(
+                    nos_proto::PortAggregateConversationOp::Add {
+                        name: name.clone(),
+                        first: *first,
+                        last: *last,
+                        member: member.clone(),
+                    },
+                ));
+            }
+        }
         if let Some(domain) = args.port_aggregate_untagged_domain.clone() {
             let profile = format!("{name}-sp");
             ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
@@ -3566,7 +3666,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
-        for member in &args.port_aggregate_members {
+        for (index, member) in args.port_aggregate_members.iter().enumerate() {
             ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
                 name: member.clone(),
             }));
@@ -3586,6 +3686,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     priority,
                 }));
             }
+            if let Some(base) = args.lacp_v2.lacp_link_number {
+                let offset = u16::try_from(index).context("too many members")?;
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpLinkNumber {
+                    name: member.clone(),
+                    link_number: base
+                        .checked_add(offset)
+                        .context("--lacp-link-number overflows")?,
+                }));
+            }
         }
     } else if args.port_aggregate_mtu.is_some()
         || args.port_aggregate_address.is_some()
@@ -3599,13 +3708,17 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_bfd.is_some()
         || args.port_aggregate_bfd_peer.is_some()
         || args.lacp_port_priority.is_some()
+        || args.lacp_v2.lacp_version.is_some()
+        || args.lacp_v2.lacp_port_algorithm.is_some()
+        || args.lacp_v2.lacp_conversation_map.is_some()
+        || args.lacp_v2.lacp_link_number.is_some()
         || args.lacp_mode.is_some()
         || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--port-aggregate-bfd/--port-aggregate-bfd-peer/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--port-aggregate-bfd/--port-aggregate-bfd-peer/--lacp-port-priority/--lacp-version/--lacp-port-algorithm/--lacp-conversation-map/--lacp-link-number/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -5577,6 +5690,24 @@ mod tests {
             (&["--lacp-system-priority", "1"], "require --port-aggregate"),
             (&["--min-links", "2"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
+            (&["--lacp-version", "1"], "require --port-aggregate"),
+            (
+                &["--lacp-port-algorithm", "c-vlan"],
+                "require --port-aggregate",
+            ),
+            (
+                &["--lacp-conversation-map", "1-2:eth1"],
+                "require --port-aggregate",
+            ),
+            (&["--lacp-link-number", "1"], "require --port-aggregate"),
+            (
+                &["--port-aggregate", "b", "--lacp-version", "3"],
+                "invalid value",
+            ),
+            (
+                &["--port-aggregate", "b", "--lacp-conversation-map", "1-2"],
+                "FIRST-LAST:MEMBER",
+            ),
             (&["--lacp-mode", "passive"], "require --port-aggregate"),
             (
                 &["--lldp-destination-interface", "eth1"],
@@ -6758,6 +6889,14 @@ mod tests {
             "bd9",
             "--enslave-interface-into-port-aggregate",
             "eth8",
+            "--lacp-version",
+            "1",
+            "--lacp-port-algorithm",
+            "c-vlan",
+            "--lacp-conversation-map",
+            "0-10:eth8,20-30:eth8",
+            "--lacp-link-number",
+            "7",
             "--lacp-mode",
             "passive",
             "--lacp-port-priority",
@@ -6835,6 +6974,10 @@ mod tests {
             "SetPortAggregate { name: \"eth8\"",
             "SetLacpMode",
             "SetLacpPortPriority",
+            "SetLacpVersion",
+            "SetLacpPortAlgorithm",
+            "Add { name: \"bond0\", first: 20, last: 30, member: \"eth8\" }",
+            "SetLacpLinkNumber { name: \"eth8\", link_number: 7 }",
             "ClearPortAggregate { name: \"eth9\" }",
             "SetLldpTransmit { name: \"eth1\", enabled: true }",
             "SetLldpReceive { name: \"eth2\", enabled: true }",

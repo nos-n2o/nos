@@ -163,6 +163,18 @@ pub enum InterfaceOp {
         /// Mode to select.
         mode: crate::schema::LacpMode,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpLinkNumber {
+        /// Name of the interface this op targets.
+        name: String,
+        /// LACP `Link_Number` (1-65535, unique within the aggregate).
+        link_number: u16,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearLacpLinkNumber {
+        /// Name of the interface this op targets.
+        name: String,
+    },
 }
 
 impl InterfaceOp {
@@ -282,6 +294,14 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.lacp_port_priority = Some(*priority);
                 Ok(())
             }
+            InterfaceOp::SetLacpLinkNumber { name, link_number } => {
+                find_interface_mut(config, name)?.lacp_link_number = Some(*link_number);
+                Ok(())
+            }
+            InterfaceOp::ClearLacpLinkNumber { name } => {
+                find_interface_mut(config, name)?.lacp_link_number = None;
+                Ok(())
+            }
             InterfaceOp::SetLacpMode { name, mode } => {
                 find_interface_mut(config, name)?.lacp_mode = *mode;
                 Ok(())
@@ -335,6 +355,7 @@ mod tests {
             port_aggregate: None,
             stp_port_profile: None,
             lacp_port_priority: None,
+            lacp_link_number: None,
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
@@ -384,6 +405,7 @@ mod tests {
                 port_aggregate: None,
                 stp_port_profile: None,
                 lacp_port_priority: None,
+                lacp_link_number: None,
                 lacp_mode: crate::schema::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
@@ -750,5 +772,25 @@ mod tests {
         .apply(&mut cfg)
         .unwrap_err();
         assert!(matches!(err, OpError::InterfaceNotFound(n) if n == "eth0"));
+    }
+
+    #[test]
+    fn set_and_clear_lacp_link_number() {
+        let mut cfg = Config::default();
+        let name = "eth1".to_string();
+        InterfaceOp::Ensure { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        InterfaceOp::SetLacpLinkNumber {
+            name: name.clone(),
+            link_number: 3,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_link_number, Some(3));
+        InterfaceOp::ClearLacpLinkNumber { name }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_link_number, None);
     }
 }

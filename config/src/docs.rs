@@ -1083,6 +1083,46 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              into equally sized groups: the group holding the lowest (port priority, port number) \
              is kept. `delete` goes back to 32768. Changing it restarts LACP on this member only.",
         ),
+        Topic::InterfaceLacpLinkNumber => (
+            "Set an interface's LACP Link_Number.",
+            "Sets the 802.1AX-2014 Link_Number that names this interface in its `lacp`-mode \
+             aggregate's conversation map, 1-65535, unique among the aggregate's members. Unset, \
+             nos-lacpd picks one. Accepted and shown only: nothing reads it until the LACP v2 \
+             daemon work lands.",
+        ),
+        Topic::PortAggregateLacpVersion => (
+            "Set the LACP version (1 or 2) an aggregate advertises.",
+            "`1` or `2`, default 2. Version 2 is 802.1AX-2014 and adds the conversation TLVs; it \
+             changes the wire format only once nos-lacpd sends it (not yet: the value is accepted \
+             and shown, nothing reads it). `1` is the per-aggregate opt-out. An algorithm or \
+             conversation map needs version 2.",
+        ),
+        Topic::PortAggregateLacpPortAlgorithm => (
+            "Set how an aggregate maps frames to LACP conversations.",
+            "`unspecified` (the default: plain hashing, no steering), `c-vlan` or `s-vlan` \
+             (conversation id = the VLAN id). Needs a `lacp`-mode aggregate with `lacp-version 2`. \
+             With no `lacp-conversation-map`, distribution is automatic: conversation mod the \
+             number of active links. Accepted and shown only: nothing reads it yet.",
+        ),
+        Topic::ConversationRange => (
+            "Map LACP conversation ids to a member link.",
+            "An explicit conversation map entry, keyed by its first conversation id: ids \
+             `first` to `last` (0-4095, no overlap with another range) are carried by `member`, \
+             an interface of this aggregate. Needs `lacp-port-algorithm` other than `unspecified`. \
+             Ids with no entry use automatic distribution (conversation mod active links).",
+        ),
+        Topic::ConversationRangeFirst => (
+            "Set the first conversation id of a range.",
+            "The first conversation id of the range, 0-4095.",
+        ),
+        Topic::ConversationRangeLast => (
+            "Set the last conversation id of a range.",
+            "The last conversation id of the range, inclusive: at least `first`, at most 4095.",
+        ),
+        Topic::ConversationRangeMember => (
+            "Set the member interface carrying a conversation range.",
+            "The name of an interface whose `port-aggregate` is this aggregate.",
+        ),
         Topic::InterfaceLacpMode => (
             "Set an interface's LACP mode (active or passive).",
             "Sets the LACP Activity nos-lacpd advertises for this interface when it is a member of \

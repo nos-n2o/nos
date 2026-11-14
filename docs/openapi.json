@@ -2253,6 +2253,33 @@
         ],
         "type": "object"
       },
+      "ConversationRange": {
+        "description": "One entry of an aggregate's explicit conversation map: conversation ids\n`first..=last` are carried by the `member` link.",
+        "properties": {
+          "first": {
+            "description": "First conversation id of the range (0-4095).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last": {
+            "description": "Last conversation id of the range, inclusive (at least `first`, at most 4095).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "member": {
+            "description": "Member interface carrying these conversations.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "first",
+          "last",
+          "member"
+        ],
+        "type": "object"
+      },
       "DfAlgorithm": {
         "description": "The RFC 8584 Designated Forwarder election algorithm this PE asks for on\nan Ethernet Segment, advertised in its Type-4 route's DF Election extended\ncommunity. `Hrw` only takes effect when every PE on the segment advertises\nit; otherwise every PE falls back to `Modulo` (RFC 8584 §2.2.3).",
         "enum": [
@@ -2774,6 +2801,15 @@
             "description": "Applies the flowspec rules of the BGP instance owning this device's\nrouting table to the IP packets arriving here (RFC 8955 section 5:\ningress only); placement rules are `acl::valid_flowspec_placements`.",
             "type": "boolean"
           },
+          "lacp_link_number": {
+            "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "lacp_mode": {
             "$ref": "#/components/schemas/LacpMode",
             "description": "This link's LACP Activity (`Passive` = never speaks first). Only\nmeaningful while `port_aggregate` names a `Lacp`-mode aggregate;\nignored (not rejected) otherwise."
@@ -2958,6 +2994,16 @@
         ],
         "type": "object"
       },
+      "LacpAgreement": {
+        "description": "Whether both ends agreed on conversation-sensitive operation.",
+        "enum": [
+          "NotApplicable",
+          "Agreed",
+          "Mismatch",
+          "V1Partner"
+        ],
+        "type": "string"
+      },
       "LacpMode": {
         "description": "A member port's 802.1AX `LACP_Activity`: `Active` ports send LACPDUs\nwhenever the link is up; `Passive` ones stay silent until they hear an\n`Active` partner (two `Passive` ends never form a bundle).",
         "enum": [
@@ -2974,6 +3020,15 @@
           "Attached",
           "Collecting",
           "Distributing"
+        ],
+        "type": "string"
+      },
+      "LacpPortAlgorithm": {
+        "description": "The Port Algorithm an aggregate maps frames to conversation ids with.",
+        "enum": [
+          "Unspecified",
+          "CVlan",
+          "SVlan"
         ],
         "type": "string"
       },
@@ -3025,6 +3080,17 @@
               "null"
             ]
           },
+          "partner_port_algorithm": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LacpPortAlgorithm",
+                "description": "The partner's advertised Port Algorithm, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "partner_port_number": {
             "description": "Partner Port number; the administrative default (1) while defaulted.",
             "format": "int32",
@@ -3057,6 +3123,15 @@
           },
           "partner_system_priority": {
             "description": "Partner System Priority; the administrative default (0xffff) while defaulted.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "partner_version": {
+            "description": "The partner's LACP version from its last LACPDU (appended, #892);\n`None` until one is received.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -3116,6 +3191,14 @@
           "Expired",
           "Defaulted",
           "Current"
+        ],
+        "type": "string"
+      },
+      "LacpVersion": {
+        "description": "The 802.1AX-2014 LACP version an aggregate advertises (`1` or `2` in the CLI).",
+        "enum": [
+          "V1",
+          "V2"
         ],
         "type": "string"
       },
@@ -4378,6 +4461,17 @@
             "description": "Applies the flowspec rules of the BGP instance owning this device's\nrouting table to the IP packets arriving here (RFC 8955 section 5:\ningress only); placement rules are `acl::valid_flowspec_placements`.",
             "type": "boolean"
           },
+          "lacp_conversation_map": {
+            "description": "Explicit conversation-to-member map; empty = automatic distribution\n(`conversation mod active-links`). Validated by `valid_port_aggregates`.",
+            "items": {
+              "$ref": "#/components/schemas/ConversationRange"
+            },
+            "type": "array"
+          },
+          "lacp_port_algorithm": {
+            "$ref": "#/components/schemas/LacpPortAlgorithm",
+            "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+          },
           "lacp_rate": {
             "$ref": "#/components/schemas/LacpRate",
             "description": "See [`LacpRate`]. `#[serde(default)]` so a config persisted before\nthis field existed still loads."
@@ -4397,6 +4491,10 @@
               "integer",
               "null"
             ]
+          },
+          "lacp_version": {
+            "$ref": "#/components/schemas/LacpVersion",
+            "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
           },
           "min_links": {
             "description": "Minimum number of member ports that must be `Distributing` for the\nbond to carry traffic: below it `nos-lacpd` pushes an empty active\nset, so the kernel bond holds no member, while the ports keep\nnegotiating and the bond refills as soon as the count is met. 0 and 1\nbehave the same (any Distributing port is enough). Only meaningful\nfor a `Lacp`-mode aggregate; ignored (not rejected) otherwise, and not\nchecked against the member count, which lives on the `Interface`s.",
@@ -4482,6 +4580,28 @@
             "description": "Port aggregate name.",
             "type": "string"
           },
+          "agreement": {
+            "$ref": "#/components/schemas/LacpAgreement",
+            "description": "Conversation-sensitive agreement with the partner."
+          },
+          "conversations_per_link": {
+            "description": "Conversations carried per member link, `(member, count)`.",
+            "items": {
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
           "min_links": {
             "description": "The aggregate's configured `min-links`.",
             "format": "int32",
@@ -4491,6 +4611,10 @@
           "min_links_met": {
             "description": "Whether enough ports are Distributing to meet `min_links`; `false`\nmeans the bond was emptied even though ports may be negotiating.",
             "type": "boolean"
+          },
+          "port_algorithm": {
+            "$ref": "#/components/schemas/LacpPortAlgorithm",
+            "description": "The configured `lacp-port-algorithm`."
           },
           "ports": {
             "description": "Member ports.",
@@ -4502,6 +4626,10 @@
           "rate": {
             "$ref": "#/components/schemas/LacpRate",
             "description": "The aggregate's configured `lacp-rate`."
+          },
+          "version": {
+            "$ref": "#/components/schemas/LacpVersion",
+            "description": "The configured `lacp-version` (appended, #892)."
           }
         },
         "required": [
@@ -4512,7 +4640,11 @@
           "rate",
           "min_links",
           "min_links_met",
-          "ports"
+          "ports",
+          "version",
+          "port_algorithm",
+          "agreement",
+          "conversations_per_link"
         ],
         "type": "object"
       },
@@ -41314,6 +41446,168 @@
         ]
       }
     },
+    "/v1/transactions/{tx}/interface/{interface}/lacp-link-number": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lacp-link-number` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lacp-link-number` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "interface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lacp-link-number` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/transactions/{tx}/interface/{interface}/lacp-mode": {
       "delete": {
         "responses": {
@@ -61666,6 +61960,821 @@
         ]
       }
     },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-conversation-map": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: Every `lacp-conversation-map` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Explicit conversation-to-member map; empty = automatic distribution\n(`conversation mod active-links`). Validated by `valid_port_aggregates`.",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationRange"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: Every `lacp-conversation-map` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Explicit conversation-to-member map; empty = automatic distribution\n(`conversation mod active-links`). Validated by `valid_port_aggregates`.",
+                "items": {
+                  "$ref": "#/components/schemas/ConversationRange"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Explicit conversation-to-member map; empty = automatic distribution\n(`conversation mod active-links`). Validated by `valid_port_aggregates`.",
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationRange"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: Every `lacp-conversation-map` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-conversation-map/{lacp_conversation_map}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `lacp-conversation-map`, addressed by its `first`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationRange"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `lacp-conversation-map`, addressed by its `first`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "lacp_conversation_map",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationRange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationRange"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `lacp-conversation-map`, addressed by its `first`.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-conversation-map/{lacp_conversation_map}/last": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `last` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Last conversation id of the range, inclusive (at least `first`, at most 4095).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `last` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "lacp_conversation_map",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Last conversation id of the range, inclusive (at least `first`, at most 4095).",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Last conversation id of the range, inclusive (at least `first`, at most 4095).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `last` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-conversation-map/{lacp_conversation_map}/member": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `member` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Member interface carrying these conversations.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `member` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "lacp_conversation_map",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Member interface carrying these conversations.",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Member interface carrying these conversations.",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `member` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-port-algorithm": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lacp-port-algorithm` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LacpPortAlgorithm",
+                  "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lacp-port-algorithm` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LacpPortAlgorithm",
+                "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LacpPortAlgorithm",
+                  "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lacp-port-algorithm` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-rate": {
       "delete": {
         "responses": {
@@ -62126,6 +63235,153 @@
           }
         },
         "summary": "Set: The `lacp-system-priority` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/lacp-version": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lacp-version` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LacpVersion",
+                  "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lacp-version` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LacpVersion",
+                "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LacpVersion",
+                  "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lacp-version` setting.",
         "tags": [
           "transactions"
         ]

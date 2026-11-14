@@ -94,7 +94,8 @@ pub use ospfv3_instance::Ospfv3Instance;
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
 pub use port_aggregate::{
-    DfAlgorithm, EsRedundancy, LacpMode, LacpRate, PortAggregate, PortAggregateMode,
+    ConversationRange, DfAlgorithm, EsRedundancy, LacpMode, LacpPortAlgorithm, LacpRate,
+    LacpVersion, PortAggregate, PortAggregateMode,
 };
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{

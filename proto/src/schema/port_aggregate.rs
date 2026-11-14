@@ -92,6 +92,67 @@ pub enum DfAlgorithm {
     Hrw,
 }
 
+/// The 802.1AX-2014 LACP version an aggregate advertises (`1` or `2` in the CLI).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum LacpVersion {
+    /// Version 1 LACPDUs (110 bytes, no conversation TLVs).
+    #[cli(words = "1")]
+    V1,
+    /// Version 2 LACPDUs (802.1AX-2014, conversation-sensitive collection and distribution).
+    #[cli(words = "2")]
+    V2,
+}
+
+/// The default `lacp-version`: one constant, so a no-go on the dataplane
+/// spike flips it back to `V1` in one line.
+pub const DEFAULT_LACP_VERSION: LacpVersion = LacpVersion::V2;
+
+impl Default for LacpVersion {
+    fn default() -> Self {
+        DEFAULT_LACP_VERSION
+    }
+}
+
+/// The Port Algorithm an aggregate maps frames to conversation ids with.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum LacpPortAlgorithm {
+    /// No algorithm: plain hashing, no conversation steering.
+    Unspecified,
+    /// Conversation id = the C-VLAN id.
+    #[cli(words = "c-vlan")]
+    CVlan,
+    /// Conversation id = the S-VLAN id.
+    #[cli(words = "s-vlan")]
+    SVlan,
+}
+
+/// The default `lacp-port-algorithm` (steering is opt-in).
+pub const DEFAULT_LACP_PORT_ALGORITHM: LacpPortAlgorithm = LacpPortAlgorithm::Unspecified;
+
+impl Default for LacpPortAlgorithm {
+    fn default() -> Self {
+        DEFAULT_LACP_PORT_ALGORITHM
+    }
+}
+
+/// One entry of an aggregate's explicit conversation map: conversation ids
+/// `first..=last` are carried by the `member` link.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct ConversationRange {
+    /// First conversation id of the range (0-4095).
+    #[cli(topic = ConversationRangeFirst, key)]
+    pub first: u16,
+    /// Last conversation id of the range, inclusive (at least `first`, at most 4095).
+    #[cli(topic = ConversationRangeLast)]
+    pub last: u16,
+    /// Member interface carrying these conversations.
+    #[cli(topic = ConversationRangeMember)]
+    pub member: String,
+}
+
 /// A named Linux bonding device, statically (`Xor`) or LACP-negotiated
 /// (`Lacp`). Same
 /// config surface as a *physical* `Interface` (never a loopback — bonding a
@@ -170,6 +231,25 @@ pub struct PortAggregate {
     #[garde(skip)]
     #[cli(topic = PortAggregateLacpSystemPriority)]
     pub lacp_system_priority: Option<u16>,
+
+    /// See [`LacpVersion`]. Accepted and shown; nothing reads it yet.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = PortAggregateLacpVersion)]
+    pub lacp_version: LacpVersion,
+
+    /// See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = PortAggregateLacpPortAlgorithm)]
+    pub lacp_port_algorithm: LacpPortAlgorithm,
+
+    /// Explicit conversation-to-member map; empty = automatic distribution
+    /// (`conversation mod active-links`). Validated by `valid_port_aggregates`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = ConversationRange)]
+    pub lacp_conversation_map: Vec<ConversationRange>,
 
     /// Minimum number of member ports that must be `Distributing` for the
     /// bond to carry traffic: below it `nos-lacpd` pushes an empty active
@@ -269,6 +349,9 @@ impl Default for PortAggregate {
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            lacp_version: LacpVersion::default(),
+            lacp_port_algorithm: LacpPortAlgorithm::default(),
+            lacp_conversation_map: Vec::new(),
             min_links: default_min_links(),
             bfd: None,
             bfd_peer: None,
@@ -362,6 +445,9 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
         }
     }
     for agg in aggregates {
+        valid_lacp_conversations(agg, ctx)?;
+    }
+    for agg in aggregates {
         if agg.bfd.is_some() {
             let Some(peer) = agg.bfd_peer else {
                 return Err(garde::Error::new(format!(
@@ -413,6 +499,79 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
     Ok(())
 }
 
+/// The conversation-map / link-number rules of one aggregate (#892).
+fn valid_lacp_conversations(agg: &PortAggregate, ctx: &Config) -> garde::Result {
+    let name = &agg.name;
+    let steering = agg.lacp_port_algorithm != LacpPortAlgorithm::Unspecified
+        || !agg.lacp_conversation_map.is_empty();
+    if steering && agg.mode != PortAggregateMode::Lacp {
+        return Err(garde::Error::new(format!(
+            "port aggregate {name} sets a lacp-port-algorithm or lacp-conversation-map but is not in lacp mode"
+        )));
+    }
+    if steering && agg.lacp_version == LacpVersion::V1 {
+        return Err(garde::Error::new(format!(
+            "port aggregate {name} sets a lacp-port-algorithm or lacp-conversation-map but has lacp-version 1"
+        )));
+    }
+    if !agg.lacp_conversation_map.is_empty()
+        && agg.lacp_port_algorithm == LacpPortAlgorithm::Unspecified
+    {
+        return Err(garde::Error::new(format!(
+            "port aggregate {name} has a lacp-conversation-map but lacp-port-algorithm is unspecified"
+        )));
+    }
+    let members: Vec<&super::Interface> = ctx
+        .interfaces
+        .iter()
+        .filter(|i| i.port_aggregate.as_deref() == Some(name.as_str()))
+        .collect();
+    let map = &agg.lacp_conversation_map;
+    for (i, r) in map.iter().enumerate() {
+        if r.first > r.last || r.last > MAX_CONVERSATION_ID {
+            return Err(garde::Error::new(format!(
+                "port aggregate {name} conversation range {}-{} must satisfy first <= last <= {MAX_CONVERSATION_ID}",
+                r.first, r.last
+            )));
+        }
+        if !members.iter().any(|m| m.name == r.member) {
+            return Err(garde::Error::new(format!(
+                "port aggregate {name} conversation range {}-{} names {}, which is not a member of the aggregate",
+                r.first, r.last, r.member
+            )));
+        }
+        if map[..i]
+            .iter()
+            .any(|o| o.first <= r.last && r.first <= o.last)
+        {
+            return Err(garde::Error::new(format!(
+                "port aggregate {name} conversation range {}-{} overlaps another range",
+                r.first, r.last
+            )));
+        }
+    }
+    for (i, m) in members.iter().enumerate() {
+        let Some(n) = m.lacp_link_number else {
+            continue;
+        };
+        if n == 0 {
+            return Err(garde::Error::new(format!(
+                "interface {} lacp-link-number must be 1-65535",
+                m.name
+            )));
+        }
+        if members[..i].iter().any(|o| o.lacp_link_number == Some(n)) {
+            return Err(garde::Error::new(format!(
+                "port aggregate {name} has two members with lacp-link-number {n}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Highest conversation id (the 12-bit VLAN id space).
+pub const MAX_CONVERSATION_ID: u16 = 4095;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +590,9 @@ mod tests {
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            lacp_version: LacpVersion::default(),
+            lacp_port_algorithm: LacpPortAlgorithm::default(),
+            lacp_conversation_map: Vec::new(),
             min_links: 1,
             bfd: None,
             bfd_peer: None,
@@ -676,5 +838,113 @@ mod tests {
         // Members live on the `Interface`s; the aggregate itself never checks them.
         let cfg = bfd_aggregate(Some("10.0.0.1/31"), Some("10.0.0.2"));
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    // --- #892: LACP v2 knobs ---
+
+    fn lacp_config(map: Vec<ConversationRange>) -> Config {
+        let mut a = aggregate("bond1");
+        a.mode = PortAggregateMode::Lacp;
+        a.lacp_port_algorithm = LacpPortAlgorithm::CVlan;
+        a.lacp_conversation_map = map;
+        let mut c = config_with(vec![a]);
+        for (name, n) in [("eth1", Some(1)), ("eth2", Some(2))] {
+            c.interfaces.push(crate::schema::Interface {
+                name: name.into(),
+                port_aggregate: Some("bond1".into()),
+                lacp_link_number: n,
+                ..crate::schema::Interface::default()
+            });
+        }
+        c
+    }
+
+    fn range(first: u16, last: u16, member: &str) -> ConversationRange {
+        ConversationRange {
+            first,
+            last,
+            member: member.into(),
+        }
+    }
+
+    fn rejects(c: &Config, needle: &str) {
+        let err = c.validate_with(c).unwrap_err().to_string();
+        assert!(err.contains(needle), "{err}");
+    }
+
+    #[test]
+    fn defaults_are_the_constants() {
+        assert_eq!(LacpVersion::default(), DEFAULT_LACP_VERSION);
+        assert_eq!(LacpPortAlgorithm::default(), DEFAULT_LACP_PORT_ALGORITHM);
+        let a = PortAggregate::default();
+        assert_eq!(a.lacp_version, LacpVersion::V2);
+        assert_eq!(a.lacp_port_algorithm, LacpPortAlgorithm::Unspecified);
+        assert_eq!(a.lacp_conversation_map, Vec::new());
+    }
+
+    #[test]
+    fn config_without_the_new_fields_loads_with_defaults() {
+        let mut v = serde_json::to_value(aggregate("b")).unwrap();
+        let o = v.as_object_mut().unwrap();
+        for k in [
+            "lacp_version",
+            "lacp_port_algorithm",
+            "lacp_conversation_map",
+        ] {
+            o.remove(k);
+        }
+        let a: PortAggregate = serde_json::from_value(v).unwrap();
+        assert_eq!(a.lacp_version, LacpVersion::V2);
+        assert_eq!(a.lacp_port_algorithm, LacpPortAlgorithm::Unspecified);
+        assert_eq!(a.lacp_conversation_map, Vec::new());
+    }
+
+    #[test]
+    fn version_and_algorithm_json_roundtrip() {
+        for v in [LacpVersion::V1, LacpVersion::V2] {
+            let j = serde_json::to_string(&v).unwrap();
+            assert_eq!(serde_json::from_str::<LacpVersion>(&j).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn conversation_map_accepts_a_valid_map() {
+        let c = lacp_config(vec![range(0, 99, "eth1"), range(100, 4095, "eth2")]);
+        c.validate_with(&c).unwrap();
+    }
+
+    #[test]
+    fn conversation_map_rejections() {
+        rejects(&lacp_config(vec![range(10, 5, "eth1")]), "first <= last");
+        rejects(&lacp_config(vec![range(0, 4096, "eth1")]), "first <= last");
+        rejects(
+            &lacp_config(vec![range(0, 10, "eth1"), range(10, 20, "eth2")]),
+            "overlaps",
+        );
+        rejects(&lacp_config(vec![range(0, 10, "eth9")]), "not a member");
+    }
+
+    #[test]
+    fn algorithm_and_map_need_a_lacp_v2_aggregate() {
+        let mut c = lacp_config(vec![range(0, 10, "eth1")]);
+        c.port_aggregates[0].mode = PortAggregateMode::Xor;
+        rejects(&c, "not in lacp mode");
+        let mut c = lacp_config(vec![]);
+        c.port_aggregates[0].lacp_version = LacpVersion::V1;
+        rejects(&c, "lacp-version 1");
+        let mut c = lacp_config(vec![range(0, 10, "eth1")]);
+        c.port_aggregates[0].lacp_port_algorithm = LacpPortAlgorithm::Unspecified;
+        rejects(&c, "unspecified");
+    }
+
+    #[test]
+    fn link_numbers_are_non_zero_and_unique() {
+        let mut c = lacp_config(vec![]);
+        c.interfaces[1].lacp_link_number = Some(1);
+        rejects(&c, "two members with lacp-link-number 1");
+        c.interfaces[1].lacp_link_number = Some(0);
+        rejects(&c, "1-65535");
+        c.interfaces[1].lacp_link_number = None;
+        c.validate_with(&c).unwrap();
     }
 }
