@@ -30,18 +30,13 @@ pass=0
 for i in $(seq 1 "$N"); do
     log="$OUT/run-$i.log"
     start=$(date +%s)
-    if cargo run -q -p nos-e2e -- "$GROUP" >"$log" 2>&1; then
-        echo "$i PASS $(($(date +%s) - start))s" >>"$RESULTS"
+    cargo run -q -p nos-e2e -- "$GROUP" >"$log" 2>&1
+    rc=$?
+    "$(dirname "$0")/e2e-result-line.sh" "$i" "$rc" "$(($(date +%s) - start))" "$log" >>"$RESULTS"
+    if [ "$rc" = 0 ]; then
         pass=$((pass + 1))
         rm -f "$log"
     else
-        secs=$(($(date +%s) - start))
-        # The phase is the last "=== name ===" banner; the error is the
-        # harness's own "FAILED: ..." line (first line only, anyhow chains
-        # and multi-line quiet failures continue below it).
-        phase=$(sed -n 's/.*=== \(.*\) ===.*/\1/p' "$log" | tail -1)
-        err=$(sed -n 's/.*\] [^ ]*: FAILED: //p' "$log" | head -1 | cut -c1-200)
-        echo "$i FAIL ${secs}s $phase | $err" >>"$RESULTS"
         # keep only the 3 newest failed logs
         ls -t "$OUT"/run-*.log 2>/dev/null | tail -n +4 | xargs -r rm -f
     fi
