@@ -9,7 +9,7 @@ CARGO_FEATURES ?=
 # since #131 (measured 91.7%); raise it as tests land, never lower it.
 COVERAGE_MIN ?= 90
 
-.PHONY: help ci-image toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
+.PHONY: help ci-image prune-merged toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build \
         e2e-preflight e2e-soak docs-fix claude-md-size
 
@@ -112,8 +112,12 @@ fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightl
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
-ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh)
+ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh)
 	tools/ci/coverage-compare-test.sh
+	tools/ci/prune-merged-test.sh
+
+prune-merged: ## Remove worktrees/target dirs of merged work + docker cache; dry run unless APPLY=1 (#1051)
+	tools/ci/prune-merged.sh
 
 claude-md-size: ## Fail when a CLAUDE.md exceeds its ceiling in tools/ci/claude-md-budget.txt
 	tools/ci/check-claude-md.sh
