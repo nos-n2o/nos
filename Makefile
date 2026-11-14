@@ -112,9 +112,10 @@ fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightl
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
-ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh)
+ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh, gh-plan-comment.sh)
 	tools/ci/coverage-compare-test.sh
 	tools/ci/prune-merged-test.sh
+	tools/ci/gh-plan-comment.test.sh
 
 prune-merged: ## Remove worktrees/target dirs of merged work + docker cache; dry run unless APPLY=1 (#1051)
 	tools/ci/prune-merged.sh
