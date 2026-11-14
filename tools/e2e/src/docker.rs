@@ -9,11 +9,14 @@ use bollard::models::{
     VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, LogsOptionsBuilder,
+    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, ListContainersOptionsBuilder,
+    ListNetworksOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
     RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder, UploadToContainerOptionsBuilder,
 };
 use bollard::{body_full, Docker};
 use futures::StreamExt;
+
+use crate::lab::{lab_env, prefixed, LAB_LABEL};
 
 /// The nos image every router container runs: `NOS_E2E_IMAGE`, default `nos:local`
 /// (CI). A per-worktree tag (`make docker-build IMAGE=nos:issue-N`) lets two labs
@@ -47,12 +50,95 @@ pub struct ContainerSpec<'a> {
 
 pub struct Dock {
     pub docker: Docker,
+    /// The lab id (#1049): every name below is mapped through it, so callers
+    /// keep using the lab-0 names (`router-a`, `nos-verify-net`).
+    lab: u8,
 }
 
 impl Dock {
     pub fn connect() -> anyhow::Result<Self> {
         let docker = Docker::connect_with_local_defaults().context("connecting to docker")?;
-        Ok(Self { docker })
+        let lab = lab_env().map_err(anyhow::Error::msg)?;
+        Ok(Self { docker, lab })
+    }
+
+    /// `name` (container, network or volume) as docker knows it in this lab.
+    fn n(&self, name: &str) -> String {
+        prefixed(self.lab, name)
+    }
+
+    /// The label every object of this lab carries.
+    fn labels(&self) -> HashMap<String, String> {
+        HashMap::from([(LAB_LABEL.to_string(), self.lab.to_string())])
+    }
+
+    /// `label=nos-e2e.lab=<k>` as a docker list filter.
+    fn lab_filter(&self) -> HashMap<String, Vec<String>> {
+        HashMap::from([(
+            "label".to_string(),
+            vec![format!("{LAB_LABEL}={}", self.lab)],
+        )])
+    }
+
+    /// Whether `name` is a running container (a router `up` left behind).
+    pub async fn running(&self, name: &str) -> bool {
+        self.docker
+            .inspect_container(&self.n(name), None)
+            .await
+            .ok()
+            .and_then(|i| i.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false)
+    }
+
+    pub async fn network_ipv6(&self, name: &str) -> anyhow::Result<bool> {
+        let net = self.docker.inspect_network(&self.n(name), None).await?;
+        Ok(net.enable_ipv6 == Some(true))
+    }
+
+    /// Removes every container, volume and network of this lab, by label: one
+    /// lab's `down` never touches the other's.
+    pub async fn teardown_lab(&self) {
+        let filters = self.lab_filter();
+        let opts = ListContainersOptionsBuilder::default()
+            .all(true)
+            .filters(&filters)
+            .build();
+        for c in self
+            .docker
+            .list_containers(Some(opts))
+            .await
+            .unwrap_or_default()
+        {
+            if let Some(id) = c.id {
+                self.container_remove_raw(&id).await;
+            }
+        }
+        let opts = ListVolumesOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        for v in self
+            .docker
+            .list_volumes(Some(opts))
+            .await
+            .map(|r| r.volumes.unwrap_or_default())
+            .unwrap_or_default()
+        {
+            self.volume_remove_raw(&v.name).await;
+        }
+        let opts = ListNetworksOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        for n in self
+            .docker
+            .list_networks(Some(opts))
+            .await
+            .unwrap_or_default()
+        {
+            if let Some(id) = n.id {
+                let _ = self.docker.remove_network(&id).await;
+            }
+        }
     }
 
     /// The harness never builds the image (that needs BuildKit); fail fast instead.
@@ -66,7 +152,10 @@ impl Dock {
     // --- networks ---
 
     pub async fn network_exists(&self, name: &str) -> bool {
-        self.docker.inspect_network(name, None).await.is_ok()
+        self.docker
+            .inspect_network(&self.n(name), None)
+            .await
+            .is_ok()
     }
 
     /// `subnets` are all put in the network's IPAM config; `ipv6` turns on IPv6.
@@ -84,7 +173,8 @@ impl Dock {
             })
             .collect::<Vec<_>>();
         let req = NetworkCreateRequest {
-            name: name.to_string(),
+            name: self.n(name),
+            labels: Some(self.labels()),
             enable_ipv6: Some(ipv6),
             ipam: (!config.is_empty()).then(|| Ipam {
                 config: Some(config),
@@ -100,15 +190,15 @@ impl Dock {
     }
 
     pub async fn network_remove(&self, name: &str) {
-        let _ = self.docker.remove_network(name).await;
+        let _ = self.docker.remove_network(&self.n(name)).await;
     }
 
     pub async fn network_connect(&self, network: &str, container: &str) {
         let req = NetworkConnectRequest {
-            container: container.to_string(),
+            container: self.n(container),
             ..Default::default()
         };
-        let _ = self.docker.connect_network(network, req).await;
+        let _ = self.docker.connect_network(&self.n(network), req).await;
     }
 
     /// `network_connect` at a fixed address, so nos's config can name it.
@@ -119,7 +209,7 @@ impl Dock {
         ip: &str,
     ) -> anyhow::Result<()> {
         let req = NetworkConnectRequest {
-            container: container.to_string(),
+            container: self.n(container),
             endpoint_config: Some(EndpointSettings {
                 ipam_config: Some(EndpointIpamConfig {
                     ipv4_address: Some(ip.to_string()),
@@ -129,17 +219,17 @@ impl Dock {
             }),
         };
         self.docker
-            .connect_network(network, req)
+            .connect_network(&self.n(network), req)
             .await
             .with_context(|| format!("connecting {container} to {network}"))
     }
 
     pub async fn network_disconnect(&self, network: &str, container: &str) {
         let req = NetworkDisconnectRequest {
-            container: container.to_string(),
+            container: self.n(container),
             force: Some(true),
         };
-        let _ = self.docker.disconnect_network(network, req).await;
+        let _ = self.docker.disconnect_network(&self.n(network), req).await;
     }
 
     // --- volumes / containers ---
@@ -150,6 +240,7 @@ impl Dock {
         self.docker
             .create_volume(VolumeCreateRequest {
                 name: Some(name.to_string()),
+                labels: Some(self.labels()),
                 ..Default::default()
             })
             .await
@@ -158,11 +249,20 @@ impl Dock {
     }
 
     pub async fn container_remove(&self, name: &str) {
+        self.container_remove_raw(&self.n(name)).await;
+    }
+
+    /// By docker's own name or id (no lab prefix).
+    async fn container_remove_raw(&self, name: &str) {
         let opts = RemoveContainerOptionsBuilder::default().force(true).build();
         let _ = self.docker.remove_container(name, Some(opts)).await;
     }
 
     pub async fn volume_remove(&self, name: &str) {
+        self.volume_remove_raw(&self.n(name)).await;
+    }
+
+    async fn volume_remove_raw(&self, name: &str) {
         let opts = RemoveVolumeOptionsBuilder::default().force(true).build();
         let _ = self.docker.remove_volume(name, Some(opts)).await;
     }
@@ -170,8 +270,9 @@ impl Dock {
     /// Replaces any existing container of that name (with fresh volumes, so no
     /// state — registries, log buffer — leaks between runs), seeds it, starts it.
     pub async fn start(&self, spec: &ContainerSpec<'_>) -> anyhow::Result<()> {
-        let (name, network) = (spec.name, spec.network);
-        self.container_remove(name).await;
+        let (name, network) = (self.n(spec.name), self.n(spec.network));
+        let (name, network) = (name.as_str(), network.as_str());
+        self.container_remove_raw(name).await;
         let run_vol = format!("{name}-run");
         let data_vol = format!("{name}-data");
         self.volume_recreate(&run_vol).await?;
@@ -186,6 +287,7 @@ impl Dock {
         };
         let body = ContainerCreateBody {
             image: Some(image()),
+            labels: Some(self.labels()),
             cmd: Some(spec.cmd.clone()),
             // Short 802.1AX churn-detection time so the `lacp` phase needn't wait 60s.
             env: Some(vec![
@@ -315,6 +417,8 @@ impl Dock {
         caps: &[&str],
     ) -> anyhow::Result<()> {
         self.container_remove(name).await;
+        let (full, network) = (self.n(name), self.n(network));
+        let network = network.as_str();
         let endpoint = EndpointSettings {
             ipam_config: Some(EndpointIpamConfig {
                 ipv4_address: Some(ip.to_string()),
@@ -324,6 +428,7 @@ impl Dock {
         };
         let body = ContainerCreateBody {
             image: Some(image.to_string()),
+            labels: Some(self.labels()),
             entrypoint: entrypoint.map(|e| e.iter().map(|s| (*s).to_string()).collect()),
             cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
             host_config: Some(HostConfig {
@@ -336,7 +441,7 @@ impl Dock {
             }),
             ..Default::default()
         };
-        let opts = CreateContainerOptionsBuilder::default().name(name).build();
+        let opts = CreateContainerOptionsBuilder::default().name(&full).build();
         self.docker
             .create_container(Some(opts), body)
             .await
@@ -345,7 +450,7 @@ impl Dock {
             self.upload(name, dir, file, contents).await?;
         }
         self.docker
-            .start_container(name, None)
+            .start_container(&full, None)
             .await
             .with_context(|| format!("starting container {name}"))?;
         Ok(())
@@ -361,7 +466,11 @@ impl Dock {
     ) -> anyhow::Result<()> {
         let opts = UploadToContainerOptionsBuilder::default().path(dir).build();
         self.docker
-            .upload_to_container(name, Some(opts), body_full(tar_one(file, contents)?.into()))
+            .upload_to_container(
+                &self.n(name),
+                Some(opts),
+                body_full(tar_one(file, contents)?.into()),
+            )
             .await
             .with_context(|| format!("writing {dir}/{file} into {name}"))
     }
@@ -371,23 +480,25 @@ impl Dock {
     /// networks are attached with `network_connect`.
     pub async fn start_host(&self, name: &str, image: &str, network: &str) -> anyhow::Result<()> {
         self.container_remove(name).await;
+        let (full, network) = (self.n(name), self.n(network));
         let body = ContainerCreateBody {
             image: Some(image.to_string()),
+            labels: Some(self.labels()),
             cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             host_config: Some(HostConfig {
                 cap_add: Some(["NET_ADMIN", "NET_RAW"].map(String::from).to_vec()),
-                network_mode: Some(network.to_string()),
+                network_mode: Some(network),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let opts = CreateContainerOptionsBuilder::default().name(name).build();
+        let opts = CreateContainerOptionsBuilder::default().name(&full).build();
         self.docker
             .create_container(Some(opts), body)
             .await
             .with_context(|| format!("creating container {name}"))?;
         self.docker
-            .start_container(name, None)
+            .start_container(&full, None)
             .await
             .with_context(|| format!("starting container {name}"))?;
         Ok(())
@@ -425,7 +536,7 @@ impl Dock {
         let created = self
             .docker
             .create_exec(
-                container,
+                &self.n(container),
                 ExecConfig {
                     cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
                     user: user.map(String::from),
@@ -486,7 +597,10 @@ impl Dock {
     }
 
     pub async fn pid(&self, container: &str) -> anyhow::Result<i64> {
-        let info = self.docker.inspect_container(container, None).await?;
+        let info = self
+            .docker
+            .inspect_container(&self.n(container), None)
+            .await?;
         info.state
             .and_then(|s| s.pid)
             .with_context(|| format!("no pid for {container}"))
@@ -494,10 +608,14 @@ impl Dock {
 
     /// The MAC address docker gave `container`'s interface on `network`.
     pub async fn mac(&self, container: &str, network: &str) -> anyhow::Result<String> {
-        let info = self.docker.inspect_container(container, None).await?;
+        let info = self
+            .docker
+            .inspect_container(&self.n(container), None)
+            .await?;
+        let network = self.n(network);
         info.network_settings
             .and_then(|s| s.networks)
-            .and_then(|mut n| n.remove(network))
+            .and_then(|mut n| n.remove(&network))
             .and_then(|e| e.mac_address)
             .filter(|m| !m.is_empty())
             .with_context(|| format!("{container} has no MAC address on {network}"))
@@ -506,6 +624,10 @@ impl Dock {
     /// Whole stdout+stderr of a container (only used where REST itself is what
     /// the check kills, so its own log stream is gone).
     pub async fn logs(&self, container: &str) -> anyhow::Result<String> {
+        self.logs_raw(&self.n(container)).await
+    }
+
+    async fn logs_raw(&self, container: &str) -> anyhow::Result<String> {
         let opts = LogsOptionsBuilder::default()
             .stdout(true)
             .stderr(true)
@@ -536,6 +658,10 @@ impl Dock {
         if self.docker.inspect_image(image).await.is_ok() {
             return Ok(());
         }
+        let _lock = helper_build_lock().await?;
+        if self.docker.inspect_image(image).await.is_ok() {
+            return Ok(());
+        }
         let opts = bollard::query_parameters::CreateImageOptionsBuilder::default()
             .from_image(image)
             .build();
@@ -548,6 +674,11 @@ impl Dock {
 
     /// Builds `tag` from an inline Dockerfile, once.
     pub async fn ensure_image(&self, tag: &str, dockerfile: &str) -> anyhow::Result<()> {
+        if self.docker.inspect_image(tag).await.is_ok() {
+            return Ok(());
+        }
+        // Two labs share these tags: the second waits, then finds it built.
+        let _lock = helper_build_lock().await?;
         if self.docker.inspect_image(tag).await.is_ok() {
             return Ok(());
         }
@@ -608,10 +739,11 @@ impl Dock {
     ) -> anyhow::Result<String> {
         let body = ContainerCreateBody {
             image: Some(helper_image.to_string()),
+            labels: Some(self.labels()),
             cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
             host_config: Some(HostConfig {
                 privileged: Some(true),
-                network_mode: netns_of.map(|c| format!("container:{c}")),
+                network_mode: netns_of.map(|c| format!("container:{}", self.n(c))),
                 pid_mode: host_pid.then(|| "host".to_string()),
                 ..Default::default()
             }),
@@ -627,13 +759,30 @@ impl Dock {
             Some(Err(e)) => return Err(e.into()),
             None => -1,
         };
-        let out = self.logs(&id).await.unwrap_or_default();
-        self.container_remove(&id).await;
+        let out = self.logs_raw(&id).await.unwrap_or_default();
+        self.container_remove_raw(&id).await;
         if code != 0 {
             bail!("{}: exit {code}: {}", cmd.join(" "), out.trim());
         }
         Ok(out)
     }
+}
+
+/// The host-wide lock that serialises building/pulling the shared helper images
+/// (`nos-e2e-gobgp:local`, FRR, the netns helper) across labs; an `flock`, so a
+/// killed run never leaves it held.
+async fn helper_build_lock() -> anyhow::Result<std::fs::File> {
+    tokio::task::spawn_blocking(|| {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open("/tmp/nos-e2e-helper-build.lock")
+            .context("opening the helper-image build lock")?;
+        f.lock().context("taking the helper-image build lock")?;
+        Ok(f)
+    })
+    .await?
 }
 
 /// A tar archive holding one regular file (mode 0644).

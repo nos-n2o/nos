@@ -23,7 +23,7 @@ pub(super) fn redistribute() -> Vec<&'static str> {
         "--static-route",
         REDISTRIBUTE_PREFIX,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ]
 }
@@ -209,7 +209,7 @@ pub async fn bgp_routes_paging(w: &mut World) -> anyhow::Result<()> {
     let mut add = flags("--static-route");
     add.extend(strings(&[
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ]));
     a.provision(&add).await?;
@@ -346,7 +346,7 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         GR_B_PREFIX,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ])
     .await?;
@@ -482,7 +482,7 @@ pub async fn ribd_crash_hold(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         GR_B_PREFIX,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ])
     .await?;
@@ -584,7 +584,7 @@ pub async fn bgp_gr_frr(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     w.start(A, Some(flags), &[]).await?;
     w.dock.container_remove("router-g").await;
@@ -606,7 +606,7 @@ pub async fn bgp_gr_frr(w: &mut World) -> anyhow::Result<()> {
                     "router-f",
                     FRR_IMAGE,
                     NET,
-                    IP_G,
+                    IP_G.s(),
                     &[
                         "sh",
                         "-c",
@@ -994,19 +994,19 @@ pub async fn reflector(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_A.to_string(),
             "--peer",
-            IP_A,
+            IP_A.s(),
         ])
     };
-    w.start(A, Some(hub(IP_B)), &[]).await?;
-    w.start(B, Some(client(RID_B, IP_B)), &[]).await?;
-    w.start(C, Some(client(RID_C, IP_C)), &[]).await?;
-    w.a()?.provision_flags(&hub(IP_C)).await?;
+    w.start(A, Some(hub(IP_B.s())), &[]).await?;
+    w.start(B, Some(client(RID_B, IP_B.s())), &[]).await?;
+    w.start(C, Some(client(RID_C, IP_C.s())), &[]).await?;
+    w.a()?.provision_flags(&hub(IP_C.s())).await?;
 
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     for r in [a, b, c] {
         r.established().await?;
     }
-    let mut flags = client(RID_B, IP_B);
+    let mut flags = client(RID_B, IP_B.s());
     flags.extend(strings(&redistribute()));
     b.provision_flags(&flags).await?;
     log("waiting for router-c to learn the prefix purely via the reflector");
@@ -1050,10 +1050,12 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
         "--export-policy",
         "route-server-med",
     ]));
-    w.start(A, Some(hub("pg-b", ASN_B, IP_B)), &[]).await?;
+    w.start(A, Some(hub("pg-b", ASN_B, IP_B.s())), &[]).await?;
     w.start(B, Some(b_flags.clone()), &[]).await?;
     w.start(C, None, &[]).await?;
-    w.a()?.provision_flags(&hub("pg-c", ASN_C, IP_C)).await?;
+    w.a()?
+        .provision_flags(&hub("pg-c", ASN_C, IP_C.s()))
+        .await?;
 
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     for r in [a, b, c] {
@@ -1115,7 +1117,7 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_A.to_string(),
             "--peer",
-            IP_A,
+            IP_A.s(),
         ])
     };
     let advertising = |ip: &str, rid: &str| {
@@ -1128,10 +1130,10 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
     // `loc_rib` baseline below would count its route.
     w.remove(B).await;
     w.remove(C).await;
-    w.start(A, Some(hub("pg-b", IP_B, "2")), &[]).await?;
-    w.start(B, Some(spoke(IP_B, RID_B)), &[]).await?;
-    w.start(C, Some(spoke(IP_C, RID_C)), &[]).await?;
-    w.a()?.provision_flags(&hub("pg-c", IP_C, "2")).await?;
+    w.start(A, Some(hub("pg-b", IP_B.s(), "2")), &[]).await?;
+    w.start(B, Some(spoke(IP_B.s(), RID_B)), &[]).await?;
+    w.start(C, Some(spoke(IP_C.s(), RID_C)), &[]).await?;
+    w.a()?.provision_flags(&hub("pg-c", IP_C.s(), "2")).await?;
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     for r in [b, c] {
         r.established().await?;
@@ -1139,10 +1141,10 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
 
     // router-b first, so its path is the older one (decision step 8) and
     // stays best while router-c's comes and goes as the sibling.
-    b.provision_flags(&advertising(IP_B, RID_B)).await?;
+    b.provision_flags(&advertising(IP_B.s(), RID_B)).await?;
     a.wait(&loc_rib()).await?;
     let best_moves = a.count(&loc_rib());
-    c.provision_flags(&advertising(IP_C, RID_C)).await?;
+    c.provision_flags(&advertising(IP_C.s(), RID_C)).await?;
     let both =
         format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B},{IP_C} next_hops=2 ");
     log("waiting for router-a to install one kernel route over both next hops");
@@ -1152,13 +1154,13 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         .iter()
         .find(|p| p["prefix"] == REDISTRIBUTE_PREFIX)
         .map(|p| p["candidates"][0]["gateways"].clone());
-    if gateways != Some(serde_json::json!([IP_B, IP_C])) {
+    if gateways != Some(serde_json::json!([IP_B.s(), IP_C.s()])) {
         bail!("GET /v1/routes/rt1: expected gateways [{IP_B}, {IP_C}], got {gateways:?}");
     }
 
     log("router-c withdraws: the route shrinks to router-b alone");
     let reject = policy_file("multipath-reject", "reject\n")?;
-    let mut withdrawn = advertising(IP_C, RID_C);
+    let mut withdrawn = advertising(IP_C.s(), RID_C);
     withdrawn.extend(strings(&[
         "--policy-name",
         "multipath-reject",
@@ -1177,7 +1179,7 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
 
     log("router-c advertises again: both next hops are back");
     let base = a.count(&both);
-    c.provision_flags(&advertising(IP_C, RID_C)).await?;
+    c.provision_flags(&advertising(IP_C.s(), RID_C)).await?;
     a.wait_new(&both, base, 60).await?;
     if a.count(&loc_rib()) != best_moves {
         bail!("router-a's best path moved while only the multipath sibling changed");
@@ -1188,7 +1190,7 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         "added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_C} next_hops=1 .*backup=true"
     );
     let (base_one, base_backup) = (a.count(&one), a.count(&backup));
-    a.provision_flags(&hub("pg-c", IP_C, "1")).await?;
+    a.provision_flags(&hub("pg-c", IP_C.s(), "1")).await?;
     a.wait_new(&one, base_one, 60).await?;
     a.wait_new(&backup, base_backup, 60).await
 }
@@ -1425,7 +1427,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     let file = policy_file("reject-frr-prefix", "reject\n")?;
     let mut tight = seed.clone();
@@ -1453,7 +1455,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -1552,7 +1554,7 @@ async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         AGGREGATE_CONTRIBUTOR_B,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ])
     .await?;
@@ -1644,7 +1646,7 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
 pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
 
-    for subnet in [SUBNET, OSPF_BROADCAST_SUBNET] {
+    for subnet in [SUBNET.s(), OSPF_BROADCAST_SUBNET] {
         a.wait_connected(subnet).await?;
     }
 
@@ -1673,7 +1675,7 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         NHR_PREFIX,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ]);
     let mut with_ospf = advertise.clone();
@@ -1893,7 +1895,7 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         AGGREGATE_CONTRIBUTOR_B,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
         "--remove-static-route",
         REDISTRIBUTE_PREFIX,
@@ -2065,7 +2067,7 @@ pub async fn blackhole(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         BLACKHOLE_UNCOVERED,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
         "--policy-name",
         "tag-blackhole",
@@ -2236,7 +2238,7 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_B.to_string(),
         "--peer",
-        IP_B,
+        IP_B.s(),
     ]);
     w.start(C, Some(c_flags), &[]).await?;
     let b = w.b()?;
@@ -2252,11 +2254,11 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_C.to_string(),
         "--peer",
-        IP_C,
+        IP_C.s(),
         "--static-route",
         CONTROL_PREFIX,
         "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
+        REDISTRIBUTE_GATEWAY.s(),
         "--redistribute",
     ]);
     b.provision_flags(&b_flags).await?;
@@ -2299,7 +2301,7 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     flags.extend(redistribute().into_iter().map(str::to_string));
     w.start(A, Some(flags), &[]).await?;
@@ -2328,7 +2330,7 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -2389,7 +2391,7 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     w.start(A, Some(flags), &[]).await?;
     ensure_exabgp(w).await?;
@@ -2406,7 +2408,7 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -2451,7 +2453,7 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
         "--route-refresh-stale-time",
         "5",
     ]);
@@ -2466,8 +2468,8 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
         )
         .await?;
     let script = include_str!("borr.py")
-        .replace("@IP_A@", IP_A)
-        .replace("@IP_G@", IP_G)
+        .replace("@IP_A@", IP_A.s())
+        .replace("@IP_G@", IP_G.s())
         .replace("@ASN@", &ASN_G.to_string())
         .replace("@RID@", RID_G)
         .replace("@KEPT@", RR_STALE_KEPT)
@@ -2477,7 +2479,7 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             PY_SPEAKER_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/borr.py"],
             ("/etc", "borr.py", script.as_bytes()),
         )
@@ -2543,7 +2545,7 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &CONFED_ASN_B.to_string(),
         "--peer",
-        IP_B,
+        IP_B.s(),
     ]);
     a_flags.extend(confed(CONFED_ASN_A, CONFED_ASN_B));
     let mut b_flags = strings(&[
@@ -2554,7 +2556,7 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &CONFED_ASN_A.to_string(),
         "--peer",
-        IP_A,
+        IP_A.s(),
     ]);
     b_flags.extend(confed(CONFED_ASN_B, CONFED_ASN_A));
     b_flags.extend(strings(&redistribute()));
@@ -2570,7 +2572,7 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     g_flags.extend(confed(CONFED_ASN_A, CONFED_ASN_B));
     w.a()?.provision_flags(&g_flags).await?;
@@ -2592,7 +2594,7 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -2690,7 +2692,7 @@ pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
         "--local-as",
         &LOCAL_AS.to_string(),
     ]);
@@ -2714,7 +2716,7 @@ pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -2825,7 +2827,7 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
         "--add-path",
         "receive",
     ]);
@@ -2843,7 +2845,7 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -2938,7 +2940,7 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_A.to_string(),
         "--peer",
-        IP_A,
+        IP_A.s(),
         "--add-path",
         "receive",
     ]);
@@ -2956,7 +2958,7 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_B.to_string(),
             "--peer",
-            IP_B,
+            IP_B.s(),
             "--add-path",
             "send",
             "--add-path-send-count",
@@ -3043,7 +3045,7 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
     ]);
     let with = |extra: &[&str]| {
         let mut f = base.clone();
@@ -3066,7 +3068,7 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -3279,7 +3281,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
             RPKI_CACHE,
             STAYRTR_IMAGE,
             NET,
-            IP_RPKI,
+            IP_RPKI.s(),
             &[
                 "-cache",
                 "/vrps.json",
@@ -3339,8 +3341,9 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
             "--announce-rpki-state",
         ])
     };
-    w.start(C, Some(ibgp(IP_C, RID_C, IP_A)), &[]).await?;
-    let mut pg_c = ibgp(IP_A, RID_A, IP_C);
+    w.start(C, Some(ibgp(IP_C.s(), RID_C, IP_A.s())), &[])
+        .await?;
+    let mut pg_c = ibgp(IP_A.s(), RID_A, IP_C.s());
     pg_c.extend(strings(&["--peer-group", "pg-c"]));
     w.a()?.provision_flags(&pg_c).await?;
     let tag_out = policy_file(
@@ -3361,7 +3364,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_G.to_string(),
             "--peer",
-            IP_G,
+            IP_G.s(),
             "--policy-name",
             "rpki-tag-out",
             "--policy-source-file",
@@ -3385,7 +3388,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -3544,7 +3547,7 @@ async fn rpki_cache_auth(w: &mut World) -> anyhow::Result<()> {
         .start_nos_tool(
             RTR_STUB,
             NET,
-            IP_RTR_STUB,
+            IP_RTR_STUB.s(),
             &[
                 "nos-rtr-stub",
                 "0.0.0.0:323",
@@ -3552,7 +3555,7 @@ async fn rpki_cache_auth(w: &mut World) -> anyhow::Result<()> {
                 "24",
                 "64496",
                 RTR_STUB_KEY,
-                IP_A,
+                IP_A.s(),
             ],
             &["NET_ADMIN"],
         )
@@ -3645,7 +3648,7 @@ fn evpn_flags() -> Vec<String> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
         "--evpn",
     ])
 }
@@ -3804,7 +3807,7 @@ async fn start_gobgp_gr(w: &World, afi_safis: &[&str], asn: u32, gr: bool) -> an
             "router-g",
             GOBGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["gobgpd", "-f", "/etc/gobgpd.toml"],
             ("/etc", "gobgpd.toml", conf.as_bytes()),
         )
@@ -3876,7 +3879,7 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_B.to_string(),
             "--peer",
-            IP_B,
+            IP_B.s(),
             "--flowspec",
         ]);
         f.extend(strings(extra));
@@ -3934,7 +3937,7 @@ pub async fn flowspec(w: &mut World) -> anyhow::Result<()> {
         "proto =6",
         "dst-port =25",
         "traffic-rate:0:0",
-        IP_G,
+        IP_G.s(),
     ] {
         if !body.contains(want) {
             bail!("show bgp flowspec is missing {want}: {body}");
@@ -4092,7 +4095,7 @@ async fn flowspec_propagation(
     ))
     .await?;
     let body = b_show().await?;
-    for want in ["dest 192.0.2.0/24", "traffic-rate:0:0", "discard", IP_A] {
+    for want in ["dest 192.0.2.0/24", "traffic-rate:0:0", "discard", IP_A.s()] {
         if !body.contains(want) {
             bail!("router-b's show bgp flowspec is missing {want}: {body}");
         }
@@ -4585,7 +4588,7 @@ pub async fn vpn_export(w: &mut World) -> anyhow::Result<()> {
         .unwrap_or_default();
     for want in [
         &format!("[{VPN_LABEL}]"),
-        IP_A,
+        IP_A.s(),
         &format!("{ASN_A}"),
         VPN_RD_A,
     ] {
@@ -4703,15 +4706,15 @@ async fn two_pes(w: &mut World) -> anyhow::Result<()> {
             "vpn route imported table={VPN_TABLE} prefix={prefix} labels=\\[{VPN_LABEL}\\] rd={rd} next_hop={pe}"
         )
     };
-    a.wait(&imported(VPN_EXPORT_B, VPN_RD_B, IP_B)).await?;
-    b.wait(&imported(VPN_EXPORT_A, VPN_RD_A, IP_A)).await?;
+    a.wait(&imported(VPN_EXPORT_B, VPN_RD_B, IP_B.s())).await?;
+    b.wait(&imported(VPN_EXPORT_A, VPN_RD_A, IP_A.s())).await?;
     let body = vrf_routes(a).await?;
     if !body.contains(VPN_EXPORT_B.split('/').next().unwrap_or_default())
         || !body.contains("\"Vpn\"")
     {
         bail!("router-a's {VPN_TABLE} lacks router-b's VPN route: {body}");
     }
-    if a.count(&imported(VPN_EXPORT_A, VPN_RD_A, IP_B)) > 0 {
+    if a.count(&imported(VPN_EXPORT_A, VPN_RD_A, IP_B.s())) > 0 {
         bail!("router-a imported its own export back");
     }
     Ok(())
@@ -4736,14 +4739,14 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
 
     log("the CEs ping each other across the MPLS link");
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
-    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 
     log("the VRF does not reach the core: a CE cannot ping router-b's underlay address");
     host_sh(w, CE_HOST, &format!("ip route add {IP_B}/32 via {L3_GW_A}")).await?;
     let (code, out) = w
         .dock
-        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", IP_B])
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", IP_B.s()])
         .await?;
     if code == 0 {
         bail!("{CE_HOST} reached {IP_B} through {VPN_TABLE}: {out}");
@@ -4754,7 +4757,7 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     let new_label = 2000;
     let (base_rm, base_a) = (
         b.count(&dp_removed_pop(VPN_LABEL)),
-        a.count(&dp_labelled(L3_SUBNET_B, new_label, IP_B)),
+        a.count(&dp_labelled(L3_SUBNET_B.s(), new_label, IP_B.s())),
     );
     b.provision_flags(&dp_pe(
         B,
@@ -4765,10 +4768,14 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     .await?;
     b.wait_new(&dp_removed_pop(VPN_LABEL), base_rm, 60).await?;
     b.wait(&dp_pop(new_label)).await?;
-    a.wait_new(&dp_labelled(L3_SUBNET_B, new_label, IP_B), base_a, 60)
-        .await?;
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
-    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+    a.wait_new(
+        &dp_labelled(L3_SUBNET_B.s(), new_label, IP_B.s()),
+        base_a,
+        60,
+    )
+    .await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 
     log("router-b's vpn unset: its pop route and router-a's labelled route go");
     let gone =
@@ -4784,7 +4791,7 @@ pub async fn vpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&gone, base_gone, 60).await?;
     let (code, _) = w
         .dock
-        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3_HOST_IP_B])
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3_HOST_IP_B.s()])
         .await?;
     if code == 0 {
         bail!("{CE_HOST} still reaches {L3_HOST_IP_B} after router-b's vpn was unset");
@@ -4846,8 +4853,8 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
         .and_then(|p| p["candidates"].get(0))
         .with_context(|| format!("{VPN_TABLE} has no {prefix}: {body}"))?;
     if route["source"] != "Vpn"
-        || route["vpn"][0]["pe_next_hop"] != IP_G
-        || route["gateways"][0] != IP_G
+        || route["vpn"][0]["pe_next_hop"] != IP_G.s()
+        || route["gateways"][0] != IP_G.s()
         || route["mpls_labels"] != serde_json::json!([[300]])
     {
         bail!("{VPN_TABLE}'s {prefix} is not the imported VPNv6 route (IPv4 PE, IPv4 gateway): {route}");
@@ -4866,7 +4873,7 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
         .unwrap_or_default();
     for want in [
         &format!("[{VPN_LABEL}]"),
-        IP_A,
+        IP_A.s(),
         &format!("{ASN_A}"),
         VPN_RD_A,
     ] {
@@ -4882,8 +4889,8 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
     log("two nos PEs with IPv6 CE hosts: ping6 both ways over the VPN label");
     vpn_dp_setup(w, true).await?;
     let (a, b) = (w.a()?, w.b()?);
-    ping_until(w, CE_HOST, L3V6_HOST_B, 30).await?;
-    ping_until(w, H_HOST, L3V6_HOST_A, 30).await?;
+    ping_until(w, CE_HOST, L3V6_HOST_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3V6_HOST_A.s(), 30).await?;
 
     log("router-b's vpn unset: the IPv6 labelled route goes and the ping stops");
     let gone =
@@ -4898,7 +4905,7 @@ pub async fn vpn_v6(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&gone, base_gone, 60).await?;
     let (code, _) = w
         .dock
-        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3V6_HOST_B])
+        .exec(CE_HOST, &["ping", "-c", "2", "-W", "1", L3V6_HOST_B.s()])
         .await?;
     if code == 0 {
         bail!("{CE_HOST} still reaches {L3V6_HOST_B} after router-b's vpn was unset");
@@ -4941,26 +4948,38 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     for net in [NET_L3_A, NET_L3_B] {
         if !w.dock.network_exists(net).await {
             let subnet = if net == NET_L3_A {
-                L3_SUBNET_A
+                L3_SUBNET_A.s()
             } else {
-                L3_SUBNET_B
+                L3_SUBNET_B.s()
             };
             w.dock.network_create(net, &[subnet], false).await?;
         }
     }
-    let gw_c = "198.18.2.3";
+    let gw_c = crate::lab::Addr("198.18.2.3").s();
     w.dock
-        .network_connect_ip(NET_L3_A, "router-a", L3_GW_A)
+        .network_connect_ip(NET_L3_A, "router-a", L3_GW_A.s())
         .await?;
     w.dock
-        .network_connect_ip(NET_L3_B, "router-b", L3_GW_B)
+        .network_connect_ip(NET_L3_B, "router-b", L3_GW_B.s())
         .await?;
     w.dock
         .network_connect_ip(NET_L3_B, "router-c", gw_c)
         .await?;
     for (host, net, ip, other, gw) in [
-        (CE_HOST, NET_L3_A, L3_HOST_IP_A, L3_SUBNET_B, L3_GW_A),
-        (H_HOST, NET_L3_B, L3_HOST_IP_B, L3_SUBNET_A, L3_GW_B),
+        (
+            CE_HOST,
+            NET_L3_A,
+            L3_HOST_IP_A.s(),
+            L3_SUBNET_B.s(),
+            L3_GW_A.s(),
+        ),
+        (
+            H_HOST,
+            NET_L3_B,
+            L3_HOST_IP_B.s(),
+            L3_SUBNET_A.s(),
+            L3_GW_B.s(),
+        ),
     ] {
         w.dock.start_host(host, HOST_IMAGE, net).await?;
         host_sh(
@@ -4991,8 +5010,8 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
         flags.extend(strings(&["--peer-group", group]));
         flags
     };
-    a.provision_flags(&pe_a("pg1", IP_B)).await?;
-    a.provision_flags(&pe_a("pg-c", IP_C)).await?;
+    a.provision_flags(&pe_a("pg1", IP_B.s())).await?;
+    a.provision_flags(&pe_a("pg-c", IP_C.s())).await?;
     b.provision_flags(&dp_pe(
         B,
         VPN_RD_B,
@@ -5013,8 +5032,8 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
         "installed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\], \\[{LABEL_C}\\]\\] gateway={IP_B},{IP_C} interfaces="
     );
     a.wait(&both).await?;
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
-    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 
     log("router-c unsets vpn: the route shrinks to router-b's hop");
     let single = format!(
@@ -5041,8 +5060,8 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     c.provision_flags(&clear).await?;
     a.wait_new(&single, base_single, 60).await?;
     a.assert_quiet(&removed, base_removed, 10).await?;
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
-    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 
     log("router-c sets vpn again: the route grows back to both hops, in place");
     let (a, c) = (w.a()?, w.c()?);
@@ -5055,7 +5074,7 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&both, base_both, 60).await?;
     a.assert_quiet(&removed, base_removed, 10).await?;
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
 
     let out = host_sh(
         w,
@@ -5197,46 +5216,46 @@ async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
         [
             v6s(
                 NET_L3_A,
-                L3_SUBNET_A,
-                L3V6_SUBNET_A,
+                L3_SUBNET_A.s(),
+                L3V6_SUBNET_A.s(),
                 "router-a",
-                L3_GW_A,
-                L3V6_GW_A,
+                L3_GW_A.s(),
+                L3V6_GW_A.s(),
                 CE_HOST,
-                L3V6_HOST_A,
-                L3V6_SUBNET_B,
+                L3V6_HOST_A.s(),
+                L3V6_SUBNET_B.s(),
             ),
             v6s(
                 NET_L3_B,
-                L3_SUBNET_B,
-                L3V6_SUBNET_B,
+                L3_SUBNET_B.s(),
+                L3V6_SUBNET_B.s(),
                 "router-b",
-                L3_GW_B,
-                L3V6_GW_B,
+                L3_GW_B.s(),
+                L3V6_GW_B.s(),
                 H_HOST,
-                L3V6_HOST_B,
-                L3V6_SUBNET_A,
+                L3V6_HOST_B.s(),
+                L3V6_SUBNET_A.s(),
             ),
         ]
     } else {
         [
             v4(
                 NET_L3_A,
-                L3_SUBNET_A,
+                L3_SUBNET_A.s(),
                 "router-a",
-                L3_GW_A,
+                L3_GW_A.s(),
                 CE_HOST,
-                L3_HOST_IP_A,
-                L3_SUBNET_B,
+                L3_HOST_IP_A.s(),
+                L3_SUBNET_B.s(),
             ),
             v4(
                 NET_L3_B,
-                L3_SUBNET_B,
+                L3_SUBNET_B.s(),
                 "router-b",
-                L3_GW_B,
+                L3_GW_B.s(),
                 H_HOST,
-                L3_HOST_IP_B,
-                L3_SUBNET_A,
+                L3_HOST_IP_B.s(),
+                L3_SUBNET_A.s(),
             ),
         ]
     };
@@ -5248,9 +5267,9 @@ async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
         w.dock.start_host(host, HOST_IMAGE, net).await?;
         let script = if v6 {
             let gw6 = if *router == "router-a" {
-                L3V6_GW_A
+                L3V6_GW_A.s()
             } else {
-                L3V6_GW_B
+                L3V6_GW_B.s()
             };
             format!(
                 "set -e; ip addr flush dev eth0; ip -6 addr add {ip}/64 dev eth0 nodad; \
@@ -5272,8 +5291,9 @@ async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
         .await?;
     a.wait(&dp_pop(VPN_LABEL)).await?;
     b.wait(&dp_pop(VPN_LABEL)).await?;
-    a.wait(&dp_labelled(sites[0].6, VPN_LABEL, IP_B)).await?;
-    b.wait(&dp_labelled(sites[1].6, VPN_LABEL, IP_A)).await
+    a.wait(&dp_labelled(sites[0].6, VPN_LABEL, IP_B.s()))
+        .await?;
+    b.wait(&dp_labelled(sites[1].6, VPN_LABEL, IP_A.s())).await
 }
 
 /// Removes `vpn_dp_setup`'s hosts and networks.
@@ -5492,8 +5512,8 @@ async fn vrf_import(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> anyhow::R
     let labels = vpn["mpls_labels"].to_string();
     if vpn["source"] != "Vpn"
         || !(labels == "[[100]]" || labels == "[[200]]")
-        || vpn["vpn"][0]["pe_next_hop"] != IP_G
-        || vpn["gateways"][0] != IP_G
+        || vpn["vpn"][0]["pe_next_hop"] != IP_G.s()
+        || vpn["gateways"][0] != IP_G.s()
     {
         bail!("{VPN_TABLE}'s 10.10.0.0/24 is not the imported VPN route: {vpn}");
     }
@@ -5570,7 +5590,7 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
             "-a",
             "evpn",
             "multicast",
-            IP_G,
+            IP_G.s(),
             "etag",
             "0",
             "rd",
@@ -6091,7 +6111,7 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
             "-a",
             "evpn",
             "multicast",
-            IP_G,
+            IP_G.s(),
             "etag",
             "0",
             "rd",
@@ -6152,7 +6172,7 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     let body = a
         .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
         .await?;
-    for want in [EVPN_REMOTE_MAC, EVPN_REMOTE_IP, IP_G, &vxlan] {
+    for want in [EVPN_REMOTE_MAC, EVPN_REMOTE_IP, IP_G.s(), &vxlan] {
         if !body.contains(want) {
             bail!("show fdb is missing {want}: {body}");
         }
@@ -6700,7 +6720,15 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     }
 
     let peer_es = |verb: &'static str| {
-        let mut v = strings(&["global", "rib", verb, "-a", "evpn", "esi", ESI_PEER_ORIGIN]);
+        let mut v = strings(&[
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "evpn",
+            "esi",
+            ESI_PEER_ORIGIN.s(),
+        ]);
         v.push("esi".to_string());
         v.extend(strings(&GOBGP_ESI));
         v.extend(strings(&["rd", "65010:1"]));
@@ -6755,21 +6783,21 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     gobgp_owned(w, peer_es("add")).await?;
     gobgp_owned(
         w,
-        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
     )
     .await?;
     a.wait_new(&role("non-df"), base, 30).await?;
     a.wait(&flooding(false)).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
     log("local bias: router-a marks what the second PE sends (enc_src_ip on vx ingress) and drops it on the bond");
-    local_bias_readback(w, "router-a", &bond, &vxlan, ESI_PEER_ORIGIN, true).await?;
+    local_bias_readback(w, "router-a", &bond, &vxlan, ESI_PEER_ORIGIN.s(), true).await?;
 
     log("its Type-4 and per-EVI A-D withdrawn: router-a is the DF again and the bond floods");
     let base = a.count(&role("df"));
     gobgp_owned(w, peer_es("del")).await?;
     gobgp_owned(
         w,
-        gobgp_ad("del", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+        gobgp_ad("del", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
     )
     .await?;
     a.wait_new(&role("df"), base, 30).await?;
@@ -6872,7 +6900,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 
     log("aliasing: a MAC on a segment two PEs serve is balanced over both, in the real kernel");
     let alias_mac = ESI3_MAC.0;
-    let [pe1, pe2] = ESI3_PES;
+    let [pe1, pe2] = esi3_pes();
     let group_installed = format!(
         "remote mac group installed domain={EVPN_DOMAIN} mac={alias_mac} vteps={},{}",
         pe1.0, pe2.0
@@ -6963,7 +6991,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     gobgp_owned(w, peer_es("add")).await?;
     gobgp_owned(
         w,
-        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
     )
     .await?;
     a.wait_new(&role("non-df"), base, 30).await?;
@@ -7002,7 +7030,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 /// on, a MAC whose own PE loses its per-ES A-D moves to the PE the segment
 /// elects as DF among the remaining ones (by their Type-4s), not to the
 /// lowest address — and to the lowest address once no Type-4 is held. Read
-/// back from the real kernel FDB (see `consts::ESI4_PES`). GoBGP can't send a
+/// back from the real kernel FDB (see `consts::esi4_pes()`). GoBGP can't send a
 /// Type-4 with the ES-Import RT `nos-fdbd` requires, so the one Type-4 comes
 /// from a real FRR (`router-f`, see `start_frr_segment`).
 async fn single_active_backup(w: &World) -> anyhow::Result<()> {
@@ -7028,9 +7056,9 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
         }
         anyhow::Ok(())
     };
-    let [p1, p2, _, p4] = ESI4_PES;
+    let [p1, p2, _, p4] = esi4_pes();
     let base = a.count(&at(p1.0));
-    for pe in ESI4_PES {
+    for pe in esi4_pes() {
         gobgp_owned(w, single(gobgp_ad("add", &ESI4, true, pe))).await?;
         gobgp_owned(w, gobgp_ad("add", &ESI4, false, pe)).await?;
     }
@@ -7053,10 +7081,10 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
     in_kernel(p2.0).await?;
 
     gobgp_owned(w, gobgp_macadv("del", &ESI4, ESI4_MAC, p1)).await?;
-    for pe in ESI4_PES {
+    for pe in esi4_pes() {
         gobgp_owned(w, gobgp_ad("del", &ESI4, false, pe)).await?;
     }
-    for pe in &ESI4_PES[1..] {
+    for pe in &esi4_pes()[1..] {
         gobgp_owned(w, gobgp_ad("del", &ESI4, true, *pe)).await?;
     }
     Ok(())
@@ -7068,7 +7096,7 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
 /// route-map strips FRR's DF Election community, which GoBGP can't decode and
 /// would treat the whole UPDATE as a withdraw. Returns once GoBGP holds it.
 async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
-    let (vtep, _) = ESI4_PES[3];
+    let (vtep, _) = esi4_pes()[3];
     let esi = format!("00:{}", ESI4[1]);
     let conf = format!(
         "frr defaults traditional\nhostname router-f\n!\n\
@@ -7479,8 +7507,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
         }
     }
     log("local bias in the kernel: router-a (non-DF) drops core BUM too, router-b (DF) only the other PE's");
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, true).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, false).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), true).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), false).await?;
 
     log("the CE bonds its two links; the host takes an address");
     dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
@@ -7562,8 +7590,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     log("local bias: the CE's broadcast out of its link to router-a is not echoed back through router-b (the DF), and the host gets it once");
     // The link flaps and DF re-elections above rewrote the filters: read them
     // back again, so a missing one fails here by name rather than as a count.
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, true).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, false).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), true).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), false).await?;
     let (echo_a, echo_b, host) = arp_broadcast(w, Some("eth0")).await?;
     if (echo_a, echo_b, host) != (0, 0, 1) {
         bail!(
@@ -7600,8 +7628,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&df_alg(B, EVPN_DP_RD_B)).await?;
     a.wait_new(&role(&bond_a, "df"), base_a, 60).await?;
     b.wait_new(&role(&bond_b, "non-df"), base_b, 60).await?;
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, false).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, true).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), true).await?;
     let (via_a, via_b, _) = arp_broadcast(w, None).await?;
     if (via_b, via_a) != (1, 0) {
         bail!(
@@ -7616,7 +7644,7 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     // The CE now sends through router-b's pin, so router-b advertises it too.
-    same_segment_no_move(w, &ce_mac, [(A, IP_B), (B, IP_A)]).await?;
+    same_segment_no_move(w, &ce_mac, [(A, IP_B.s()), (B, IP_A.s())]).await?;
 
     dataplane_teardown(w).await
 }
@@ -8262,8 +8290,8 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
 
     // The tenant subnet on eth1 makes the first table's gateway on-link.
     for (net, subnet, router, gw) in [
-        (NET_L3_A, L3_SUBNET_A, "router-a", L3_GW_A),
-        (NET_L3_B, L3_SUBNET_B, "router-b", L3_GW_B),
+        (NET_L3_A, L3_SUBNET_A.s(), "router-a", L3_GW_A.s()),
+        (NET_L3_B, L3_SUBNET_B.s(), "router-b", L3_GW_B.s()),
     ] {
         if !w.dock.network_exists(net).await {
             w.dock.network_create(net, &[subnet], false).await?;
@@ -8276,7 +8304,8 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         "router-b originates {total} static /32s in {} IP-VRFs; router-a has none yet",
         CHUNKED_TABLES.len()
     ));
-    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B)).await?;
+    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B.s()))
+        .await?;
     for (table, vni) in &CHUNKED_TABLES[1..] {
         b.provision_flags(&chunked_table_flags(B, table, *vni))
             .await?;
@@ -8304,7 +8333,7 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
         for (t, (table, _)) in CHUNKED_TABLES.iter().enumerate() {
             let instance = format!("sri-chunked{t}");
             let gateway: std::net::IpAddr = if t == 0 {
-                L3_HOST_IP_B.parse()?
+                L3_HOST_IP_B.s().parse()?
             } else {
                 format!("198.19.{t}.2").parse()?
             };
@@ -8408,7 +8437,8 @@ pub async fn evpn_l3_chunked(w: &mut World) -> anyhow::Result<()> {
     }
     let removed = a.count("removed route");
     let applied = std::time::Instant::now();
-    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
+    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A.s()))
+        .await?;
     for (table, vni) in &CHUNKED_TABLES[1..] {
         a.provision_flags(&chunked_table_flags(A, table, *vni))
             .await?;
@@ -8652,21 +8682,21 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     for (net, subnet, router, gw, host, ip, other) in [
         (
             NET_L3_A,
-            L3_SUBNET_A,
+            L3_SUBNET_A.s(),
             "router-a",
-            L3_GW_A,
+            L3_GW_A.s(),
             CE_HOST,
-            L3_HOST_IP_A,
-            L3_SUBNET_B,
+            L3_HOST_IP_A.s(),
+            L3_SUBNET_B.s(),
         ),
         (
             NET_L3_B,
-            L3_SUBNET_B,
+            L3_SUBNET_B.s(),
             "router-b",
-            L3_GW_B,
+            L3_GW_B.s(),
             H_HOST,
-            L3_HOST_IP_B,
-            L3_SUBNET_A,
+            L3_HOST_IP_B.s(),
+            L3_SUBNET_A.s(),
         ),
     ] {
         if !w.dock.network_exists(net).await {
@@ -8686,10 +8716,12 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("each PE's IP-VRF gets the L3 VNI");
-    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
-    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B)).await?;
+    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A.s()))
+        .await?;
+    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B.s()))
+        .await?;
     let vxlan = format!("vx{L3_VNI}");
-    for (r, vtep) in [(a, IP_A), (b, IP_B)] {
+    for (r, vtep) in [(a, IP_A.s()), (b, IP_B.s())] {
         r.wait(&format!(
             "created l3 vni vxlan device vxlan={vxlan} vni={L3_VNI} vtep={vtep} underlay=eth0"
         ))
@@ -8697,7 +8729,10 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("each learns the other's subnet as a Type-5 with a Router's MAC, and installs it");
-    for (r, peer, prefix) in [(a, IP_B, L3_SUBNET_B), (b, IP_A, L3_SUBNET_A)] {
+    for (r, peer, prefix) in [
+        (a, IP_B.s(), L3_SUBNET_B.s()),
+        (b, IP_A.s(), L3_SUBNET_A.s()),
+    ] {
         r.wait(&format!(
             "evpn route learned peer={peer} route_type=5 .*{prefix}"
         ))
@@ -8728,13 +8763,13 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("the hosts ping each other across the L3 VNI");
-    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
-    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+    ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 
     symmetric_irb(
         w,
-        &l3_pe_flags(A, L3_RD_A, L3_GW_A),
-        &l3_pe_flags(B, L3_RD_B, L3_GW_B),
+        &l3_pe_flags(A, L3_RD_A, L3_GW_A.s()),
+        &l3_pe_flags(B, L3_RD_B, L3_GW_B.s()),
     )
     .await?;
 
@@ -8757,7 +8792,7 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
         "evpn remote vtep removed vni={L3_VNI} vtep={IP_B}"
     ))
     .await?;
-    if tenant_has_evpn(a, L3_SUBNET_B).await? {
+    if tenant_has_evpn(a, L3_SUBNET_B.s()).await? {
         bail!("router-a still lists {L3_SUBNET_B} after router-b's withdrawal");
     }
 
@@ -8792,14 +8827,14 @@ async fn l3_gobgp_burst(w: &World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_G.to_string(),
         "--peer",
-        IP_G,
+        IP_G.s(),
         "--evpn",
     ]))
     .await?;
     start_gobgp(w, &["l2vpn-evpn"]).await?;
     let mut last = String::new();
     for _ in 0..60 {
-        last = gobgp(w, &["neighbor", IP_A]).await.unwrap_or_default();
+        last = gobgp(w, &["neighbor", IP_A.s()]).await.unwrap_or_default();
         if last.contains("BGP state = SESSION_STATE_ESTABLISHED") {
             break;
         }
@@ -9027,26 +9062,35 @@ async fn ce_on_each_link(w: &World) -> anyhow::Result<()> {
 pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     const RD_C: &str = "65003:1";
     w.require_ipv6().await?;
-    let a_b = ("pg-b", ASN_B, V6_B);
-    let a_c = ("pg-c", ASN_C, V6_C);
-    let b_a = ("pg-a", ASN_A, V6_A);
-    let c_a = ("pg-a", ASN_A, V6_A);
-    w.start(A, Some(v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_b)), &[])
+    let a_b = ("pg-b", ASN_B, V6_B.s());
+    let a_c = ("pg-c", ASN_C, V6_C.s());
+    let b_a = ("pg-a", ASN_A, V6_A.s());
+    let c_a = ("pg-a", ASN_A, V6_A.s());
+    w.start(A, Some(v6_pe_flags(A, V6_A.s(), EVPN_DP_RD_A, a_b)), &[])
         .await?;
-    w.start(B, Some(v6_pe_flags(B, V6_B, EVPN_DP_RD_B, b_a)), &[])
+    w.start(B, Some(v6_pe_flags(B, V6_B.s(), EVPN_DP_RD_B, b_a)), &[])
         .await?;
-    w.start(C, Some(v6_pe_flags(C, V6_C, RD_C, c_a)), &[])
+    w.start(C, Some(v6_pe_flags(C, V6_C.s(), RD_C, c_a)), &[])
         .await?;
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
-    a.provision_flags(&v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_c))
+    a.provision_flags(&v6_pe_flags(A, V6_A.s(), EVPN_DP_RD_A, a_c))
         .await?;
-    b.provision_flags(&v6_pe_flags(B, V6_B, EVPN_DP_RD_B, ("pg-c", ASN_C, V6_C)))
-        .await?;
-    c.provision_flags(&v6_pe_flags(C, V6_C, RD_C, ("pg-b", ASN_B, V6_B)))
+    b.provision_flags(&v6_pe_flags(
+        B,
+        V6_B.s(),
+        EVPN_DP_RD_B,
+        ("pg-c", ASN_C, V6_C.s()),
+    ))
+    .await?;
+    c.provision_flags(&v6_pe_flags(C, V6_C.s(), RD_C, ("pg-b", ASN_B, V6_B.s())))
         .await?;
 
     log("the IPv6 sessions: each PE peers the other two over its v6 address");
-    for (r, peers) in [(a, [V6_B, V6_C]), (b, [V6_A, V6_C]), (c, [V6_A, V6_B])] {
+    for (r, peers) in [
+        (a, [V6_B.s(), V6_C.s()]),
+        (b, [V6_A.s(), V6_C.s()]),
+        (c, [V6_A.s(), V6_B.s()]),
+    ] {
         for peer in peers {
             r.wait(&format!("bgp session established.*{peer}")).await?;
         }
@@ -9092,24 +9136,24 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     w.dock.start_host(H_HOST, HOST_IMAGE, NET_H).await?;
 
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
-    let mut fa = v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_b);
+    let mut fa = v6_pe_flags(A, V6_A.s(), EVPN_DP_RD_A, a_b);
     fa.extend(bond_flags("bond1", true, "eth1"));
     a.provision_flags(&fa).await?;
-    let mut fb = v6_pe_flags(B, V6_B, EVPN_DP_RD_B, b_a);
+    let mut fb = v6_pe_flags(B, V6_B.s(), EVPN_DP_RD_B, b_a);
     fb.extend(bond_flags("bond1", true, "eth1"));
     b.provision_flags(&fb).await?;
-    let mut fc = v6_pe_flags(C, V6_C, RD_C, c_a);
+    let mut fc = v6_pe_flags(C, V6_C.s(), RD_C, c_a);
     fc.extend(bond_flags("bond2", false, "eth1"));
     c.provision_flags(&fc).await?;
 
     let vxlan = format!("vx{EVPN_VNI}");
-    for (r, me) in [(a, V6_A), (b, V6_B), (c, V6_C)] {
+    for (r, me) in [(a, V6_A.s()), (b, V6_B.s()), (c, V6_C.s())] {
         r.wait(&format!(
             "vxlan device ready domain={EVPN_DOMAIN} vni={EVPN_VNI} vxlan={vxlan} .*vtep={me}"
         ))
         .await?;
     }
-    for peer in [V6_A, V6_B] {
+    for peer in [V6_A.s(), V6_B.s()] {
         c.wait(&format!(
             "flood entry installed domain={EVPN_DOMAIN} vtep={peer}"
         ))
@@ -9129,8 +9173,8 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     // #460: the CE comes up only now. A fresh container's IPv6 RS/MLD burst
     // that a PE floods back before its segment port is set up teaches that
     // CE link's docker bridge the CE's MAC behind the PE, for 300s.
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B, false).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A, true).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B.s(), false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A.s(), true).await?;
     w.dock.start_host(CE_HOST, HOST_IMAGE, NET_CE_A).await?;
     w.dock.network_connect(NET_CE_B, CE_HOST).await;
 
@@ -9184,21 +9228,21 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
         .and_then(|m| m.iter().find(|e| e["mac"] == ce_mac.as_str()))
         .map(|e| e["vteps"].to_string())
         .context("router-c's show fdb lacks the CE's MAC")?;
-    if !vteps.contains(V6_A) || !vteps.contains(V6_B) {
+    if !vteps.contains(V6_A.s()) || !vteps.contains(V6_B.s()) {
         bail!("router-c's show fdb does not list both VTEPs of the CE's MAC: {vteps}");
     }
     // Flows balanced over both PEs: whichever one router-c picks delivers.
     host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     ce_on_each_link(w).await?;
-    same_segment_no_move(w, &ce_mac, [(A, V6_B), (B, V6_A)]).await?;
+    same_segment_no_move(w, &ce_mac, [(A, V6_B.s()), (B, V6_A.s())]).await?;
 
     // Local bias (#24) over an IPv6 underlay: `enc_src_ip` matches the outer
     // IPv6 source on the VXLAN device itself. Router-a is the DF, router-b the
     // non-DF.
     log("local bias: router-a and router-b mark each other's VTEP; core BUM from router-c reaches the CE once, through the DF router-a");
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B, false).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A, true).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B.s(), false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A.s(), true).await?;
     let (via_a, via_b, _) = arp_broadcast(w, None).await?;
     if (via_a, via_b) != (1, 0) {
         bail!(
@@ -9225,7 +9269,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
         format!("remote mac group removed domain={EVPN_DOMAIN} mac={ce_mac} vteps={V6_A},{V6_B}");
     let only_b = format!("segment per-es a-d changed domain={EVPN_DOMAIN} esi={ESI} pes={V6_B}$");
     let (base, base_b) = (c.count(&removed), c.count(&only_b));
-    let mut shut = v6_pe_flags(C, V6_C, RD_C, c_a);
+    let mut shut = v6_pe_flags(C, V6_C.s(), RD_C, c_a);
     shut.extend(strings(&["--shutdown-peer", ""]));
     c.provision_flags(&shut).await?;
     c.wait_new(&removed, base, 60).await?;
@@ -9242,7 +9286,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
 
     log("the session back: the group over both returns");
     let base = c.count(&group);
-    let mut unshut = v6_pe_flags(C, V6_C, RD_C, c_a);
+    let mut unshut = v6_pe_flags(C, V6_C.s(), RD_C, c_a);
     unshut.push("--unshutdown-peer".to_string());
     c.provision_flags(&unshut).await?;
     host_sh(w, CE_HOST, "ip link set eth0 up; sleep 1").await?;
@@ -9256,7 +9300,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
 
     log("unsetting router-c's vni removes its VXLAN device and IPv6 nexthops");
     // `v6_pe_flags`' route targets are the ones `--evpn-clear` removes.
-    let mut clear = v6_pe_flags(C, V6_C, RD_C, c_a);
+    let mut clear = v6_pe_flags(C, V6_C.s(), RD_C, c_a);
     clear.push("--evpn-clear".to_string());
     // `--evpn-clear` refuses the other `--evpn-*` setting flags.
     for flag in [
@@ -9427,7 +9471,7 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_B.to_string(),
             "--peer",
-            IP_B,
+            IP_B.s(),
             "--role",
             role,
         ])
@@ -9439,7 +9483,7 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
     w.a()?.provision(&flags).await?;
     w.b()?.provision(&["--role", "customer"]).await?;
     w.b()?
-        .provision_flags(&b_group("pg-c", ASN_C, IP_C, "customer"))
+        .provision_flags(&b_group("pg-c", ASN_C, IP_C.s(), "customer"))
         .await?;
     w.start(C, Some(c_flags("provider")), &[]).await?;
     let (b, c) = (w.b()?, w.c()?);
@@ -9452,7 +9496,7 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
     log("otc: c becomes b's customer; it now receives a's route carrying OTC = a's asn");
     let base = c.count(est);
     c.provision_flags(&c_flags("customer")).await?;
-    b.provision_flags(&b_group("pg-c", ASN_C, IP_C, "provider"))
+    b.provision_flags(&b_group("pg-c", ASN_C, IP_C.s(), "provider"))
         .await?;
     c.wait_new(est, base, 60).await?;
     c.wait(&format!("{} .*otc=Some({ASN_A})", learned()))
@@ -9505,7 +9549,7 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
         "otc-unset-role",
         "if this.bgp.remote_role != role.provider and this.bgp.remote_role != role.customer and this.bgp.local_role == role.provider:\n    accept\nelse:\n    reject\n",
     )?;
-    let mut g_flags = b_group("pg-g", ASN_G, IP_G, "provider");
+    let mut g_flags = b_group("pg-g", ASN_G, IP_G.s(), "provider");
     g_flags.extend(strings(&[
         "--policy-name",
         "otc-unset-role",
@@ -9528,7 +9572,7 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
             "router-g",
             EXABGP_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &["/etc/exabgp.conf"],
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
@@ -9732,7 +9776,7 @@ async fn rtc_graceful_restart(w: &World) -> anyhow::Result<()> {
     gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
     // Both capabilities carry (1, 132): GoBGP lists `rtc` among router-a's
     // restartable families.
-    let neighbor = gobgp(w, &["neighbor", IP_A]).await?;
+    let neighbor = gobgp(w, &["neighbor", IP_A.s()]).await?;
     let remote = neighbor
         .split("Remote:")
         .nth(1)

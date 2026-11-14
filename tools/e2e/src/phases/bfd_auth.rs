@@ -39,7 +39,7 @@ async fn session(r: &Router, peer: &str) -> anyhow::Result<(serde_json::Value, S
 
 /// Both routers report `method` and `key_id`, and neither prints a secret.
 async fn shows_auth(w: &World, method: &str, key_id: u8) -> anyhow::Result<()> {
-    for (r, peer) in [(w.a()?, IP_B), (w.b()?, IP_A)] {
+    for (r, peer) in [(w.a()?, IP_B.s()), (w.b()?, IP_A.s())] {
         let (s, body) = session(r, peer).await?;
         anyhow::ensure!(
             s["auth_method"] == method && s["auth_key_id"] == key_id,
@@ -68,10 +68,10 @@ async fn shows_auth(w: &World, method: &str, key_id: u8) -> anyhow::Result<()> {
 /// the authentication is removed everywhere.
 pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
-    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
     fa.extend(auth("meticulous-sha1", 1, MARKER));
     let mut fb = B.base_flags();
-    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A.s()));
     fb.extend(auth("meticulous-sha1", 1, MARKER));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
@@ -91,9 +91,9 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     let (n_failed, n_up) = (b.count(&failed_b), a.count(&up_a));
     a.provision(&auth("meticulous-sha1", 1, "wrong")).await?;
     b.wait_new(&failed_b, n_failed, 20).await?;
-    session_is(a, IP_B, "Down", None, 40).await?;
+    session_is(a, IP_B.s(), "Down", None, 40).await?;
     a.assert_quiet(&up_a, n_up, 10).await?;
-    let (s, body) = session(b, IP_A).await?;
+    let (s, body) = session(b, IP_A.s()).await?;
     anyhow::ensure!(
         s["auth_failures"].as_u64().is_some_and(|n| n > 0),
         "router-b should count the failures: {body}"
@@ -102,7 +102,7 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     log("the secret restored: Up again");
     a.provision(&auth("meticulous-sha1", 1, MARKER)).await?;
     a.wait_new(&up_a, n_up, 30).await?;
-    session_is(a, IP_B, "Up", None, 10).await?;
+    session_is(a, IP_B.s(), "Up", None, 10).await?;
 
     log("the secret lives in the admin keystore only: not in the config view, not in any log (#510)");
     for r in [a, b] {
@@ -115,7 +115,7 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     both(a, b, &auth("meticulous-sha1", 1, rotated)).await?;
     a.assert_quiet(&down_a, n_down_a, 20).await?;
     b.assert_quiet(&down_b, n_down_b, 0).await?;
-    session_is(a, IP_B, "Up", None, 10).await?;
+    session_is(a, IP_B.s(), "Up", None, 10).await?;
     for r in [a, b] {
         no_leak(r, &[MARKER, rotated]).await?;
     }
@@ -128,7 +128,7 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     both(a, b, &auth("keyed-md5", 3, "n3w")).await?;
     a.assert_quiet(&down_a, n_down_a, 20).await?;
     b.assert_quiet(&down_b, n_down_b, 0).await?;
-    session_is(a, IP_B, "Up", None, 10).await?;
+    session_is(a, IP_B.s(), "Up", None, 10).await?;
     shows_auth(w, "KeyedMd5", 3).await?;
 
     log("interop: FRR bfdd has no authentication, so the authenticated profile never reaches it");
@@ -144,7 +144,7 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -154,7 +154,7 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
             &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
         )
         .await?;
-    let mut route = bfd_route(BFD_PREFIX_F, IP_G);
+    let mut route = bfd_route(BFD_PREFIX_F, IP_G.s());
     route.extend(strings(&["--bfd-interval-ms", "5000"]));
     a.provision(&route).await?;
     let up_g = format!("bfd session up peer={IP_G}");
@@ -165,8 +165,8 @@ pub async fn bfd_auth(w: &mut World) -> anyhow::Result<()> {
     let off = strings(&["--no-bfd-auth", "--bfd-interval-ms", "5000"]);
     both(a, b, &off).await?;
     a.wait(&up_g).await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
-    session_is(b, IP_A, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
+    session_is(b, IP_A.s(), "Up", None, 30).await?;
     w.dock.container_remove("router-f").await;
     Ok(())
 }

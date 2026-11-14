@@ -75,9 +75,9 @@ async fn graceful_down(
 /// back. Finally a real FRR `bfdd` (`router-f`) reaches Up with router-a.
 pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
-    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
     let mut fb = B.base_flags();
-    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A.s()));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
     let (a, b) = (w.a()?, w.b()?);
@@ -94,8 +94,8 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     a.wait(&added).await?;
 
     log("GET /v1/bfd/sessions: Up; a bad ?peer= is 400");
-    session_is(a, IP_B, "Up", None, 5).await?;
-    session_is(b, IP_A, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
+    session_is(b, IP_A.s(), "Up", None, 5).await?;
     a.rest_expect(Method::GET, "/v1/bfd/sessions?peer=nope", None, 400)
         .await?;
 
@@ -125,7 +125,7 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
         dropped?;
         a.wait_new(&down_a, n_down, 10).await?;
         a.wait_new(&removed, n_removed, 10).await?;
-        session_is(a, IP_B, "Down", Some("ControlDetectionTimeExpired"), 5).await
+        session_is(a, IP_B.s(), "Down", Some("ControlDetectionTimeExpired"), 5).await
     }
     .await;
     // Lift it whatever happened, so a failure does not leave the lab broken.
@@ -138,12 +138,12 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&added, n_added, 30).await?;
     // The diag is whatever last took the session down: it sticks while Up,
     // so Up is only asserted without one.
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
 
     log("#659: router-a's last client leaves: router-b sees AdminDown, not a timeout");
     graceful_down(b, a.provision(&["--remove-static-route", BFD_PREFIX_B])).await?;
     let n_up_b = b.count(&up_b);
-    a.provision(&bfd_route(BFD_PREFIX_B, IP_B)).await?;
+    a.provision(&bfd_route(BFD_PREFIX_B, IP_B.s())).await?;
     b.wait_new(&up_b, n_up_b, 30).await?;
 
     log("#659: nos-bfdd on router-a stops on SIGTERM: router-b sees AdminDown");
@@ -190,7 +190,7 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -202,7 +202,7 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
         .await?;
     // FRR only answers sessions it has configured; router-a registers one
     // when a BFD static route points at FRR.
-    w.a()?.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    w.a()?.provision(&bfd_route(BFD_PREFIX_F, IP_G.s())).await?;
     w.a()?.wait(&format!("bfd session up peer={IP_G}")).await?;
     // FRR answers the Up-time Poll sequence (P=1) with F and stays Up.
     let down_g = format!("bfd session down peer={IP_G}");
@@ -288,8 +288,8 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
         (a.count(cease), b.count(cease), a.count(est), b.count(est));
     a.provision(&["--bfd-bgp"]).await?;
     b.provision(&["--bfd-bgp"]).await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
-    session_is(b, IP_A, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
+    session_is(b, IP_A.s(), "Up", None, 30).await?;
     a.assert_quiet(cease, cease_a, 3).await?;
     b.assert_quiet(cease, cease_b, 0).await?;
     a.assert_quiet(est, est_a, 0).await?;
@@ -297,22 +297,22 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
 
     log("dropping UDP 3784 on router-a: BFD Down closes the BGP session within seconds");
     drop_udp_and_recover(w, "3784").await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
 
     log("max-hops 2 makes both sessions multihop (RFC 5883, UDP 4784, TTL >= 254)");
     let registered =
         |peer: &str, hop: bool| format!("bfd session registered peer={peer} .*multihop={hop}");
     let (reg_a, reg_b) = (
-        a.count(&registered(IP_B, true)),
-        b.count(&registered(IP_A, true)),
+        a.count(&registered(IP_B.s(), true)),
+        b.count(&registered(IP_A.s(), true)),
     );
     a.provision(&["--max-hops", "2"]).await?;
     b.provision(&["--max-hops", "2"]).await?;
-    a.wait_new(&registered(IP_B, true), reg_a, 30).await?;
-    b.wait_new(&registered(IP_A, true), reg_b, 30).await?;
+    a.wait_new(&registered(IP_B.s(), true), reg_a, 30).await?;
+    b.wait_new(&registered(IP_A.s(), true), reg_b, 30).await?;
     a.established().await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
-    session_is(b, IP_A, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
+    session_is(b, IP_A.s(), "Up", None, 30).await?;
     let path = format!("/v1/bfd/sessions?peer={IP_B}");
     let sessions = a.rest_expect(Method::GET, &path, None, 200).await?;
     let v: serde_json::Value = serde_json::from_str(&sessions)?;
@@ -322,19 +322,19 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     );
     log("dropping UDP 4784 on router-a: the multihop session closes BGP too");
     drop_udp_and_recover(w, "4784").await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
 
     log("max-hops 1 again: back to single-hop sessions");
     let (reg_a, reg_b) = (
-        a.count(&registered(IP_B, false)),
-        b.count(&registered(IP_A, false)),
+        a.count(&registered(IP_B.s(), false)),
+        b.count(&registered(IP_A.s(), false)),
     );
     a.provision(&["--max-hops", "1"]).await?;
     b.provision(&["--max-hops", "1"]).await?;
-    a.wait_new(&registered(IP_B, false), reg_a, 30).await?;
-    b.wait_new(&registered(IP_A, false), reg_b, 30).await?;
+    a.wait_new(&registered(IP_B.s(), false), reg_a, 30).await?;
+    b.wait_new(&registered(IP_A.s(), false), reg_b, 30).await?;
     a.established().await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
 
     // #659: router-a retires its session first and says AdminDown, so
     // router-b's BGP closes on `neighbor-signaled-session-down` (before this
@@ -357,10 +357,10 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
 pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
     let padded = strings(&["--bfd-padded-pdu-size", "1400"]);
     let mut fa = A.base_flags();
-    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
     fa.extend(padded.clone());
     let mut fb = B.base_flags();
-    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A.s()));
     fb.extend(padded);
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
@@ -401,7 +401,7 @@ pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
 
     log("mtu restored: Up again");
     a.wait_new(&up_a, n_up, 30).await?;
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
 
     log("interop: FRR bfdd ignores the padding and reaches Up with router-a");
     let conf = format!(
@@ -416,7 +416,7 @@ pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -426,9 +426,9 @@ pub async fn bfd_padded(w: &mut World) -> anyhow::Result<()> {
             &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
         )
         .await?;
-    a.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    a.provision(&bfd_route(BFD_PREFIX_F, IP_G.s())).await?;
     a.wait(&format!("bfd session up peer={IP_G}")).await?;
-    session_is(a, IP_G, "Up", None, 5).await?;
+    session_is(a, IP_G.s(), "Up", None, 5).await?;
     w.dock.container_remove("router-f").await;
     Ok(())
 }
@@ -447,7 +447,7 @@ async fn start_frr_bfd(w: &World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -485,7 +485,7 @@ async fn reflector_is(
 /// router-a guards a static route via router-b with `bfd-profile sb` (mode
 /// sbfd, 100 ms x 3, no remote discriminator: the peer's address). The
 /// initiator comes Up from reflections alone (REST: kind `SbfdInitiator`,
-/// remote discriminator 171048963; router-b holds no session and its
+/// remote discriminator `IP_B` as a number (171048963 in lab 0); router-b holds no session and its
 /// `GET /v1/bfd/reflector` counts the replies) and the route is installed.
 /// An FRR `bfdd` (`router-f`) keeps a classical session with router-a
 /// throughout. Router-b then answers for 10.77.0.1 instead: router-a goes
@@ -499,12 +499,12 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
         "--static-route",
         BFD_PREFIX_B,
         "--static-gateway",
-        IP_B,
+        IP_B.s(),
         "--sbfd-static-route",
         BFD_PREFIX_B,
     ]));
     let mut fb = B.base_flags();
-    fb.extend(strings(&["--sbfd-reflector", IP_B]));
+    fb.extend(strings(&["--sbfd-reflector", IP_B.s()]));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
     let (a, b) = (w.a()?, w.b()?);
@@ -526,12 +526,14 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
             200,
         )
         .await?;
+    // The initiator's discriminator is the reflector's IPv4 address, as a number.
+    let disc = u32::from(IP_B.s().parse::<std::net::Ipv4Addr>()?);
     anyhow::ensure!(
         body.contains("\"kind\":\"SbfdInitiator\"")
-            && body.contains("\"remote_discriminator\":171048963"),
-        "expected an S-BFD session probing 10.50.0.3: {body}"
+            && body.contains(&format!("\"remote_discriminator\":{disc}")),
+        "expected an S-BFD session probing {IP_B}: {body}"
     );
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
 
     log("the reflector keeps no session, only counters");
     let sessions = b
@@ -550,7 +552,7 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     log("interop: a classical session with FRR bfdd on the same link");
     start_frr_bfd(w).await?;
     let (a, b) = (w.a()?, w.b()?);
-    a.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    a.provision(&bfd_route(BFD_PREFIX_F, IP_G.s())).await?;
     a.wait(&format!("bfd session up peer={IP_G}")).await?;
 
     log("router-b answers for another discriminator: Down, route withdrawn, counted");
@@ -564,7 +566,7 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     b.provision(&["--sbfd-reflector", "10.77.0.1"]).await?;
     a.wait_new(&down, n_down, 10).await?;
     a.wait_new(&removed, n_removed, 10).await?;
-    session_is(a, IP_B, "Down", Some("ControlDetectionTimeExpired"), 5).await?;
+    session_is(a, IP_B.s(), "Down", Some("ControlDetectionTimeExpired"), 5).await?;
     reflector_is(b, 10, "unknown_discriminator drops", |v| {
         v["discarded"]["unknown_discriminator"].as_u64() > Some(0)
     })
@@ -581,7 +583,7 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&up, n_up, 30).await?;
     a.wait_new(&added, n_added, 30).await?;
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
     a.assert_quiet(&frr_down, n_frr, 3).await?;
     w.dock.container_remove("router-f").await;
     Ok(())
@@ -602,7 +604,7 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
     fa.push("--bfd-unsolicited".to_string());
     let mut fb = B.base_flags();
-    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A.s()));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
     let (a, b) = (w.a()?, w.b()?);
@@ -613,11 +615,11 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     let added = format!("added route prefix={BFD_PREFIX_A} gateway={IP_A}");
 
     log("router-b's packets create a passive session on router-a, route added on router-b");
-    a.wait(&created(IP_B)).await?;
-    a.wait(&up_a(IP_B)).await?;
+    a.wait(&created(IP_B.s())).await?;
+    a.wait(&up_a(IP_B.s())).await?;
     b.wait(&up_b).await?;
     b.wait(&added).await?;
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
     let body = a
         .rest_expect(
             Method::GET,
@@ -634,15 +636,15 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     log("interop: FRR bfdd as the active end");
     start_frr_bfd(w).await?;
     let (a, b) = (w.a()?, w.b()?);
-    a.wait(&created(IP_G)).await?;
-    a.wait(&up_a(IP_G)).await?;
-    session_is(a, IP_G, "Up", None, 5).await?;
+    a.wait(&created(IP_G.s())).await?;
+    a.wait(&up_a(IP_G.s())).await?;
+    session_is(a, IP_G.s(), "Up", None, 5).await?;
     w.dock.container_remove("router-f").await;
 
     log("UDP 3784 dropped on router-a: Down, then aged out after the aging time");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let aged = format!("bfd unsolicited session aged out peer={IP_B}");
-    let (n_aged, n_created) = (a.count(&aged), a.count(&created(IP_B)));
+    let (n_aged, n_created) = (a.count(&aged), a.count(&created(IP_B.s())));
     tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
     let dropped = tc(
         &w.dock,
@@ -662,15 +664,15 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     lifted?;
 
     log("filter lifted: router-b's next packet creates a fresh session");
-    a.wait_new(&created(IP_B), n_created, 30).await?;
-    session_is(a, IP_B, "Up", None, 30).await?;
+    a.wait_new(&created(IP_B.s()), n_created, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 30).await?;
 
     log("bfd-unsolicited removed: session dropped, no answer, nothing created");
     let gone = format!("bfd unsolicited session removed: no longer configured peer={IP_B}");
-    let (n_gone, n_created, n_up_b) = (a.count(&gone), a.count(&created(IP_B)), b.count(&up_b));
+    let (n_gone, n_created, n_up_b) = (a.count(&gone), a.count(&created(IP_B.s())), b.count(&up_b));
     a.provision(&["--no-bfd-unsolicited"]).await?;
     a.wait_new(&gone, n_gone, 30).await?;
-    a.assert_quiet(&created(IP_B), n_created, 8).await?;
+    a.assert_quiet(&created(IP_B.s()), n_created, 8).await?;
     b.assert_quiet(&up_b, n_up_b, 0).await?;
     let sessions = a
         .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
