@@ -113,3 +113,10 @@ cargo fmt --all
 - Register sockets with the per-crate `register_fd` (`l2-socket`, `ospf`, `ospfv3`, `bfd`), never `AsyncFd::new` (deprecated, RUSTSEC-2026-0386); the workspace floor is tokio 1.53.3.
 - A `start_paused` test that does real socket I/O must `tokio::time::advance` by hand: the paused clock no longer auto-advances while I/O is pending (see `run_reapplies_on_the_tick_without_a_diff`).
 - An e2e phase must not wait on a log line emitted just before a flood of thousands of lines: `nos-logd`'s 1024-entry tail channel drops entries for the REST follower (`log tail subscriber lagged`). Count the container stdout instead (`stdout_count` in `tools/e2e/src/phases/bgp.rs`, #838).
+
+**Coverage gate (#1043).** `Coverage` compares each PR with master, not only with `COVERAGE_MIN`:
+
+- `tools/ci/coverage-compare.sh lcov.info [baseline]` sums `LH`/`LF` into one line-coverage percent, writes it to `coverage-total.txt` and the job summary, and exits 1 when it is more than 0.05 pt below the baseline (both numbers printed).
+- On push to master the job uploads `coverage-total.txt` as artifact `coverage-total`. On a PR it runs `gh run download` on the newest successful master `ci.yml` push run (job permission `actions: read`).
+- No baseline (first run, artifact expired after 90 days, token without actions access) prints a notice and passes.
+- Locally: `make coverage`, then `tools/ci/coverage-compare.sh lcov.info <file holding master's number>`. `make ci-scripts-test` (part of `make check`) tests the script.

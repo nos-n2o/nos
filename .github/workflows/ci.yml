@@ -85,6 +85,9 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      actions: read
     env:
       # Line tables only: full debuginfo filled the runner disk (#827). Local builds keep
       # full debuginfo (Cargo.toml untouched), so gdb is unaffected.
@@ -132,11 +135,29 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
+      - run: make ci-scripts-test
       - run: make coverage
-      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      # Baseline = the `coverage-total` artifact of the newest successful master run of
+      # this workflow (#1043). Absent (first run, 90-day expiry, fork token without
+      # actions access) -> the compare step skips with a notice instead of failing.
+      - name: Fetch master coverage baseline
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch master \
+            --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          [ -n "$id" ] && gh run download "$id" --repo "$GITHUB_REPOSITORY" \
+            -n coverage-total -D master-coverage
+      - name: Coverage total (fails on a drop of more than 0.05 pt vs master)
+        run: tools/ci/coverage-compare.sh lcov.info master-coverage/coverage-total.txt
+      - name: Store master coverage total
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: lcov.info
-          fail_ci_if_error: false
+          name: coverage-total
+          path: coverage-total.txt
 
   audit:
     name: Security audit
