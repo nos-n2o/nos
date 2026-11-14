@@ -337,8 +337,9 @@ fn decode_one(route_type: u8, body: &[u8]) -> Result<EvpnNlri, WireError> {
                 58 => 16,
                 _ => return Err(WireError::InvalidNetworkField),
             };
-            let prefix =
-                IpNet::new(r.ip(addr_len)?, plen).map_err(|_| WireError::InvalidNetworkField)?;
+            let prefix = IpNet::new(r.ip(addr_len)?, plen)
+                .map_err(|_| WireError::InvalidNetworkField)?
+                .trunc();
             EvpnNlri::IpPrefix {
                 rd,
                 esi,
@@ -748,5 +749,27 @@ mod tests {
             "df-election:alg2"
         );
         assert_eq!(samples()[4].to_string(), "[3]:[65000:1]:[0]:[192.0.2.1]");
+    }
+
+    #[test]
+    fn type5_host_bits_are_truncated() {
+        // #603: 10.0.15.0/20 on the wire decodes to 10.0.0.0/20.
+        let padded: IpNet = "10.0.15.0/20".parse().unwrap();
+        let mut buf = Vec::new();
+        encode_nlri(
+            &EvpnNlri::IpPrefix {
+                rd: RD,
+                esi: ESI,
+                tag: 0,
+                prefix: padded,
+                gateway: "0.0.0.0".parse().unwrap(),
+                label: 100,
+            },
+            &mut buf,
+        );
+        let EvpnNlri::IpPrefix { prefix, .. } = &decode_nlris(&buf).unwrap()[0] else {
+            panic!("not a type 5");
+        };
+        assert_eq!(*prefix, "10.0.0.0/20".parse::<IpNet>().unwrap());
     }
 }

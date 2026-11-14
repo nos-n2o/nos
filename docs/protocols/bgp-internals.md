@@ -65,6 +65,7 @@ Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, pe
 - Unknown message type: Header Error / Bad Message Type (1/3), data = the type octet. There is no ignore path.
 - OPEN of at least 29 octets that does not parse: OPEN Message Error / Unspecific (2/0).
 - Bad NLRI (IPv4/IPv6 prefixes, EVPN, RT-Constraint): UPDATE Message Error / Invalid Network Field (3/10).
+- Decoded NLRI prefixes (unicast, withdrawn, MP_*, EVPN Type-5, FlowSpec) are truncated to their prefix length, so host bits on the wire never split a key (#603, RFC 4271 §4.3).
 - Bad `MP_REACH_NLRI`/`MP_UNREACH_NLRI`: UPDATE Message Error / Optional Attribute Error (3/9).
 - Any other framing error in an UPDATE: UPDATE Message Error / Malformed Attribute List (3/1).
 - ROUTE-REFRESH whose body is not 4 octets: ROUTE-REFRESH Message Error / Invalid Message Length (7/1, RFC 7313 §5), data = the whole message including the header.
