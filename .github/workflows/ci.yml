@@ -58,6 +58,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: make clippy
 
   clippy-canary:
@@ -72,6 +74,8 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Step-level continue-on-error keeps the check green: a job-level one still
       # shows a red X on the commit/PR.
       - id: canary
@@ -94,21 +98,20 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      # Preinstalled toolchains we never use (~25-30 GB); df before/after for diagnosis.
-      - name: Free runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
-          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
       - run: make test
+      - name: Disk headroom
+        if: always()
+        run: df -h /
 
   coverage:
     name: Coverage
@@ -120,23 +123,22 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      # Preinstalled toolchains we never use (~25-30 GB); df before/after for diagnosis.
-      - name: Free runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
-          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
       - run: make ci-scripts-test
       - run: make coverage
+      - name: Disk headroom
+        if: always()
+        run: df -h /
       # Baseline = the `coverage-total` artifact of the newest successful master run of
       # this workflow (#1043). Absent (first run, 90-day expiry, fork token without
       # actions access) -> the compare step skips with a notice instead of failing.
@@ -237,6 +239,8 @@ jobs:
           toolchain: ${{ env.MIRI_TOOLCHAIN }}
           components: miri, rust-src
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       # Only the pure-logic leaf crates: Miri cannot execute FFI, and everything else in
       # the workspace either is FFI (`nos-tcp-auth`/`nos-l2-socket` — raw setsockopt and
       # AF_PACKET), runs TLS through aws-lc-rs's C code in its tests (`nos-pki` and every
@@ -260,6 +264,8 @@ jobs:
           toolchain: nightly
           components: miri, rust-src
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - id: canary
         continue-on-error: true
         run: cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
@@ -282,6 +288,8 @@ jobs:
         with:
           toolchain: nightly
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-mutants
@@ -312,6 +320,7 @@ jobs:
           toolchain: nightly
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
           workspaces: fuzz
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
