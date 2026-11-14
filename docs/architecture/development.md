@@ -78,7 +78,7 @@ cargo fmt --all
 - Memory: each test process runs under `ulimit -v` (`NOS_MUTANTS_AS_KB`, default 6 GiB) through the nextest `mutants` profile's run-wrapper (`.config/nextest.toml`); a runaway mutant aborts itself. `systemd-run --scope -p MemoryMax` wraps the whole local run as a backstop when available. A global `ulimit -v` is not used: it would break rustc.
 - Config: `.cargo/mutants.toml`. Its `exclude_globs` mirror `make coverage`'s `--ignore-filename-regex`; keep both in sync. `exclude_re` skips daemon glue (`main`, `wait_or_shutdown`, `resolve_once`, `resolve_with_retry`), which only `nos-e2e` can test.
 - Looping mutants end as TIMEOUT after `max(60s, 3x baseline)`.
-- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 32 shards (`--shard k/32`; 8 and 16 left shards cancelled at the 120 min cap, #1052), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
+- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 32 shards (`--shard k/32`, job cap 240 min: 8 and 16 shards, and 32 at a 120 min cap, left shards cancelled, #1052), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
 - Resume or re-check one mutant: `make mutants MUTANTS_ARGS="-F '^exact name$'"`.
 
 ## Dependency policy
