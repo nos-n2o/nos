@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn classic_replay_check_accepts_equal_drops_lower() {
+    // RFC 2328 D.4.3: only a *lower* number is a replay (#611).
+    let mut cfg = link("eth0.0", 10);
+    cfg.auth = LinkAuthConfig::Crypto {
+        keys: vec![(1, packet::CryptoAlgorithm::HmacSha256, b"k".to_vec())],
+        current_key_id: 1,
+        extended: false,
+    };
+    let peer = Ipv4Addr::new(2, 2, 2, 2);
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut n = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        n.last_crypto_seq = HashMap::new();
+        s.neighbors.insert(peer, n);
+    });
+    let keys = vec![(1, packet::CryptoAlgorithm::HmacSha256, b"k".to_vec())];
+    let policy = packet::AuthPolicy::Crypto {
+        keys: &keys,
+        extended: None,
+    };
+    let check = |seq: u64| {
+        let pkt = packet::HelloPacket {
+            lls: None,
+            router_id: peer,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            network_mask: Ipv4Addr::UNSPECIFIED,
+            hello_interval: 10,
+            options: packet::OPTION_E,
+            dead_interval: 40,
+            router_priority: 1,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        };
+        let data = packet::encode_hello(
+            &pkt,
+            &packet::OutgoingAuth::Crypto {
+                key_id: 1,
+                algorithm: packet::CryptoAlgorithm::HmacSha256,
+                key: b"k",
+                sequence: seq,
+                extended: None,
+            },
+        );
+        let p = packet::decode(&data, &policy).unwrap();
+        accept_crypto_sequence(&cfg, &status, &data, &p)
+    };
+    assert!(check(10));
+    assert!(check(10), "equal is accepted for AuType 2");
+    assert!(!check(9), "lower is a replay");
+    assert!(check(11));
+}
+
+#[test]
 fn extended_sequence_starts_at_boot_count_and_carries_into_it() {
     let auth = ext_auth();
     let mut seq = initial_crypto_seq(&auth, 3);
