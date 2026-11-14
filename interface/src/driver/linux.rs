@@ -25,7 +25,7 @@ use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Reque
 use super::links::{self, Delta, LinkHub};
 use super::{
     bridge_registry, port_aggregate_registry, rib_client, BridgePortRef, DriverError,
-    InterfaceDriver, LinkWatch, DEFAULT_MTU,
+    InterfaceDriver, LinkWatch, Lookup, DEFAULT_MTU,
 };
 use crate::state::{
     BroadcastDomainState, InterfaceState, PortAggregateState, StpPorts, SubinterfaceState,
@@ -169,6 +169,32 @@ struct StpMemory {
     trapped: HashSet<u32>,
     /// Ports this driver wrote a non-forwarding state to.
     held: HashSet<u32>,
+}
+
+impl<T> Lookup<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Lookup<U> {
+        match self {
+            Lookup::Found(v) => Lookup::Found(f(v)),
+            Lookup::NotConfigured => Lookup::NotConfigured,
+            Lookup::Unknown => Lookup::Unknown,
+        }
+    }
+}
+
+/// The one master a physical link gets, by precedence VRF > bond > bridge.
+/// A higher-precedence `Unknown` is returned as is, never falling through to
+/// a lower master: that would enslave the link to the wrong one or
+/// un-enslave it (#615).
+fn pick_master(
+    vrf: Lookup<String>,
+    bond: Lookup<String>,
+    bridge: Lookup<String>,
+) -> (Lookup<String>, MasterKind) {
+    match (vrf, bond) {
+        (Lookup::NotConfigured, Lookup::NotConfigured) => (bridge, MasterKind::Bridge),
+        (Lookup::NotConfigured, bond) => (bond, MasterKind::Bond),
+        (vrf, _) => (vrf, MasterKind::Vrf),
+    }
 }
 
 /// Which kind of thing `reconcile_master` is enslaving a link into — picks
@@ -318,7 +344,7 @@ impl LinuxInterfaceDriver {
         port: &BridgePortRef,
     ) -> Result<Option<LinkMessage>, DriverError> {
         let parent = if port.aggregate {
-            let Some(id) = port_aggregate_registry::lookup_port_aggregate_id(
+            let Lookup::Found(id) = port_aggregate_registry::lookup_port_aggregate_id(
                 &self.port_aggregate_registry_path,
                 &port.name,
             ) else {
@@ -479,7 +505,7 @@ impl LinuxInterfaceDriver {
     /// table, connect failure, rib hasn't created a VRF yet): all
     /// expected, transient conditions, retried automatically by the
     /// caller's periodic re-apply tick.
-    async fn resolve_vrf_name(&self, table_name: &str) -> Option<String> {
+    async fn resolve_vrf_name(&self, table_name: &str) -> Lookup<String> {
         let socket = watchdog::resolve_once(
             &self.watchdog_socket,
             &ServiceRef::RibTable(table_name.to_string()),
@@ -487,13 +513,21 @@ impl LinuxInterfaceDriver {
         .await;
         let Some(socket) = socket else {
             debug!(table = %table_name, "routing table's nos-ribd instance not resolvable yet");
-            return None;
+            return Lookup::Unknown;
         };
-        let name = rib_client::get_vrf_name(&socket).await;
-        if name.is_none() {
-            debug!(table = %table_name, "routing table's nos-ribd has no vrf allocated yet");
+        if let Some(name) = rib_client::get_vrf_name(&socket).await {
+            return Lookup::Found(name);
         }
-        name
+        debug!(table = %table_name, "routing table's nos-ribd has no vrf allocated yet");
+        Lookup::Unknown
+    }
+
+    /// `resolve_vrf_name` for an optional table: no table = `NotConfigured`.
+    async fn vrf_lookup(&self, table_name: Option<&str>) -> Lookup<String> {
+        match table_name {
+            Some(t) => self.resolve_vrf_name(t).await,
+            None => Lookup::NotConfigured,
+        }
     }
 
     /// Resolves `table_name`'s allocated kernel table id, symmetric to
@@ -618,6 +652,26 @@ impl LinuxInterfaceDriver {
     /// picks the log wording only (`"vrf"` preserves
     /// `tools/verify-bgp.sh`'s existing "enslaved interface to vrf" grep
     /// exactly; `"bridge"` is the new broadcast-domain case).
+    async fn reconcile_master_lookup(
+        &self,
+        interface: &str,
+        link: &LinkMessage,
+        master: Lookup<String>,
+        kind: MasterKind,
+    ) -> Result<(), DriverError> {
+        match master {
+            Lookup::Unknown => {
+                debug!(interface = %interface, kind = ?kind, "master unknown, leaving enslavement unchanged");
+                Ok(())
+            }
+            Lookup::Found(name) => {
+                self.reconcile_master(interface, link, Some(&name), kind)
+                    .await
+            }
+            Lookup::NotConfigured => self.reconcile_master(interface, link, None, kind).await,
+        }
+    }
+
     async fn reconcile_master(
         &self,
         interface: &str,
@@ -803,10 +857,10 @@ impl LinuxInterfaceDriver {
                     let bridge_ifname =
                         bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
                             .map(bridge_registry::bridge_ifname);
-                    self.reconcile_master(
+                    self.reconcile_master_lookup(
                         &subname,
                         &sub_link,
-                        bridge_ifname.as_deref(),
+                        bridge_ifname,
                         MasterKind::Bridge,
                     )
                     .await?;
@@ -816,17 +870,9 @@ impl LinuxInterfaceDriver {
                     addresses,
                     ..
                 } => {
-                    let vrf_ifname = match routing_table {
-                        Some(table_name) => self.resolve_vrf_name(table_name).await,
-                        None => None,
-                    };
-                    self.reconcile_master(
-                        &subname,
-                        &sub_link,
-                        vrf_ifname.as_deref(),
-                        MasterKind::Vrf,
-                    )
-                    .await?;
+                    let vrf_ifname = self.vrf_lookup(routing_table.as_deref()).await;
+                    self.reconcile_master_lookup(&subname, &sub_link, vrf_ifname, MasterKind::Vrf)
+                        .await?;
                     self.reconcile_addresses(&subname, sub_link.header.index, addresses)
                         .await?;
                 }
@@ -901,37 +947,34 @@ impl LinuxInterfaceDriver {
         self.reconcile_addresses(name, index, physical_addresses)
             .await?;
 
-        let vrf_ifname = match tag0.and_then(|s| s.routing_table.clone()) {
-            Some(table_name) => self.resolve_vrf_name(&table_name).await,
-            None => None,
-        };
+        let vrf_ifname = self
+            .vrf_lookup(tag0.and_then(|s| s.routing_table.as_deref()))
+            .await;
         // At most one of a VRF/bond/`Untagged`-bridge master can apply to
         // the same link — commit-time validation
         // (`valid_subinterface_and_switching_profile_tags`,
         // `valid_port_aggregate_membership`) rejects any of the three
         // colliding, since the link has only one master.
-        let bond_ifname = port_aggregate
-            .filter(|_| port_aggregate_active)
-            .and_then(|name| {
-                port_aggregate_registry::lookup_port_aggregate_id(
-                    &self.port_aggregate_registry_path,
-                    name,
-                )
-            })
-            .map(port_aggregate_registry::port_aggregate_ifname);
-        let untagged_bridge = switching_profile_members
+        let bond_ifname = match port_aggregate.filter(|_| port_aggregate_active) {
+            Some(name) => port_aggregate_registry::lookup_port_aggregate_id(
+                &self.port_aggregate_registry_path,
+                name,
+            )
+            .map(port_aggregate_registry::port_aggregate_ifname),
+            None => Lookup::NotConfigured,
+        };
+        let untagged_bridge = match switching_profile_members
             .iter()
             .find(|(_, tag)| *tag == VlanTag::Untagged)
-            .and_then(|(domain, _)| {
+        {
+            Some((domain, _)) => {
                 bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
-            })
-            .map(bridge_registry::bridge_ifname);
-        let (master_ifname, master_kind) = match (vrf_ifname, bond_ifname, untagged_bridge) {
-            (Some(name), _, _) => (Some(name), MasterKind::Vrf),
-            (None, Some(name), _) => (Some(name), MasterKind::Bond),
-            (None, None, bridge) => (bridge, MasterKind::Bridge),
+                    .map(bridge_registry::bridge_ifname)
+            }
+            None => Lookup::NotConfigured,
         };
-        self.reconcile_master(name, link, master_ifname.as_deref(), master_kind)
+        let (master, master_kind) = pick_master(vrf_ifname, bond_ifname, untagged_bridge);
+        self.reconcile_master_lookup(name, link, master, master_kind)
             .await?;
         // Fail-safe, as soon as the enslaved port exists: before the caller's
         // trailing `up` where the link is still down (the kernel keeps it
@@ -1021,7 +1064,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             self.reconcile_addresses(&desired.name, index, &desired.addresses)
                 .await?;
             let vrf_ifname = self.resolve_vrf_name(table_name).await;
-            self.reconcile_master(&desired.name, &link, vrf_ifname.as_deref(), MasterKind::Vrf)
+            self.reconcile_master_lookup(&desired.name, &link, vrf_ifname, MasterKind::Vrf)
                 .await?;
         } else {
             self.reconcile_physical_link(
@@ -1132,11 +1175,8 @@ impl InterfaceDriver for LinuxInterfaceDriver {
 
         self.reconcile_addresses(&ifname, link.header.index, &desired.addresses)
             .await?;
-        let vrf_ifname = match &desired.routing_table {
-            Some(table_name) => self.resolve_vrf_name(table_name).await,
-            None => None,
-        };
-        self.reconcile_master(&ifname, &link, vrf_ifname.as_deref(), MasterKind::Vrf)
+        let vrf_ifname = self.vrf_lookup(desired.routing_table.as_deref()).await;
+        self.reconcile_master_lookup(&ifname, &link, vrf_ifname, MasterKind::Vrf)
             .await?;
 
         self.handle
@@ -1152,7 +1192,8 @@ impl InterfaceDriver for LinuxInterfaceDriver {
     /// `nos-ribd`'s VRF teardown: a later restart (or the domain being
     /// re-added) recreates the identically-named bridge.
     async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
-        let Some(bridge_id) = bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
+        let Lookup::Found(bridge_id) =
+            bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
         else {
             debug!(domain = %domain, "no bridge id allocated, nothing to tear down");
             return Ok(());
@@ -1237,7 +1278,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
     /// touches the port-aggregate-id registry entry — same reasoning as
     /// `remove_broadcast_domain`.
     async fn remove_port_aggregate(&self, name: &str) -> Result<(), DriverError> {
-        let Some(bond_id) = port_aggregate_registry::lookup_port_aggregate_id(
+        let Lookup::Found(bond_id) = port_aggregate_registry::lookup_port_aggregate_id(
             &self.port_aggregate_registry_path,
             name,
         ) else {
@@ -1400,6 +1441,28 @@ mod tests {
     }
 
     use super::*;
+
+    fn f(n: &str) -> Lookup<String> {
+        Lookup::Found(n.into())
+    }
+
+    #[test]
+    fn pick_master_precedence_and_unknown_never_falls_through() {
+        use Lookup::{NotConfigured as N, Unknown as U};
+        // Each kind alone: Found / NotConfigured / Unknown.
+        assert_eq!(pick_master(f("v"), N, N), (f("v"), MasterKind::Vrf));
+        assert_eq!(pick_master(N, f("b"), N), (f("b"), MasterKind::Bond));
+        assert_eq!(pick_master(N, N, f("br")), (f("br"), MasterKind::Bridge));
+        assert_eq!(pick_master(N, N, N), (N, MasterKind::Bridge));
+        assert_eq!(pick_master(U, N, N), (U, MasterKind::Vrf));
+        assert_eq!(pick_master(N, U, N), (U, MasterKind::Bond));
+        assert_eq!(pick_master(N, N, U), (U, MasterKind::Bridge));
+        // Higher precedence wins; Unknown above a Found is not skipped past.
+        assert_eq!(pick_master(f("v"), f("b"), f("br")).1, MasterKind::Vrf);
+        assert_eq!(pick_master(U, f("b"), f("br")), (U, MasterKind::Vrf));
+        assert_eq!(pick_master(N, U, f("br")), (U, MasterKind::Bond));
+        assert_eq!(pick_master(N, f("b"), U), (f("b"), MasterKind::Bond));
+    }
 
     #[test]
     fn parent_is_raised_only_when_down_and_not_err_disabled() {

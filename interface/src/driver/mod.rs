@@ -26,6 +26,17 @@ use nos_proto::{StpPortState, VlanTag};
 
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
+/// Result of asking "what is this link's master?" of something that can fail
+/// to answer. `NotConfigured` (nothing wanted: un-enslave) must never be
+/// confused with `Unknown` (could not find out: leave the link as it is, the
+/// 10s re-apply tick retries) (#615).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup<T> {
+    NotConfigured,
+    Found(T),
+    Unknown,
+}
+
 /// The MTU enforced on a link (or bond) whose `mtu` is unset — so `delete
 /// … mtu` really puts the link back, and `show interface` reports the truth.
 pub const DEFAULT_MTU: u32 = 1500;

@@ -6,6 +6,8 @@ use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, trace, warn};
 
+use super::Lookup;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     #[serde(default)]
@@ -60,10 +62,23 @@ pub fn ensure_port_aggregate_id(path: &Path, aggregate_name: &str) -> io::Result
 }
 
 /// Read-only, no lock needed — atomic renames (see `save`) mean a reader
-/// never observes a torn write. `None` if this aggregate has never had
-/// `ensure_port_aggregate_id` succeed.
-pub fn lookup_port_aggregate_id(path: &Path, aggregate_name: &str) -> Option<u32> {
-    load(path).ok()?.by_name.get(aggregate_name).copied()
+/// never observes a torn write. `NotConfigured` if this aggregate has never had
+/// `ensure_port_aggregate_id` succeed;
+/// `Unknown` if the file is unreadable or unparseable.
+pub fn lookup_port_aggregate_id(path: &Path, aggregate_name: &str) -> Lookup<u32> {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_norway::from_slice::<Registry>(&bytes) {
+            Ok(reg) => reg
+                .by_name
+                .get(aggregate_name)
+                .map_or(Lookup::NotConfigured, |&id| Lookup::Found(id)),
+            // `load` starts empty for the writers; a reader must not
+            // mistake that for "never allocated" (#615).
+            Err(_) => Lookup::Unknown,
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Lookup::NotConfigured,
+        Err(_) => Lookup::Unknown,
+    }
 }
 
 pub fn port_aggregate_ifname(bond_id: u32) -> String {
@@ -141,21 +156,49 @@ mod tests {
     }
 
     #[test]
-    fn lookup_of_missing_entry_is_none() {
+    fn lookup_of_missing_entry_is_not_configured() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("port-aggregate-ids.yaml");
-        assert!(lookup_port_aggregate_id(&path, "bond1").is_none());
+        assert_eq!(
+            lookup_port_aggregate_id(&path, "bond1"),
+            Lookup::NotConfigured
+        );
 
         ensure_port_aggregate_id(&path, "bond1").unwrap();
-        assert!(lookup_port_aggregate_id(&path, "bond2").is_none());
-        assert_eq!(lookup_port_aggregate_id(&path, "bond1"), Some(1));
+        assert_eq!(
+            lookup_port_aggregate_id(&path, "bond2"),
+            Lookup::NotConfigured
+        );
+        assert_eq!(lookup_port_aggregate_id(&path, "bond1"), Lookup::Found(1));
     }
 
     #[test]
-    fn lookup_against_a_missing_file_is_none() {
+    fn lookup_against_a_missing_file_is_not_configured() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("does-not-exist.yaml");
-        assert!(lookup_port_aggregate_id(&path, "bond1").is_none());
+        assert_eq!(
+            lookup_port_aggregate_id(&path, "bond1"),
+            Lookup::NotConfigured
+        );
+    }
+
+    #[test]
+    fn lookup_of_an_unparseable_file_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ids.yaml");
+        std::fs::write(&path, "by_name: [not, a, map").unwrap();
+        assert_eq!(lookup_port_aggregate_id(&path, "bond1"), Lookup::Unknown);
+    }
+
+    #[test]
+    fn lookup_of_an_unreadable_path_is_unknown() {
+        // A directory where the file should be: `read` fails with a
+        // non-NotFound I/O error.
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            lookup_port_aggregate_id(tmp.path(), "bond1"),
+            Lookup::Unknown
+        );
     }
 
     #[test]
