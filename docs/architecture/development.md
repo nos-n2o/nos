@@ -120,3 +120,8 @@ cargo fmt --all
 - On push to master the job uploads `coverage-total.txt` as artifact `coverage-total`. On a PR it runs `gh run download` on the newest successful master `ci.yml` push run (job permission `actions: read`).
 - No baseline (first run, artifact expired after 90 days, token without actions access) prints a notice and passes.
 - Locally: `make coverage`, then `tools/ci/coverage-compare.sh lcov.info <file holding master's number>`. `make ci-scripts-test` (part of `make check`) tests the script.
+
+## Disk cleanup
+
+- `make prune-merged` lists (dry run) what it would remove; `make prune-merged APPLY=1` does it: worktrees under `.claude/worktrees/` whose branch is in `origin/master` or whose PR is merged, their `~/.cache/nos-target-<issue>*` dirs, then `docker image prune` and `docker buildx prune --keep-storage 100GB`.
+- It keeps worktrees with uncommitted changes, unpushed commits or an open PR, the current worktree and the main checkout. `make ci-scripts-test` tests it with a fake repo.
