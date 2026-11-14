@@ -17,3 +17,9 @@ slow-timeout = { period = "30s", terminate-after = 1 }
 [[profile.mutants.scripts]]
 filter = "all()"
 run-wrapper = "mem-cap"
+
+# A resident-memory measurement over 66k routes: the unmutated baseline (every shard
+# runs it) timed out at the 30s cap above on a CI runner (#1052).
+[[profile.mutants.overrides]]
+filter = "test(commit_and_put_cost_at_66k_routes)"
+slow-timeout = { period = "120s", terminate-after = 1 }
