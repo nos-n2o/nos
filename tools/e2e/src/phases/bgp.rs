@@ -7654,12 +7654,13 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
 /// other's Type-2 for it on `ESI`, and through 10s of `nos-fdbd` re-push
 /// ticks (when the flap used to start) neither withdraws its own nor freezes
 /// the MAC — at any point in the phase, since the routers are fresh.
+/// The log line continues after `next_hop` (`local_pref`, `communities`, #874), so the pattern ends on the space, not `$` (#1075).
 async fn same_segment_no_move(w: &World, mac: &str, pes: [(Id, &str); 2]) -> anyhow::Result<()> {
     log("the CE's MAC on both PEs' segment is not a mac move (#172)");
     for (id, other) in pes {
         w.get(id)?
             .wait(&format!(
-                "evpn route learned .*:\\[{ESI}\\]:\\[0\\]:\\[48\\]:\\[{mac}\\].* next_hop={other}$"
+                "evpn route learned .*:\\[{ESI}\\]:\\[0\\]:\\[48\\]:\\[{mac}\\].* next_hop={other} "
             ))
             .await?;
     }
