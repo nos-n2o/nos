@@ -45,7 +45,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 - **Order is the safety property** (`sync_df`): egress filters, then ingress marking, then the multicast/broadcast flood flags open. A missing piece degrades to duplicates, never loss. If tc setup fails the port keeps DF-only flooding (`local_bias: false`, warning `local bias unavailable, df-only flooding`).
 - The mark is `0xE5000000|bitmap(P)` (mask `0xFF00FFFF`); 16 all-active segments per domain, the 17th is DF-only.
 - `enc_src_ip` only matches with tunnel metadata on: `set_local_bias` keeps a `nop` `tun_id` fib rule per domain (#460). A flower `enc_*` filter alone does not turn it on.
-- Type-4 counts (`ad_index`) for any ESI when it carries that ESI's ES-Import RT: it feeds only the single-active `backup_pe`; `plan_df` reads Type-4s itself, by exact ESI. `max_remote_macs` (`Fdb::sync_keys`) admits the lowest N remote `Mac`/`MacGroup` addresses, recomputed on every change (O(received)); neighbours, flood and `SegmentMac` don't count.
+- Type-4 counts (`ad_index`) for any ESI when it carries that ESI's ES-Import RT: it feeds only the single-active `backup_pe`; `plan_df` reads Type-4s itself, by exact ESI. `max_remote_macs` (`Fdb::sync_keys`) admits the lowest N remote `Mac`/`MacGroup` addresses, moved incrementally at the boundary (O(log N) per changed MAC; no ceiling = O(1) per push, #604; every change to a route's `desired` inputs must pass that key to `sync_keys`; `holders` refcounts `installed`); neighbours, flood and `SegmentMac` don't count.
 - Ceilings are `ponytail:` comments: search `ponytail:` in `fdb/src` (HRW only cross-checked nos-to-nos, 255 nexthops + groups per domain, 16 segments, reserved mark bits, `del_segment_mac`).
 
 ## Modules

@@ -6,9 +6,10 @@
 //! ponytail: a MAC learned from two VTEPs (or under two RDs) is last write
 //! wins — no MAC-mobility sequence numbers, so it can flap between them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::pending;
 use std::net::IpAddr;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -159,7 +160,7 @@ pub struct EvpnTarget {
     pub routes: HashMap<EvpnKey, EvpnRoute>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Installed {
     Mac {
         mac: Mac,
@@ -269,6 +270,10 @@ fn pinnable(segments: &[Segment]) -> HashMap<Esi, String> {
         .collect()
 }
 
+// Calls of `desired` on this thread (the unit tests count them, #604).
+#[cfg(test)]
+thread_local!(static DESIRED_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
 /// What a received route should become in the kernel, if anything: it must
 /// carry one of our import Route Targets, name this VNI, and not be our own.
 /// A Type-2 with an IP is both an FDB entry (its MAC) and a neighbour (its IP).
@@ -285,6 +290,8 @@ fn desired(
     local: &BTreeMap<Mac, String>,
     pinnable: &HashMap<Esi, String>,
 ) -> Vec<Installed> {
+    #[cfg(test)]
+    DESIRED_CALLS.with(|c| c.set(c.get() + 1));
     if !route
         .ext_communities
         .iter()
@@ -663,6 +670,9 @@ struct Inner {
     /// same entry (a MAC-only and a MAC+IP Type-2 for one MAC), so an item is
     /// only removed when no other key still holds it.
     installed: HashMap<EvpnKey, Vec<Installed>>,
+    /// How many keys in `installed` hold each item (`installed`'s inverse),
+    /// so "held by another key" is O(1). Written only by `set_installed`.
+    holders: HashMap<Installed, u32>,
     /// Each MAC with the bridge port it sits behind.
     local: BTreeMap<Mac, String>,
     /// The last election result per attached segment.
@@ -700,6 +710,11 @@ struct Inner {
     neigh_suppress: bool,
     /// The remote MACs admitted under `max_remote_macs` (`None`: no ceiling).
     admitted: Option<BTreeSet<Mac>>,
+    /// Ceiling bookkeeping, kept only while a ceiling is set: the MACs each
+    /// route would install (`desired`, before the ceiling) and its inverse.
+    /// `admitted` is always the lowest `max_remote_macs` keys of `cand`.
+    cand_by_key: HashMap<EvpnKey, BTreeSet<Mac>>,
+    cand: BTreeMap<Mac, HashSet<EvpnKey>>,
     /// The ceiling warning fired and the count has not dropped back since.
     ceiling_warned: bool,
 }
@@ -789,6 +804,7 @@ impl Fdb {
         if g.ready != ready {
             if let Some(old) = g.ready.take() {
                 let mut items: Vec<Installed> = Vec::new();
+                g.holders.clear();
                 for i in std::mem::take(&mut g.installed).into_values().flatten() {
                     if !items.contains(&i) {
                         items.push(i);
@@ -830,6 +846,7 @@ impl Fdb {
             g.neigh_suppress = false;
             g.ready = None;
             g.installed.clear();
+            g.holders.clear();
             self.publish(&g);
             self.sync_df(&mut g).await;
             return;
@@ -844,6 +861,11 @@ impl Fdb {
             self.publish(&g);
         }
         refresh_ads(&mut g);
+        // Every key is re-synced below, so the ceiling bookkeeping restarts
+        // from scratch (a changed or lifted ceiling included).
+        g.admitted = None;
+        g.cand_by_key.clear();
+        g.cand.clear();
         let keys: Vec<EvpnKey> = g.received.keys().cloned().collect();
         self.sync_keys(&mut g, keys).await;
         self.sync_df(&mut g).await;
@@ -1199,67 +1221,153 @@ impl Fdb {
         }
     }
 
-    /// Re-decides which remote MACs fit under `max-remote-macs` and syncs
-    /// `keys` plus every route whose MAC was admitted or evicted by it.
-    /// ponytail: O(received) per call; a lower MAC arriving later evicts a
-    /// higher one (deterministic, arrival-order independent).
+    /// Syncs `keys` plus every route whose MAC the `max-remote-macs` ceiling
+    /// admitted or evicted because of them.
+    /// Without a ceiling this is O(keys). With one, only `keys` are re-decided
+    /// and `admitted` is moved at its boundary in O(log n) per MAC (a lower
+    /// MAC arriving later evicts a higher one: deterministic, arrival-order
+    /// independent). Relies on every change that alters a route's `desired`
+    /// passing that route in `keys` (`set_ready` passes them all).
     async fn sync_keys(&self, g: &mut Inner, mut keys: Vec<EvpnKey>) {
         let Some(ready) = g.ready.clone() else { return };
         let pins = pinnable(&g.segments);
-        let cands: BTreeSet<Mac> = g
-            .received
-            .values()
-            .flat_map(|r| desired(&ready, r, &g.ads, &g.local, &pins))
-            .filter_map(|i| match i {
-                Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => Some(mac),
-                _ => None,
-            })
-            .collect();
-        let new = ready.max_remote_macs.map(|n| {
-            cands
-                .iter()
-                .take(n as usize)
-                .copied()
-                .collect::<BTreeSet<_>>()
-        });
-        let over = ready
-            .max_remote_macs
-            .is_some_and(|n| cands.len() > n as usize);
-        if over && !g.ceiling_warned {
-            warn!(domain = %self.domain, max = ready.max_remote_macs.unwrap_or(0), "remote mac ceiling reached");
-        }
-        g.ceiling_warned = over;
-        if g.admitted != new {
-            let affected: BTreeSet<Mac> = match (&g.admitted, &new) {
-                (Some(a), Some(b)) => a.symmetric_difference(b).copied().collect(),
-                _ => cands.clone(),
-            };
-            g.admitted = new;
-            keys.extend(
-                g.received
-                    .keys()
-                    .filter(|k| match k {
-                        EvpnKey::Mac { mac, .. } | EvpnKey::MacIp { mac, .. } => {
-                            affected.contains(mac)
-                        }
-                        _ => false,
-                    })
-                    .cloned(),
-            );
+        if ready.max_remote_macs.is_some() {
+            self.update_ceiling(g, &ready, &pins, &mut keys);
         }
         for k in keys {
-            self.sync_key(g, &k).await;
+            self.sync_key(g, &k, &ready, &pins).await;
+        }
+    }
+
+    /// Re-indexes `keys`' candidate MACs, moves `admitted`, and appends to
+    /// `keys` the routes of every MAC that entered or left it.
+    fn update_ceiling(
+        &self,
+        g: &mut Inner,
+        ready: &Ready,
+        pins: &HashMap<Esi, String>,
+        keys: &mut Vec<EvpnKey>,
+    ) {
+        let n = ready.max_remote_macs.unwrap_or(u32::MAX) as usize;
+        let mut vanished = Vec::new();
+        let mut appeared = Vec::new();
+        for k in keys.iter() {
+            let new: BTreeSet<Mac> = g
+                .received
+                .get(k)
+                .map(|r| desired(ready, r, &g.ads, &g.local, pins))
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|i| match i {
+                    Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => Some(mac),
+                    _ => None,
+                })
+                .collect();
+            let old = if new.is_empty() {
+                g.cand_by_key.remove(k)
+            } else {
+                g.cand_by_key.insert(k.clone(), new.clone())
+            }
+            .unwrap_or_default();
+            for m in old.difference(&new) {
+                let Some(set) = g.cand.get_mut(m) else {
+                    continue;
+                };
+                set.remove(k);
+                if set.is_empty() {
+                    g.cand.remove(m);
+                    vanished.push(*m);
+                }
+            }
+            for m in new.difference(&old) {
+                let set = g.cand.entry(*m).or_default();
+                if set.is_empty() {
+                    appeared.push(*m);
+                }
+                set.insert(k.clone());
+            }
+        }
+        let first = g.admitted.is_none();
+        let adm = g.admitted.get_or_insert_with(BTreeSet::new);
+        let mut moved: BTreeSet<Mac> = BTreeSet::new();
+        for m in vanished {
+            if adm.remove(&m) {
+                moved.insert(m);
+            }
+        }
+        // Admitted is the lowest-n prefix of `cand`: refill from just above
+        // its top, then let a newcomer below the top displace it.
+        while adm.len() < n {
+            let next = match adm.last() {
+                Some(top) => g
+                    .cand
+                    .range((Bound::Excluded(*top), Bound::Unbounded))
+                    .next(),
+                None => g.cand.iter().next(),
+            };
+            let Some((m, _)) = next else { break };
+            adm.insert(*m);
+            moved.insert(*m);
+        }
+        for m in appeared {
+            if g.cand.contains_key(&m) && !adm.contains(&m) && adm.last().is_some_and(|t| m < *t) {
+                adm.insert(m);
+                moved.insert(m);
+            }
+        }
+        while adm.len() > n {
+            if let Some(top) = adm.pop_last() {
+                moved.insert(top);
+            }
+        }
+        // A fresh ceiling decides every candidate for the first time.
+        if first {
+            moved.extend(g.cand.keys().copied());
+        }
+        for m in &moved {
+            if let Some(set) = g.cand.get(m) {
+                keys.extend(set.iter().cloned());
+            }
+        }
+        let over = g.cand.len() > n;
+        if over && !g.ceiling_warned {
+            warn!(domain = %self.domain, max = n, "remote mac ceiling reached");
+        }
+        g.ceiling_warned = over;
+    }
+
+    /// Records what `key` now holds in the kernel, keeping `holders` in step.
+    fn set_installed(g: &mut Inner, key: &EvpnKey, now: &[Installed]) {
+        let old = if now.is_empty() {
+            g.installed.remove(key)
+        } else {
+            g.installed.insert(key.clone(), now.to_vec())
+        };
+        for i in old.iter().flatten() {
+            if let Some(c) = g.holders.get_mut(i) {
+                *c -= 1;
+                if *c == 0 {
+                    g.holders.remove(i);
+                }
+            }
+        }
+        for i in now {
+            *g.holders.entry(i.clone()).or_default() += 1;
         }
     }
 
     /// Brings one route's kernel state in line with `received` + config.
-    async fn sync_key(&self, g: &mut Inner, key: &EvpnKey) {
-        let Some(ready) = g.ready.clone() else { return };
-        let pins = pinnable(&g.segments);
+    async fn sync_key(
+        &self,
+        g: &mut Inner,
+        key: &EvpnKey,
+        ready: &Ready,
+        pins: &HashMap<Esi, String>,
+    ) {
         let mut want = g
             .received
             .get(key)
-            .map(|r| desired(&ready, r, &g.ads, &g.local, &pins))
+            .map(|r| desired(ready, r, &g.ads, &g.local, pins))
             .unwrap_or_default();
         if let Some(adm) = &g.admitted {
             want.retain(|i| match i {
@@ -1271,11 +1379,15 @@ impl Fdb {
         if want == have {
             return;
         }
-        let held_elsewhere =
-            |g: &Inner, i: &Installed| g.installed.iter().any(|(k, v)| k != key && v.contains(i));
+        // `holders` counts `key`'s own occurrences too: another key holds `i`
+        // when the count exceeds them.
+        let held_elsewhere = |g: &Inner, i: &Installed| {
+            g.holders.get(i).copied().unwrap_or(0) as usize
+                > have.iter().filter(|h| *h == i).count()
+        };
         for h in &have {
             if !want.contains(h) && !held_elsewhere(g, h) {
-                self.uninstall(&ready, h).await;
+                self.uninstall(ready, h).await;
             }
         }
         let mut now = Vec::new();
@@ -1284,16 +1396,11 @@ impl Fdb {
             // so its Type-2 is not withdrawn until the CE goes quiet.
             let active =
                 matches!(&w, Installed::SegmentMac { mac, port } if g.local.get(mac) == Some(port));
-            if have.contains(&w) || held_elsewhere(g, &w) || self.install(&ready, &w, active).await
-            {
+            if have.contains(&w) || held_elsewhere(g, &w) || self.install(ready, &w, active).await {
                 now.push(w);
             }
         }
-        if now.is_empty() {
-            g.installed.remove(key);
-        } else {
-            g.installed.insert(key.clone(), now);
-        }
+        Self::set_installed(g, key, &now);
     }
 
     async fn install(&self, r: &Ready, i: &Installed, active: bool) -> bool {
@@ -2190,6 +2297,110 @@ mod tests {
         fdb.set_ready(Some(ready())).await;
         all.extend(calls(&driver));
         assert_eq!(live(&all), BTreeSet::from([mac(1), mac(2)]));
+    }
+
+    /// #604: without a ceiling a push re-decides only its own route, never all
+    /// of `received`.
+    #[tokio::test]
+    async fn a_push_without_a_ceiling_decides_only_its_own_route() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver, Duration::ZERO);
+        fdb.set_ready(Some(ready())).await;
+        let n = 2000u32;
+        let route = |i: u32| {
+            let mut r = mac_route(0, 10100, RT, REMOTE);
+            r.key = EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [0, 0, 0, 0, i.to_be_bytes()[2], i.to_be_bytes()[3]],
+            };
+            r
+        };
+        let before = DESIRED_CALLS.with(std::cell::Cell::get);
+        for i in 0..n {
+            fdb.apply_push(EvpnUpdate::Add(route(i))).await;
+        }
+        for i in 0..n {
+            fdb.apply_push(EvpnUpdate::Remove(route(i).key)).await;
+        }
+        let calls = DESIRED_CALLS.with(std::cell::Cell::get) - before;
+        assert!(calls <= 2 * n as usize, "{calls} desired calls");
+        assert!(fdb.inner.lock().await.holders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_item_two_routes_share_goes_with_the_second_withdrawal() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready())).await;
+        let a = mac_route(1, 10100, RT, REMOTE);
+        let mut b = a.clone();
+        b.key = EvpnKey::Mac {
+            rd: [0, 0, 0, 0, 0, 0, 0, 7],
+            mac: [0, 0, 0, 0, 0, 1],
+        };
+        for r in [&a, &b] {
+            fdb.apply_push(EvpnUpdate::Add(r.clone())).await;
+        }
+        let mut all = calls(&driver);
+        fdb.apply_push(EvpnUpdate::Remove(a.key.clone())).await;
+        all.extend(calls(&driver));
+        assert_eq!(live(&all).len(), 1, "{all:?}");
+        fdb.apply_push(EvpnUpdate::Remove(b.key.clone())).await;
+        all.extend(calls(&driver));
+        assert!(live(&all).is_empty(), "{all:?}");
+    }
+
+    /// The incremental ceiling equals "the lowest N candidates" after any
+    /// sequence of adds and withdrawals.
+    #[tokio::test]
+    async fn the_incremental_ceiling_matches_the_lowest_n() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        let capped = |n| Ready {
+            max_remote_macs: Some(n),
+            ..ready()
+        };
+        fdb.set_ready(Some(capped(3))).await;
+        let mut present = BTreeSet::new();
+        let mut all = Vec::new();
+        let mut x = 12345u32;
+        for step in 0..300 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let m = ((x >> 16) % 12) as u8 + 1;
+            if (x >> 8) & 1 == 0 {
+                present.insert(m);
+                fdb.apply_push(EvpnUpdate::Add(mac_route(m, 10100, RT, REMOTE)))
+                    .await;
+            } else {
+                present.remove(&m);
+                fdb.apply_push(EvpnUpdate::Remove(mac_route(m, 10100, RT, REMOTE).key))
+                    .await;
+            }
+            // A ceiling change or lift now and then.
+            let n = match step {
+                100 => Some(5),
+                200 => Some(1),
+                _ => None,
+            };
+            if let Some(n) = n {
+                fdb.set_ready(Some(capped(n))).await;
+            }
+            all.extend(calls(&driver));
+            let cap = match step {
+                0..=99 => 3,
+                100..=199 => 5,
+                _ => 1,
+            };
+            let want: BTreeSet<String> = present
+                .iter()
+                .take(cap)
+                .map(|m| format!("{} {REMOTE}", format_mac([0, 0, 0, 0, 0, *m])))
+                .collect();
+            assert_eq!(live(&all), want, "step {step}");
+        }
+        fdb.set_ready(Some(ready())).await;
+        all.extend(calls(&driver));
+        assert_eq!(live(&all).len(), present.len());
     }
 
     #[tokio::test]
