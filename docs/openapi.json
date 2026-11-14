@@ -2802,7 +2802,7 @@
             "type": "boolean"
           },
           "lacp_link_number": {
-            "description": "The 802.1AX-2014 Link_Number naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+            "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -41484,7 +41484,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The 802.1AX-2014 Link_Number naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                  "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -41549,7 +41549,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "The 802.1AX-2014 Link_Number naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -41566,7 +41566,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "The 802.1AX-2014 Link_Number naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
+                  "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
