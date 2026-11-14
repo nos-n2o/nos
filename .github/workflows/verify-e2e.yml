@@ -34,9 +34,10 @@ jobs:
           load: true
           build-args: NOS_BUILD_REV=${{ github.sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
       # Kernel modules the routers need + file capabilities on nos-ribd
       # (the same script `make e2e-preflight` runs locally).
+      - run: df -h /
       - run: tools/ci/e2e-preflight.sh
       - run: cargo run --release -p nos-e2e -- ${{ matrix.group }}
       - name: Container state and logs
