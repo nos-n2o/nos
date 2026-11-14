@@ -17,12 +17,12 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Phase list: [e2e-pha
 
 A container cannot `modprobe`, so the docker host must have every module the lab uses; a missing one makes a phase fail like a product regression (`stp-mstp`, `ospf-graceful-restart`, `vpn` did on a host without `cls_fw act_skbedit act_sample psample mpls_router mpls_iptunnel`, #897). The per-phase table is in [e2e-phases.md](../e2e-phases.md#kernel-modules).
 
-- Load them once: `sudo modprobe -a vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_gact sch_ingress cls_u32 act_sample psample mpls_router mpls_iptunnel`. Without `-a` every name after the first is taken as a parameter of the first.
+- Load them once: `sudo modprobe -a vrf dummy bonding vxlan 8021q bridge ipip cls_flower cls_fw act_skbedit act_mirred act_gact sch_ingress cls_u32 act_sample psample mpls_router mpls_iptunnel`. Without `-a` every name after the first is taken as a parameter of the first.
 - Load them at every boot: put one module name per line in `/etc/modules-load.d/nos-e2e.conf` (same list), then `sudo systemctl restart systemd-modules-load`.
 - Load `mpls_router` before the lab starts: `/proc/sys/net/mpls` only exists in network namespaces created after it loads.
 - Check: `make e2e-preflight` exits 1 naming every missing module and the phases it blocks. Built-in modules count (`modules.builtin`). `NOS_E2E_PREFLIGHT_ASSUME_MISSING="cls_u32 psample"` makes it pretend those are absent, to see the message.
 - A failed `nos-e2e` run checks the same list on its own host and prints the missing modules that block the phases it ran (`tools/e2e/src/modules.rs`); no output means the modules are not the cause.
-- Add a module (a feature needing a new tc action, e.g. #865/#891's `act_mirred`): one row in the `table` of `tools/ci/e2e-preflight.sh` (the script and `nos-e2e` both read it), one row in the table of `docs/e2e-phases.md`, and the module in the `modprobe` line and snippet above. `cargo test -p nos-e2e` fails if a row names an unknown phase.
+- Add a module (a feature needing a new tc action, as `act_mirred` was for #865/#891): one row in the `table` of `tools/ci/e2e-preflight.sh` (the script and `nos-e2e` both read it), one row in the table of `docs/e2e-phases.md`, and the module in the `modprobe` line and snippet above. `cargo test -p nos-e2e` fails if a row names an unknown phase.
 
 ## Diagnosing and measuring flaky checks
 
