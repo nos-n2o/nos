@@ -6,8 +6,20 @@ name: verify-e2e
 # Each group is self-contained (its own `up` + checks + teardown) and runs on
 # its own independent runner, so there's no collision between the hardcoded
 # container names/network nos-e2e uses.
+# Manual dispatch (#1050) soaks: `group` (one group or `all`), `runs` (1..20
+# independent runner jobs per group), `ref` (branch/tag/sha to test).
 on:
   workflow_dispatch:
+    inputs:
+      group:
+        description: "Group to run (base, drivers, rpl, ospf-suite, multi, pki-suite, pki-crl) or all"
+        default: all
+      runs:
+        description: "Runs per group (1-20), each on its own runner"
+        default: "1"
+      ref:
+        description: "Branch, tag or sha to test (default: the dispatched ref)"
+        default: ""
   schedule:
     - cron: "0 4 * * *"
 
@@ -15,36 +27,105 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          GROUP: ${{ inputs.group || 'all' }}
+          RUNS: ${{ inputs.runs || '1' }}
+        run: |
+          all='["base","drivers","rpl","ospf-suite","multi","pki-suite","pki-crl"]'
+          case "$RUNS" in ''|*[!0-9]*) echo "runs must be 1-20" >&2; exit 1;; esac
+          [ "$RUNS" -ge 1 ] && [ "$RUNS" -le 20 ] || { echo "runs must be 1-20" >&2; exit 1; }
+          if [ "$GROUP" = all ]; then groups=$all
+          else
+            echo "$all" | jq -e --arg g "$GROUP" 'index($g)' >/dev/null || { echo "unknown group '$GROUP'" >&2; exit 1; }
+            groups=$(jq -cn --arg g "$GROUP" '[$g]')
+          fi
+          echo "matrix=$(jq -cn --argjson g "$groups" --argjson n "$RUNS" '{include: [$g[] as $x | range(1; $n + 1) | {group: $x, run: .}]}')" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: [plan]
+    name: "verify (${{ matrix.group }} #${{ matrix.run }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        group: [base, drivers, rpl, ospf-suite, multi, pki-suite, pki-crl]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       # Keep the containers on failure so the step below can read them.
       VERIFY_E2E_KEEP: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           tags: nos:local
           load: true
-          build-args: NOS_BUILD_REV=${{ github.sha }}
+          build-args: NOS_BUILD_REV=${{ steps.rev.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=min
       # Kernel modules the routers need + file capabilities on nos-ribd
       # (the same script `make e2e-preflight` runs locally).
       - run: df -h /
       - run: tools/ci/e2e-preflight.sh
-      - run: cargo run --release -p nos-e2e -- ${{ matrix.group }}
+      - name: Run group
+        run: |
+          start=$(date +%s)
+          set +e
+          cargo run --release -p nos-e2e -- ${{ matrix.group }} 2>&1 | tee e2e-run.log
+          rc=${PIPESTATUS[0]}
+          mkdir -p e2e-result
+          tools/ci/e2e-result-line.sh ${{ matrix.run }} "$rc" "$(($(date +%s) - start))" e2e-run.log > "e2e-result/${{ matrix.group }}-${{ matrix.run }}.txt"
+          exit "$rc"
+      - name: Upload result line
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-result-${{ matrix.group }}-${{ matrix.run }}
+          path: e2e-result/
+          if-no-files-found: ignore
       - name: Container state and logs
         if: failure()
         run: |
           docker ps -a
           docker logs router-a 2>&1 | tail -200 || true
+
+  # Soak table in tools/ci/e2e-soak.sh's format, per group, plus the per-check
+  # failure counts (#1050).
+  summary:
+    name: Results summary
+    runs-on: ubuntu-latest
+    needs: [verify]
+    if: always()
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: e2e-result-*
+          path: results
+          merge-multiple: true
+      - run: |
+          [ -d results ] || { echo "no results" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          for g in $(ls results | sed 's/-[0-9]*\.txt$//' | sort -u); do
+            all=$(cat results/"$g"-[0-9]*.txt | sort -n)
+            n=$(echo "$all" | wc -l); pass=$(echo "$all" | grep -c ' PASS ' || true)
+            {
+              echo "### $g: $pass/$n passed"
+              echo '```'
+              echo "$all"
+              echo
+              echo "Per-check failures ($g):"
+              echo "$all" | grep ' FAIL ' | cut -d' ' -f4- | sort | uniq -c | sort -rn || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
 
   # Same as ci.yml's `alert`: a red nightly opens or updates the `ci-red` issue.
   alert:
