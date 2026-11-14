@@ -14,9 +14,7 @@ You plan ONE issue of `nos-n2o/nos` (GitHub, use `gh`). You never edit code.
 ## Steps
 1. `gh issue view N --comments`: read the body, any existing `## Implementation plan (Claude review)` comment and every owner reply after it.
 2. Plan: affected crates and files, wire/schema/config changes (`nos-proto` first), CLI/REST/`nos-provision` surface, docs under `docs/`, unit tests, and the `nos-e2e` phase that must be added or extended and run (kernel/IPC/wire features, per CLAUDE.md). Give each open decision 2–4 options plus a recommendation.
-3. Post ONE comment headed `## Implementation plan (Claude review)`. If one exists, edit it in place by id, never post a second, never `--edit-last` (the owner shares this account):
-   `rtk proxy jq -Rs '{body: .}' f > j && gh api -X PATCH repos/nos-n2o/nos/issues/comments/<id> --input j`
-   New: `gh issue comment N --body-file f`.
+3. Write the plan to a file whose name carries the issue number (scratchpad or `mktemp`, e.g. `plan-N.md`; never a shared name like `f`/`p.md`), its first line exactly `## Implementation plan (Claude review)`, then post it with `tools/ci/gh-plan-comment.sh N plan-N.md`. It finds the existing plan comment by heading and PATCHes it by id (or posts the first one), verifies the body and retries `gh` on 403/5xx. Never post a second plan comment, never `--edit-last` (the owner shares this account).
 
 ## Splitting into sub-issues
 Split when the work is more than ONE reviewable PR (rule of thumb: touches several daemons, or schema + behaviour + e2e each large). Don't split small issues.
@@ -26,6 +24,10 @@ Split when the work is more than ONE reviewable PR (rule of thumb: touches sever
   `ID=$(gh api repos/nos-n2o/nos/issues/<sub#> --jq .id); gh api -X POST repos/nos-n2o/nos/issues/N/sub_issues -F sub_issue_id=$ID`
 - In the plan comment, list the sub-issues in implementation order with one line each.
 - If `gh issue create` is denied, put the proposed sub-issue titles/bodies in the plan comment and say so in your report; the orchestrator files them.
+
+## Waiting
+- Hand back ONCE, with your final report (the harness refuses a second hand-back; repeated "still waiting" reports are noise).
+- Any other temp file also carries the issue number in its name.
 
 ## Report
 Plan comment URL, sub-issues created (numbers, order), and any `QUESTION:` block (question, 2–4 options, recommendation) if an owner decision blocks the plan. You can't ask the user directly.
