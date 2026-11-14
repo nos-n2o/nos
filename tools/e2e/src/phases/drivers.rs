@@ -105,6 +105,29 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #615: an unanswerable `nos-ribd` ("which VRF?") is unknown, not "no VRF":
+/// while router-a's `nos-ribd` is dead eth0 stays enslaved to rt1's VRF across
+/// several 10 s re-apply ticks, and the session survives.
+pub async fn vrf_unknown(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let removed = "removed interface from master enslavement";
+    let released = "startup hold released";
+    let (removed_base, released_base) = (a.count(removed), a.count(released));
+    log("SIGKILL router-a's nos-ribd: its VRF name is unanswerable until it is back");
+    // One kill leaves a restart window shorter than the 10 s re-apply tick
+    // (and `nos-restd` is down with it, so no config commit can resync
+    // meanwhile). Kill it again as it respawns: the watchdog's crash backoff
+    // doubles, so `nos-ribd` is down across at least one tick.
+    for _ in 0..30 {
+        w.dock.kill_process("router-a", "nos-ribd").await?;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    a.assert_quiet(removed, removed_base, 3).await?;
+    a.wait_new(released, released_base, 90).await?;
+    a.assert_quiet(removed, removed_base, 12).await?;
+    a.established().await
+}
+
 /// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and
 /// REST reports what the link is held at. Leaves eth0 at the docker default
 /// for later phases.
