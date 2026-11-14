@@ -3,6 +3,7 @@
 //! distinct sub-block per scenario so log lines from different phases are
 //! never confusable.
 
+use crate::lab::Addr;
 /// The user every router's *seeded* config carries, and what the harness logs
 /// in as (`POST /v1/login`) to get the client certificate its REST calls use.
 pub const E2E_USER: &str = "e2e";
@@ -20,26 +21,26 @@ pub const NET: &str = "nos-verify-net";
 /// order, so router-a ends up with eth1/eth2.
 pub const NET_BOND1: &str = "nos-verify-net-bond1";
 pub const NET_BOND2: &str = "nos-verify-net-bond2";
-pub const SUBNET: &str = "10.50.0.0/24";
+pub const SUBNET: Addr = Addr("10.50.0.0/24");
 /// A fixed ULA (RFC 4193) block so the docker network itself — and thus each
 /// container's eth0 — has IPv6 enabled at the kernel level at all. Never
 /// assigned to nos's own config.
-pub const SUBNET6: &str = "fd00:10:50::/64";
+pub const SUBNET6: Addr = Addr("fd00:10:50::/64");
 
-pub const IP_A: &str = "10.50.0.2";
-pub const IP_B: &str = "10.50.0.3";
-pub const IP_C: &str = "10.50.0.4";
+pub const IP_A: Addr = Addr("10.50.0.2");
+pub const IP_B: Addr = Addr("10.50.0.3");
+pub const IP_C: Addr = Addr("10.50.0.4");
 /// The throwaway router of the `rest` phase's destructive checks.
-pub const IP_R: &str = "10.50.0.5";
+pub const IP_R: Addr = Addr("10.50.0.5");
 /// `ospf-remote-lfa`'s fourth and fifth ring routers.
-pub const IP_D: &str = "10.50.0.13";
-pub const IP_E: &str = "10.50.0.14";
+pub const IP_D: Addr = Addr("10.50.0.13");
+pub const IP_E: Addr = Addr("10.50.0.14");
 /// The `lldp` phase's second management address on router-b: TEST-NET-1, on
 /// no interface, so it is advertised with the "unknown" interface numbering.
 pub const MGMT_NOWHERE: &str = "192.0.2.1";
 /// The `evpn` phase's third-party speaker (GoBGP), which originates the EVPN
 /// routes no NOS router can yet.
-pub const IP_G: &str = "10.50.0.6";
+pub const IP_G: Addr = Addr("10.50.0.6");
 pub const ASN_G: u32 = 65010;
 pub const RID_G: &str = "6.6.6.6";
 pub const GOBGP_IMAGE: &str = "nos-e2e-gobgp:local";
@@ -114,13 +115,13 @@ pub const fn add_path_community(id: u32) -> u32 {
 /// phase sees the failover. The ASN the first VRP set wrongly authorizes for
 /// `REDISTRIBUTE_PREFIX` (router-b, `ASN_B`, really originates it).
 pub const RPKI_CACHE: &str = "rpki-cache";
-pub const IP_RPKI: &str = "10.50.0.8";
-pub const IP_RPKI_DEAD: &str = "10.50.0.9";
+pub const IP_RPKI: Addr = Addr("10.50.0.8");
+pub const IP_RPKI_DEAD: Addr = Addr("10.50.0.9");
 pub const RPKI_WRONG_ASN: u32 = 64999;
 /// `rpki`, #498: `nos-rtr-stub`, a cache requiring TCP-MD5 from router-a
 /// (StayRTR cannot sign its session), and the key it and router-a share.
 pub const RTR_STUB: &str = "rtr-stub";
-pub const IP_RTR_STUB: &str = "10.50.0.10";
+pub const IP_RTR_STUB: Addr = Addr("10.50.0.10");
 pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
 /// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
 /// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
@@ -134,7 +135,7 @@ pub const STAYRTR_IMAGE: &str = "rpki/stayrtr:v0.6.4";
 pub const GOBMP_IMAGE: &str =
     "sbezverk/gobmp@sha256:e905f70d90f30d1eee60d04ac74c1fc4d41116fd3e53ba8bba7ae9b4201bfb30";
 pub const BMP_COLLECTOR: &str = "bmp-collector";
-pub const IP_BMP: &str = "10.50.0.40";
+pub const IP_BMP: Addr = Addr("10.50.0.40");
 pub const BMP_PORT: u16 = 5000;
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
@@ -191,7 +192,7 @@ pub const LACP_SYSTEM_PRIORITY_A_CHANGED: u16 = 150;
 /// the peer PE GoBGP plays (below router-a's, so it wins the DF election for
 /// the even `EVPN_VNI`), and a MAC pinned behind the bond.
 pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
-pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
+pub const ESI_PEER_ORIGIN: Addr = Addr("10.50.0.1");
 /// `evpn-esi`: a PE that advertises only a bare Type-4 for `ESI` — no per-EVI
 /// A-D for `EVPN_VNI` — and, being GoBGP, no DF Election community, so no
 /// AC-DF. RFC 8584 §2.2.3 (strictly): the per-EVI filter only applies when
@@ -218,7 +219,12 @@ pub const ESI2_RD: &str = "65010:9";
 /// GoBGP plays with distinct next hops (fake VTEPs — only the kernel state
 /// router-a builds for them is read back) and one MAC advertised by the first.
 pub const ESI3: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:bb"];
-pub const ESI3_PES: [(&str, &str); 2] = [("10.50.0.11", "65010:11"), ("10.50.0.12", "65010:12")];
+pub fn esi3_pes() -> [(&'static str, &'static str); 2] {
+    [
+        (Addr("10.50.0.11").s(), "65010:11"),
+        (Addr("10.50.0.12").s(), "65010:12"),
+    ]
+}
 pub const ESI3_MAC: (&str, &str) = ("aa:bb:cc:00:00:05", "192.0.2.35");
 /// `evpn-dataplane`: the two PEs share one Route Target both ways, each has
 /// its own RD; a dual-homed CE (`ce`, one link to each PE) and a host (`h`)
@@ -272,26 +278,26 @@ pub const VPN_LABEL: u32 = 1000;
 /// IPv6 twin of `vpn-dataplane`'s CE networks (ULA, next to their IPv4
 /// `L3_SUBNET_*`): each PE's address, the host's, and the subnet.
 pub const VPN6_EXPORT_A: &str = "2001:db8:a::1/128";
-pub const L3V6_SUBNET_A: &str = "fd18:1::/64";
-pub const L3V6_SUBNET_B: &str = "fd18:2::/64";
-pub const L3V6_GW_A: &str = "fd18:1::2";
-pub const L3V6_GW_B: &str = "fd18:2::2";
-pub const L3V6_HOST_A: &str = "fd18:1::10";
-pub const L3V6_HOST_B: &str = "fd18:2::10";
+pub const L3V6_SUBNET_A: Addr = Addr("fd18:1::/64");
+pub const L3V6_SUBNET_B: Addr = Addr("fd18:2::/64");
+pub const L3V6_GW_A: Addr = Addr("fd18:1::2");
+pub const L3V6_GW_B: Addr = Addr("fd18:2::2");
+pub const L3V6_HOST_A: Addr = Addr("fd18:1::10");
+pub const L3V6_HOST_B: Addr = Addr("fd18:2::10");
 pub const L3_VNI: u32 = 5000;
 pub const L3_RT: &str = "65000:5000";
 pub const L3_RD_A: &str = "65001:5000";
 pub const L3_RD_B: &str = "65002:5000";
 pub const NET_L3_A: &str = "nos-verify-net-l3-a";
 pub const NET_L3_B: &str = "nos-verify-net-l3-b";
-pub const L3_SUBNET_A: &str = "198.18.1.0/24";
-pub const L3_SUBNET_B: &str = "198.18.2.0/24";
+pub const L3_SUBNET_A: Addr = Addr("198.18.1.0/24");
+pub const L3_SUBNET_B: Addr = Addr("198.18.2.0/24");
 /// Each PE's address on its host's network (docker assigns it, nos configures
 /// the same one), and the host's own.
-pub const L3_GW_A: &str = "198.18.1.2";
-pub const L3_GW_B: &str = "198.18.2.2";
-pub const L3_HOST_IP_A: &str = "198.18.1.10";
-pub const L3_HOST_IP_B: &str = "198.18.2.10";
+pub const L3_GW_A: Addr = Addr("198.18.1.2");
+pub const L3_GW_B: Addr = Addr("198.18.2.2");
+pub const L3_HOST_IP_A: Addr = Addr("198.18.1.10");
+pub const L3_HOST_IP_B: Addr = Addr("198.18.2.10");
 /// `evpn`'s interop check: the Type-5 GoBGP announces into router-a's IP-VRF.
 pub const L3_GOBGP_PREFIX: &str = "198.18.9.0/24";
 pub const L3_GOBGP_RT: &str = "65010:5000";
@@ -320,9 +326,9 @@ pub const IRB_HOST_IP: &str = "198.18.3.20";
 /// `evpn-v6`: each PE's IPv6 VTEP/BGP address on eth0 (in `SUBNET6`, above
 /// the low addresses docker hands out — nos-interfaced removes docker's own
 /// anyway), selected as the VTEP by its label.
-pub const V6_A: &str = "fd00:10:50::a";
-pub const V6_B: &str = "fd00:10:50::b";
-pub const V6_C: &str = "fd00:10:50::c";
+pub const V6_A: Addr = Addr("fd00:10:50::a");
+pub const V6_B: Addr = Addr("fd00:10:50::b");
+pub const V6_C: Addr = Addr("fd00:10:50::c");
 pub const V6_LABEL: &str = "v6";
 /// `evpn-esi`, DF-aware backup: a fourth, single-active segment router-a is
 /// not on, served by four PEs GoBGP plays (fake VTEPs). The MAC's own PE is
@@ -331,12 +337,14 @@ pub const V6_LABEL: &str = "v6";
 /// lowest-address fallback picks .22. Only .24 sends a Type-4 (a real FRR),
 /// so with the Type-4 held the backup is .24, and without it .22.
 pub const ESI4: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:cc"];
-pub const ESI4_PES: [(&str, &str); 4] = [
-    ("10.50.0.21", "65010:21"),
-    ("10.50.0.22", "65010:22"),
-    ("10.50.0.23", "65010:23"),
-    ("10.50.0.24", "65010:24"),
-];
+pub fn esi4_pes() -> [(&'static str, &'static str); 4] {
+    [
+        (Addr("10.50.0.21").s(), "65010:21"),
+        (Addr("10.50.0.22").s(), "65010:22"),
+        (Addr("10.50.0.23").s(), "65010:23"),
+        (Addr("10.50.0.24").s(), "65010:24"),
+    ]
+}
 /// The AS of the FRR PE (`router-f`) that originates ESI4's Type-4 with its
 /// ES-Import RT, which GoBGP's CLI can't set.
 pub const ESI4_FRR_ASN: u32 = 65024;
@@ -351,7 +359,7 @@ pub const RID_C: &str = "3.3.3.3";
 
 /// TEST-NET-2 — a fake redistributed prefix.
 pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
-pub const REDISTRIBUTE_GATEWAY: &str = "10.50.0.99";
+pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is
 /// authorised and the second (TEST-NET-1) is not.
@@ -480,9 +488,9 @@ pub const OSPF_PUSH_CHUNK_TEST: usize = 64;
 /// `Full` is 3 frames.
 pub const REDISTRIBUTE_CHUNK_TEST: usize = 32;
 pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
-pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
-pub const OSPF_FRR_IP_A: &str = "10.51.0.2";
-pub const OSPF_FRR_IP_F: &str = "10.51.0.6";
+pub const OSPF_FRR_SUBNET: Addr = Addr("10.51.0.0/24");
+pub const OSPF_FRR_IP_A: Addr = Addr("10.51.0.2");
+pub const OSPF_FRR_IP_F: Addr = Addr("10.51.0.6");
 pub const OSPF_ROUTER_ID_F: &str = "9.9.9.6";
 /// Scales nos-ospfd's LSA age clock: 1800/180 = 10s, 3600/180 = 20s.
 pub const OSPF_AGE_MULTIPLIER: u32 = 180;
@@ -499,8 +507,8 @@ pub const OSPF_FRR_EXTERNAL_NARROW: &str = "198.18.100.0/25";
 /// (nobody owns `OSPF_FRR_FA`); FRR puts that address in the Type-5's
 /// forwarding address, and router-a must route via it, not via FRR (#215).
 pub const OSPF_FRR_FA_PREFIX: &str = "198.18.101.0/24";
-pub const OSPF_FRR_FA: &str = "10.51.0.9";
-pub const ASBR_GATEWAY: &str = "10.50.0.98";
+pub const OSPF_FRR_FA: Addr = Addr("10.51.0.9");
+pub const ASBR_GATEWAY: Addr = Addr("10.50.0.98");
 pub const MTU_VALUE: u32 = 9000;
 /// `ospf-mtu-pagination` (v2 LSU/LSR/LSAck split, #806): with no auth the LSU
 /// budget is 200-20-24-4 = 152 bytes (4 Type-5s of 36), the LSR/LSAck budget
@@ -558,12 +566,12 @@ pub const OSPFV3_ABR_LOOPBACK_ADDRESS: &str = "2001:db8:5::1/128";
 /// router-c (the ASBR), a docker network of its own so the two areas sit on
 /// different L2 segments (docker names it `eth1` on both).
 pub const NET_OSPFV3_A1: &str = "nos-verify-net-ospfv3-a1";
-pub const OSPFV3_A1_SUBNET: &str = "10.52.0.0/24";
-pub const OSPFV3_A1_SUBNET6: &str = "fd19:3::/64";
-pub const OSPFV3_A1_IP_B: &str = "10.52.0.2";
-pub const OSPFV3_A1_IP_C: &str = "10.52.0.3";
-pub const OSPFV3_A1_ADDRESS_B: &str = "fd19:3::2/64";
-pub const OSPFV3_A1_ADDRESS_C: &str = "fd19:3::3/64";
+pub const OSPFV3_A1_SUBNET: Addr = Addr("10.52.0.0/24");
+pub const OSPFV3_A1_SUBNET6: Addr = Addr("fd19:3::/64");
+pub const OSPFV3_A1_IP_B: Addr = Addr("10.52.0.2");
+pub const OSPFV3_A1_IP_C: Addr = Addr("10.52.0.3");
+pub const OSPFV3_A1_ADDRESS_B: Addr = Addr("fd19:3::2/64");
+pub const OSPFV3_A1_ADDRESS_C: Addr = Addr("fd19:3::3/64");
 /// RFC 5340 A.4.1 Inter-Area-Router-LSA (0x2004) and RFC 8362 E-Inter-Area-Router (0xA024).
 pub const LSA_TYPE_INTER_AREA_ROUTER: u16 = 0x2004;
 pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0xA024;
@@ -602,7 +610,7 @@ pub const MED: u32 = 4242;
 
 pub const REST_PORT: u16 = 8080;
 /// Not assigned to any interface, so binding it fails with EADDRNOTAVAIL.
-pub const REST_ABSENT_ADDRESS: &str = "10.50.0.77";
+pub const REST_ABSENT_ADDRESS: Addr = Addr("10.50.0.77");
 pub const REST_TX: &str = "rest-e2e";
 /// Where every router's `nos-acld --flowspec-file` looks (#561): the data
 /// volume, writable by the harness through `bollard`.
@@ -612,7 +620,7 @@ pub const FLOWSPEC_FILE: &str = "flowspec.json";
 /// The `syslog` phase's collector (syslog-ng, an independent RFC 5424
 /// receiver) on the shared network.
 pub const SYSLOG_COLLECTOR: &str = "syslog-collector";
-pub const IP_SYSLOG: &str = "10.50.0.30";
+pub const IP_SYSLOG: Addr = Addr("10.50.0.30");
 pub const SYSLOG_IMAGE: &str = "nos-e2e-syslog:local";
 /// Router-a's hostname while the phase runs (the default `nos` says nothing).
 pub const SYSLOG_HOSTNAME: &str = "e2e-a";

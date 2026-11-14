@@ -55,7 +55,7 @@ async fn start_collector(w: &World) -> anyhow::Result<()> {
             BMP_COLLECTOR,
             GOBMP_IMAGE,
             NET,
-            IP_BMP,
+            IP_BMP.s(),
             &[
                 "--dump=console",
                 &format!("--source-port={BMP_PORT}"),

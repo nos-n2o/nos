@@ -146,7 +146,7 @@ async fn vlan_sub_link_mtu(a: &Router) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_B.to_string(),
             "--peer",
-            IP_B,
+            IP_B.s(),
         ]);
         f.extend(strings(extra));
         f
@@ -1154,11 +1154,11 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     let on_if = |ip: &str| format!("{ip} (ifindex [1-9][0-9]*)");
     let mgmt_a = learned_a(&format!(
         " ttl=15 management_addresses={},{MGMT_NOWHERE} capabilities=",
-        on_if(IP_B)
+        on_if(IP_B.s())
     ));
     let mgmt_b = learned_b(&format!(
         " ttl=15 management_addresses={} capabilities=",
-        on_if(IP_A)
+        on_if(IP_A.s())
     ));
     let (base_ma, base_mb) = (a.count(&mgmt_a), b.count(&mgmt_b));
     a.provision(&host(
@@ -1169,7 +1169,7 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
             "--lldp-tx-hold",
             "3",
             "--lldp-management-address",
-            IP_A,
+            IP_A.s(),
         ],
     ))
     .await?;
@@ -1181,7 +1181,7 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
             "--lldp-tx-hold",
             "3",
             "--lldp-management-address",
-            IP_B,
+            IP_B.s(),
             "--lldp-management-address",
             MGMT_NOWHERE,
         ],
@@ -1194,7 +1194,7 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     // with only the other.
     let only_b = learned_a(&format!(
         " ttl=15 management_addresses={} capabilities=",
-        on_if(IP_B)
+        on_if(IP_B.s())
     ));
     let base_ob = a.count(&only_b);
     b.provision(&host(
@@ -2628,7 +2628,7 @@ pub async fn routed_subinterface(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_B.to_string(),
             "--peer",
-            IP_B,
+            IP_B.s(),
         ]));
         f.extend(strings(extra));
         f
@@ -2822,7 +2822,7 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&eorr, eorr_base, 30).await?;
     a.rest_expect(
         Method::POST,
-        "/v1/bgp/r1/peer/10.50.0.99/soft-in",
+        &format!("/v1/bgp/r1/peer/{REDISTRIBUTE_GATEWAY}/soft-in"),
         None,
         404,
     )
@@ -3242,10 +3242,10 @@ async fn classical_handshake(a: &Router) -> anyhow::Result<()> {
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let tcp = tokio::net::TcpStream::connect((a.id.ip, REST_PORT)).await?;
+    let tcp = tokio::net::TcpStream::connect((a.id.ip.s(), REST_PORT)).await?;
     tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
         .connect(
-            ServerName::IpAddress(a.id.ip.parse::<std::net::IpAddr>()?.into()),
+            ServerName::IpAddress(a.id.ip.s().parse::<std::net::IpAddr>()?.into()),
             tcp,
         )
         .await?;
@@ -3506,7 +3506,7 @@ async fn rest_destructive(w: &mut World) -> anyhow::Result<()> {
     log("router-r: committing a config with no users is 422 and keeps the transaction");
     r.provision(&[
         "--rest-api-address",
-        REST_ABSENT_ADDRESS,
+        REST_ABSENT_ADDRESS.s(),
         "--rest-api-port",
         &REST_PORT.to_string(),
     ])
@@ -3639,7 +3639,7 @@ impl SyslogCerts {
         let leaf = |key: &KeyPair| -> anyhow::Result<rcgen::Certificate> {
             let mut p = CertificateParams::new(vec![SYSLOG_DNS_NAME.to_string()])?;
             p.subject_alt_names
-                .push(SanType::IpAddress(IP_SYSLOG.parse()?));
+                .push(SanType::IpAddress(IP_SYSLOG.s().parse()?));
             Ok(p.signed_by(key, &issuer)?)
         };
         let ecdsa = KeyPair::generate()?;
@@ -3682,7 +3682,7 @@ async fn start_syslog_collector(w: &World, certs: &SyslogCerts) -> anyhow::Resul
             SYSLOG_COLLECTOR,
             SYSLOG_IMAGE,
             NET,
-            IP_SYSLOG,
+            IP_SYSLOG.s(),
             &[
                 "sh",
                 "-c",
@@ -3773,7 +3773,7 @@ pub async fn syslog(w: &mut World) -> anyhow::Result<()> {
     let certs = SyslogCerts::generate()?;
     start_syslog_collector(w, &certs).await?;
 
-    let addr = IP_SYSLOG.to_string();
+    let addr = IP_SYSLOG.s().to_string();
     a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
     for (name, transport) in [("c-udp", "udp"), ("c-tcp", "tcp")] {
         a.provision(&[
@@ -3918,7 +3918,7 @@ async fn router_a_log_count(w: &World, pattern: &str) -> anyhow::Result<usize> {
 
 /// Adds/updates TLS collector `name` on `port`; `extra` are the trust flags.
 async fn tls_server(w: &World, name: &str, port: u16, extra: &[&str]) -> anyhow::Result<()> {
-    let (addr, port) = (IP_SYSLOG.to_string(), port.to_string());
+    let (addr, port) = (IP_SYSLOG.s().to_string(), port.to_string());
     let mut args = vec![
         "--hostname",
         SYSLOG_HOSTNAME,
@@ -4212,7 +4212,7 @@ pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
             .collect()
     };
     let mut add = flags("--static-route");
-    add.extend(strings(&["--static-gateway", REDISTRIBUTE_GATEWAY]));
+    add.extend(strings(&["--static-gateway", REDISTRIBUTE_GATEWAY.s()]));
     a.provision(&add).await?;
 
     let ours = |items: &[serde_json::Value]| -> Vec<String> {

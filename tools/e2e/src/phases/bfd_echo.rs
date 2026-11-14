@@ -46,10 +46,10 @@ async fn echo_running(r: &Router, peer: &str, secs: u64) -> anyhow::Result<()> {
 /// accepts Echo reaches Up and Echo runs through its forwarding too.
 pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
-    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
     fa.extend(echo());
     let mut fb = B.base_flags();
-    fb.extend(bfd_route(BFD_PREFIX_A, IP_A));
+    fb.extend(bfd_route(BFD_PREFIX_A, IP_A.s()));
     fb.extend(echo());
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(fb), &[]).await?;
@@ -64,9 +64,9 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
     a.wait(&up_a).await?;
     a.wait(&echo_a).await?;
     b.wait(&echo_b).await?;
-    echo_running(a, IP_B, 15).await?;
-    echo_running(b, IP_A, 15).await?;
-    session_is(a, IP_B, "Up", None, 5).await?;
+    echo_running(a, IP_B.s(), 15).await?;
+    echo_running(b, IP_A.s(), 15).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
 
     log("dropping UDP 3785 on router-a: Down by echo-function-failed, Control untouched");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
@@ -101,7 +101,7 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
     log("filter lifted: Up again and Echo runs again");
     a.wait_new(&up_a, n_up, 30).await?;
     a.wait_new(&echo_a, n_echo, 30).await?;
-    echo_running(a, IP_B, 15).await?;
+    echo_running(a, IP_B.s(), 15).await?;
 
     log("interop: FRR bfdd accepting Echo reaches Up with Echo running through it");
     let conf = format!(
@@ -116,7 +116,7 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            IP_G,
+            IP_G.s(),
             &[
                 "sh",
                 "-c",
@@ -126,11 +126,11 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
             &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
         )
         .await?;
-    a.provision(&bfd_route(BFD_PREFIX_F, IP_G)).await?;
+    a.provision(&bfd_route(BFD_PREFIX_F, IP_G.s())).await?;
     a.wait(&format!("bfd session up peer={IP_G}")).await?;
     a.wait(&format!("bfd echo active peer={IP_G}")).await?;
-    echo_running(a, IP_G, 20).await?;
-    session_is(a, IP_G, "Up", None, 5).await?;
+    echo_running(a, IP_G.s(), 20).await?;
+    session_is(a, IP_G.s(), "Up", None, 5).await?;
     w.dock.container_remove("router-f").await;
     Ok(())
 }
@@ -146,7 +146,7 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
 /// brings both back.
 pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
-    fa.extend(bfd_route(BFD_PREFIX_B, IP_B));
+    fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
     fa.extend(strings(&[
         "--bfd-echo-mode",
         "unaffiliated",
@@ -181,7 +181,7 @@ pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
         body.contains("\"echo_only\":true") && body.contains("\"echo_active\":true"),
         "expected an echo-only session: {body}"
     );
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
 
     log("dropping UDP 3785 on router-a: Down by echo-function-failed, route withdrawn");
     let (n_failed, n_removed, n_up, n_added) = (
@@ -203,7 +203,7 @@ pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
         dropped?;
         a.wait_new(&failed, n_failed, 5).await?;
         a.wait_new(&removed, n_removed, 5).await?;
-        session_is(a, IP_B, "Down", Some("EchoFunctionFailed"), 5).await
+        session_is(a, IP_B.s(), "Down", Some("EchoFunctionFailed"), 5).await
     }
     .await;
     let lifted = tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"]).await;
@@ -213,6 +213,6 @@ pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
     log("filter lifted: Up again and the route is back");
     a.wait_new(&up, n_up, 30).await?;
     a.wait_new(&added, n_added, 30).await?;
-    session_is(a, IP_B, "Up", None, 5).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
     Ok(())
 }

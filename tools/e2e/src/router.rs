@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::consts::*;
 use crate::docker::{ContainerSpec, Dock};
+use crate::lab::Addr;
 use crate::logs::Logs;
 use crate::rest::Rest;
 
@@ -24,10 +25,10 @@ pub fn log(msg: impl AsRef<str>) {
 #[derive(Clone, Copy)]
 pub struct Id {
     pub name: &'static str,
-    pub ip: &'static str,
+    pub ip: Addr,
     pub asn: u32,
     pub rid: &'static str,
-    pub peer_ip: &'static str,
+    pub peer_ip: Addr,
     pub remote_as: u32,
 }
 
@@ -97,7 +98,7 @@ impl Id {
             "--remote-as",
             &self.remote_as.to_string(),
             "--peer",
-            self.peer_ip,
+            self.peer_ip.s(),
         ])
     }
 }
@@ -137,7 +138,7 @@ impl Router {
     /// it — since a client verifies the API against exactly that.
     pub async fn attach(dock: &Dock, id: Id) -> anyhow::Result<Self> {
         let ca = Self::fetch_rest_ca(dock, id.name).await?;
-        let rest = Rest::new(id.ip, REST_PORT, ca);
+        let rest = Rest::new(id.ip.s(), REST_PORT, ca);
         Ok(Self {
             id,
             logs: Logs::follow(rest.clone()),
@@ -174,7 +175,7 @@ impl Router {
             "--user",
             &format!("{E2E_USER}={E2E_PASSWORD}"),
             "--rest-api-address",
-            id.ip,
+            id.ip.s(),
             "--rest-api-port",
             &REST_PORT.to_string(),
         ]));
@@ -195,11 +196,11 @@ impl Router {
             &format!("--acld-arg=--flowspec-file={FLOWSPEC_DIR}/{FLOWSPEC_FILE}"),
         ]);
         cmd.extend(strings(watchdog_args));
-        log(format!("starting {} at {}", id.name, id.ip));
+        log(format!("starting {} at {}", id.name, id.ip.s()));
         dock.start(&ContainerSpec {
             name: id.name,
             network: NET,
-            ip: id.ip,
+            ip: id.ip.s(),
             cmd,
             seed: Some(("configd/config.yaml", yaml.into_bytes())),
         })
@@ -811,7 +812,7 @@ mod tests {
         let mut flags = A.base_flags();
         flags.extend(strings(&[
             "--rest-api-address",
-            A.ip,
+            A.ip.s(),
             "--rest-api-port",
             &REST_PORT.to_string(),
         ]));
@@ -825,7 +826,7 @@ mod tests {
             Some(3)
         );
         let rest = config.routing_tables[0].rest_api.as_ref().unwrap();
-        assert_eq!(rest.address.to_string(), IP_A);
+        assert_eq!(rest.address.to_string(), IP_A.s());
         assert_eq!(rest.port, REST_PORT);
 
         let yaml = serde_norway::to_string(&config).unwrap();

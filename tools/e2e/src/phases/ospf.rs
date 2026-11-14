@@ -55,7 +55,7 @@ fn asbr(mut f: Vec<String>) -> Vec<String> {
         "--static-route",
         ASBR_PREFIX,
         "--static-gateway",
-        ASBR_GATEWAY,
+        ASBR_GATEWAY.s(),
         "--redistribute-to-ospf",
     ]));
     f
@@ -870,7 +870,7 @@ pub async fn ospf_host_router(w: &mut World) -> anyhow::Result<()> {
 /// candidate for `SUBNET`.
 async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Result<()> {
     for _ in 0..secs {
-        if r.rt1_has(SUBNET, "Ospf").await? == want {
+        if r.rt1_has(SUBNET.s(), "Ospf").await? == want {
             log(format!(
                 "{}: ospf candidate for {SUBNET} present={want}",
                 r.name()
@@ -921,7 +921,7 @@ pub async fn ospf_prefix_suppression(w: &mut World) -> anyhow::Result<()> {
     // Router-b is DR on the bridge: its Network-LSA is re-originated, /32 mask.
     b.wait_new(&network_lsa, n0, 30).await?;
     // §2.1: the type-3 stub for eth0.0's subnet is gone from both Router-LSAs.
-    c.wait_ospf_route_gone(SUBNET, 15).await?;
+    c.wait_ospf_route_gone(SUBNET.s(), 15).await?;
 
     // Transit is untouched: router-b's loopback (a stub, never hidden) is
     // reached by router-a over both links — one of them across the bridge's
@@ -2047,7 +2047,7 @@ pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
             "added route prefix={OSPF_VLINK_LOOPBACK_ADDRESS} gateway={gateway} next_hops=1 .*source=Some(Ospf)"
         )
     };
-    a.wait(&added(IP_B)).await?;
+    a.wait(&added(IP_B.s())).await?;
     b.wait(&added(c_bridge)).await?;
 
     log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
@@ -2121,11 +2121,11 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
     if !w.dock.network_exists(NET_OSPF_FRR).await {
         w.dock
-            .network_create(NET_OSPF_FRR, &[OSPF_FRR_SUBNET], false)
+            .network_create(NET_OSPF_FRR, &[OSPF_FRR_SUBNET.s()], false)
             .await?;
     }
     w.dock
-        .network_connect_ip(NET_OSPF_FRR, "router-a", OSPF_FRR_IP_A)
+        .network_connect_ip(NET_OSPF_FRR, "router-a", OSPF_FRR_IP_A.s())
         .await?;
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
@@ -2146,7 +2146,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
         "--remote-as",
         &ASN_B.to_string(),
         "--peer",
-        IP_B,
+        IP_B.s(),
     ]);
     eth1.extend(ospf(OSPF_ROUTER_ID));
     a.provision_flags(&eth1).await?;
@@ -2168,7 +2168,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET_OSPF_FRR,
-            OSPF_FRR_IP_F,
+            OSPF_FRR_IP_F.s(),
             &[
                 "sh",
                 "-c",
@@ -2249,7 +2249,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     a.provision(&max_metric(true)).await?;
     frr_until(w, "show ip ospf route", 60, |out| {
         frr_route_cost(out, lo).is_some_and(|c| c >= 65535)
-            && frr_route_cost(out, SUBNET).is_some_and(|c| c < 65535)
+            && frr_route_cost(out, SUBNET.s()).is_some_and(|c| c < 65535)
     })
     .await?;
     a.provision(&max_metric(false)).await?;
@@ -2279,7 +2279,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     .await?;
     frr_until(w, "show ip ospf route", 60, |out| {
         frr_route_cost(out, lo).is_some_and(|c| c >= 65535)
-            && frr_route_cost(out, SUBNET).is_some_and(|c| c < 65535)
+            && frr_route_cost(out, SUBNET.s()).is_some_and(|c| c < 65535)
     })
     .await?;
     a.provision(&host_router(false)).await?;
@@ -3097,7 +3097,7 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &id.remote_as.to_string(),
             "--peer",
-            id.peer_ip,
+            id.peer_ip.s(),
         ]);
         f.extend(ospfv3_instance_only(router_id));
         f.extend(strings(&["--ospfv3-interface-profile", OSPFV3_PROFILE]));
@@ -3455,7 +3455,11 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
     w.require_ipv6().await?;
     if !w.dock.network_exists(NET_OSPFV3_A1).await {
         w.dock
-            .network_create(NET_OSPFV3_A1, &[OSPFV3_A1_SUBNET, OSPFV3_A1_SUBNET6], true)
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
             .await?;
     }
     for infinity in [false, true] {
@@ -3469,10 +3473,10 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
         w.start(B, None, b_args).await?;
         w.start(C, None, &[]).await?;
         w.dock
-            .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B)
+            .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
             .await?;
         w.dock
-            .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C)
+            .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
             .await?;
         let (a, b, c) = (w.a()?, w.b()?, w.c()?);
         let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
@@ -3495,7 +3499,7 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
                 "--remote-as",
                 &id.remote_as.to_string(),
                 "--peer",
-                id.peer_ip,
+                id.peer_ip.s(),
                 "--ospfv3-instance",
                 OSPFV3_INSTANCE,
                 "--ospfv3-router-id",
@@ -3515,7 +3519,7 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
         b.provision_flags(&area1(
             B,
             &format!("{OSPFV3_A1_IP_B}/24"),
-            OSPFV3_A1_ADDRESS_B,
+            OSPFV3_A1_ADDRESS_B.s(),
             OSPFV3_ROUTER_ID_B,
         ))
         .await?;
@@ -3524,14 +3528,14 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
         let mut c_flags = area1(
             C,
             &format!("{OSPFV3_A1_IP_C}/24"),
-            OSPFV3_A1_ADDRESS_C,
+            OSPFV3_A1_ADDRESS_C.s(),
             OSPFV3_ROUTER_ID_C,
         );
         c_flags.extend(strings(&[
             "--static-route",
             OSPFV3_A1_ASBR_PREFIX,
             "--static-gateway",
-            OSPFV3_A1_ADDRESS_B.trim_end_matches("/64"),
+            OSPFV3_A1_ADDRESS_B.s().trim_end_matches("/64"),
             "--redistribute-to-ospfv3",
         ]));
         c.provision_flags(&c_flags).await?;
@@ -4045,7 +4049,7 @@ fn ring_flags(id: Id, n: usize, iface: &str, address: &str, on: bool) -> Vec<Str
         "--remote-as",
         &id.remote_as.to_string(),
         "--peer",
-        id.peer_ip,
+        id.peer_ip.s(),
         "--ospf-instance",
         OSPF_INSTANCE,
         "--ospf-router-id",
@@ -4492,7 +4496,7 @@ pub async fn ospf_bfd(w: &mut World) -> anyhow::Result<()> {
             daemon: "ospf",
             on: "--ospf-bfd",
             off: "--no-ospf-bfd",
-            peer: IP_B.to_string(),
+            peer: IP_B.s().to_string(),
             loopback: strings(&[
                 "--loopback-address",
                 OSPF_SPF_LOOPBACK_ADDRESS,
@@ -4595,7 +4599,7 @@ async fn forge(w: &World, f: &Forge) -> anyhow::Result<()> {
         0
     }
     .to_string();
-    let b_ip = if f.mode == "v2" { IP_B } else { "-" };
+    let b_ip = if f.mode == "v2" { IP_B.s() } else { "-" };
     let inject = |step: &'static str, prefix: &'static str| {
         let args = [
             "python3",

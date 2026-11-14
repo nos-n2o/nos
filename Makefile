@@ -115,6 +115,7 @@ docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenA
 ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh, gh-plan-comment.sh)
 	tools/ci/coverage-compare-test.sh
 	tools/ci/prune-merged-test.sh
+	tools/ci/e2e-lab-test.sh
 	tools/ci/gh-plan-comment.test.sh
 
 prune-merged: ## Remove worktrees/target dirs of merged work + docker cache; dry run unless APPLY=1 (#1051)

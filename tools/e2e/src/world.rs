@@ -21,15 +21,7 @@ impl World {
         let dock = Dock::connect()?;
         let mut routers = BTreeMap::new();
         for id in [A, B, C, D, E] {
-            let running = dock
-                .docker
-                .inspect_container(id.name, None)
-                .await
-                .ok()
-                .and_then(|i| i.state)
-                .and_then(|s| s.running)
-                .unwrap_or(false);
-            if running {
+            if dock.running(id.name).await {
                 let router = Router::attach(&dock, id).await?;
                 router.logs.settle().await;
                 routers.insert(id.name, router);
@@ -69,12 +61,12 @@ impl World {
         // non-ospfv3 phase works without it, so fall back to IPv4-only.
         if self
             .dock
-            .network_create(NET, &[SUBNET, SUBNET6], true)
+            .network_create(NET, &[SUBNET.s(), SUBNET6.s()], true)
             .await
             .is_err()
         {
             log("warning: dual-stack network create failed (docker daemon may lack IPv6 support) — falling back to IPv4-only; ospfv3/ospfv3-dr will not work on this host");
-            self.dock.network_create(NET, &[SUBNET], false).await?;
+            self.dock.network_create(NET, &[SUBNET.s()], false).await?;
         }
         Ok(())
     }
@@ -83,8 +75,7 @@ impl World {
     /// to IPv4-only when the docker daemon can't make an IPv6 network.
     pub async fn require_ipv6(&self) -> anyhow::Result<()> {
         self.ensure_network().await?;
-        let net = self.dock.docker.inspect_network(NET, None).await?;
-        if net.enable_ipv6 != Some(true) {
+        if !self.dock.network_ipv6(NET).await? {
             anyhow::bail!("docker daemon lacks IPv6: {NET} is IPv4-only");
         }
         Ok(())
@@ -154,25 +145,9 @@ impl World {
 
     pub async fn down(&mut self) {
         self.routers.clear();
-        for name in Self::CONTAINERS {
-            self.dock.container_remove(name).await;
-            self.dock.volume_remove(&format!("{name}-run")).await;
-            self.dock.volume_remove(&format!("{name}-data")).await;
-        }
-        for net in [
-            NET,
-            NET_BOND1,
-            NET_BOND2,
-            NET_CE_A,
-            NET_CE_B,
-            NET_H,
-            NET_OSPF_FRR,
-            NET_OSPFV3_A1,
-            NET_L3_A,
-            NET_L3_B,
-        ] {
-            self.dock.network_remove(net).await;
-        }
+        // By the lab label, so this lab's containers, volumes and networks go
+        // and another lab's stay (#1049).
+        self.dock.teardown_lab().await;
     }
 
     /// `nos-e2e logs [n]`: the last `n` log lines of every running router, via REST.

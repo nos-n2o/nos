@@ -9,6 +9,7 @@ use reqwest::Method;
 
 use crate::consts::*;
 use crate::docker::Dock;
+use crate::lab::Addr;
 use crate::router::{log, Router};
 use crate::world::World;
 
@@ -38,8 +39,9 @@ const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 /// Step 2b (#544): router-b's TCP from its address, denied and sampled on
 /// router-a's `eth0` ingress (`sport`/`dport` depend on who connects).
-const LOGGED: &str =
-    "acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=10.50.0.3 dst=10.50.0.2 proto=6";
+fn logged_line() -> String {
+    format!("acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src={IP_B} dst={IP_A} proto=6")
+}
 const DETACHED: &str = "acl detached interface=eth0 direction=in";
 /// Step 6: the snapshot `nos-acld` reads, and what it logs. Rule 0 drops
 /// router-b's TCP (prio 10); rule 1 (packet length) has no flower key.
@@ -277,7 +279,7 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     );
 
     log("step 2b: d-bgp logs: router-b's retries show as acl log lines");
-    let (compiled, logged) = (a.count(COMPILED_2), a.count(LOGGED));
+    let (compiled, logged) = (a.count(COMPILED_2), a.count(&logged_line()));
     put_d_bgp(a, "before=p-bgp", true).await?;
     a.wait_new(COMPILED_2, compiled, 30).await?;
     // The kernel samples one packet in 100 (#699): the session's few retries
@@ -297,11 +299,11 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
                 ],
             )
             .await?;
-        if a.count(LOGGED) > logged {
+        if a.count(&logged_line()) > logged {
             break;
         }
     }
-    a.wait_new(LOGGED, logged, 30).await?;
+    a.wait_new(&logged_line(), logged, 30).await?;
 
     log("step 3: d-bgp moved after p-bgp: the session comes back");
     let (est, compiled) = (a.count(ESTABLISHED), a.count(COMPILED_3));
@@ -356,7 +358,7 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
 /// `flowspec-dataplane` (#562): the destination of every rule, router-a's
 /// own address, so router-g's probes arrive on its `eth0`. Not port 8080:
 /// that is the REST API the harness drives router-a through.
-const FSD_DEST: &str = "10.50.0.2/32";
+const FSD_DEST: Addr = Addr("10.50.0.2/32");
 const FSD_TCP_PORT: &str = "9999";
 const FSD_UDP_PORT: &str = "9998";
 /// nos-provision's default BGP instance, the `instance` of every push.
@@ -447,7 +449,7 @@ pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
             "--remote-as",
             &ASN_G.to_string(),
             "--peer",
-            IP_G,
+            IP_G.s(),
             "--flowspec",
             "--flowspec-interface",
             &format!("eth0={on}"),
@@ -459,12 +461,12 @@ pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&g_up, base, 60).await?;
     // RFC 8955 section 6: the rules' destination needs a unicast route from
     // the same originator. The connected route stays the one installed.
-    super::bgp::gobgp(w, &["global", "rib", "add", "-a", "ipv4", SUBNET]).await?;
+    super::bgp::gobgp(w, &["global", "rib", "add", "-a", "ipv4", SUBNET.s()]).await?;
 
     log("step 1: drop TCP from router-g: installed, counted, shown");
     let tcp = [
         "destination",
-        FSD_DEST,
+        FSD_DEST.s(),
         "source",
         &format!("{IP_G}/32"),
         "protocol",
@@ -486,7 +488,7 @@ pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
     log("step 2: rate-limit UDP: a police filter that counts");
     let udp = [
         "destination",
-        FSD_DEST,
+        FSD_DEST.s(),
         "protocol",
         "udp",
         "destination-port",
@@ -499,7 +501,7 @@ pub async fn flowspec_dataplane(w: &mut World) -> anyhow::Result<()> {
     fsd_counted(w, &probe, "rate 1000 bytes/s").await?;
 
     log("step 3: a packet-length rule is unsupported, logged and shown");
-    let len = ["destination", FSD_DEST, "packet-length", "==64"];
+    let len = ["destination", FSD_DEST.s(), "packet-length", "==64"];
     let unsupported = format!(
         "flowspec rule unsupported instance={FSD_INSTANCE} flow=.*reason=packet length: no flower key"
     );

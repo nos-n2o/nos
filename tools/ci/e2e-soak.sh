@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Soak one nos-e2e group N times (#884): GROUP=<group> N=<n> tools/ci/e2e-soak.sh
-# Holds the shared lab lock for the whole loop. Per-run logs and results.txt go
+# Holds a lab slot (tools/ci/e2e-lab.sh, #1049) for the whole loop and runs on it
+# (NOS_E2E_LAB; NOS_E2E_IMAGE is passed through). Per-run logs and results.txt go
 # to $TMPDIR/e2e-soak/<group>-<ts>/; only the last 3 failed run logs are kept.
 set -u
 
@@ -15,15 +16,15 @@ if [ "$GROUP" = multi ]; then
     exit 2
 fi
 
-LOCK=/tmp/nos-e2e.lock
-mkdir "$LOCK" 2>/dev/null || { echo "e2e-soak: lab lock $LOCK exists, another e2e run is active" >&2; exit 1; }
-trap 'rmdir "$LOCK"' EXIT
+lab=$(E2E_LAB_PID=$$ "$(dirname "$0")/e2e-lab.sh" acquire) || { echo "e2e-soak: no free lab slot, another e2e run is active" >&2; exit 1; }
+trap '"$(dirname "$0")/e2e-lab.sh" release "$lab"' EXIT
+export NOS_E2E_LAB=$lab
 
 OUT="${TMPDIR:-/tmp}/e2e-soak/$GROUP-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 RESULTS="$OUT/results.txt"
 : >"$RESULTS"
-echo "e2e-soak: $GROUP x$N, logs in $OUT"
+echo "e2e-soak: $GROUP x$N on lab $lab, logs in $OUT"
 
 pass=0
 for i in $(seq 1 "$N"); do

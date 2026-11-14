@@ -14,6 +14,26 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Phase list: [e2e-pha
 - `make e2e-preflight` (`tools/ci/e2e-preflight.sh`, the same script `verify-e2e.yml` runs before the harness) checks the host has every kernel module the lab needs and that the image's `nos-ribd` still carries its `cap_net_admin` file capability — run it when `up` fails with "REST API never came up". Which modules, which phases each blocks, and how to load them: [Host kernel modules](#host-kernel-modules).
 - **Phases must undo what they set.** Provisioning is cumulative and docker networks outlive a phase, so a leftover leaks into every later phase of a group: `ospf-opaque` disconnects router-a from the FRR network (else `link_veths` reuses that NIC as `eth1` instead of a veth to router-b), clears its `redistribute … to ospf` rule (else `ospfv3-asbr` never sees a *new* Type-5), and `ospf-bfd`/`ospfv3-bfd` clear their loopback profile (else `ospfv3-lfa` re-provisions an identical config and sees no new route). When a phase passes alone but fails in its group, bisect the earlier phases for such a leftover before touching the failing one (#456).
 
+## Parallel labs (#1049)
+
+Two labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..1); lab 0 is the historical lab, byte for byte, and is what CI uses.
+
+- **Slots.** `tools/ci/e2e-lab.sh acquire` takes the first free slot (`/tmp/nos-e2e.lock.<k>`, `NOS_E2E_LABS`, default 2), records worktree/pid/start time and prints `k`; `release <k>` frees it; `status` lists the slots and flags one whose pid is gone as STALE. Run every `nos-e2e` command of one session with `NOS_E2E_LAB=$k`. The lock spans several `cargo run -p nos-e2e` invocations (`up`, phases, `down`), so it is a script convention, not harness code. A caller whose shell exits between commands (an agent) is flagged STALE too: check `docker ps` for `l<k>-` containers before releasing.
+- **Names.** At the `Dock` boundary (`tools/e2e/src/docker.rs`) every container, network and volume name gets the prefix `l<k>-` for `k>0` (`l1-router-a`, `l1-nos-verify-net`); phases keep writing `"router-a"`. `router-r`'s `docker logs` and the `nos` uid rule see the unprefixed name.
+- **Labels.** Every container, network and volume carries `nos-e2e.lab=<k>`, and `down` / group teardown remove everything with that label, so one lab's `down` never touches the other's. A container from before #1049 has no label: remove it by hand once.
+- **Subnets.** Docker rejects overlapping pools, so each network with explicit IPAM moves with `k` (`tools/e2e/src/lab.rs`, the `Addr` constants in `consts.rs`; use `.s()` for a `&'static str`, `{ADDR}` in `format!`): `10.50/51/52.x` becomes `10.60/61/62.x`, `fd00:10:50::` `fd00:10:60::`, the CE/L3 networks `198.18.x` `198.19.x`, `fd18:`/`fd19:` `fd28:`/`fd29:`. A new explicit subnet must be an `Addr`, never a literal. Auto-allocated networks and addresses inside containers need nothing.
+- **Ports, netns, images.** No port is published (REST goes to the container IP) and veths are created into each container's netns by pid, so nothing collides on the host. The NOS image is per lab (`NOS_E2E_IMAGE`). The shared helper images (`nos-e2e-gobgp:local`, FRR, the netns helper...) are built or pulled under an `flock` on `/tmp/nos-e2e-helper-build.lock`, so two labs never race on a tag.
+- **Memory** (peak summed `docker stats` of one lab's containers, sampled every ~3 s):
+
+| Group | Peak (MiB) | Containers at peak |
+|---|---|---|
+| `base` | 397 | 2 |
+| `drivers` | 198 | 2 |
+| `ospf-suite` | 457 | 5 |
+| `multi` | 290 (stopped by #928 at `vpn`, so a lower bound) | 6 |
+
+  Measured with both labs running at once on the 31 GB, 24-core host. A lab is under 0.5 GB, far below the ~8 GB threshold at which `multi` would be kept to slot 0, so every group may run on either slot, and a third slot would fit memory-wise (the 2 GiB per-container cap is the limit, not the sum). The host's real consumers are the implementers' release builds (`CARGO_BUILD_JOBS=8` while two labs are up).
+
 ## Host kernel modules
 
 A container cannot `modprobe`, so the docker host must have every module the lab uses; a missing one makes a phase fail like a product regression (`stp-mstp`, `ospf-graceful-restart`, `vpn` did on a host without `cls_fw act_skbedit act_sample psample mpls_router mpls_iptunnel`, #897). The per-phase table is in [e2e-phases.md](../e2e-phases.md#kernel-modules).
@@ -31,6 +51,6 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 - **Failure output**: `assert_quiet` lists each offending line as `+<ms>ms <line>` (offset from the baseline-th match, or the last stored line when the baseline is 0; max 10 lines, then "and N more") plus the window. `wait_new` and `assert_quiet` log `baseline=<n>` when they start; `wait_new`'s timeout error shows the last 3 matching lines, so a stale-line false pass is visible.
 - **`Logs::barrier`**: returns when the store length is unchanged for 2 consecutive 250ms polls (capped at 10s, then it warns and returns). It is quiescence, not a guarantee that every line was delivered.
 - **Soak**: `make e2e-soak GROUP=<g> N=<n>` (`tools/ci/e2e-soak.sh`) runs one group n times serially (groups create and tear down their own containers, so runs are independent). Groups: `base`, `drivers`, `rpl`, `ospf-suite`, `pki-suite`; `multi` is refused until the `evpn-l3-chunked` hang is fixed, and `all` is not accepted (record it by hand).
-  - It holds the lab lock `/tmp/nos-e2e.lock` for the whole loop and fails fast if it exists.
+  - It acquires a lab slot (`tools/ci/e2e-lab.sh acquire`, [Parallel labs](#parallel-labs-1049)) for the whole loop, runs on it (`NOS_E2E_LAB`) and fails fast when both slots are held.
   - Output goes to `$TMPDIR/e2e-soak/<group>-<ts>/`: `results.txt` (`<i> PASS|FAIL <secs>s`, plus the failing phase and error on FAIL) and the logs of the last 3 failed runs (passing runs' logs are deleted).
   - The closing table counts failures per phase and error; paste it in the PR. Use N=10 to rank flaky checks; N=1 only proves the script.
