@@ -72,6 +72,7 @@ impl ConversationMap {
     /// ponytail: UNVERIFIED: entry width (2 bytes) and byte order (big
     /// endian) of the digest input are assumed; the likeliest interop bug.
     pub fn digest(&self) -> [u8; 16] {
+        // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- MD5 is the LACPDU wire digest (802.1AX), an integrity tag, not a security primitive
         let mut md5 = Md5::new();
         for link in &self.0 {
             md5.update(link.to_be_bytes());
