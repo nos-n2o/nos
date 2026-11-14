@@ -73,12 +73,12 @@ cargo fmt --all
 
 ## Mutation testing
 
-- Run: `make mutants` (nightly; `MUTANTS_JOBS` default 2, `MUTANTS_MEM` default 20G, `MUTANTS_ARGS` for e.g. `-f rpl/src/parser.rs` or `--shard 0/8`). `CARGO_TARGET_DIR` is unset for the run so each job builds its own copy of the tree under `MUTANTS_TMPDIR` (`~/.cache/nos-mutants`, ~20 GB per job).
+- Run: `make mutants` (nightly; `MUTANTS_JOBS` default 2, `MUTANTS_MEM` default 20G, `MUTANTS_ARGS` for e.g. `-f rpl/src/parser.rs` or `--shard 0/32`). `CARGO_TARGET_DIR` is unset for the run so each job builds its own copy of the tree under `MUTANTS_TMPDIR` (`~/.cache/nos-mutants`, ~20 GB per job).
 - A shared `CARGO_TARGET_DIR` across `-j` jobs makes a mutant run another job's binary (false MISSED), hence the unset above.
 - Memory: each test process runs under `ulimit -v` (`NOS_MUTANTS_AS_KB`, default 6 GiB) through the nextest `mutants` profile's run-wrapper (`.config/nextest.toml`); a runaway mutant aborts itself. `systemd-run --scope -p MemoryMax` wraps the whole local run as a backstop when available. A global `ulimit -v` is not used: it would break rustc.
 - Config: `.cargo/mutants.toml`. Its `exclude_globs` mirror `make coverage`'s `--ignore-filename-regex`; keep both in sync. `exclude_re` skips daemon glue (`main`, `wait_or_shutdown`, `resolve_once`, `resolve_with_retry`), which only `nos-e2e` can test.
 - Looping mutants end as TIMEOUT after `max(60s, 3x baseline)`.
-- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 16 shards (`--shard k/16`; 8 took ~107 min each against the 120 min cap, #1052), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
+- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 32 shards (`--shard k/32`; 8 and 16 left shards cancelled at the 120 min cap, #1052), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
 - Resume or re-check one mutant: `make mutants MUTANTS_ARGS="-F '^exact name$'"`.
 
 ## Dependency policy
