@@ -49,7 +49,7 @@ jobs:
 
   verify:
     needs: [plan]
-    name: verify (${{ matrix.group }} #${{ matrix.run }})
+    name: "verify (${{ matrix.group }} #${{ matrix.run }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
