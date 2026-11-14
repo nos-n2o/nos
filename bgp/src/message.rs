@@ -1476,7 +1476,10 @@ fn decode_prefixes(
         } else {
             Ipv6Addr::from(octets).into()
         };
-        let net = IpNet::new(addr, prefix_len).map_err(|_| WireError::InvalidNetworkField)?;
+        // RFC 4271 §4.3: trailing bits are irrelevant; canonicalise so keys match.
+        let net = IpNet::new(addr, prefix_len)
+            .map_err(|_| WireError::InvalidNetworkField)?
+            .trunc();
         prefixes.push(net);
         if with_ids {
             path_ids.push(path_id);
@@ -4451,6 +4454,34 @@ mod tests {
         let u = parse_update(&body, &add_path, false).unwrap();
         assert_eq!(u.withdrawn_path_ids, vec![7]);
         assert_eq!(u.withdrawn_routes.len(), 1);
+    }
+
+    #[test]
+    fn nlri_host_bits_are_truncated() {
+        // #603: /20 padded with host bits (0a 00 0f) is the same key as 10.0.0.0/20.
+        let clean: IpNet = "10.0.0.0/20".parse().unwrap();
+        assert_eq!(
+            decode_prefixes(AFI_IPV4, &[20, 10, 0, 0x0f], false)
+                .unwrap()
+                .0,
+            vec![clean]
+        );
+        assert_eq!(
+            decode_prefixes(AFI_IPV4, &[20, 10, 0, 0], false).unwrap().0,
+            vec![clean]
+        );
+        // Add-Path form.
+        assert_eq!(
+            decode_prefixes(AFI_IPV4, &[0, 0, 0, 7, 20, 10, 0, 0x0f], true).unwrap(),
+            (vec![clean], vec![7])
+        );
+        let clean6: IpNet = "2001:db8::/31".parse().unwrap();
+        assert_eq!(
+            decode_prefixes(AFI_IPV6, &[31, 0x20, 0x01, 0x0d, 0xb9], false)
+                .unwrap()
+                .0,
+            vec![clean6]
+        );
     }
 
     #[test]

@@ -634,3 +634,11 @@ fn action_communities_render_as_text() {
     assert_eq!(format_action(0x8009_0000_0000_000a), "traffic-marking:10");
     assert_eq!(format_action(0x0002_fde8_0000_2710), "RT:65000:10000");
 }
+
+#[test]
+fn dest_prefix_host_bits_are_truncated() {
+    // #603: component 1, /20 with host bits set in the third octet.
+    let mut b: &[u8] = &[20, 10, 0, 0x0f];
+    let p = decode_prefix(Afi::V4, &mut b).unwrap();
+    assert_eq!(p, v4([10, 0, 0, 0], 20));
+}

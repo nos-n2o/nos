@@ -251,7 +251,9 @@ fn decode_prefix(afi: Afi, b: &mut &[u8]) -> Result<Prefix, WireError> {
             let mut a = [0u8; 4];
             let raw = take(b, usize::from(len).div_ceil(8))?;
             a[..raw.len()].copy_from_slice(raw);
-            let net = Ipv4Net::new(Ipv4Addr::from(a), len).map_err(|_| bad())?;
+            let net = Ipv4Net::new(Ipv4Addr::from(a), len)
+                .map_err(|_| bad())?
+                .trunc();
             Ok(Prefix::v4(net))
         }
         Afi::V6 => {
@@ -266,7 +268,9 @@ fn decode_prefix(afi: Afi, b: &mut &[u8]) -> Result<Prefix, WireError> {
                 let pos = usize::from(offset) + i;
                 a[pos / 8] |= ((pat[i / 8] >> (7 - i % 8)) & 1) << (7 - pos % 8);
             }
-            let net = Ipv6Net::new(Ipv6Addr::from(a), len).map_err(|_| bad())?;
+            let net = Ipv6Net::new(Ipv6Addr::from(a), len)
+                .map_err(|_| bad())?
+                .trunc();
             Ok(Prefix {
                 net: IpNet::V6(net),
                 offset,
