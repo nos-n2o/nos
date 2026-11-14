@@ -335,6 +335,11 @@ fn on_dbd_in_exstart<L: Lsa>(
             if !is_negotiation_attempt && dbd.master {
                 return Vec::new();
             }
+            // A reply must answer our ExStart sequence number; a stale one
+            // is ignored and our negotiation DBD keeps being retransmitted.
+            if !is_negotiation_attempt && dbd.dd_sequence_number != adj.dd_sequence_number {
+                return Vec::new();
+            }
             adj.is_master = true;
             seed_summary(adj, p, local_lsdb_headers, in_scope, is_opaque);
             if is_negotiation_attempt {
@@ -469,6 +474,11 @@ fn on_dbd_in_exchange<L: Lsa>(
     if adj.is_master {
         // Expect the slave's reply to our last poll: same sequence number,
         // MS bit clear.
+        // RFC 2328 §10.6: a duplicate of the previous reply (we already
+        // advanced past it) is discarded; anything else is a mismatch.
+        if !dbd.master && dbd.dd_sequence_number == adj.dd_sequence_number.wrapping_sub(1) {
+            return Vec::new();
+        }
         if dbd.dd_sequence_number != adj.dd_sequence_number || dbd.master {
             return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
         }
@@ -484,6 +494,16 @@ fn on_dbd_in_exchange<L: Lsa>(
         }
         actions
     } else {
+        // RFC 2328 §10.6: the master's duplicate of the poll we already
+        // answered: resend our last DBD (nothing if we have none).
+        if dbd.master && dbd.dd_sequence_number == adj.dd_sequence_number {
+            return adj
+                .last_dbd_sent
+                .clone()
+                .map(Action::SendDbd)
+                .into_iter()
+                .collect();
+        }
         // Expect the master's next poll: MS bit set, sequence number one
         // past the last one we accepted.
         if !dbd.master || dbd.dd_sequence_number != adj.dd_sequence_number.wrapping_add(1) {

@@ -8,6 +8,7 @@
 //! see root `CLAUDE.md`'s dependency-graph section.
 
 pub mod bfd;
+pub mod dbd_fault;
 pub mod drouters;
 pub mod election;
 pub mod exchange;

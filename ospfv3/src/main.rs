@@ -48,6 +48,11 @@ struct Args {
     #[arg(long)]
     dbd_max_headers: Option<usize>,
 
+    /// Drop or duplicate the Nth outgoing exchange DBD, e.g. `drop:2,dup:3`
+    /// (#607). Test-only, via `--ospfv3d-arg`; never a config field.
+    #[arg(long, hide = true)]
+    dbd_fault: Option<String>,
+
     /// Originate every summary/external LSA at `LSInfinity` (`ospfv3-lsinfinity`
     /// e2e). Test-only, via `--ospfv3d-arg`; never a config field.
     #[arg(long, hide = true)]
@@ -70,6 +75,9 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let identity = bootstrap::identity()?;
+    if let Some(spec) = &args.dbd_fault {
+        nos_ospf_common::dbd_fault::install(spec).map_err(anyhow::Error::msg)?;
+    }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     bootstrap::init_tracing(

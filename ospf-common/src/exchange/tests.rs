@@ -225,7 +225,7 @@ fn master_accepts_neighbors_reply_as_exstart_trigger() {
         init: false,
         more: false,
         master: false,
-        dd_sequence_number: 999, // the neighbor's own, irrelevant to us
+        dd_sequence_number: 7, // must echo our ExStart sequence number (#607)
         lsa_headers: vec![neighbor_lsa],
     };
     let actions = on_dbd_received(
@@ -809,7 +809,7 @@ fn exchange_mismatch_as_slave_triggers_seq_number_mismatch() {
         init: false,
         more: false,
         master: true,
-        dd_sequence_number: 5, // stale, not 6
+        dd_sequence_number: 7, // skipped, not 6
         lsa_headers: Vec::new(),
     };
     let actions = on_dbd_received(
@@ -966,6 +966,78 @@ fn master_discards_duplicate_in_full() {
     assert_eq!(dbd_in(&mut adj, NeighborState::Full, &dup), []);
     dup.master = true;
     assert_eq!(dbd_in(&mut adj, NeighborState::Full, &dup), []);
+}
+
+/// A reply-shaped (MS clear) or poll-shaped (MS set) in-flight DBD at `seq`.
+fn exchange_dbd(master: bool, seq: u32) -> DbdPacket {
+    let mut d = negotiation_dbd(router_id("9.9.9.10"), seq);
+    d.init = false;
+    d.more = false;
+    d.master = master;
+    d
+}
+
+#[test]
+fn slave_in_exchange_resends_last_dbd_for_masters_duplicate_poll() {
+    // #607, RFC 2328 §10.6: the master repeats the poll we already answered.
+    let (mut adj, reply, poll) = slave_after_final_reply();
+    assert_eq!(
+        dbd_in(&mut adj, NeighborState::Exchange, &poll),
+        vec![Action::SendDbd(reply)]
+    );
+    assert_eq!(adj.dd_sequence_number, 42);
+    // Nothing kept to resend: ignored, not a mismatch.
+    adj.last_dbd_sent = None;
+    assert_eq!(dbd_in(&mut adj, NeighborState::Exchange, &poll), []);
+}
+
+#[test]
+fn master_in_exchange_discards_duplicate_reply_only() {
+    let master = |seq| AdjacencyData {
+        is_master: true,
+        dd_sequence_number: seq,
+        ..Default::default()
+    };
+    // We advanced to 6; the slave's reply to poll 5 arrives again.
+    let mut adj = master(6);
+    assert_eq!(
+        dbd_in(&mut adj, NeighborState::Exchange, &exchange_dbd(false, 5)),
+        []
+    );
+    // Any other wrong seq, or a wrong MS bit, still restarts.
+    for (m, seq) in [(false, 4), (false, 7), (true, 5)] {
+        let mut adj = master(6);
+        assert_eq!(
+            dbd_in(&mut adj, NeighborState::Exchange, &exchange_dbd(m, seq)),
+            vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
+            "ms={m} seq={seq}"
+        );
+    }
+}
+
+#[test]
+fn exstart_master_ignores_a_reply_with_the_wrong_sequence_number() {
+    let mut adj = AdjacencyData {
+        dd_sequence_number: 7,
+        ..Default::default()
+    };
+    // Neighbor 9.9.9.5 < us (9.9.9.9): we are master.
+    let mut run = |seq| {
+        let mut d = exchange_dbd(false, seq);
+        d.router_id = router_id("9.9.9.5");
+        on_dbd_received(
+            &mut adj,
+            NeighborState::ExStart,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.5"),
+            &d,
+            &[],
+            100,
+            1500,
+        )
+    };
+    assert_eq!(run(3), []);
+    assert!(run(7).contains(&Action::NeighborEvent(Event::NegotiationDone)));
 }
 
 // LSR/LSU/LSAck, moved from both daemons' `exchange` tests. Each daemon

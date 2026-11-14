@@ -336,7 +336,7 @@ fn only_the_slave_keeps_its_final_dbd_once_full() {
 }
 
 #[tokio::test]
-async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
+async fn retransmit_pending_resends_a_dbd_only_in_exstart_or_as_exchange_master() {
     let wire = Arc::new(wire::Wire::default());
     let cfg = wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint);
     let socket = (wire.opener())(&cfg).unwrap();
@@ -347,15 +347,18 @@ async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
     };
     let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
     let (_, dbd) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
-    for (state, sent) in [
-        (NeighborState::Full, false),
-        (NeighborState::Loading, false),
-        (NeighborState::Exchange, true),
+    for (state, is_master, sent) in [
+        (NeighborState::Full, true, false),
+        (NeighborState::Loading, true, false),
+        (NeighborState::ExStart, false, true),
+        (NeighborState::Exchange, false, false),
+        (NeighborState::Exchange, true, true),
     ] {
         let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
         status.send_modify(|s| {
             let mut info = neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2));
             info.adjacency = Some(AdjacencyData {
+                is_master,
                 last_dbd_sent: Some(dbd.clone()),
                 ..Default::default()
             });
@@ -364,7 +367,7 @@ async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
         let mut seq = 0;
         retransmit_pending(&socket, &cfg, Ipv4Addr::new(9, 9, 9, 9), &status, &mut seq);
         let got = tokio::time::timeout(Duration::from_millis(20), peer.recv()).await;
-        assert_eq!(got.is_ok(), sent, "{state:?}");
+        assert_eq!(got.is_ok(), sent, "{state:?} master={is_master}");
     }
 }
 

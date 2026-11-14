@@ -1206,7 +1206,11 @@ fn execute_actions(
                         "ospfv3 dbd chunk sent, more remaining"
                     );
                 }
-                ("dbd", vec![packet::encode_dbd(&pkt)])
+                let copies = nos_ospf_common::dbd_fault::copies();
+                if copies != 1 {
+                    info!(link = %cfg.attach_point, neighbor = %neighbor_id, copies, "ospfv3 dbd fault injected");
+                }
+                ("dbd", vec![packet::encode_dbd(&pkt); copies])
             }
             exchange::Action::SendLsr(requests) => {
                 ("lsr", lsr_packets(cfg, local_router_id, &requests))
@@ -1339,12 +1343,14 @@ fn retransmit_pending(
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
-        // Only while negotiating: a slave's kept final reply goes out only
-        // in answer to the master's duplicate (`exchange`), never on a timer.
-        if let (NeighborState::ExStart | NeighborState::Exchange, Some(dbd)) =
-            (info.state, &adj.last_dbd_sent)
-            && let Err(e) =
-                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(dbd))
+        // ExStart, or Exchange as master: a slave answers only the master's
+        // poll (RFC 2328 §10.8), its kept reply never goes out on a timer.
+        if let (true, Some(dbd)) = (
+            info.state == NeighborState::ExStart
+                || (info.state == NeighborState::Exchange && adj.is_master),
+            &adj.last_dbd_sent,
+        ) && let Err(e) =
+            socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(dbd))
         {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 dbd");
         }
@@ -5813,7 +5819,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
+    async fn retransmit_pending_resends_a_dbd_only_in_exstart_or_as_exchange_master() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::PointToPoint);
         let socket = (wire.opener())(&cfg).unwrap();
@@ -5824,15 +5830,18 @@ pub(crate) mod tests {
         };
         let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
         let (_, dbd) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
-        for (state, sent) in [
-            (NeighborState::Full, false),
-            (NeighborState::Loading, false),
-            (NeighborState::Exchange, true),
+        for (state, is_master, sent) in [
+            (NeighborState::Full, true, false),
+            (NeighborState::Loading, true, false),
+            (NeighborState::ExStart, false, true),
+            (NeighborState::Exchange, false, false),
+            (NeighborState::Exchange, true, true),
         ] {
             let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
             status.send_modify(|s| {
                 let mut info = neighbor_info(state, "fe80::2".parse().unwrap(), 2);
                 info.adjacency = Some(AdjacencyData {
+                    is_master,
                     last_dbd_sent: Some(dbd.clone()),
                     ..Default::default()
                 });
@@ -5840,7 +5849,7 @@ pub(crate) mod tests {
             });
             retransmit_pending(&socket, &cfg, Ipv4Addr::new(9, 9, 9, 9), &status);
             let got = tokio::time::timeout(std::time::Duration::from_millis(20), peer.recv()).await;
-            assert_eq!(got.is_ok(), sent, "{state:?}");
+            assert_eq!(got.is_ok(), sent, "{state:?} master={is_master}");
         }
     }
 
