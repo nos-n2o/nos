@@ -112,10 +112,13 @@ fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightl
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
+ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh)
+	tools/ci/coverage-compare-test.sh
+
 claude-md-size: ## Fail when a CLAUDE.md exceeds its ceiling in tools/ci/claude-md-budget.txt
 	tools/ci/check-claude-md.sh
 
-check: claude-md-size build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
+check: claude-md-size ci-scripts-test build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
 ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 
