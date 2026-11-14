@@ -90,3 +90,11 @@ Real two-container verification (see [docs/e2e-phases.md](../docs/e2e-phases.md)
 **The member links are direct veth pairs between the two containers' network namespaces, not docker networks** (unlike the static `port-aggregate` phase): a docker network is a Linux bridge, and a Linux bridge never forwards the `01:80:C2:00:00:02` slow-protocols address (the kernel refuses to enable it — it's in the restricted link-local group range), so no LACPDU could ever cross one. A throwaway privileged helper container with iproute2 creates the pairs (`World::link_veths`). The link-loss check withdraws a member by config rather than taking a link down because each `nos-interfaced` re-applies "admin up" on every 10s resync, which would undo a `link set down`.
 
 - v2 / CSCD research (#890): what is verified and what is not, byte tables, SR Linux experiments: [lacp-v2.md](lacp-v2.md); real-capture goldens in `lacp/tests/golden/`.
+
+## v2 codec (#893, UNVERIFIED)
+
+- `Lacpdu.v2: Option<V2Tlvs>`: `None` encodes the unchanged 110-byte v1 PDU; `Some` encodes version 2 with the TLVs after the Collector block (offset 58), then Terminator, padded to 110.
+- Assumed TLVs (see [lacp-v2.md](lacp-v2.md)): Port Algorithm 4 (len 6), Conversation ID Digest 5 (len 20, Link_Number + MD5), Masks 6-9 (len 130), Service Mapping Digest 10 (len 18).
+- Digest input: 4096 big-endian u16 link numbers, conversation 0 first (assumed). Mask bit order: conversation 0 is the MSB of mask 1 (assumed).
+- Decode: unknown types and wrong-length known types are skipped by length; an overrunning length makes `v2 = None`; the v1 fields stay usable; never panics.
+- `conversation::send_version(pref, last_partner_version)`: pref 2 sends 2 until a v1 PDU is seen, then 1, back to 2 on a v2 PDU; pref 1 always 1.

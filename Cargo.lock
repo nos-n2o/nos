@@ -1969,6 +1969,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "md-5",
  "nos-daemon",
  "nos-l2-socket",
  "nos-pki",
