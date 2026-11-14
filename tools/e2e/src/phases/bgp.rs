@@ -888,8 +888,9 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
     }
     a.wait_new(updated, upd_a, 30).await?;
     b.wait_new(updated, upd_b, 30).await?;
-    let (est_a, fail_a) = (
+    let (est_a, est_b, fail_a) = (
         a.count("bgp session established"),
+        b.count("bgp session established"),
         a.count("failed to update tcp-ao keys in place, resetting session"),
     );
     a.provision(&["--ao-promote-current", "1"]).await?;
@@ -901,6 +902,8 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     reestablished(a, est_a).await?;
+    // router-b logs its side of the same reset (#1076): wait for it, then baseline
+    reestablished(b, est_b).await?;
 
     log("removing key 2 on router-b too: key 1 only, current on both");
     let est_b = b.count("bgp session established");
