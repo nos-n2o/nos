@@ -6,7 +6,7 @@ use anyhow::Context;
 use reqwest::Method;
 
 use crate::consts::*;
-use crate::docker::{Dock, IMAGE};
+use crate::docker::{image, Dock};
 use crate::router::{log, Id, Router, A, B, C, D, E};
 
 pub struct World {
@@ -58,7 +58,7 @@ impl World {
 
     /// Creates the primary network (dual-stack when the docker daemon allows).
     pub async fn ensure_network(&self) -> anyhow::Result<()> {
-        self.dock.require_image(IMAGE).await?;
+        self.dock.require_image(&image()).await?;
         if self.dock.network_exists(NET).await {
             return Ok(());
         }

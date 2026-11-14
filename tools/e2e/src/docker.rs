@@ -15,7 +15,17 @@ use bollard::query_parameters::{
 use bollard::{body_full, Docker};
 use futures::StreamExt;
 
-pub const IMAGE: &str = "nos:local";
+/// The nos image every router container runs: `NOS_E2E_IMAGE`, default `nos:local`
+/// (CI). A per-worktree tag (`make docker-build IMAGE=nos:issue-N`) lets two labs
+/// run two builds without sharing the mutable `nos:local` tag (#1048).
+pub fn image() -> String {
+    image_from(std::env::var("NOS_E2E_IMAGE").ok())
+}
+
+fn image_from(v: Option<String>) -> String {
+    v.filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nos:local".to_string())
+}
 
 /// Daemons default to `trace`, which includes `mio`/`hyper`/rtnetlink packet
 /// dumps. Over REST that is self-amplifying — serving the log stream makes
@@ -175,7 +185,7 @@ impl Dock {
             ..Default::default()
         };
         let body = ContainerCreateBody {
-            image: Some(IMAGE.to_string()),
+            image: Some(image()),
             cmd: Some(spec.cmd.clone()),
             // Short 802.1AX churn-detection time so the `lacp` phase needn't wait 60s.
             env: Some(vec![
@@ -278,7 +288,7 @@ impl Dock {
             .await
     }
 
-    /// A tool shipped in the nos image (`IMAGE`) run in place of its
+    /// A tool shipped in the nos image (`image()`) run in place of its
     /// `nos-watchdogd` entrypoint, e.g. `nos-rtr-stub`.
     pub async fn start_nos_tool(
         &self,
@@ -288,7 +298,7 @@ impl Dock {
         argv: &[&str],
         caps: &[&str],
     ) -> anyhow::Result<()> {
-        self.start_plain_inner(name, IMAGE, network, ip, Some(argv), &[], None, caps)
+        self.start_plain_inner(name, &image(), network, ip, Some(argv), &[], None, caps)
             .await
     }
 
@@ -635,4 +645,16 @@ fn tar_one(path: &str, contents: &[u8]) -> anyhow::Result<Vec<u8>> {
     header.set_cksum();
     builder.append_data(&mut header, path, contents)?;
     Ok(builder.into_inner()?)
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::image_from;
+
+    #[test]
+    fn image_env_override() {
+        assert_eq!(image_from(None), "nos:local");
+        assert_eq!(image_from(Some(String::new())), "nos:local");
+        assert_eq!(image_from(Some("nos:issue-7".into())), "nos:issue-7");
+    }
 }
