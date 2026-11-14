@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Post or update the `## Implementation plan (Claude review)` comment of an issue (#1046).
+# Post or update the `## Implementation plan (Claude review)` (or `## Already fixed on master (Claude review)`) comment of an issue (#1046).
 # Usage: tools/ci/gh-plan-comment.sh <issue> <file>
 # Finds the comment by its heading and PATCHes it by id, else posts a new one (never `--edit-last`:
 # the owner shares the account). Verifies the posted body; retries gh on 403/5xx.
@@ -8,8 +8,12 @@ issue=${1:?usage: gh-plan-comment.sh <issue> <file>}
 file=${2:?usage: gh-plan-comment.sh <issue> <file>}
 repo=${NOS_REPO:-nos-n2o/nos}
 heading='## Implementation plan (Claude review)'
+# #1047: a stale-issue report uses its own heading (same find-by-heading PATCH/POST logic).
+stale='## Already fixed on master (Claude review)'
 [[ -s "$file" ]] || { echo "$file: missing or empty" >&2; exit 1; }
-[[ "$(head -n1 "$file")" == "$heading"* ]] || { echo "$file: first line must be '$heading'" >&2; exit 1; }
+first=$(head -n1 "$file")
+if [[ "$first" == "$stale"* ]]; then heading=$stale; fi
+[[ "$first" == "$heading"* ]] || { echo "$file: first line must be '$heading' or '$stale'" >&2; exit 1; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/gh-plan-comment-$issue.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT

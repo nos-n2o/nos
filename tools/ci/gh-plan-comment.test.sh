@@ -47,4 +47,10 @@ run >/dev/null && fail "3x 403 should fail"
 reset 0
 STUB_CORRUPT=1 run >/dev/null && fail "verify mismatch should fail"
 grep -q differs "$t/err" || fail "mismatch message"
+printf '## Already fixed on master (Claude review)\n\nabc123\n' >"$t/plan.md"
+reset 0 '[{"id":42,"body":"## Implementation plan (Claude review)\nold"},{"id":43,"body":"## Already fixed on master (Claude review)\nold"}]'
+run >/dev/null || fail "stale heading"
+has '-X PATCH .*comments/43' || fail "expected PATCH of 43 (stale heading)"
+printf 'nope\n' >"$t/plan.md"
+run >/dev/null && fail "bad heading should fail"
 echo ok
