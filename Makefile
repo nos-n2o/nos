@@ -107,7 +107,7 @@ FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_co
 
 fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightly + cargo-fuzz; nightly CI job, not part of check)
 	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }
-	cd fuzz && for t in $(FUZZ_TARGETS); do RUSTFLAGS="--cap-lints allow" $(FUZZ_CARGO) fuzz run $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=$(FUZZ_RSS_MB) || exit 1; done
+	cd fuzz && host=$$($(FUZZ_CARGO) -vV | sed -n 's/^host: //p') && for t in $(FUZZ_TARGETS); do RUSTFLAGS="--cap-lints allow" $(FUZZ_CARGO) fuzz run --target $$host $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=$(FUZZ_RSS_MB) || exit 1; done
 
 docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot

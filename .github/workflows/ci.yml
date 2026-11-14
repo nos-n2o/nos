@@ -281,7 +281,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # 17.6k mutants: 8 shards took ~107 min each (cap 120, #1052); 16 halves that.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -299,8 +300,8 @@ jobs:
       # Same entry point as local; the per-test cap comes from .config/nextest.toml.
       # `make mutants` reports survivors/timeouts (cargo-mutants exit 2/3) without
       # failing; only usage errors and a red unmutated baseline fail the job (#362).
-      - name: Run shard ${{ matrix.shard }}/8
-        run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/8"
+      - name: Run shard ${{ matrix.shard }}/16
+        run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/16"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

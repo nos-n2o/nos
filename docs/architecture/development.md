@@ -78,7 +78,7 @@ cargo fmt --all
 - Memory: each test process runs under `ulimit -v` (`NOS_MUTANTS_AS_KB`, default 6 GiB) through the nextest `mutants` profile's run-wrapper (`.config/nextest.toml`); a runaway mutant aborts itself. `systemd-run --scope -p MemoryMax` wraps the whole local run as a backstop when available. A global `ulimit -v` is not used: it would break rustc.
 - Config: `.cargo/mutants.toml`. Its `exclude_globs` mirror `make coverage`'s `--ignore-filename-regex`; keep both in sync. `exclude_re` skips daemon glue (`main`, `wait_or_shutdown`, `resolve_once`, `resolve_with_retry`), which only `nos-e2e` can test.
 - Looping mutants end as TIMEOUT after `max(60s, 3x baseline)`.
-- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 8 shards (`--shard k/8`), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
+- CI (`ci.yml` `mutants`, nightly or `workflow_dispatch`): 16 shards (`--shard k/16`; 8 took ~107 min each against the 120 min cap, #1052), `make mutants` reports survivors and timeouts (cargo-mutants exit 2/3) without failing; only infra errors fail; `mutants-out-<k>` artifacts hold the results.
 - Resume or re-check one mutant: `make mutants MUTANTS_ARGS="-F '^exact name$'"`.
 
 ## Dependency policy
@@ -102,7 +102,7 @@ cargo fmt --all
 
 - `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`. Property: no panic, abort or OOM.
 - Install: `make tools` (adds `cargo-fuzz`); needs a nightly toolchain.
-- Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.
+- Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target passes `--target <rustc host>` (the CI cargo-fuzz binary is musl and otherwise builds for musl, which fails) and sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.
 - Longer run of one target: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=600`.
 - Reproduce a crash: `cd fuzz && cargo +nightly fuzz run <target> artifacts/<target>/<crash-file>`.
 - A found crash becomes a regression unit test in the owning crate (minimised input as a `const` byte array) before the fix.
