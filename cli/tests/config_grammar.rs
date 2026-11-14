@@ -736,3 +736,46 @@ fn bmp_station_list() {
         }]
     );
 }
+
+#[test]
+fn lacp_v2_knobs_and_conversation_map() {
+    let mut doc = serde_json::to_value(Config {
+        port_aggregates: vec![PortAggregate {
+            name: "bond1".into(),
+            ..Default::default()
+        }],
+        interfaces: vec![Interface {
+            name: "eth1".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    for line in [
+        "set port-aggregate bond1 lacp-version 1",
+        "set port-aggregate bond1 lacp-port-algorithm c-vlan",
+        "set port-aggregate bond1 lacp-conversation-map 0 last 99",
+        "set port-aggregate bond1 lacp-conversation-map 0 member eth1",
+        "set port-aggregate bond1 lacp-conversation-map 100 last 200",
+        "delete port-aggregate bond1 lacp-conversation-map 100",
+        "set interface eth1 lacp-link-number 4",
+    ] {
+        let edit = config_grammar::parse(line, &[], &doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(&mut doc, &path, value).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    let a = &cfg.port_aggregates[0];
+    assert_eq!(a.lacp_version, LacpVersion::V1);
+    assert_eq!(a.lacp_port_algorithm, LacpPortAlgorithm::CVlan);
+    assert_eq!(
+        a.lacp_conversation_map,
+        vec![ConversationRange {
+            first: 0,
+            last: 99,
+            member: "eth1".into()
+        }]
+    );
+    assert_eq!(cfg.interfaces[0].lacp_link_number, Some(4));
+}

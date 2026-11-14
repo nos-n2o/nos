@@ -34,7 +34,13 @@ fn sample() -> PortAggregateLacpSummary {
             partner_churn: false,
             individual: false,
             unsupported_version_pdus: 0,
+            partner_version: None,
+            partner_port_algorithm: None,
         }],
+        version: nos_proto::LacpVersion::V1,
+        port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
+        agreement: nos_proto::LacpAgreement::NotApplicable,
+        conversations_per_link: Vec::new(),
     }
 }
 

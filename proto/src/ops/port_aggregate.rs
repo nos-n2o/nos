@@ -3,7 +3,8 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    Config, DfAlgorithm, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode,
+    Config, DfAlgorithm, EsRedundancy, LacpPortAlgorithm, LacpRate, LacpVersion, PortAggregate,
+    PortAggregateMode,
 };
 
 use super::OpError;
@@ -149,6 +150,20 @@ pub enum PortAggregateOp {
         /// Name of the port aggregate this op targets.
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpVersion {
+        /// Name of the port aggregate this op targets.
+        name: String,
+        /// LACP version to advertise.
+        version: LacpVersion,
+    },
+    /// Appended (postcard indexes variants by position).
+    SetLacpPortAlgorithm {
+        /// Name of the port aggregate this op targets.
+        name: String,
+        /// Port algorithm mapping frames to conversations.
+        algorithm: LacpPortAlgorithm,
+    },
 }
 
 impl PortAggregateOp {
@@ -169,6 +184,9 @@ impl PortAggregateOp {
                         df_algorithm: DfAlgorithm::default(),
                         lacp_system_id: None,
                         lacp_system_priority: None,
+                        lacp_version: crate::schema::LacpVersion::default(),
+                        lacp_port_algorithm: crate::schema::LacpPortAlgorithm::default(),
+                        lacp_conversation_map: Vec::new(),
                         min_links: 1,
                         bfd: None,
                         bfd_peer: None,
@@ -260,6 +278,14 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.df_algorithm = *algorithm;
                 Ok(())
             }
+            PortAggregateOp::SetLacpVersion { name, version } => {
+                find_aggregate_mut(config, name)?.lacp_version = *version;
+                Ok(())
+            }
+            PortAggregateOp::SetLacpPortAlgorithm { name, algorithm } => {
+                find_aggregate_mut(config, name)?.lacp_port_algorithm = *algorithm;
+                Ok(())
+            }
             PortAggregateOp::Delete { name } => {
                 let before = config.port_aggregates.len();
                 config.port_aggregates.retain(|a| &a.name != name);
@@ -300,6 +326,9 @@ mod tests {
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            lacp_version: crate::schema::LacpVersion::default(),
+            lacp_port_algorithm: crate::schema::LacpPortAlgorithm::default(),
+            lacp_conversation_map: Vec::new(),
             min_links: 1,
             bfd: None,
             bfd_peer: None,
@@ -534,5 +563,45 @@ mod tests {
         .apply(&mut cfg)
         .unwrap_err();
         assert!(matches!(err, OpError::PortAggregateNotFound(n) if n == "bond1"));
+    }
+
+    #[test]
+    fn set_lacp_version_and_algorithm() {
+        let mut cfg = Config::default();
+        let name = "bond1".to_string();
+        PortAggregateOp::Ensure {
+            name: name.clone(),
+            mode: PortAggregateMode::Lacp,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V2);
+        PortAggregateOp::SetLacpVersion {
+            name: name.clone(),
+            version: LacpVersion::V1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        PortAggregateOp::SetLacpPortAlgorithm {
+            name,
+            algorithm: LacpPortAlgorithm::SVlan,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V1);
+        assert_eq!(
+            cfg.port_aggregates[0].lacp_port_algorithm,
+            LacpPortAlgorithm::SVlan
+        );
+    }
+
+    #[test]
+    fn new_ops_roundtrip_through_postcard() {
+        let op = PortAggregateOp::SetLacpPortAlgorithm {
+            name: "b".into(),
+            algorithm: LacpPortAlgorithm::CVlan,
+        };
+        let bytes = postcard::to_allocvec(&op).unwrap();
+        assert_eq!(postcard::from_bytes::<PortAggregateOp>(&bytes).unwrap(), op);
     }
 }

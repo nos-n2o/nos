@@ -435,6 +435,20 @@ topics! {
     PortAggregateLacpSystemPriority,
     /// `Interface.lacp_port_priority`
     InterfaceLacpPortPriority,
+    /// `Interface.lacp_link_number`
+    InterfaceLacpLinkNumber,
+    /// `PortAggregate.lacp_version`
+    PortAggregateLacpVersion,
+    /// `PortAggregate.lacp_port_algorithm`
+    PortAggregateLacpPortAlgorithm,
+    /// `PortAggregate.lacp_conversation_map`
+    ConversationRange,
+    /// `ConversationRange.first`
+    ConversationRangeFirst,
+    /// `ConversationRange.last`
+    ConversationRangeLast,
+    /// `ConversationRange.member`
+    ConversationRangeMember,
     /// `Interface.lacp_mode`
     InterfaceLacpMode,
     /// `Config.bfd_profiles`

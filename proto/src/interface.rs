@@ -145,6 +145,34 @@ pub struct LacpAggregateMembers {
     pub active_members: Vec<String>,
 }
 
+/// Bytes of one link's conversation mask: 4096 conversation ids, one bit each.
+pub const LACP_CONVERSATION_MASK_LEN: usize = 512;
+
+/// One member link's share of an aggregate's conversations (#865).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpLinkConversations {
+    /// Member interface name.
+    pub member: String,
+    /// The member's `Link_Number`.
+    pub link_number: u16,
+    /// Bitmask of the conversation ids this link carries: exactly
+    /// `LACP_CONVERSATION_MASK_LEN` bytes, validated on receipt.
+    pub mask: Vec<u8>,
+}
+
+/// What `nos-lacpd` pushes to `nos-interfaced` (`InterfaceRequest::
+/// PushLacpConversations`): per-link conversation masks of one aggregate.
+/// Always the whole set (full resend); an empty `links` means plain hashing.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpAggregateConversations {
+    /// Name of the port aggregate.
+    pub aggregate: String,
+    /// One entry per link carrying mapped conversations.
+    pub links: Vec<LacpLinkConversations>,
+}
+
 /// What `nos-bfdd` pushes to `nos-interfaced` (`InterfaceRequest::
 /// PushBfdMembers`): the member interfaces of `aggregate` whose micro-BFD
 /// session (RFC 7130) is currently Up. Always the whole set (full resend,
@@ -256,6 +284,9 @@ pub enum InterfaceRequest {
         /// `true` puts the port into err-disabled, `false` releases it.
         disabled: bool,
     },
+    /// Fire-and-forget, sent by `nos-lacpd` (#865): the per-link conversation
+    /// masks of an aggregate. Appended last. No reply.
+    PushLacpConversations(LacpAggregateConversations),
 }
 
 /// The kernel state `nos-stpd` wants a bridge port in.
@@ -371,5 +402,24 @@ mod tests {
             postcard::to_allocvec(&InterfaceRequest::GetPortAggregates).unwrap(),
             vec![3]
         );
+    }
+
+    #[test]
+    fn push_lacp_conversations_roundtrips() {
+        let req = InterfaceRequest::PushLacpConversations(LacpAggregateConversations {
+            aggregate: "bond1".into(),
+            links: vec![LacpLinkConversations {
+                member: "eth1".into(),
+                link_number: 1,
+                mask: vec![0xff; LACP_CONVERSATION_MASK_LEN],
+            }],
+        });
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let InterfaceRequest::PushLacpConversations(back) = postcard::from_bytes(&bytes).unwrap()
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(back.links[0].mask.len(), 512);
+        assert_eq!(back.aggregate, "bond1");
     }
 }

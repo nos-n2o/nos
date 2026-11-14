@@ -79,13 +79,13 @@ pub use fdb::{
 };
 pub use interface::{
     BfdAggregateMembers, BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus,
-    LacpAggregateMembers, LinkState, PortAggregateStatus, StpPortAssignment, StpPortState,
-    SubinterfaceStatus,
+    LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LinkState,
+    PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
 };
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
 pub use lacp::{
-    LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
+    LacpAgreement, LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
     PortAggregateLacpSummary,
 };
 pub use lldp::{LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
@@ -94,9 +94,9 @@ pub use ops::{
     AdminOp, AsPathListOp, BfdProfileOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
     BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp,
     LoggingOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp,
-    Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateOp, PortAggregateSubinterfaceOp,
-    PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp,
-    SubinterfaceOp, SwitchingProfileOp, UserOp,
+    Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateConversationOp, PortAggregateOp,
+    PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
+    StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
     LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,
@@ -117,19 +117,19 @@ pub use schema::{
     BgpAuth, BgpBlackhole, BgpConfederation, BgpDamping, BgpFlowspecValidation, BgpGracefulRestart,
     BgpInstance, BgpLocalAs, BgpMaximumPrefix, BgpPeer, BgpPeerGroup, BgpPrefixLimit, BgpRole,
     BgpShutdown, BmpMonitor, BmpMonitorOut, BmpStation, BroadcastDomain, CommunityAlias,
-    CommunityGroup, Config, DfAlgorithm, EsRedundancy, Interface, InterfaceAddress, LacpMode,
-    LacpRate, LldpDestination, LldpSettings, LoggingSettings, NetworkType, NextHopMode, OspfArea,
-    OspfAreaRange, OspfAreaType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance,
-    OspfProfile, OspfVirtualLink, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition,
-    PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, Redistribute,
-    RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
-    RoutingTableVpn, RpkiCache, SourceAddress, StaticRoute, StaticRoutingInstance, StpMode,
-    Subinterface, SwitchingProfile, SwitchingProfileMember, SyslogFacility, SyslogServer,
-    SyslogTls, SyslogTransport, User, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS,
-    DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT, GR_SELECTION_DEFERRAL_TIME_DEFAULT,
-    GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
-    LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, REST_API_PORT_DEFAULT,
-    ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
+    CommunityGroup, Config, ConversationRange, DfAlgorithm, EsRedundancy, Interface,
+    InterfaceAddress, LacpMode, LacpPortAlgorithm, LacpRate, LacpVersion, LldpDestination,
+    LldpSettings, LoggingSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange, OspfAreaType,
+    OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, OspfVirtualLink,
+    Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode,
+    PrefixList, PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget, RestApi,
+    RoutingTable, RoutingTableEvpn, RoutingTableVpn, RpkiCache, SourceAddress, StaticRoute,
+    StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile, SwitchingProfileMember,
+    SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User, VlanTag,
+    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
+    GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT,
+    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
+    REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
 };
 pub use stp::{
     StpEvent, StpInstance, StpInstancePort, StpMst, StpPortCounters, StpPortInfo, StpRequest,

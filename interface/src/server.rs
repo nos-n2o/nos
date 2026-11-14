@@ -82,7 +82,9 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
                     | Role::Fdbd
             )
         }
-        InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
+        InterfaceRequest::PushLacpMembers(_) | InterfaceRequest::PushLacpConversations(_) => {
+            role == Role::Lacpd
+        }
         InterfaceRequest::PushBfdMembers(_) => role == Role::Bfdd,
         InterfaceRequest::SubscribeLinks => {
             matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld)
@@ -182,6 +184,19 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
         }
         InterfaceRequest::PushLacpMembers(msg) => {
             apply_lacp_push(ctx, msg).await;
+            None
+        }
+        InterfaceRequest::PushLacpConversations(msg) => {
+            // #892: accepted and dropped; the steering lands with #895.
+            if msg
+                .links
+                .iter()
+                .any(|l| l.mask.len() != nos_proto::interface::LACP_CONVERSATION_MASK_LEN)
+            {
+                warn!(aggregate = %msg.aggregate, "lacp conversations push has a malformed mask, dropped");
+            } else {
+                debug!(aggregate = %msg.aggregate, links = msg.links.len(), "lacp conversations push ignored");
+            }
             None
         }
         InterfaceRequest::PushBfdMembers(msg) => {
@@ -398,6 +413,17 @@ mod mtu_tests {
 #[cfg(test)]
 mod authz_tests {
     use super::*;
+
+    #[test]
+    fn only_lacpd_may_push_conversations() {
+        let push = InterfaceRequest::PushLacpConversations(nos_proto::LacpAggregateConversations {
+            aggregate: String::new(),
+            links: Vec::new(),
+        });
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &push), role == Role::Lacpd, "{role:?}");
+        }
+    }
 
     #[test]
     fn only_lacpd_may_rewrite_bond_membership() {

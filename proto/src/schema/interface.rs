@@ -335,6 +335,14 @@ pub struct Interface {
     #[cli(topic = InterfaceLacpPortPriority)]
     pub lacp_port_priority: Option<u16>,
 
+    /// The 802.1AX-2014 `Link_Number` naming this link in its aggregate's
+    /// conversation map, 1-65535 and unique among the aggregate's members;
+    /// `None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceLacpLinkNumber)]
+    pub lacp_link_number: Option<u16>,
+
     /// This link's LACP Activity (`Passive` = never speaks first). Only
     /// meaningful while `port_aggregate` names a `Lacp`-mode aggregate;
     /// ignored (not rejected) otherwise.
@@ -616,6 +624,7 @@ mod tests {
             port_aggregate: None,
             stp_port_profile: None,
             lacp_port_priority: None,
+            lacp_link_number: None,
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
@@ -1176,6 +1185,9 @@ mod tests {
             df_algorithm: crate::schema::DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            lacp_version: crate::schema::LacpVersion::default(),
+            lacp_port_algorithm: crate::schema::LacpPortAlgorithm::default(),
+            lacp_conversation_map: Vec::new(),
             min_links: 1,
             bfd: None,
             bfd_peer: None,

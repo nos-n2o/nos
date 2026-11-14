@@ -351,6 +351,7 @@ impl FakeInterfaced {
                     feed(&lc, InterfaceEvent::LinkChanged),
                 ),
                 InterfaceRequest::PushLacpMembers(_)
+                | InterfaceRequest::PushLacpConversations(_)
                 | InterfaceRequest::PushBfdMembers(_)
                 | InterfaceRequest::SetStpPortStates(_)
                 | InterfaceRequest::FlushFdb { .. }
@@ -423,6 +424,7 @@ fn is_push(r: &InterfaceRequest) -> bool {
     matches!(
         r,
         InterfaceRequest::PushLacpMembers(_)
+            | InterfaceRequest::PushLacpConversations(_)
             | InterfaceRequest::PushBfdMembers(_)
             | InterfaceRequest::SetStpPortStates(_)
             | InterfaceRequest::FlushFdb { .. }
