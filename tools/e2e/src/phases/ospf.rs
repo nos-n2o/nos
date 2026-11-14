@@ -1435,8 +1435,15 @@ pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {
 /// RFC 2328 §10.8 DBD pagination, forced by `--dbd-max-headers=1`. router-a
 /// also redistributes a static route (two distinct LSAs before the exchange
 /// starts), since a single-LSA summary fits in one chunk even at 1.
+/// #607: `--dbd-fault=drop:2,dup:3` makes each daemon lose its 2nd and
+/// duplicate its 3rd exchange DBD; RFC 2328 §10.6 retransmission/duplicate
+/// handling must recover without a sequence-mismatch restart.
 pub async fn ospf_dbd_pagination(w: &mut World) -> anyhow::Result<()> {
-    w.up(&["--ospfd-arg=--dbd-max-headers=1"]).await?;
+    w.up(&[
+        "--ospfd-arg=--dbd-max-headers=1",
+        "--ospfd-arg=--dbd-fault=drop:2,dup:3",
+    ])
+    .await?;
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, asbr(ospf(OSPF_ROUTER_ID))))
         .await?;
@@ -1444,7 +1451,19 @@ pub async fn ospf_dbd_pagination(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
         .await?;
     paginated(a, b).await?;
-    both_full_p2p(a, b).await
+    both_full_p2p(a, b).await?;
+    dbd_faults_survived(a, b, "ospf").await
+}
+
+/// #607: the injected DBD loss/duplicate fired and still cost no restart.
+async fn dbd_faults_survived(a: &Router, b: &Router, daemon: &str) -> anyhow::Result<()> {
+    let fault = format!("{daemon} dbd fault injected");
+    if a.wait(&fault).await.is_err() && b.wait(&fault).await.is_err() {
+        bail!("no dbd fault was ever injected");
+    }
+    let restart = format!("{daemon} neighbor sequence mismatch, restarting negotiation");
+    quiet_settled(a, &restart, 0).await?;
+    quiet_settled(b, &restart, 0).await
 }
 
 /// The same, driven purely by a real `OspfProfile.mtu` override (200 bytes)
@@ -2493,7 +2512,7 @@ pub(super) async fn frr_until(
 /// also cut to the MTU (#807): router-a must log `ospfv3 lsu split` and
 /// router-b must learn the last prefix, which one oversize LSU would lose.
 pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
-    w.up(&[]).await?;
+    w.up(&["--ospfv3d-arg=--dbd-fault=drop:2,dup:3"]).await?;
     let (a, b) = (w.a()?, w.b()?);
     let mtu = |mut f: Vec<String>| {
         f.extend(strings(&[
@@ -2534,7 +2553,8 @@ pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(split, split_a, 60).await?;
-    b.wait(&last).await
+    b.wait(&last).await?;
+    dbd_faults_survived(a, b, "ospfv3").await
 }
 
 /// #853, self-contained: `nos-ospfv3d --router-lsa-max-links=1` (test-only)

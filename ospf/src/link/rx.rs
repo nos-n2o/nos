@@ -838,7 +838,11 @@ pub(super) fn execute_actions(
                 let auth = cfg
                     .auth
                     .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-                ("dbd", vec![packet::encode_dbd(&pkt, &auth)])
+                let copies = nos_ospf_common::dbd_fault::copies();
+                if copies != 1 {
+                    info!(link = %cfg.attach_point, neighbor = %neighbor_id, copies, "ospf dbd fault injected");
+                }
+                ("dbd", vec![packet::encode_dbd(&pkt, &auth); copies])
             }
             exchange::Action::SendLsr(requests) => {
                 ("lsr", split_lsr(cfg, next_seq, local_router_id, &requests))

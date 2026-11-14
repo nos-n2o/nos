@@ -135,11 +135,13 @@ pub(super) fn retransmit_pending(
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
-        // Only while negotiating: a slave's kept final reply goes out only
-        // in answer to the master's duplicate (`exchange`), never on a timer.
-        if let (NeighborState::ExStart | NeighborState::Exchange, Some(dbd)) =
-            (info.state, &adj.last_dbd_sent)
-        {
+        // ExStart, or Exchange as master: a slave answers only the master's
+        // poll (RFC 2328 §10.8), its kept reply never goes out on a timer.
+        if let (true, Some(dbd)) = (
+            info.state == NeighborState::ExStart
+                || (info.state == NeighborState::Exchange && adj.is_master),
+            &adj.last_dbd_sent,
+        ) {
             let auth = cfg
                 .auth
                 .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
