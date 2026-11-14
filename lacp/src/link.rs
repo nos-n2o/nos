@@ -773,6 +773,7 @@ fn build_pdu(
         actor,
         partner,
         collector_max_delay: 0,
+        v2: None,
     }
 }
 
@@ -1018,6 +1019,7 @@ mod tests {
                 state: 0,
             },
             collector_max_delay: 0,
+            v2: None,
         };
         let sent = config_pdu(1);
         assert!(needs_transmit(None, &sent), "first send goes out");

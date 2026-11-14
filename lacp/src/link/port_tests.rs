@@ -112,6 +112,7 @@ fn partner_frame(state: u8) -> Vec<u8> {
         actor: partner_info(state),
         partner: our_view(),
         collector_max_delay: 0,
+        v2: None,
     })
 }
 
@@ -132,6 +133,7 @@ fn frame_with_view(state: u8, view: PortInfo) -> Vec<u8> {
         actor: partner_info(state),
         partner: view,
         collector_max_delay: 0,
+        v2: None,
     })
 }
 
@@ -341,10 +343,10 @@ fn the_limiter_defers_the_fourth_pdu_to_the_next_refill() {
     let mut r = rig(true, LacpRate::Slow);
     let pdu = r.port.pdu();
     for _ in 0..3 {
-        r.port.tx.transmit(&r.sink, "eth1", pdu);
+        r.port.tx.transmit(&r.sink, "eth1", pdu.clone());
     }
     assert_eq!(r.sink.count(), 3);
-    r.port.tx.transmit(&r.sink, "eth1", pdu);
+    r.port.tx.transmit(&r.sink, "eth1", pdu.clone());
     assert_eq!(r.sink.count(), 3);
     assert_eq!(
         r.port.tx.next_periodic_send,
@@ -643,6 +645,7 @@ fn a_changed_partner_identity_deselects_the_port() {
         actor: new,
         partner: our_view(),
         collector_max_delay: 0,
+        v2: None,
     };
     r.port.on_frame(&encode(&pdu), &r.sink);
     assert_eq!(r.observed().partner.unwrap().system, [8; 6]);
@@ -694,6 +697,7 @@ fn own_system_id_lacpdus_are_dropped_and_warn_once() {
             },
             partner: our_view(),
             collector_max_delay: 0,
+            v2: None,
         })
     };
     r.port.on_frame(&looped(100), &r.sink);

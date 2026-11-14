@@ -39,7 +39,8 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | Module | Role |
 |---|---|
 | `main.rs` | Single-instance args (`--watchdog-socket`, `--listen-socket`, `--log-socket`); starts `server::start`, `reconcile::run`, `interface_client::run` |
-| `packet.rs` | Hand-rolled LACPDU and Marker PDU codec, pure |
+| `packet.rs` | Hand-rolled LACPDU and Marker PDU codec, pure; `Lacpdu.v2` = UNVERIFIED v2 TLVs (#893, nothing sends them) |
+| `conversation.rs` | Pure CSCD model: `ConversationMap`, `PortAlgorithm`, MD5 digest, masks, `send_version` (UNVERIFIED wire choices) |
 | `socket.rs` | `LacpSocket` over `nos-l2-socket`: one member interface, ethertype `0x8809`, group `01:80:C2:00:00:02` |
 | `receive_machine.rs`, `periodic_tx_machine.rs`, `mux_machine.rs`, `churn_machine.rs` | The pure state machines (churn: 60s, `NOS_LACP_CHURN_SECS`) |
 | `selection.rs` | Config-scoped `select` |

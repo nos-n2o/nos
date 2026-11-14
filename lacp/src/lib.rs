@@ -6,6 +6,7 @@
 
 pub mod aggregate;
 pub mod churn_machine;
+pub mod conversation;
 pub mod interface_client;
 pub mod link;
 pub mod mux_machine;
