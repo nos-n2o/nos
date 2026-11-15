@@ -62,6 +62,19 @@ async fn revision(r: &Router) -> anyhow::Result<String> {
 /// capabilities below (only visible in logs): re-runnable after a
 /// log-flooding phase for the session part only. Callers following such a
 /// phase use `Router::established()`, not this phase.
+/// What `nos-bgpd` logs when a policy change is applied to a live session
+/// instead of restarting it (#629); `kind` is `import` or `export`.
+pub(super) fn in_place(peer: &str, kind: &str) -> String {
+    format!("policy changed in place peer={peer} kind=\"{kind}\"")
+}
+
+/// A peer drops ROUTE-REFRESH requests beyond a burst of 2 plus one per 10 s
+/// (`RefreshLimiter`, #396), so a phase that changes an import policy
+/// repeatedly spaces the changes out (#629).
+async fn refresh_gap() {
+    tokio::time::sleep(Duration::from_secs(11)).await;
+}
+
 pub async fn established(w: &mut World) -> anyhow::Result<()> {
     let waited = async {
         w.a()?.established().await?;
@@ -1214,6 +1227,7 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
             "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\") and this.bgp.med == 0 and this.bgp.first_as == {ASN_A} and this.bgp.neighbor_as == {ASN_A} and this.bgp.origin_as == {ASN_A} and this.bgp.as_path.path_length == 1 and this.bgp.next_hop in {SUBNET}:\n    reject\nelse:\n    accept\n"
         ),
     )?;
+    let applied = b.count(&in_place(IP_A.s(), "import"));
     b.provision(&[
         "--policy-name",
         "reject-redistribute-prefix",
@@ -1223,10 +1237,11 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
         "reject-redistribute-prefix",
     ])
     .await?;
-    // A genuinely new session: provisioning `redistribute` on router-a while
-    // router-b's is still coming back up leaves both Idle on a retry timer.
-    reestablished(a, est_a).await?;
-    reestablished(b, est_b).await?;
+    // #629: an import-policy change is a route refresh, not a restart.
+    b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
+    a.assert_quiet("bgp session established", est_a, 3).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await?;
 
     a.provision(&redistribute()).await?;
     a.wait(&loc_rib()).await?;
@@ -1237,16 +1252,88 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     let after = b.count(&learned());
     b.provision::<&str>(&[]).await?;
     b.wait_new(&learned(), after, 60).await?;
+    a.assert_quiet("bgp session established", est_a, 3).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await?;
+    policy_in_place(w, &file).await?;
     soft_reconfig(w).await?;
     as_set_export_policy(w).await?;
     call_chain(w).await
+}
+
+/// #629: with `soft-reconfiguration-inbound` off, tightening then loosening a
+/// live peer's import policy is a route refresh (the learned route leaves,
+/// then returns), and router-a's export policy withdraws then re-announces the
+/// prefix at router-b: no session on either side restarts.
+async fn policy_in_place(w: &World, reject_file: &str) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    let gone = format!("loc-rib route for {REDISTRIBUTE_PREFIX} withdrawn");
+    let import = [
+        "--policy-name",
+        "reject-redistribute-prefix",
+        "--policy-source-file",
+        reject_file,
+        "--import-policy",
+        "reject-redistribute-prefix",
+    ];
+
+    log("in place: tightening router-b's import policy withdraws the learned route");
+    refresh_gap().await;
+    let (applied, refresh, withdrawn) = (
+        b.count(&in_place(IP_A.s(), "import")),
+        b.count("sent route refresh request"),
+        b.count(&gone),
+    );
+    b.provision(&import).await?;
+    b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
+    b.wait_new("sent route refresh request", refresh, 30)
+        .await?;
+    b.wait_new(&gone, withdrawn, 30).await?;
+
+    log("in place: loosening it brings the route back from a new route refresh");
+    refresh_gap().await;
+    let (learned_before, refresh) = (b.count(&learned()), b.count("sent route refresh request"));
+    b.provision::<&str>(&[]).await?;
+    b.wait_new(&learned(), learned_before, 30).await?;
+    b.wait_new("sent route refresh request", refresh, 30)
+        .await?;
+    a.assert_quiet("bgp session established", est_a, 3).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await?;
+
+    log("in place: router-a's export policy withdraws the prefix from router-b, accept-all re-announces it");
+    let (applied, withdrawn) = (a.count(&in_place(IP_B.s(), "export")), b.count(&gone));
+    let deny_file = policy_file("reject-export-all", "reject\n")?;
+    let mut deny: Vec<&str> = redistribute();
+    deny.extend([
+        "--policy-name",
+        "reject-export-all",
+        "--policy-source-file",
+        &deny_file,
+        "--export-policy",
+        "reject-export-all",
+    ]);
+    a.provision(&deny).await?;
+    a.wait_new(&in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
+    b.wait_new(&gone, withdrawn, 30).await?;
+    let (applied, learned_before) = (a.count(&in_place(IP_B.s(), "export")), b.count(&learned()));
+    a.provision(&redistribute()).await?;
+    a.wait_new(&in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
+    b.wait_new(&learned(), learned_before, 30).await?;
+    a.assert_quiet("bgp session established", est_a, 5).await?;
+    b.assert_quiet("bgp session established", est_b, 5).await
 }
 
 /// #870: `call NAME` composes two stored policies. Router-b's import policy
 /// calls a callee that rejects (route not learned), then one that accepts
 /// (route learned); a call cycle is refused at commit.
 async fn call_chain(w: &mut World) -> anyhow::Result<()> {
-    let (a, b) = (w.a()?, w.b()?);
+    let b = w.b()?;
     for (callee, verdict, entry) in [
         ("chain-filter-reject", "reject", "chain-entry-reject"),
         ("chain-filter-accept", "accept", "chain-entry-accept"),
@@ -1266,11 +1353,9 @@ async fn call_chain(w: &mut World) -> anyhow::Result<()> {
             entry,
             &format!("call {callee}\nset this.bgp.local_pref = 150\naccept\n"),
         )?;
+        refresh_gap().await;
         let before = b.count(&learned());
-        let (est_a, est_b) = (
-            a.count("bgp session established"),
-            b.count("bgp session established"),
-        );
+        let applied = b.count(&in_place(IP_A.s(), "import"));
         b.provision(&[
             "--policy-name",
             entry,
@@ -1280,8 +1365,9 @@ async fn call_chain(w: &mut World) -> anyhow::Result<()> {
             entry,
         ])
         .await?;
-        reestablished(a, est_a).await?;
-        reestablished(b, est_b).await?;
+        // #629: applied to the live session with a route refresh.
+        b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+            .await?;
         if verdict == "reject" {
             b.assert_quiet(&learned(), before, 6).await?;
         } else {
@@ -1308,6 +1394,7 @@ async fn call_chain(w: &mut World) -> anyhow::Result<()> {
     );
 
     log("call chain: restoring router-b's accept-all import policy");
+    refresh_gap().await;
     let before = b.count(&learned());
     b.provision::<&str>(&[]).await?;
     b.wait_new(&learned(), before, 60).await
@@ -1418,7 +1505,8 @@ async fn soft_reconfig(w: &mut World) -> anyhow::Result<()> {
 /// route FRR announced is still retained when router-a's import policy
 /// rejects it, and loosening the policy re-admits it locally, with no new
 /// session and no refresh. Enabling the flag on a live no-refresh session is
-/// the one case that must restart it.
+/// the one case that must restart it, and so is an import-policy change
+/// without the flag (#629: only a refresh could re-judge, and FRR has none).
 pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
     let seed = strings(&[
         "--address",
@@ -1508,7 +1596,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
 
     log("loosening the policy re-admits it from the retained copy: same session, no refresh");
     let (est, accepted) = (a.count("bgp session established"), a.count(&reeval(1)));
-    let mut loose = seed;
+    let mut loose = seed.clone();
     loose.push("--soft-reconfiguration-inbound".into());
     a.provision_flags(&loose).await?;
     a.wait_new(&learned_frr, 0, 30).await?;
@@ -1521,7 +1609,30 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("soft reconfiguration: retention disabled", 0, 30)
         .await?;
     a.assert_quiet("bgp session established", est, 5).await?;
-    let seen = a.count(&learned_frr);
+
+    log("#629: without the flag an import-policy change needs a route refresh, which FRR cannot take: it restarts");
+    let mut rejecting = seed.clone();
+    rejecting.extend(strings(&[
+        "--policy-name",
+        "reject-frr-prefix",
+        "--policy-source-file",
+        &file,
+        "--import-policy",
+        "reject-frr-prefix",
+    ]));
+    let (in_place_before, est) = (
+        a.count("policy changed in place"),
+        a.count("bgp session established"),
+    );
+    a.provision_flags(&rejecting).await?;
+    a.wait_new("bgp session established", est, 90).await?;
+    a.assert_quiet("policy changed in place", in_place_before, 1)
+        .await?;
+    let (est, seen) = (a.count("bgp session established"), a.count(&learned_frr));
+    a.provision_flags(&seed).await?;
+    a.wait_new("bgp session established", est, 90).await?;
+    a.wait_new(&learned_frr, seen, 60).await?;
+    let (est, seen) = (a.count("bgp session established"), a.count(&learned_frr));
     set_soft_reconfig(a, true).await?;
     a.wait_new("bgp session established", est, 90).await?;
     a.wait_new(&learned_frr, seen, 60).await
@@ -1581,14 +1692,12 @@ async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(looped, loop_before, 60).await?;
 
     log("export policy matching the flat form `ASN_B` must not match the set member");
-    let (est_a, est_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    let applied = a.count(&in_place(IP_B.s(), "export"));
     let loop_before = b.count(looped);
     a.provision(&flags("set-flat-match", &negative)).await?;
-    reestablished(a, est_a).await?;
-    reestablished(b, est_b).await?;
+    // #629: the export policy is swapped in place and the aggregate withdrawn.
+    a.wait_new(&in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
     log("waiting 6s to confirm the aggregate is not exported");
     b.assert_quiet(looped, loop_before, 6).await?;
 
@@ -1603,7 +1712,10 @@ async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
 /// redistribution point, before router-a's own loc-rib.
 pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let (before_a, before_b) = (a.count(&loc_rib()), b.count(&learned()));
+    let (before_a, before_b) = (
+        a.count(&format!("{} origin=Local", loc_rib())),
+        b.count(&learned()),
+    );
     let file = policy_file(
         "reject-at-redistribute",
         &format!("if this.prefix in {REDISTRIBUTE_PREFIX}:\n    reject\nelse:\n    accept\n"),
@@ -1620,7 +1732,10 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
     a.provision(&flags).await?;
     log("waiting 6s to confirm the redistribute policy filters the prefix at the source");
     tokio::time::sleep(Duration::from_secs(6)).await;
-    let (after_a, after_b) = (a.count(&loc_rib()), b.count(&learned()));
+    let (after_a, after_b) = (
+        a.count(&format!("{} origin=Local", loc_rib())),
+        b.count(&learned()),
+    );
     if after_a > before_a {
         bail!("router-a installed the prefix into its own loc-rib despite its redistribute policy");
     }
@@ -1630,7 +1745,8 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
 
     log("reverting router-a's redistribute rule to accept-all (no policy)");
     a.provision(&redistribute()).await?;
-    a.wait_new(&loc_rib(), after_a, 60).await?;
+    a.wait_new(&format!("{} origin=Local", loc_rib()), after_a, 60)
+        .await?;
     b.wait_new(&learned(), after_b, 60).await
 }
 
@@ -1661,7 +1777,7 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
         "next-hop-loopback",
         &format!("set this.bgp.next_hop = {next_hop}\naccept\n"),
     )?;
-    // Two commits: the export policy alone first (it restarts the session),
+    // Two commits: the export policy alone first (applied in place),
     // then the prefix. In one commit, nos-ribd's redistribution push can
     // reach the old session before the restart and announce the prefix under
     // the previous policy, with router-b's own (resolvable) address (#159).
@@ -1694,15 +1810,13 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let loc = format!("loc-rib best path for {NHR_PREFIX} updated");
     let via_loopback = format!("{loc}.*next_hop=Some({next_hop})");
     let (ex0, loc0, via0) = (a.count(&excluded), a.count(&loc), a.count(&via_loopback));
-    let (est_a, est_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    let applied = b.count(&in_place(IP_A.s(), "export"));
     b.provision(&policy).await?;
-    // A new export policy restarts router-b's session.
-    reestablished(a, est_a).await?;
-    reestablished(b, est_b).await?;
-    // Same policy, so no restart: the first UPDATE already carries the loopback.
+    // #629: a new export policy is applied in place; wait for it so the
+    // prefix below is first advertised under it.
+    b.wait_new(&in_place(IP_A.s(), "export"), applied, 30)
+        .await?;
+    // Same policy: the first UPDATE already carries the loopback.
     b.provision(&advertise).await?;
     a.wait(&format!("learned route for {NHR_PREFIX} into adj-rib-in"))
         .await?;
@@ -1892,6 +2006,15 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
         f
     };
 
+    // `as-set-export-policy` and `communities` leave router-a's aggregate
+    // configured (and, since #629 no longer resets sessions, possibly
+    // active): start from none so the activation below is a new one.
+    let mut clear = redistribute();
+    clear.extend(["--remove-aggregate-address", AGGREGATE_PREFIX]);
+    if let Err(e) = a.provision(&clear).await {
+        log(format!("no leftover aggregate to clear: {e:#}"));
+    }
+
     log("router-b: redistribute a second /24, stop redistributing its own copy of router-a's");
     let (a_learned, b_loc) = (a.count(&learned_b), b.count(&loc_rib(REDISTRIBUTE_PREFIX)));
     b.provision(&[
@@ -1911,17 +2034,16 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
     // Both contributors are already in the Loc-RIB: the config change's seed
     // scan activates it with two at once.
     let activated = format!("aggregate activated aggregate={AGGREGATE_PREFIX} contributors=2 ");
-    let (act, learned) = (a.count(&activated), b.count(&learned_agg));
+    // Counted with the pattern waited on: other `learned` lines (an as-set
+    // aggregate left from an earlier phase) must not inflate the baseline.
+    let atomic = format!(
+        "{learned_agg} peer={IP_A} .*atomic_aggregate=true aggregator=Some(({ASN_A}, {RID_A}))"
+    );
+    let (act, learned) = (a.count(&activated), b.count(&atomic));
     a.provision(&a_flags(&[])).await?;
     a.wait_new(&activated, act, 30).await?;
-    b.wait_new(
-        &format!(
-            "{learned_agg} peer={IP_A} .*atomic_aggregate=true aggregator=Some(({ASN_A}, {RID_A}))"
-        ),
-        learned,
-        30,
-    )
-    .await?;
+    // The re-announcement can wait out the MRAI (30 s, #629).
+    b.wait_new(&atomic, learned, 60).await?;
 
     log("as-set: router-b sees its own ASN in the AS_SET and drops (withdraws) the aggregate");
     let a_set = format!(
@@ -2133,6 +2255,11 @@ pub async fn blackhole(w: &mut World) -> anyhow::Result<()> {
 /// survive encoding, the real session, and decoding into router-b's loc-rib.
 pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    // Router-b must not originate the prefix itself, or its own copy outranks
+    // the tagged one below. `as-set-export-policy` leaves that static route
+    // behind; a session restart used to hide it (#629).
+    b.provision(&["--remove-static-route", REDISTRIBUTE_PREFIX])
+        .await?;
     let (est_a, est_b) = (
         a.count("bgp session established"),
         b.count("bgp session established"),
@@ -4077,7 +4204,7 @@ async fn flowspec_rfc9117(w: &World) -> anyhow::Result<()> {
 /// The #560 half of `flowspec`, run while router-a holds GoBGP's IPv4 rule
 /// as valid and its IPv6 one as invalid: router-b learns and validates the
 /// IPv4 rule only; its import policy, then router-a's export policy, keep it
-/// out (each change restarts the session), and accept-all brings it back.
+/// out (each change is applied in place, #629), and accept-all brings it back.
 async fn flowspec_propagation(
     w: &World,
     a_to_b: &dyn Fn(&[&str]) -> Vec<String>,
@@ -4114,7 +4241,8 @@ async fn flowspec_propagation(
     )?;
     let rejected =
         format!("flowspec route rejected by import policy peer={IP_A} family=ipv4-flowspec");
-    let (base, sessions) = (b.count(&rejected), b.count("bgp session established"));
+    refresh_gap().await;
+    let (base, applied) = (b.count(&rejected), b.count(&in_place(IP_A.s(), "import")));
     b.provision_flags(&b_flags(&[
         "--policy-name",
         "flowspec-reject-dest",
@@ -4124,22 +4252,26 @@ async fn flowspec_propagation(
         "flowspec-reject-dest",
     ]))
     .await?;
-    reestablished(b, sessions).await?;
+    // #629: a route refresh, not a restart; router-a re-sends the rule.
+    b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
     b.wait_new(&rejected, base, 60).await?;
     if b_show().await?.contains("dest 192.0.2.0/24") {
         bail!("router-b still shows a rule its import policy rejects");
     }
-    let (base, sessions) = (b.count(&learned), b.count("bgp session established"));
+    refresh_gap().await;
+    let (base, applied) = (b.count(&learned), b.count(&in_place(IP_A.s(), "import")));
     b.provision_flags(&b_flags(&["--flowspec-import-policy", "accept-all"]))
         .await?;
-    reestablished(b, sessions).await?;
+    b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
     b.wait_new(&learned, base, 60).await?;
 
     flowspec_soft_reconfig(w, b_flags).await?;
 
     log("router-a's flowspec export policy toward router-b keeps the rule from it");
     let deny = policy_file("flowspec-export-deny", "reject\n")?;
-    let (base, sessions) = (b.count(&learned), b.count("bgp session established"));
+    let (base, applied) = (b.count(&learned), a.count(&in_place(IP_B.s(), "export")));
     a.provision_flags(&a_to_b(&[
         "--policy-name",
         "flowspec-export-deny",
@@ -4149,20 +4281,23 @@ async fn flowspec_propagation(
         "flowspec-export-deny",
     ]))
     .await?;
-    reestablished(b, sessions).await?;
+    // #629: swapped in place; the rule is withdrawn from router-b.
+    a.wait_new(&in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
     b.assert_quiet(&learned, base, 15).await?;
     if b_show().await?.contains("dest 192.0.2.0/24") {
         bail!("router-a advertised a rule its export policy rejects");
     }
-    let sessions = b.count("bgp session established");
+    let applied = a.count(&in_place(IP_B.s(), "export"));
     a.provision_flags(&a_to_b(&["--flowspec-export-policy", "accept-all"]))
         .await?;
-    reestablished(b, sessions).await?;
+    a.wait_new(&in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
     b.wait_new(&learned, base, 60).await
 }
 
 /// #866: router-b keeps the raw Flowspec rules router-a sends, so the import
-/// policy flip that restarts the session above is applied in place: the rule
+/// policy flip that route-refreshes the session above is applied from the retained copy: the rule
 /// leaves `show bgp flowspec` and comes back from the retained copy, with no
 /// new session and no new route refresh.
 async fn flowspec_soft_reconfig(
@@ -4392,10 +4527,11 @@ async fn vpn_soft_reconfig(
     // The refresh answer is asynchronous: wait for GoBGP to have sent it.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let reeval = |accepted: u32| {
-        format!(
-            "re-evaluated import policy peer={IP_G} family=vpnv4 retained=[0-9]* accepted={accepted} "
-        )
+    // Both RDs of 10.10.0.0/24 flip each time (`changed=2`); other routes
+    // GoBGP holds stay accepted, so the accepted count is not asserted (#629:
+    // no session restart trimmed them before).
+    let reeval = |_: u32| {
+        format!("re-evaluated import policy peer={IP_G} family=vpnv4 retained=[0-9]* accepted=[0-9]* changed=2")
     };
     log("rejecting 10.10.0.0/24 in place: both RDs leave the table and the VRF");
     let reject = policy_file(
@@ -5476,14 +5612,10 @@ async fn vpn_soo_and_policy(w: &World, flags: &dyn Fn(&str) -> Vec<String>) -> a
     log("removing the policy unimports it again");
     let unimported = format!("vpn route unimported table={VPN_TABLE} prefix={steered}");
     let base = a.count(&unimported);
-    // A policy change restarts the session: wait for GoBGP's routes to come
-    // back before `vpn` goes on to read them.
-    let relearned =
-        format!("vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24");
-    let base_relearned = a.count(&relearned);
+    // A policy change is a route refresh (#629), not a restart: GoBGP's other
+    // routes never left, so there is nothing to wait for but the unimport.
     a.provision_flags(&with(&[])).await?;
-    a.wait_new(&unimported, base, 60).await?;
-    a.wait_new(&relearned, base_relearned, 60).await
+    a.wait_new(&unimported, base, 60).await
 }
 
 /// `vpn`'s VRF import part (#579), with GoBGP holding 10.10.0.0/24 under
@@ -9525,19 +9657,24 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
             name,
         ]))
     };
-    let est_b = w.b()?.count(est);
+    refresh_gap().await;
+    let applied = w.b()?.count(&in_place(IP_A.s(), "import"));
     w.b()?
         .provision(&on_a(
             "otc-reject",
             &format!("if {matches}:\n    reject\nelse:\n    accept\n"),
         )?)
         .await?;
-    reestablished(w.b()?, est_b).await?;
+    // #629: applied in place, the route refresh re-judges router-a's route.
+    w.b()?
+        .wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
     let learned_otc = format!("{} .*otc=Some({ASN_A})", learned());
     let base = w.b()?.count(&learned_otc);
     w.b()?.assert_quiet(&learned_otc, base, 10).await?;
 
     log("otc: the same condition as an accept finds a's route again");
+    refresh_gap().await;
     let base = w.b()?.count(&learned_otc);
     w.b()?
         .provision(&on_a(

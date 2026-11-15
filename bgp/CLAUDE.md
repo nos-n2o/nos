@@ -18,7 +18,7 @@ Resolves peers and VRF from `nos-configd`, runs the FSM over VRF-scoped TCP, exc
 ## Raw TCP session model
 
 - Per peer, an active retry loop plus one shared passive listener (`0.0.0.0:179` + `[::]:179`), both scoped into the VRF by `SO_BINDTODEVICE` (`tcp.rs`).
-- Skip dialing while `PeerSlot::is_established` (either role).
+- No dialing while `PeerSlot::is_established` (either role).
 - Retry sleep is jittered `[0.75, 1] x connect_retry_time` (`session::jittered`) (#158).
 - Shutdown/removal: `PeerSlot::stop` + abort listeners before the Cease (#444).
 - **Both roles must be stopped on reconcile.** `peer_tasks` owns only the active loop; passive sessions live on the `PeerSlot` (`set_passive_task`/`stop_passive`). Both stops are `abort()`s that skip `fsm::run`'s exit path, so `reconcile_peers` calls `BgpRib::peer_disconnected` itself, or Adj-RIB-In outlives the session.
@@ -28,20 +28,20 @@ Resolves peers and VRF from `nos-configd`, runs the FSM over VRF-scoped TCP, exc
 - Socket-level only: `fsm.rs` never sees it. MD5 or TCP-AO, mutually exclusive (one per socket); `setsockopt` lives in `nos-tcp-auth`. Keys are admin labels (#508): `ResolvedAuth::resolve(&BgpAuth, &Config)`, subscribed with `DiffScope::Admin`, so a rotation restarts the peer except what `session::ao_delta` expresses.
 - The listener is shared: keys are installed per peer address (`applied_auth`, `sync_listener_auth`; `spawn_listeners` primes them).
 - `tcp::apply_auth(on_listener)` strips `set_current`/`set_rnext` for a socket in `LISTEN` (`TCP_AO_ADD_KEY` returns `EINVAL` otherwise); the active side keeps them.
-- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (errors such as `EBUSY` reset).
+- Hitless rollover (#83): the kernel does RFC 5925 §7.5.2 per connection; `ao_delta` returns `None` (restart) for MD5, a changed kept key or a reused RecvID, else an Established session gets `FsmCommand::UpdateAo` (`EBUSY` etc. reset).
 
 ## GTSM / `max-hops`
 
-`tcp::bind_listener` always sets TTL 255 or a GTSM active side drops the SYN-ACK; the minimum TTL is per socket (`apply_max_hops`).
+`tcp::bind_listener` always sets TTL 255 or a GTSM active side drops the SYN-ACK; minimum TTL is per socket (`apply_max_hops`).
 
 ## BGP finite state machine
 
 - `fsm::step` is the pure transition core, unit-tested; `fsm::run` owns the framed socket and timers. `UPDATE`/`ROUTE_REFRESH` bypass `step` (handled in `run`'s read branch, only once `Established`).
 - Send to a peer only via `OutboxTx::send` (bounded, coalescing, #395).
 - Every well-formed inbound message resets the hold timer (RFC 4271 §4.4), in the read branch.
-- Timer defaults/floors: `nos_proto`; OPEN order: internals. OpenSent wait 240 s at hold 0 (#665).
+- Timer defaults/floors: `nos_proto`; OPEN order: internals; OpenSent wait 240 s at hold 0 (#665).
 - The `PeerSlot` command channel is polled only while `Established`, so one task contends for it.
-- 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; a peer without it gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN is emitted only above 255 bytes.
+- 4-octet AS: `AS_TRANS` without capability 65 is a bad peer AS; such a peer gets `BgpCodec::two_octet_as` (`AS4_PATH` merge). RFC 9072 OPEN only above 255 bytes.
 
 ## Aggregation (#78)
 
@@ -57,23 +57,23 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Collision resolution
 
-`collision::PeerSlot` is shared by both roles. An already-`Established` connection beats an ID compare; a tie keeps the first registered. `fsm::run` calls `BgpRib::peer_disconnected` **only if it registered** (its `registered` flag), or a collision loser wipes the winner's `adj_rib_in`/`peer_outbox`. A displaced loser (`mark_established` false) must not register (#965).
+`collision::PeerSlot` is shared by both roles. An `Established` connection beats an ID compare; a tie keeps the first registered. `fsm::run` calls `BgpRib::peer_disconnected` **only if it registered** (its `registered` flag), or a collision loser wipes the winner's `adj_rib_in`/`peer_outbox`. A displaced loser never registers (#965).
 
 ## Administrative shutdown
 
-`session::cease_reason` picks the Cease subcode for every session `reconcile_peers` stops (2 shutdown with an RFC 9003 message, 3 de-configured, 6 other change); `FsmCommand::Cease` carries already-encoded `data`.
+`session::cease_reason` picks the Cease subcode of every session `reconcile_peers` stops (2 shutdown with an RFC 9003 message, 3 de-configured, 6 other change); `FsmCommand::Cease` carries encoded `data`.
 
 ## Maximum prefixes
 
-Counters (`path_counts`) change only in `put_path`/`take_path`, the sole Adj-RIB-In mutators (`prefix_counters_match_a_recount_through_every_mutation`). The hold lives on `PeerSlot`; the Cease is queued once (a queued command outlives the session). No built-in cap; `limit 0` = explicitly uncapped.
+Counters (`path_counts`) change only in `put_path`/`take_path`, the sole Adj-RIB-In mutators (`prefix_counters_match_a_recount_through_every_mutation`). The hold lives on `PeerSlot`; the Cease is queued once (it outlives the session). No built-in cap; `limit 0` = uncapped.
 
 ## Route refresh
 
-Route Refresh (2) and Enhanced (70) are always advertised. The RFC 7313 stale deadline is one per family, per session. Peer requests pass `RefreshLimiter` (2, then 1/10s). `send_route_refresh` sends nothing without the peer's capability.
+Route Refresh (2) and Enhanced (70) always advertised. The RFC 7313 stale deadline is one per family, per session. Peer requests pass `RefreshLimiter` (per family, 2 then 1/10s).
 
 ## Soft reconfiguration inbound (#859)
 
-`rib/retain.rs` keeps pre-policy copies; `remove_path` drops them. `Reapply` (`diff_peers`) applies policy/flag-only changes in place; `session/reeval.rs` re-evaluates in chunks.
+`rib/retain.rs` keeps pre-policy copies; `remove_path` drops them. `Reapply` (`diff_peers`) applies policy/flag-only changes in place (#629: import without the flag = `Refresh`, restart without the capability; export = `BgpRib::reexport_peer`, a diff, never `resend_all`); `session/reeval.rs` re-evaluates in chunks. Export policies: read `PeerSlot`, not `slot.peer`.
 
 ## RPKI
 
@@ -81,7 +81,7 @@ Runs inside `nos-bgpd` (#17). `BgpRib::set_vrps` re-validates in place; peers wh
 
 ## BMP (#878)
 
-`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy = the received UPDATE; post-policy = a tap at every Adj-RIB-In mutation (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Stats: a new drop site bumps `PeerStats`. Out (#867): `fsm::write_update`.
+`Hub` in `SharedRib` (`bgp_rib.bmp()`); the FSM only pushes, under a std mutex. Peer Up/Down at `ReportEstablished`/the `registered` exit. Dial only on `Resolved`. Route Monitoring (#864): pre-policy = the received UPDATE; post-policy = a tap at every Adj-RIB-In mutation (`learn_*`, `drop_*`, `remove_path`, `settle`): a new site must tap. Stats: a new drop site bumps `PeerStats`. Out (#867): `fsm::write_update`.
 
 ## Graceful restart (#12)
 
@@ -103,7 +103,7 @@ Route-server candidates (`rs_candidates`) are never filtered by feasibility or a
 
 - The codec's rx set (reader `add_path_afis`) and tx set (writer) differ; encoding writes an id whenever the update has one, so the RIB must never hand a tx session an id-less NLRI.
 - `propagate_add_path` runs first in `recompute_and_propagate`, before the "best unchanged" return (a non-best path can change the top N), and beside `fan_out` in `aggregate.rs`.
-- A path keeps its id while selected; an entering path takes the lowest freed id, else `add_path_next_id` (monotonic per (peer, prefix), never recycled). Step 10 compares `(peer, path id)`.
+- A path keeps its id while selected; an entering path takes the lowest freed id, else `add_path_next_id` (monotonic per (peer, prefix)). Step 10 compares `(peer, path id)`.
 
 ## Communities
 
@@ -115,12 +115,11 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 - MAC mobility has **no withdraw**: a sequence only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; else PEs on one segment freeze each other as duplicates.
 - Flowspec, VPN (keyed by (RD, prefix), every RT kept, no ADD-PATH), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
-- `nos-bgpd` is dumb about origination: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table).
+- `nos-bgpd` never originates on its own: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local` by `EvpnSource`, `vpn_local` by table).
 
 ## L3VPN (#573), RT-Constraint (#875)
 
 - RT-Constraint interest is the per-peer `rtc_adj_rib_in` (stale entries included), cached as `PeerOutbox.rtc_interest`; `None` = family not negotiated = no filtering. Type-4 is never filtered.
-
 - A reflector holds every VPN path whatever its RTs (no VRF needed) and keeps label, RD and next hop; a VRF export is next-hop-self.
 - Imported routes are never re-exported; a route with a VRF's own Site of Origin is not imported into it.
 - The label is owned and persisted by `nos-ribd`, never `nos-bgpd`.
@@ -132,7 +131,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 
 ## IGP cost, next-hop feasibility
 
-`igp_client.rs` polls `nos-ribd` every 2s. Infeasible candidates (`next_hop_feasible`) leave the decision entirely, except before the first `set_igp` and for route-server clients; `set_igp` re-decides every Adj-RIB-In prefix (details: internals page).
+`igp_client.rs` polls `nos-ribd` every 2s. Infeasible candidates (`next_hop_feasible`) leave the decision, except before the first `set_igp` and for route-server clients; `set_igp` re-decides every prefix (internals page).
 
 ## BFD (#286)
 

@@ -270,6 +270,125 @@ impl BgpRib {
         }
     }
 
+    /// Installs `peer`'s new export policies (#629) and brings it in line:
+    /// every prefix, VPN path and Flowspec rule is re-run through the
+    /// per-peer advertise path and diffed against what was sent, so a route
+    /// the policy now refuses is withdrawn and a newly accepted one
+    /// announced; an identical one sends nothing. (`resend_all` re-announces
+    /// only and never withdraws.) While deferring only the policies are
+    /// swapped: the end-of-deferral initial update covers the rest. EVPN has
+    /// no export policy.
+    pub fn reexport_peer(
+        &mut self,
+        peer: IpAddr,
+        unicast: Arc<CompiledPolicy>,
+        flowspec: Option<Arc<CompiledPolicy>>,
+    ) {
+        if !self.peer_outboxes.contains_key(&peer) {
+            return;
+        }
+        let mut prefixes: HashSet<IpNet> = self.loc_rib.keys().copied().collect();
+        prefixes.extend(self.adj_rib_out.get(&peer).into_iter().flatten().copied());
+        prefixes.extend(
+            self.add_path_sent
+                .keys()
+                .filter(|(p, _)| *p == peer)
+                .map(|(_, n)| *n),
+        );
+        let advertise = |rib: &Self, prefix: IpNet| {
+            let outbox = &rib.peer_outboxes[&peer];
+            if outbox.add_path_tx.contains(&family_of(prefix)) {
+                return None;
+            }
+            rib.loc_rib
+                .get(&prefix)
+                .filter(|_| !rib.suppressed_by_aggregate(prefix))
+                .and_then(|route| {
+                    build_advertisement(
+                        prefix,
+                        route,
+                        peer,
+                        outbox,
+                        rib.local_asn,
+                        rib.source_is_rr_client(route),
+                        rib.cluster_id,
+                        None,
+                    )
+                })
+        };
+        // `adj_rib_out` holds prefixes, not attributes: what was sent is
+        // rebuilt under the old policy before the swap.
+        let deferring = self.deferring();
+        let before: Vec<_> = if deferring {
+            Vec::new()
+        } else {
+            prefixes.iter().map(|p| (*p, advertise(self, *p))).collect()
+        };
+        self.peer_outboxes
+            .get_mut(&peer)
+            .expect("checked")
+            .export_policy = unicast;
+        match flowspec {
+            Some(p) => self.flowspec_export.insert(peer, p),
+            None => self.flowspec_export.remove(&peer),
+        };
+        if deferring {
+            return;
+        }
+        for (prefix, was) in before {
+            let outbox = &self.peer_outboxes[&peer];
+            if outbox.add_path_tx.contains(&family_of(prefix)) {
+                self.propagate_add_path(prefix, Some(peer));
+                continue;
+            }
+            let adv = advertise(self, prefix);
+            let sent = self.adj_rib_out.entry(peer).or_default();
+            if let Some(adv) = adv {
+                if was.as_ref() == Some(&adv) && sent.contains(&prefix) {
+                    continue;
+                }
+                sent.insert(prefix);
+                outbox.tx.send(OutboundUpdate::Announce(adv));
+            } else if sent.remove(&prefix) {
+                outbox.tx.send(OutboundUpdate::Withdraw(
+                    prefix,
+                    outbox.mp_bgp_negotiated,
+                    None,
+                ));
+            }
+        }
+        let flow: Vec<_> = self
+            .flowspec_loc
+            .keys()
+            .chain(
+                self.flowspec_adj_rib_out
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(std::collections::HashMap::keys),
+            )
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        for k in flow {
+            self.sync_flow_to(peer, &k, false);
+        }
+        let vpn: HashSet<_> = self
+            .vpn_loc
+            .keys()
+            .chain(
+                self.vpn_adj_rib_out
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(std::collections::HashMap::keys),
+            )
+            .copied()
+            .collect();
+        for k in vpn {
+            self.sync_vpn_to(peer, &k, false);
+        }
+    }
+
     /// RFC 7313 `BoRR` received: every `family` route currently held from
     /// `peer` becomes stale until the peer re-announces it.
     pub fn begin_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) {

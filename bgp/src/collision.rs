@@ -181,6 +181,10 @@ pub struct PeerSlot {
     /// The EVPN and Flowspec import policies, replaceable like `import_policy`.
     evpn_import: std::sync::Mutex<Option<Arc<nos_rpl::CompiledPolicy>>>,
     flowspec_import: std::sync::Mutex<Option<Arc<nos_rpl::CompiledPolicy>>>,
+    /// The unicast/VPN and Flowspec export policies, replaceable like
+    /// `import_policy` (#629): an established session's copy lives in the RIB
+    /// outbox (`BgpRib::set_peer_export_policy`); a new session reads these.
+    export: std::sync::Mutex<ExportPolicies>,
     /// `peer.soft_reconfiguration_inbound`, replaceable for the same reason.
     soft_reconfig: std::sync::atomic::AtomicBool,
     /// What the established session negotiated: bit 0 RFC 2918 Route Refresh,
@@ -189,6 +193,12 @@ pub struct PeerSlot {
     /// The running re-evaluation pass, if any (see `reeval_begin`).
     reeval: std::sync::Mutex<ReevalState>,
 }
+
+/// A peer's (unicast/VPN, Flowspec) export policies.
+pub type ExportPolicies = (
+    Arc<nos_rpl::CompiledPolicy>,
+    Option<Arc<nos_rpl::CompiledPolicy>>,
+);
 
 /// Why a `soft-in` got no counts: a policy change started a newer pass, the
 /// session went down, or the pass tripped a maximum-prefix limit.
@@ -223,6 +233,10 @@ impl PeerSlot {
             import_policy: std::sync::Mutex::new(peer.import_policy.clone()),
             evpn_import: std::sync::Mutex::new(peer.evpn_import_policy.clone()),
             flowspec_import: std::sync::Mutex::new(peer.flowspec_import_policy.clone()),
+            export: std::sync::Mutex::new((
+                peer.export_policy.clone(),
+                peer.flowspec_export_policy.clone(),
+            )),
             soft_reconfig: std::sync::atomic::AtomicBool::new(peer.soft_reconfiguration_inbound),
             refresh_caps: std::sync::atomic::AtomicU8::new(0),
             reeval: std::sync::Mutex::new(ReevalState::default()),
@@ -302,6 +316,21 @@ impl PeerSlot {
             .flowspec_import
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = flowspec;
+    }
+
+    /// The current unicast/VPN and Flowspec export policies (`None` accepts all Flowspec).
+    pub fn export_policies(&self) -> ExportPolicies {
+        self.export
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_export_policies(&self, p: ExportPolicies) {
+        *self
+            .export
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = p;
     }
 
     pub fn set_import_policy(&self, policy: Arc<nos_rpl::CompiledPolicy>) {
