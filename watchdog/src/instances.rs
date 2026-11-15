@@ -366,6 +366,10 @@ mod tests {
     }
 
     fn section(name: &str, status: DiffStatus, claim: Claim) -> SectionDiff {
+        section_for("rest-api", name, status, claim)
+    }
+
+    fn section_for(label: &str, name: &str, status: DiffStatus, claim: Claim) -> SectionDiff {
         let new = match claim {
             Claim::Silent => None,
             Claim::Is(v) => Some(Some(v.to_string())),
@@ -377,7 +381,7 @@ mod tests {
             status,
             fields: new
                 .map(|new| nos_proto::FieldDiff {
-                    label: "rest-api".to_string(),
+                    label: label.to_string(),
                     old: None,
                     new,
                 })
@@ -403,6 +407,39 @@ mod tests {
             pass_through(&flags, "rt7"),
             ["--profile-memory-out=/tmp/dhat-rt7.json", "--plain"]
         );
+    }
+
+    /// `nos-restd` and `nos-sshd` share `RoutingTables`; each follows only its own label.
+    #[tokio::test]
+    async fn two_opt_in_families_on_one_scope_do_not_interfere() {
+        let (rest, ssh) = (managed(Some("rest-api")), managed(Some("ssh-server")));
+        let (mut ri, mut si) = (Instances::default(), Instances::default());
+        let diff = |l: &str, st, c| [section_for(l, "rt1", st, c)];
+        // Setting ssh-server spawns only the SSH family.
+        let d = diff("ssh-server", DiffStatus::Modified, Claim::Is("0.0.0.0:22"));
+        apply_diff(&mut ri, &d, &rest).await;
+        apply_diff(&mut si, &d, &ssh).await;
+        assert_eq!((names(&ri), names(&si)), (Vec::<&str>::new(), vec!["rt1"]));
+        // Added without either field spawns neither.
+        let d = [section("rt2", DiffStatus::Added, Claim::Silent)];
+        apply_diff(&mut ri, &d, &rest).await;
+        apply_diff(&mut si, &d, &ssh).await;
+        assert_eq!((names(&ri), names(&si)), (Vec::<&str>::new(), vec!["rt1"]));
+        // Pinning rest-api leaves ssh alone; unsetting ssh stops only it.
+        let d = diff("rest-api", DiffStatus::Modified, Claim::Is("[::1]:80"));
+        apply_diff(&mut ri, &d, &rest).await;
+        apply_diff(&mut si, &d, &ssh).await;
+        assert_eq!((names(&ri), names(&si)), (vec!["rt1"], vec!["rt1"]));
+        let d = diff("ssh-server", DiffStatus::Modified, Claim::Is("unset"));
+        apply_diff(&mut ri, &d, &rest).await;
+        apply_diff(&mut si, &d, &ssh).await;
+        assert_eq!((names(&ri), names(&si)), (vec!["rt1"], Vec::<&str>::new()));
+        // Removal stops the rest of it.
+        let d = diff("rest-api", DiffStatus::Removed, Claim::Gone);
+        apply_diff(&mut ri, &d, &rest).await;
+        assert_eq!(names(&ri), Vec::<&str>::new());
+        shutdown_all(ri, &rest).await;
+        shutdown_all(si, &ssh).await;
     }
 
     #[tokio::test]

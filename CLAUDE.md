@@ -105,7 +105,7 @@ Mechanisms live in [`docs/architecture/`](docs/architecture/README.md) (also ben
 - A subscriber sends its request and never writes again: the server must not close a subscribed connection on request-side EOF.
 
 **Process supervision** ([page](docs/architecture/supervision.md))
-- `nos-watchdogd` supervises everything; per-object families (`nos-bgpd`, `nos-ribd`, `nos-ospfd`, `nos-fdbd`, `nos-restd`) are spawned from `Request::SubscribeDiff`; `nos-interfaced`, `nos-logd`, `nos-lacpd`, `nos-lldpd`, `nos-stpd` are single fixed processes.
+- `nos-watchdogd` supervises everything; per-object families (`nos-bgpd`, `nos-ribd`, `nos-ospfd`, `nos-fdbd`, `nos-restd`, `nos-sshd` (opt-in per table, root)) are spawned from `Request::SubscribeDiff`; `nos-interfaced`, `nos-logd`, `nos-lacpd`, `nos-lldpd`, `nos-stpd` are single fixed processes.
 - The first diff on a connection is authoritative (stop anything not in it); `Modified` is a no-op at watchdog level because daemons re-resolve their own config.
 - Crash backoff is exponential (1s to 30s); SIGINT then 10s then kill; `docker-compose.yml` keeps `stop_grace_period: 15s`.
 - Every supervised process gets its identity on stdin (`ProcessSpec::with_identity`).

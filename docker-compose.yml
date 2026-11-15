@@ -42,6 +42,7 @@ services:
     tmpfs:
       - /tmp
       - /run/nos-users
+      - /run/nos-sshd
     # Do NOT set `security_opt: [no-new-privileges:true]`: the kernel then
     # ignores file capabilities on exec, so every setcap binary (ribd,
     # interfaced, bgpd, ...) loses its capabilities, nos-watchdogd's
