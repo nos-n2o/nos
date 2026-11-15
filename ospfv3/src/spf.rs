@@ -1830,7 +1830,7 @@ mod tests {
     #[test]
     fn backbone_view_and_skip_summaries() {
         use crate::lsa::{InterAreaPrefixLsaBody, InterAreaRouterLsaBody};
-        let (root, abr, asbr) = (router_id(1), router_id(2), router_id(9));
+        let (root, abr, boundary) = (router_id(1), router_id(2), router_id(9));
         let prefix: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
         let lsas = [
             router_lsa(root, vec![p2p(abr, 1, 2, 1)]),
@@ -1844,17 +1844,17 @@ mod tests {
                 }),
             }),
             Arc::new(Lsa {
-                header: header(lsa::LSA_TYPE_INTER_AREA_ROUTER, asbr, abr),
+                header: header(lsa::LSA_TYPE_INTER_AREA_ROUTER, boundary, abr),
                 body: LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
                     options: 0x13,
                     metric: 5,
-                    destination_router_id: asbr,
+                    destination_router_id: boundary,
                 }),
             }),
         ];
         let view = backbone_view(root, &lsas);
         assert_eq!(view.inter_prefixes, [(prefix, 11)]);
-        assert_eq!(view.inter_asbrs, [(asbr, 6, 0x13)]);
-        assert!(view.intra.asbrs.is_empty());
+        assert_eq!(view.inter_asbrs, [(boundary, 6, 0x13)]);
+        assert_eq!(view.intra.asbrs.len(), 0);
     }
 }
