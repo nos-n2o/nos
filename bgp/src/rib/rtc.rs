@@ -293,6 +293,7 @@ impl BgpRib {
             return;
         }
         self.resync_vpn(peer, keys);
+        self.resync_vpn_flow(peer, keys);
         self.resync_evpn(peer, keys);
     }
 
@@ -439,6 +440,22 @@ impl BgpRib {
             .collect();
         for k in touched {
             self.sync_vpn_to(peer, &k, false);
+        }
+    }
+
+    /// Re-syncs `peer` for every selected SAFI 134 rule one of `keys` covers.
+    fn resync_vpn_flow(&mut self, peer: IpAddr, keys: &[RtcKey]) {
+        let touched: Vec<_> = self
+            .vpn_flow_loc
+            .iter()
+            .filter(|(_, (_, r))| {
+                keys.iter()
+                    .any(|n| n.covers_any(&r.attributes.extended_communities))
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in touched {
+            self.sync_vpn_flow_to(peer, &k, false);
         }
     }
 

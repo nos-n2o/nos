@@ -614,6 +614,9 @@ pub enum OutboundUpdate {
     /// An RFC 4684 membership route (see `rtc`).
     AnnounceRtc(AdvertisedRtc),
     WithdrawRtc(RtcKey),
+    /// A selected VPN Flowspec rule under its RD (see `flowspec_vpn`).
+    AnnounceVpnFlowspec(crate::vpn::Rd, AdvertisedFlowspec),
+    WithdrawVpnFlowspec(VpnFlowKey),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -830,6 +833,13 @@ pub struct BgpRib {
     vpn_flow_validity: HashMap<(IpAddr, VpnFlowKey), HashMap<String, FlowValidity>>,
     /// SAFI 134 revalidations so far (what the tests count).
     vpn_flow_visits: u64,
+    /// Per SAFI 134 rule, the selected copy and the peer it came from
+    /// (`select_vpn_flow`).
+    vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, FlowspecRoute)>,
+    /// What each peer was last sent per SAFI 134 rule (`sync_vpn_flow_to`).
+    vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,
+    /// The SAFI 134 twin of `flowspec_stale`.
+    vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowKey>>,
     /// Per key, the selected copy and where it came from (`select_vpn`).
     vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
@@ -1010,6 +1020,9 @@ impl BgpRib {
             vpn_flow_adj_rib_in: HashMap::new(),
             vpn_flow_validity: HashMap::new(),
             vpn_flow_visits: 0,
+            vpn_flow_loc: HashMap::new(),
+            vpn_flow_adj_rib_out: HashMap::new(),
+            vpn_flow_stale: HashMap::new(),
             vpn_vrfs: crate::vpn::VrfSet::default(),
             rtc_adj_rib_in: HashMap::new(),
             rtc_local: std::collections::BTreeSet::new(),
@@ -1820,7 +1833,6 @@ impl BgpRib {
                 .collect(),
             _ => Vec::new(),
         };
-        self.drop_peer_vpn_flows(peer);
         self.max_prefix_warned.retain(|(p, _)| *p != peer);
         self.first_as_warned.remove(&peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows
@@ -1831,6 +1843,7 @@ impl BgpRib {
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
         self.vpn_adj_rib_out.remove(&peer);
+        self.vpn_flow_adj_rib_out.remove(&peer);
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
@@ -1859,6 +1872,8 @@ impl BgpRib {
         self.evpn_stale.remove(&peer);
         self.flowspec_stale.remove(&peer);
         self.vpn_stale.remove(&peer);
+        self.vpn_flow_stale.remove(&peer);
+        self.drop_peer_vpn_flows(peer);
         self.gr_deadline.remove(&peer);
         let vpns: Vec<VpnKey<IpNet>> = self
             .vpn_adj_rib_in

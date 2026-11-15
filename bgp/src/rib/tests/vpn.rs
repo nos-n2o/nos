@@ -54,7 +54,7 @@ pub(super) fn reach(next_hop: &str, as_path: Vec<u32>, vpn: Vec<VpnNlri>) -> Upd
     u
 }
 
-fn unreach(vpn: Vec<VpnNlri>) -> UpdateMessage {
+pub(super) fn unreach(vpn: Vec<VpnNlri>) -> UpdateMessage {
     let mut u = empty_update();
     u.mp_unreach = vec![message::MpUnreachNlri {
         afi: batch_afi(&vpn[0]),

@@ -513,6 +513,42 @@ fn flowspec_encodes_as_safi_133_with_its_ipv6_communities() {
 }
 
 #[test]
+fn vpn_flowspec_encodes_as_safi_134_under_its_rd_with_no_next_hop() {
+    let rule = crate::flowspec::FlowSpec::decode(crate::flowspec::Afi::V4, &[5, 1, 24, 10, 1, 2])
+        .unwrap()
+        .0;
+    let rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1];
+    let u = expect_update(outbound_update_to_message(
+        OutboundUpdate::AnnounceVpnFlowspec(
+            rd,
+            crate::rib::AdvertisedFlowspec {
+                family: AddressFamily::Vpnv4Flowspec,
+                nlri: rule.clone(),
+                route: route("10.1.2.0/24", "10.0.0.1", true, None),
+                ipv6_extended_communities: Vec::new(),
+            },
+        ),
+    ));
+    let mp = &u.mp_reach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV4, message::SAFI_FLOWSPEC_VPN));
+    assert_eq!(mp.flowspec_vpn.len(), 1);
+    assert_eq!(
+        (mp.flowspec_vpn[0].rd, &mp.flowspec_vpn[0].flow),
+        (rd, &rule)
+    );
+    assert!(mp.flowspec.is_empty() && mp.vpn.is_empty());
+    assert_eq!(u.attributes.unwrap().local_pref, Some(150));
+
+    let u = expect_update(outbound_update_to_message(
+        OutboundUpdate::WithdrawVpnFlowspec((AddressFamily::Vpnv4Flowspec, (rd, rule.clone()))),
+    ));
+    assert!(u.attributes.is_none() && u.mp_reach.is_empty());
+    let mp = &u.mp_unreach[0];
+    assert_eq!((mp.afi, mp.safi), (AFI_IPV4, message::SAFI_FLOWSPEC_VPN));
+    assert_eq!(mp.flowspec_vpn[0].flow, rule);
+}
+
+#[test]
 fn vpn_encodes_as_safi_128_with_its_label_rd_and_next_hop() {
     let rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 1];
     let prefix: ipnet::IpNet = "2001:db8:5::/48".parse().unwrap();

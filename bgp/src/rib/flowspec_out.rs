@@ -43,7 +43,13 @@ pub struct AdvertisedFlowspec {
 pub(super) fn flow_prefix(family: AddressFamily, nlri: &FlowSpec) -> IpNet {
     match super::flowspec_validate::dest_of(nlri) {
         Some(p) => p.net.trunc(),
-        None if family == AddressFamily::Ipv6Flowspec => IpNet::V6(ipnet::Ipv6Net::default()),
+        None if matches!(
+            family,
+            AddressFamily::Ipv6Flowspec | AddressFamily::Vpnv6Flowspec
+        ) =>
+        {
+            IpNet::V6(ipnet::Ipv6Net::default())
+        }
         None => IpNet::V4(ipnet::Ipv4Net::default()),
     }
 }
@@ -160,6 +166,23 @@ impl BgpRib {
                 self.drop_flow(peer, &k);
             }
         }
+        let mut vpn_rerun = Vec::new();
+        if let Some(table) = self.vpn_flow_adj_rib_in.get_mut(&peer) {
+            for (k, r) in table.iter_mut() {
+                let accepted = import_flow(&policy, r, peer, peer_as, confed);
+                if !accepted {
+                    warn!(peer = %peer, family = %k.0, rd = %crate::vpn::format_rd(&(k.1).0), route = %(k.1).1, "flowspec route rejected by import policy");
+                }
+                vpn_rerun.push((k.clone(), accepted));
+            }
+        }
+        for (k, accepted) in vpn_rerun {
+            if accepted {
+                self.revalidate_vpn_flow(peer, &k); // a rewrite may change the winner
+            } else {
+                self.drop_vpn_flow(peer, &k);
+            }
+        }
         self.flowspec_import.insert(peer, policy);
     }
 
@@ -215,11 +238,12 @@ impl BgpRib {
 
     /// The selected copy of rule `k` (from `src`) rewritten for `peer`, or
     /// `None` when `peer` must not have it.
-    fn advertise_flow(
+    pub(super) fn advertise_flow(
         &self,
         peer: IpAddr,
         src: IpAddr,
         r: &FlowspecRoute,
+        rd: Option<crate::vpn::Rd>,
     ) -> Option<AdvertisedFlowspec> {
         let outbox = self.peer_outboxes.get(&peer)?;
         let route = flow_rib_route(src, r, self.confed_peers.contains(&src));
@@ -235,7 +259,7 @@ impl BgpRib {
             self.local_asn,
             self.source_is_rr_client(&route),
             self.cluster_id,
-            Some((r.family, policy, None)),
+            Some((r.family, policy, rd)),
         )?;
         let ebgp = !outbox.is_ibgp && !outbox.is_confed;
         Some(AdvertisedFlowspec {
@@ -259,7 +283,7 @@ impl BgpRib {
         let adv = self
             .flowspec_loc
             .get(k)
-            .and_then(|(src, r)| self.advertise_flow(peer, *src, r));
+            .and_then(|(src, r)| self.advertise_flow(peer, *src, r, None));
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
             return;
         };

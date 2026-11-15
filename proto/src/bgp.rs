@@ -837,6 +837,10 @@ pub enum ReevalFamily {
     Vpnv4,
     /// `VPNv6`.
     Vpnv6,
+    /// VPN IPv4 Flowspec (SAFI 134, #1085).
+    Vpnv4Flowspec,
+    /// VPN IPv6 Flowspec (SAFI 134, #1085).
+    Vpnv6Flowspec,
 }
 
 impl ReevalFamily {
@@ -850,6 +854,8 @@ impl ReevalFamily {
             Self::Ipv6Flowspec => "ipv6-flowspec",
             Self::Vpnv4 => "vpnv4",
             Self::Vpnv6 => "vpnv6",
+            Self::Vpnv4Flowspec => "vpnv4-flowspec",
+            Self::Vpnv6Flowspec => "vpnv6-flowspec",
         }
     }
 }

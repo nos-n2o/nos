@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use nos_proto::AddressFamily;
 
-use super::{BgpRib, FlowspecKey};
+use super::{BgpRib, FlowspecKey, VpnFlowKey};
 use crate::bmp::{monitor, Hub};
 use crate::evpn::EvpnNlri;
 use crate::message::UpdateMessage;
@@ -30,6 +30,7 @@ pub(crate) enum BmpKey {
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
     Vpn(VpnKey<IpNet>),
+    VpnFlow(VpnFlowKey),
 }
 
 impl BgpRib {
@@ -85,6 +86,16 @@ impl BgpRib {
         out.extend(
             vpn.into_iter()
                 .flat_map(|t| t.keys().map(|k| BmpKey::Vpn(*k))),
+        );
+        let vpn_flow = if post {
+            self.vpn_flow_adj_rib_in.get(&peer)
+        } else {
+            self.retained.vpn_flow.get(&peer)
+        };
+        out.extend(
+            vpn_flow
+                .into_iter()
+                .flat_map(|t| t.keys().map(|k| BmpKey::VpnFlow(k.clone()))),
         );
         out
     }
@@ -144,27 +155,32 @@ impl BgpRib {
                             .map(|r| monitor::vpn_to_update(k, r)),
                     );
                 }
+                BmpKey::VpnFlow(k) => {
+                    let table = if post {
+                        self.vpn_flow_adj_rib_in.get(&peer)
+                    } else {
+                        self.retained.vpn_flow.get(&peer)
+                    };
+                    out.extend(
+                        table
+                            .and_then(|t| t.get(k))
+                            .map(|r| monitor::vpn_flowspec_to_update(k, r)),
+                    );
+                }
             }
         }
         out
     }
 
-    /// The families `peer` negotiated, one End-of-RIB each (RT-Constraint and
-    /// VPN Flowspec are not monitored).
+    /// The families `peer` negotiated, one End-of-RIB each (RT-Constraint is
+    /// not monitored).
     pub(crate) fn bmp_families(&self, peer: IpAddr) -> Vec<(u16, u8)> {
         let Some(o) = self.peer_outboxes.get(&peer) else {
             return Vec::new();
         };
         AddressFamily::ALL
             .into_iter()
-            .filter(|f| {
-                !matches!(
-                    f,
-                    AddressFamily::RtConstraint
-                        | AddressFamily::Vpnv4Flowspec
-                        | AddressFamily::Vpnv6Flowspec
-                ) && o.negotiated_afs.contains(f)
-            })
+            .filter(|f| *f != AddressFamily::RtConstraint && o.negotiated_afs.contains(f))
             .map(crate::gr::afi_safi)
             .collect()
     }

@@ -7,13 +7,12 @@
 //! VRF view. Validation is per VRF: the "unicast" side of RFC 8955 section 6
 //! is the SAFI 128 paths imported into that VRF (`vrf_unicast`).
 //!
-//! No selection, no propagation, no ACL push: that is #1085/#1086.
+//! Selection, import/export policy and propagation are #1085 (below); the
+//! ACL push is #1086.
 // ponytail: a VPN unicast change rescans the held rules for overlap
 // (`revalidate_vpn_flows_around`) and each revalidation scans the SAFI 128
 // Adj-RIB-In once, O(paths) per rule; a per-VRF `FlowIndexes` (as for
 // SAFI 133) once it shows in `tools/bench-bgp.sh`.
-// ponytail: not retained across graceful restart (dropped with the session),
-// and no import policy: both land with #1085.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -22,9 +21,11 @@ use std::time::Instant;
 use ipnet::IpNet;
 use nos_proto::AddressFamily;
 
+use super::flowspec_out::{flow_rib_route, import_flow, AdvertisedFlowspec};
 use super::flowspec_validate::{dest_of, validate, FlowValidity, Unicast};
 use super::{
-    best_index, info, warn, BgpRib, Candidate, FlowspecRoute, RouteOrigin, VpnFlowKey, VpnRoute,
+    best_index, best_path, debug, info, warn, BgpRib, Candidate, FlowspecRoute, OutboundUpdate,
+    RouteOrigin, VpnFlowKey, VpnRoute,
 };
 use crate::message::{self, PathAttributes, UpdateMessage};
 use crate::vpn::format_rd;
@@ -87,6 +88,10 @@ impl BgpRib {
                 warn!(peer = %from, family = %family, "vpn flowspec routes for a family not negotiated, ignored");
                 continue;
             }
+            let import = self.flowspec_import.get(&from).cloned();
+            let peer_as = self.peer_asns.get(&from).copied().unwrap_or(0);
+            let confed = self.confed_peers.contains(&from);
+            let mut retain = self.retained.vpn_flow_slot(from);
             let table = self.vpn_flow_adj_rib_in.entry(from).or_default();
             for n in &mp.flowspec_vpn {
                 let k: VpnFlowKey = (family, (n.rd, n.flow.clone()));
@@ -99,15 +104,34 @@ impl BgpRib {
                     received_at: Instant::now(),
                     validity: None,
                 };
+                keys.push(k.clone());
+                // The policy rewrites the held copy: keep the raw one.
+                if let Some(r) = retain.as_deref_mut() {
+                    r.insert(k.clone(), route.clone());
+                }
+                if let Some(p) = &import
+                    && !import_flow(p, &mut route, from, peer_as, confed)
+                {
+                    super::stats::bump(&mut self.peer_stats.entry(from).or_default().rejected, 1);
+                    if table.remove(&k).is_some()
+                        && let Some(h) = super::bmp_tap::tap(self.bmp.as_ref())
+                    {
+                        h.vpn_flow_post(from, &k, None);
+                    }
+                    warn!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "flowspec route rejected by import policy");
+                    continue;
+                }
                 if let Some(old) = table.get(&k)
                     && old.attributes == route.attributes
                 {
                     route.received_at = old.received_at;
                 }
-                if table.insert(k.clone(), route.clone()) != Some(route) {
+                if table.insert(k.clone(), route.clone()) != Some(route.clone()) {
+                    if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                        h.vpn_flow_post(from, &k, Some(&route));
+                    }
                     info!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "flowspec route learned");
                 }
-                keys.push(k);
             }
         }
         for k in keys {
@@ -118,6 +142,7 @@ impl BgpRib {
     /// Removes rule `k` from `peer`'s SAFI 134 Adj-RIB-In (logged).
     pub(super) fn drop_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) -> bool {
         self.vpn_flow_validity.remove(&(peer, k.clone()));
+        self.retained.take_vpn_flow(peer, k);
         let removed = self
             .vpn_flow_adj_rib_in
             .get_mut(&peer)
@@ -125,7 +150,11 @@ impl BgpRib {
             .is_some();
         if removed {
             info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), route = %(k.1).1, "flowspec route withdrawn");
+            if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
+                h.vpn_flow_post(peer, k, None);
+            }
         }
+        self.select_vpn_flow(k);
         removed
     }
 
@@ -181,6 +210,9 @@ impl BgpRib {
     /// forgets the VRFs that no longer do), logging each change.
     pub(super) fn revalidate_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) {
         let Some(r) = self.vpn_flow_adj_rib_in.get(&peer).and_then(|t| t.get(k)) else {
+            // Rejected by the import policy: no copy, so nothing to select.
+            self.vpn_flow_validity.remove(&(peer, k.clone()));
+            self.select_vpn_flow(k);
             return;
         };
         let tables: Vec<String> = self
@@ -219,6 +251,135 @@ impl BgpRib {
         } else {
             self.vpn_flow_validity.insert((peer, k.clone()), new);
         }
+        // A validity flip (or the first validation) decides the candidates.
+        self.select_vpn_flow(k);
+    }
+
+    /// Valid in at least one VRF that imports it: a best-path candidate
+    /// (RFC 8955 section 6 validation, per VRF as RFC 4364 distributes it).
+    fn vpn_flow_usable(&self, peer: IpAddr, k: &VpnFlowKey) -> bool {
+        self.vpn_flow_validity
+            .get(&(peer, k.clone()))
+            .is_some_and(|m| m.values().any(|v| *v == FlowValidity::Valid))
+    }
+
+    /// Re-decides rule `k`'s best path among the valid, imported copies every
+    /// peer holds (no IGP step: there is no next hop) and, when it changed,
+    /// propagates it.
+    pub(super) fn select_vpn_flow(&mut self, k: &VpnFlowKey) {
+        let candidates: Vec<Candidate> = self
+            .vpn_flow_adj_rib_in
+            .iter()
+            .filter_map(|(p, t)| {
+                let r = t.get(k).filter(|_| self.vpn_flow_usable(*p, k))?;
+                Some((flow_rib_route(*p, r, self.confed_peers.contains(p)), 0))
+            })
+            .collect();
+        let new = best_path(&candidates, &HashMap::new()).and_then(|b| match b.origin {
+            RouteOrigin::Peer(p) => Some((p, self.vpn_flow_adj_rib_in.get(&p)?.get(k)?.clone())),
+            RouteOrigin::Local => None,
+        });
+        if self.vpn_flow_loc.get(k) == new.as_ref() {
+            return;
+        }
+        match new {
+            Some(n) => self.vpn_flow_loc.insert(k.clone(), n),
+            None => self.vpn_flow_loc.remove(k),
+        };
+        if self.deferring() {
+            return; // the deferral's end sends the initial update
+        }
+        let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
+        for peer in peers {
+            self.sync_vpn_flow_to(peer, k, false);
+        }
+    }
+
+    /// The selected copy of `k` rewritten for `peer`, or `None` when `peer`
+    /// must not have it (RT-Constraint, split horizon, reflection, policy).
+    fn advertise_vpn_flow(
+        &self,
+        peer: IpAddr,
+        k: &VpnFlowKey,
+        src: IpAddr,
+        r: &FlowspecRoute,
+    ) -> Option<AdvertisedFlowspec> {
+        if self.rtc_holds(peer, &r.attributes.extended_communities) {
+            debug!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), route = %(k.1).1, "vpn flowspec route held by rt-constraint");
+            return None;
+        }
+        self.advertise_flow(peer, src, r, Some((k.1).0))
+    }
+
+    /// Brings `peer` in line with rule `k`, diffed against what it was last
+    /// sent; `force` re-sends even an unchanged state (a lost update).
+    pub(super) fn sync_vpn_flow_to(&mut self, peer: IpAddr, k: &VpnFlowKey, force: bool) {
+        let adv = self
+            .vpn_flow_loc
+            .get(k)
+            .and_then(|(src, r)| self.advertise_vpn_flow(peer, k, *src, r));
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        let sent = self.vpn_flow_adj_rib_out.entry(peer).or_default();
+        let rd = (k.1).0;
+        match adv {
+            Some(adv) if force || sent.get(k) != Some(&adv) => {
+                info!(peer = %peer, family = %k.0, rd = %format_rd(&rd), route = %(k.1).1, "flowspec route advertised");
+                sent.insert(k.clone(), adv.clone());
+                outbox.tx.send(OutboundUpdate::AnnounceVpnFlowspec(rd, adv));
+            }
+            Some(_) => {}
+            None => {
+                let was_sent = sent.remove(k).is_some();
+                if was_sent || (force && outbox.negotiated_afs.contains(&k.0)) {
+                    info!(peer = %peer, family = %k.0, rd = %format_rd(&rd), route = %(k.1).1, "flowspec route advertisement withdrawn");
+                    outbox
+                        .tx
+                        .send(OutboundUpdate::WithdrawVpnFlowspec(k.clone()));
+                }
+            }
+        }
+    }
+
+    /// Initial advertisement of every selected SAFI 134 rule to a
+    /// just-established peer (`initial_update`).
+    pub(super) fn announce_vpn_flow_to(&mut self, peer: IpAddr) {
+        self.vpn_flow_adj_rib_out.remove(&peer);
+        let keys: Vec<VpnFlowKey> = self.vpn_flow_loc.keys().cloned().collect();
+        for k in keys {
+            self.sync_vpn_flow_to(peer, &k, false);
+        }
+    }
+
+    /// Route refresh (RFC 2918) of a SAFI 134 family: re-sends what `peer`
+    /// was last sent of it.
+    pub(super) fn resend_vpn_flow(&self, peer: IpAddr, family: AddressFamily) {
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        for (k, adv) in self
+            .vpn_flow_adj_rib_out
+            .get(&peer)
+            .into_iter()
+            .flat_map(HashMap::iter)
+            .filter(|(k, _)| k.0 == family)
+        {
+            outbox
+                .tx
+                .send(OutboundUpdate::AnnounceVpnFlowspec((k.1).0, adv.clone()));
+        }
+    }
+
+    /// Purges `peer`'s stale SAFI 134 rules of `family` (a graceful
+    /// restart's); returns how many.
+    pub(super) fn purge_stale_vpn_flow(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
+        let Some(set) = self.vpn_flow_stale.get_mut(&peer) else {
+            return 0;
+        };
+        let keys: Vec<_> = set.iter().filter(|k| k.0 == family).cloned().collect();
+        set.retain(|k| k.0 != family);
+        keys.iter().filter(|k| self.drop_vpn_flow(peer, k)).count()
     }
 
     /// A VPN unicast prefix changed: revalidate the held rules whose
