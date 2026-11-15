@@ -1423,6 +1423,7 @@ mod tests {
                 bgp_instances: vec![instance("r1", 65000)],
                 routing_tables: vec![nos_proto::RoutingTable {
                     rest_api: None,
+                    ssh_server: None,
                     evpn: nos_proto::RoutingTableEvpn::default(),
                     vpn: nos_proto::RoutingTableVpn::default(),
                     ospfv3_instance: None,

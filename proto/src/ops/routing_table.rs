@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    Config, Redistribute, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
+    Config, Redistribute, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn, SshServer,
 };
 
 use super::OpError;
@@ -101,6 +101,20 @@ pub enum RoutingTableOp {
         /// Name of the routing table this op targets.
         name: String,
     },
+    /// Pins `nos-sshd` to this table, listening on `address:port` in its VRF.
+    SetSshServer {
+        /// Name of the routing table this op targets.
+        name: String,
+        /// IP address of the entry.
+        address: IpAddr,
+        /// Port number or member port, per the op.
+        port: u16,
+    },
+    /// Clears the SSH server of the routing table so it reverts to the default.
+    ClearSshServer {
+        /// Name of the routing table this op targets.
+        name: String,
+    },
     /// Sets (replaces) the table's whole EVPN L3 VNI config.
     SetEvpn {
         /// Name of the routing table this op targets.
@@ -135,6 +149,7 @@ impl RoutingTableOp {
                 if !config.routing_tables.iter().any(|t| &t.name == name) {
                     config.routing_tables.push(RoutingTable {
                         rest_api: None,
+                        ssh_server: None,
                         evpn: crate::schema::RoutingTableEvpn::default(),
                         vpn: crate::schema::RoutingTableVpn::default(),
                         name: name.clone(),
@@ -226,6 +241,21 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.rest_api = None;
                 Ok(())
             }
+            RoutingTableOp::SetSshServer {
+                name,
+                address,
+                port,
+            } => {
+                find_table_mut(config, name)?.ssh_server = Some(SshServer {
+                    address: *address,
+                    port: *port,
+                });
+                Ok(())
+            }
+            RoutingTableOp::ClearSshServer { name } => {
+                find_table_mut(config, name)?.ssh_server = None;
+                Ok(())
+            }
             RoutingTableOp::SetEvpn { name, evpn } => {
                 find_table_mut(config, name)?.evpn = evpn.clone();
                 Ok(())
@@ -264,6 +294,7 @@ mod tests {
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,
@@ -293,6 +324,7 @@ mod tests {
         let mut cfg = Config {
             routing_tables: vec![RoutingTable {
                 rest_api: None,
+                ssh_server: None,
                 evpn: crate::schema::RoutingTableEvpn::default(),
                 vpn: crate::schema::RoutingTableVpn::default(),
                 ospfv3_instance: None,
@@ -409,6 +441,34 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].rest_api, None);
+    }
+
+    #[test]
+    fn set_and_clear_ssh_server() {
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        RoutingTableOp::SetSshServer {
+            name: "rt1".to_string(),
+            address: "10.0.0.1".parse().unwrap(),
+            port: 22,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.routing_tables[0].ssh_server,
+            Some(SshServer {
+                address: "10.0.0.1".parse().unwrap(),
+                port: 22
+            })
+        );
+        RoutingTableOp::ClearSshServer {
+            name: "rt1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].ssh_server, None);
     }
 
     #[test]

@@ -123,13 +123,14 @@ pub use schema::{
     OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, OspfVirtualLink,
     Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode,
     PrefixList, PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget, RestApi,
-    RoutingTable, RoutingTableEvpn, RoutingTableVpn, RpkiCache, SourceAddress, StaticRoute,
-    StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile, SwitchingProfileMember,
-    SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User, VlanTag,
-    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
+    RoutingTable, RoutingTableEvpn, RoutingTableVpn, RpkiCache, SourceAddress, SshServer,
+    StaticRoute, StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile,
+    SwitchingProfileMember, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User,
+    VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
     GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT,
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
     REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
+    SSH_SERVER_PORT_DEFAULT,
 };
 pub use stp::{
     StpEvent, StpInstance, StpInstancePort, StpMst, StpPortCounters, StpPortInfo, StpRequest,

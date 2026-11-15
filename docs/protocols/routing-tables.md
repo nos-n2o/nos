@@ -10,6 +10,7 @@ A routing table is a VRF: a separate IPv4/IPv6 forwarding table with its own int
   - [Redistribute static routes into BGP or OSPF](#redistribute-static-routes-into-bgp-ospf-or-ospfv3)
   - [Read a routing table](#read-a-routing-table)
   - [Run the REST API in a routing table](#run-the-rest-api-in-a-routing-table)
+  - [Run SSH in a routing table](#run-ssh-in-a-routing-table)
   - [Remove things](#remove-things)
 - [How routing tables behave](#how-routing-tables-behave)
 - [Configuration reference](#configuration-reference)
@@ -258,6 +259,18 @@ $C -X PUT -H 'Content-Type: application/json' -d '{"address":"10.50.0.2","port":
 
 The port defaults to 8080; add `port <port>` to change it. Enabling it on a management routing table, logging in and certificates are covered in [The REST API](../api.md#enabling-the-api) and [System](system.md#the-rest-api).
 
+### Run SSH in a routing table
+
+SSH is enabled per routing table like the REST API, on one address of that table:
+
+```
+lab-1(api)> set routing-table rt1 ssh-server address 10.50.0.2
+```
+
+- The port defaults to 22; add `port <port>` to change it.
+- `delete routing-table rt1 ssh-server` unpins it.
+- This only records the setting: nothing listens until `nos-sshd` ships (#994, #995).
+
 ### Remove things
 
 - `delete routing-table <table> bgp-instance` (and `ospf-instance`, `ospfv3-instance`, `static-routing-instance`) detaches that source. Its routes leave the table.
@@ -333,6 +346,7 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | redistribute | `set routing-table <t> redistribute bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
 | redistribute policy | `… redistribute <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
 | rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete … rest-api` | `routing-table/{t}/rest-api`, `{"address":"10.50.0.2","port":8080}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address in this VRF | `show log nos-restd[<t>]` |
+| ssh-server | `set routing-table <t> ssh-server address <ip> [port <n>]` / `delete … ssh-server` | `routing-table/{t}/ssh-server`, `{"address":"10.50.0.2","port":22}` | unset; port 22 | unicast address; port 1-65535 | Will run `nos-sshd` on that address in this VRF; no effect until the daemon ships (#994, #995) | none yet |
 | vpn rd | `set routing-table <t> vpn rd <rd>` / `delete … vpn rd` | `routing-table/{t}/vpn/rd`, `"65000:1"` | `asn:nn` or `a.b.c.d:nn`, unset | required once any `vpn` field is set; unique across tables' `vpn rd` and `evpn rd` | `nos-bgpd` of `vpn bgp-instance` imports into this table and exports its routes under this RD | `show config` |
 | vpn route-target | `set routing-table <t> vpn route-target import\|export <rt>` / `delete …` | `routing-table/{t}/vpn/route-targets-import` or `…/route-targets-export`, `["65000:1"]` | list of `asn:nn` or `a.b.c.d:nn` | at least one export; import may be empty | import: VPN routes carrying one are imported, live; export: attached to every exported route | `show config` |
 | vpn bgp-instance | `set routing-table <t> vpn bgp-instance <i>` / `delete … vpn bgp-instance` | `routing-table/{t}/vpn/bgp-instance`, `"r1"` | name, unset | required; exists; not the table's own `bgp-instance` | that instance imports into this table, resolving PEs in its own table, and carries its exports | `show config` |
