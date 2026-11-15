@@ -62,8 +62,7 @@ pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Nex
     let (Some(user), Some(serial)) = req
         .extensions()
         .get::<PeerUser>()
-        .map(|p| (p.0.clone(), p.1.clone()))
-        .unwrap_or_default()
+        .map_or_default(|p| (p.0.clone(), p.1.clone()))
     else {
         return unauthorized();
     };

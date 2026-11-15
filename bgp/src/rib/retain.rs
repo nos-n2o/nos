@@ -358,8 +358,7 @@ impl BgpRib {
             .retained
             .tables
             .get(&peer)
-            .map(|t| t.keys().copied().map(ReevalKey::Unicast).collect())
-            .unwrap_or_default();
+            .map_or_default(|t| t.keys().copied().map(ReevalKey::Unicast).collect());
         let held = self.evpn_adj_rib_in.get(&peer).into_iter().flatten();
         let rejected = self.retained.evpn.get(&peer).into_iter().flatten();
         keys.extend(

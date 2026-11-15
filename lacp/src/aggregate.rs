@@ -383,8 +383,8 @@ async fn selection_loop(
             .map(|(interface, obs)| PortCandidate {
                 interface: interface.clone(),
                 current: obs.selectable(),
-                partner_system_id: obs.partner.map(|p| p.system).unwrap_or_default(),
-                partner_key: obs.partner.map(|p| p.key).unwrap_or_default(),
+                partner_system_id: obs.partner.map_or_default(|p| p.system),
+                partner_key: obs.partner.map_or_default(|p| p.key),
                 partner_individual: obs.partner_individual(),
                 actor_port_priority: priorities
                     .get(interface)

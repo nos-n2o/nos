@@ -367,12 +367,11 @@ fn expire(cfg: &LinkConfig, ports: &SharedPorts, now: Instant) {
         .lock()
         .unwrap()
         .get_mut(&cfg.interface)
-        .map(|p| {
+        .map_or_default(|p| {
             let gone = p.neighbors.expire(now);
             p.stats.ageouts += gone.len() as u64;
             gone
-        })
-        .unwrap_or_default();
+        });
     for pdu in gone {
         info!(
             interface = %cfg.interface, chassis_id = %pdu.chassis_display(),
