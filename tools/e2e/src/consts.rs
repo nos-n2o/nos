@@ -540,6 +540,18 @@ pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 /// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
+/// `ospfv3-vlan-nexthop-move` (#618): router-b's loopback, and the two VLAN
+/// subinterfaces of `eth1` (a veth) that carry OSPFv3 between the routers
+/// (`/64` per VLAN; the IPv4 address is incidental, `--address` is required).
+pub const OSPFV3_VLAN_LOOPBACK_ADDRESS_B: &str = "2001:db8:6::1/128";
+pub const OSPFV3_VLAN_TAGS: [u16; 2] = [10, 20];
+/// router-a's cost on VLAN 10 / 20 profiles, then VLAN 10's raised cost that
+/// moves the next hop to VLAN 20. `eth0.0`/eth1.0 (profile `OSPFV3_PROFILE`,
+/// default cost 1) is raised to `OSPFV3_VLAN_OTHER_COST` for the phase so
+/// those paths never win.
+pub const OSPFV3_VLAN_COSTS: [u16; 2] = [1, 2];
+pub const OSPFV3_VLAN_MOVED_COST: u16 = 5;
+pub const OSPFV3_VLAN_OTHER_COST: u16 = 1000;
 /// router-c's loopback for the `ospfv3-dr` multicast data-plane proof (#879).
 pub const OSPFV3_DR_LOOPBACK_ADDRESS_C: &str = "2001:db8:4::8/128";
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
