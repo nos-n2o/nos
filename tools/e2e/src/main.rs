@@ -20,6 +20,7 @@ mod modules;
 mod phases;
 mod rest;
 mod router;
+mod sshc;
 mod world;
 
 use std::process::ExitCode;

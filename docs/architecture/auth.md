@@ -38,4 +38,4 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 
 ## PAM (#987)
 
-- `pam_nos.so` (crate `nos-pam`) lets sshd check a password against `nos-watchdogd` with the same anonymous `Login` request as `nos`. `libnss_nos` gives each user a passwd entry for sshd. See [pam.md](pam.md#account-mapping-nss).
+- `pam_nos.so` (crate `nos-pam`) lets sshd check a password against `nos-watchdogd` (`LoginTicket`, then `nos` redeems the ticket; [ssh-access.md](../ssh-access.md)). `libnss_nos` gives each user a passwd entry for sshd. See [pam.md](pam.md#account-mapping-nss).

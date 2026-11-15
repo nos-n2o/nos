@@ -219,32 +219,22 @@ impl FakeLogin {
         }
     }
 
-    /// Accepts exactly `user`/`password`: signs the CSR with the shared test
-    /// CA and answers `Issued`; anything else is `Denied(INVALID_CREDENTIALS)`.
+    /// Accepts exactly `user`/`password` on `LoginTicket`: answers a `[7; 32]` ticket;
+    /// anything else is `Denied(INVALID_CREDENTIALS)`.
     pub fn accepting(
         path: &Path,
         user: &'static str,
         password: &'static str,
-        lifetime_secs: u64,
+        ttl_secs: u64,
     ) -> Self {
         Self::new(path, move |req| match req {
-            WatchdogRequest::Login {
+            WatchdogRequest::LoginTicket {
                 user: u,
                 password: p,
-                csr_der,
-            } if u == user && p == password => {
-                match nos_pki::testing::shared().ca().sign_csr(
-                    csr_der,
-                    &nos_pki::PeerId::new("user", user),
-                    std::time::Duration::from_secs(lifetime_secs),
-                ) {
-                    Ok(cert_der) => Reply::One(WatchdogEvent::Issued {
-                        cert_der,
-                        lifetime_secs,
-                    }),
-                    Err(e) => Reply::One(WatchdogEvent::Denied(e.to_string())),
-                }
-            }
+            } if u == user && p == password => Reply::One(WatchdogEvent::Ticket {
+                ticket: vec![7; 32],
+                ttl_secs,
+            }),
             _ => Reply::One(WatchdogEvent::Denied(
                 nos_proto::INVALID_CREDENTIALS.to_string(),
             )),

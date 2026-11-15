@@ -162,6 +162,11 @@ RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
     && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
     && rm /tmp/pam_nos.so
 COPY pam/nos-sshd.pam /etc/pam.d/nos-sshd
+# The NSS shell path (#999) is /usr/bin/nos; sshd runs it as the login shell (#992).
+# A NOS user's uid is outside group `nos`, which alone reaches /run/nos (the CA and the
+# 0660 sockets): setgid `nos` gives the login shell exactly that group, nothing else.
+RUN ln -s /usr/local/bin/nos /usr/bin/nos && echo /usr/bin/nos >> /etc/shells \
+    && chgrp nos /usr/local/bin/nos && chmod 2755 /usr/local/bin/nos
 
 # The NSS module that makes NOS users resolvable (#999): glibc reads
 # /run/nos-users/passwd, which nos-configd writes (docs/architecture/pam.md).

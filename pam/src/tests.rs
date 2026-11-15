@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use nonstick::ErrorCode;
-use nos_proto::{WatchdogEvent, INVALID_CREDENTIALS, LOGIN_BUSY};
+use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY};
 use nos_test_support::{FakeLogin, Reply};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
 use crate::module::{authenticate_user, check_account, guard};
 use crate::options::Options;
-use crate::session::NosSession;
+use crate::session::NosTicket;
 
 const T: Duration = Duration::from_secs(10);
 
@@ -59,14 +59,14 @@ fn denied(m: &str) -> Reply<WatchdogEvent> {
 }
 
 #[test]
-fn success_hands_back_a_session() {
+fn success_hands_back_a_ticket_via_login_ticket() {
     let (e, fake) = env(accepting);
     let s = authenticate_user(&e.opts, "alice".as_ref(), pw("s3cret"), T).unwrap();
     assert_eq!(s.user, "alice");
-    assert!(s.cert_der.len() > 10);
-    assert!(!s.key.is_empty());
-    assert_eq!(s.lifetime, Duration::from_secs(600));
-    assert_eq!(fake.take_seen().len(), 1);
+    assert_eq!(s.encoded.as_str(), nos_proto::ticket_to_env(&[7; 32]));
+    let seen = fake.take_seen();
+    assert_eq!(seen.len(), 1);
+    assert!(matches!(seen[0], WatchdogRequest::LoginTicket { .. }));
 }
 
 #[test]
@@ -179,12 +179,10 @@ fn bad_names_and_passwords_never_reach_the_broker() {
     assert!(f.take_seen().is_empty());
 }
 
-fn session(user: &str) -> NosSession {
-    NosSession {
+fn session(user: &str) -> NosTicket {
+    NosTicket {
         user: user.into(),
-        cert_der: vec![1, 2, 3],
-        key: vec![9; 4].into(),
-        lifetime: T,
+        encoded: "TICKET".to_string().into(),
     }
 }
 
@@ -226,5 +224,5 @@ fn guard_turns_a_panic_into_service_error() {
 fn session_debug_shows_only_the_user() {
     let d = format!("{:?}", session("alice"));
     assert!(d.contains("alice"));
-    assert!(!d.contains("cert_der") && !d.contains("key") && !d.contains("9, 9"));
+    assert!(!d.contains("TICKET") && !d.contains("encoded"));
 }
