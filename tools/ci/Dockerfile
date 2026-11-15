@@ -4,6 +4,9 @@
 ARG RUST_TOOLCHAIN
 FROM rust:${RUST_TOOLCHAIN}-bookworm
 ARG MIRI_TOOLCHAIN
+# nos-pam (#996) links -lpam.
+RUN apt-get update && apt-get install -y --no-install-recommends libpam0g-dev \
+ && rm -rf /var/lib/apt/lists/*
 RUN rustup component add clippy rustfmt llvm-tools-preview \
  && rustup toolchain install "${MIRI_TOOLCHAIN}" --profile minimal --component miri,rust-src \
  && cargo install --locked cargo-nextest cargo-llvm-cov cargo-deny cargo-audit \
