@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_config::{persistence, users, ConfigStore, ListenAddr};
+use nos_config::{nss_users, persistence, users, ConfigStore, ListenAddr};
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::DEFAULT_LOG_SOCKET;
@@ -27,6 +27,14 @@ struct Args {
     /// when a client sends the `save` command.
     #[arg(long, default_value = "/var/lib/nos/configd/config.yaml")]
     config_file: PathBuf,
+
+    /// Persisted `name:uid` map behind the NSS passwd file (never reuses a uid).
+    #[arg(long, default_value = nss_users::DEFAULT_IDS_FILE)]
+    user_ids_file: PathBuf,
+
+    /// The passwd-format file `libnss_nos` serves (`/run/nos-users`, written by this daemon).
+    #[arg(long, default_value = nss_users::DEFAULT_PASSWD_FILE)]
+    passwd_file: PathBuf,
 
     /// Unix socket to forward this process's log events to. Passed directly
     /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`).
@@ -78,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
     let mut initial = persistence::load_or_default(&args.config_file);
     users::seed_default_user(&mut initial);
 
-    let store = ConfigStore::new(initial, Some(args.config_file.clone()));
+    let store = match nss_users::UserDb::open(args.passwd_file.clone(), &args.user_ids_file) {
+        Some(db) => ConfigStore::new_with_user_db(initial, Some(args.config_file.clone()), db),
+        None => ConfigStore::new(initial, Some(args.config_file.clone())),
+    };
     let _handle = store
         .start_ipc_server(&args.listen, &identity)
         .inspect_err(|e| {
