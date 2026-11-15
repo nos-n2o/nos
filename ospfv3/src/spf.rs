@@ -230,8 +230,9 @@ fn bodies<'a, T>(
 /// (`link::LinkManager::originate_inter_area_lsas`): every prefix of every
 /// reachable Intra-Area-Prefix-LSA — root's own included, unlike `compute`,
 /// since an ABR summarizes its own loopback too — and every ASBR reachable in
-/// the area. Never an inter-area or external route: those are never
-/// re-summarized (RFC 2328 §12.4.3), which is what keeps two areas from
+/// the area. Never an inter-area or external route: only the backbone's
+/// inter-area routes are passed on (`backbone_view`, RFC 2328 §12.4.3), and a
+/// non-backbone area's only to the backbone, which keeps two areas from
 /// looping a prefix between them.
 pub struct IntraAreaView {
     /// `(prefix, cost from root)`, one per prefix (the cheapest).
@@ -284,10 +285,81 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> IntraA
     }
 }
 
+/// The backbone as RFC 2328 §12.4.3 re-summarizes it into non-backbone areas:
+/// what `intra_area_routes` shows plus what only Inter-Area-Prefix/Router-LSAs
+/// from other ABRs reveal (#610).
+pub struct BackboneView {
+    pub intra: IntraAreaView,
+    /// Inter-area prefixes with no intra-area route: `(prefix, cost)`.
+    pub inter_prefixes: Vec<(Ipv6Net, u32)>,
+    /// ASBRs reachable only through an Inter-Area-Router-LSA.
+    pub inter_asbrs: Vec<(Ipv4Addr, u32, u32)>,
+}
+
+pub fn backbone_view(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> BackboneView {
+    let intra = intra_area_routes(root, lsas);
+    let live = live_lsas(lsas);
+    let (routers, networks, _) = routers_networks_links(&live);
+    let (dist, _) = run_dijkstra(root, &routers, &networks, None);
+    let via = |abr: Ipv4Addr, metric: u32| {
+        (abr != root && metric < LS_INFINITY)
+            .then(|| {
+                dist.get(&Vertex::Router(abr))
+                    .map(|d| d.saturating_add(metric))
+            })
+            .flatten()
+    };
+    let own: HashSet<Ipv6Net> = intra.prefixes.iter().map(|(p, _)| *p).collect();
+    let mut prefixes: HashMap<Ipv6Net, u32> = HashMap::new();
+    for (abr, p) in bodies(&live, |b| match b {
+        LsaBody::InterAreaPrefix(p) => Some(p),
+        _ => None,
+    }) {
+        let prefix = p.prefix.trunc();
+        if let Some(cost) = via(abr, p.metric).filter(|_| !own.contains(&prefix)) {
+            let e = prefixes.entry(prefix).or_insert(cost);
+            *e = (*e).min(cost);
+        }
+    }
+    let known: HashSet<Ipv4Addr> = intra.asbrs.iter().map(|&(id, _, _)| id).collect();
+    let mut asbrs: HashMap<Ipv4Addr, (u32, u32)> = HashMap::new();
+    for (abr, r) in bodies(&live, |b| match b {
+        LsaBody::InterAreaRouter(r) => Some(r),
+        _ => None,
+    }) {
+        let id = r.destination_router_id;
+        if id == root || known.contains(&id) {
+            continue;
+        }
+        if let Some(cost) = via(abr, r.metric) {
+            let e = asbrs.entry(id).or_insert((cost, r.options));
+            if cost < e.0 {
+                *e = (cost, r.options);
+            }
+        }
+    }
+    BackboneView {
+        intra,
+        inter_prefixes: prefixes.into_iter().collect(),
+        inter_asbrs: asbrs.into_iter().map(|(id, (c, o))| (id, c, o)).collect(),
+    }
+}
+
 /// Runs RFC 5340 §4.8 SPF from `root` over `lsas` (one area's worth),
 /// returning every non-directly-connected destination reachable via
 /// Intra-Area-Prefix-LSAs.
 pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> {
+    compute_in(root, lsas, false)
+}
+
+/// `compute`; `skip_summaries` (RFC 2328 §16.2, RFC 5340 §4.8.3): a
+/// backbone-attached ABR's non-backbone area ignores its Inter-Area-Prefix-
+/// and Inter-Area-Router-LSAs (only the backbone's are examined).
+pub fn compute_in(
+    root: Ipv4Addr,
+    lsas: &[std::sync::Arc<Lsa>],
+    skip_summaries: bool,
+) -> Vec<RouteEntry> {
     let live = live_lsas(lsas);
     let lsas = live.as_slice();
     let (routers, networks, links) = routers_networks_links(lsas);
@@ -308,11 +380,11 @@ pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> 
         next_hop: &next_hop,
     };
     let inter_area_routers = bodies(lsas, |b| match b {
-        LsaBody::InterAreaRouter(r) => Some(r),
+        LsaBody::InterAreaRouter(r) if !skip_summaries => Some(r),
         _ => None,
     });
     for (abr, p) in bodies(lsas, |b| match b {
-        LsaBody::InterAreaPrefix(p) => Some(p),
+        LsaBody::InterAreaPrefix(p) if !skip_summaries => Some(p),
         _ => None,
     }) {
         collect_inter_area_route(&graph, abr, p, &mut out);
@@ -1751,5 +1823,38 @@ mod tests {
         assert!(!reaches_r3(build(vec![r1, r2, r3], vec![])));
         assert!(!reaches_r3(build(vec![r1, r2], back())));
         assert!(!reaches_r3(build(vec![r2, r3], back())));
+    }
+
+    /// #610, §12.4.3: the backbone view adds Inter-Area-Prefix/Router-LSAs of
+    /// another ABR; `compute_in(.., true)` ignores them (§16.2).
+    #[test]
+    fn backbone_view_and_skip_summaries() {
+        use crate::lsa::{InterAreaPrefixLsaBody, InterAreaRouterLsaBody};
+        let (root, abr, boundary) = (router_id(1), router_id(2), router_id(9));
+        let prefix: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        let lsas = [
+            router_lsa(root, vec![p2p(abr, 1, 2, 1)]),
+            router_lsa(abr, vec![p2p(root, 2, 1, 1)]),
+            Arc::new(Lsa {
+                header: header(lsa::LSA_TYPE_INTER_AREA_PREFIX, router_id(100), abr),
+                body: LsaBody::InterAreaPrefix(InterAreaPrefixLsaBody {
+                    metric: 10,
+                    prefix_options: 0,
+                    prefix,
+                }),
+            }),
+            Arc::new(Lsa {
+                header: header(lsa::LSA_TYPE_INTER_AREA_ROUTER, boundary, abr),
+                body: LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
+                    options: 0x13,
+                    metric: 5,
+                    destination_router_id: boundary,
+                }),
+            }),
+        ];
+        let view = backbone_view(root, &lsas);
+        assert_eq!(view.inter_prefixes, [(prefix, 11)]);
+        assert_eq!(view.inter_asbrs, [(boundary, 6, 0x13)]);
+        assert_eq!(view.intra.asbrs.len(), 0);
     }
 }

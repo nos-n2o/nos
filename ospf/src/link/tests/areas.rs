@@ -588,12 +588,12 @@ async fn virtual_link_reaches_full_and_joins_the_backbone() {
         .is_some());
 
     // §16.2: C drops its end, so the virtual link dies; C's area-1
-    // summary of its loopback stays at B, but B (a backbone ABR) doesn't
-    // route on it, and A loses the route too.
+    // summary of its loopback is flushed (no backbone, so C is no ABR, #610),
+    // and B (a backbone ABR) doesn't route on it, and A loses the route too.
     c.set_virtual_links(Vec::new()).await;
     settle(90).await;
     let held = b.lsdb_for(area1).await.lock().await.get(&summary);
-    assert!(held.is_some_and(|l| l.header.age < lsa::MAX_AGE));
+    assert!(held.is_none_or(|l| l.header.age >= lsa::MAX_AGE));
     assert_eq!(route(Arc::clone(&b), loopback).await, None);
     assert_eq!(route(Arc::clone(&a), loopback).await, None);
     c.set_virtual_links(vec![vlink_config(id(2))]).await;

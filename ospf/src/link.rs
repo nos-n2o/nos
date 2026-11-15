@@ -881,6 +881,8 @@ pub struct LinkManager {
     /// `originate_summary_lsas` pass — `compute_routes` turns them into
     /// discard routes.
     active_ranges: Mutex<HashMap<Ipv4Net, u32>>,
+    /// The one-time no-backbone `warn!` was logged and the state still holds.
+    no_backbone_warned: AtomicBool,
     /// Each NSSA's last translator election result (RFC 3101 §3.1), only to
     /// log a change.
     nssa_translating: Mutex<HashMap<Ipv4Addr, bool>>,
@@ -990,6 +992,7 @@ impl LinkManager {
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
+            no_backbone_warned: AtomicBool::new(false),
             nssa_translating: Mutex::new(HashMap::new()),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
@@ -1049,10 +1052,11 @@ impl LinkManager {
             .unwrap_or_default()
     }
 
-    /// RFC 2328 A.4.2's B-bit test: a link or loopback stub in 2+ areas (not
-    /// `lsdbs.len()`, which never shrinks after leaving an area).
+    /// RFC 2328 §3.1 / A.4.2: an ABR is attached to 2+ areas, one of them the
+    /// backbone (a virtual link counts). The B-bit and every summary or
+    /// cross-area flood follow this one predicate (#610).
     async fn is_area_border_router(&self) -> bool {
-        self.attached_areas().await.len() >= 2
+        self.is_backbone_abr().await
     }
 
     /// RFC 2328 §16.2: an ABR attached to the backbone (a virtual link

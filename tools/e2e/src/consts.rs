@@ -668,3 +668,9 @@ pub const FORGED_V4_PREFIX: &str = "198.18.110.0/24";
 pub const FORGED_V4_CONTROL: &str = "198.18.111.0/24";
 pub const FORGED_V6_PREFIX: &str = "2001:db8:99::/64";
 pub const FORGED_V6_CONTROL: &str = "2001:db8:98::/64";
+
+/// `ospfv3-abr-transit`: router-a's second area and its loopback there, which
+/// makes it an ABR behind the backbone.
+pub const OSPFV3_AREA_2: &str = "0.0.0.2";
+pub const OSPFV3_PROFILE_AREA2: &str = "ospfv3-profile-area2";
+pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
