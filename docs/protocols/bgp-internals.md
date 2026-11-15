@@ -458,7 +458,7 @@ What the L3VPN code (#573) leaves for VPN Flowspec (#574, SAFI 134) to build on:
 - Push: `vpn_push_client.rs` (bgpd -> a VRF's ribd) and `RedistributeVpnPrefixes` (ribd -> bgpd, `VpnPrefix { rd, prefix, labels, ext_communities }`) are the two directions. #574 adds a second payload next to them: the received rules per VRF, validated against that VRF's unicast table, and `nos-acld` receiving the table beside the rule.
 - Log conventions: `vpn route learned|withdrawn|imported|unimported|advertised|skipped by site of origin`, fields `table`, `rd`, `prefix`, `labels`, `next_hop`, in that order.
 
-Done in #1084 (receive side) and #1085 (selection and propagation, below). Still #574's: the acld push carrying the table (#1086).
+Done in #1084 (receive side) and #1085 (selection and propagation, below). The acld push carrying the table is #1086 (below).
 
 ### VPN Flowspec receive side (#1084)
 
@@ -476,8 +476,15 @@ Done in #1084 (receive side) and #1085 (selection and propagation, below). Still
 - Out: `advertise_vpn_flow` adds the RT-Constraint gate (`rtc_holds`, debug `vpn flowspec route held by rt-constraint`) to `advertise_flow`; `sync_vpn_flow_to` diffs against `vpn_flow_adj_rib_out`. The wire variants are `OutboundUpdate::AnnounceVpnFlowspec(rd, AdvertisedFlowspec)`/`WithdrawVpnFlowspec(VpnFlowKey)`, encoded in `fsm.rs` as MP_REACH/UNREACH AFI 1|2 SAFI 134 with a zero-length next hop; the backlog (`outbox.rs`) coalesces them in `vpn_flows`.
 - Lifecycle: `announce_vpn_flow_to` in `initial_update`, `resend_vpn_flow` for route refresh, `resync_vpn_flow` on RT-Constraint membership changes, `reexport_peer` for export-policy swaps; `vpn_flow_stale` for graceful restart (`retain_as_stale`, `purge_stale_vpn_flow`, counted by `stale_count`); `Retained.vpn_flow` for soft reconfiguration (`ReevalFamily::Vpnv4Flowspec`/`Vpnv6Flowspec`, `reeval_vpn_flow`); BMP: `BmpKey::VpnFlow`, `Hub::vpn_flow_post`, Adj-RIB-Out replay and counts.
 - Logs: `flowspec route advertised peer=… family=vpnv4-flowspec rd=… route=…`, `flowspec route advertisement withdrawn …` (same fields), `flowspec route rejected by import policy peer=… family=… rd=… route=…`.
-- ponytail: `show bgp flowspec` has no selected/advertised column for SAFI 134 rows (a proto field for it can come with #1086's enforcement view); an RFC 7313 BoRR does not mark SAFI 134 stale, as for SAFI 133.
+- ponytail: `show bgp flowspec` has no selected/advertised column for SAFI 134 rows (`dataplane` in a `vrf` view is the enforcement view, #1086; a selected column would be a new proto field); an RFC 7313 BoRR does not mark SAFI 134 stale, as for SAFI 133.
 
+
+### VPN Flowspec enforcement (#1086)
+
+- `vpn_flows_of(table)` (`rib/flowspec_vpn.rs`): the copies of `vpn_flow_loc` valid in `table`, one per (family, rule), the lowest RD winning (`best_import`'s tie-break), IPv4 first in RFC 8955 section 5.1 order. `vpn_flowspec_push_snapshot` lowers it per table (every VRF listed, empty when no rule; `None` while deferring); `vpn_flow_enforced` is the same set as a predicate for `show`.
+- `acl_push_client` keeps `sent` per table: only changed tables are pushed (one `PushFlowspec` + `Ack` each), a reconnect clears `sent`, a table that left the `VrfSet` is pushed once empty then forgotten, and shutdown clears every table that was sent.
+- `FlowShown.table` carries the `vrf` filter into the row; `dataplane()` joins `nos-acld`'s rows on (instance, table, flow), so two VRFs with one flow never show each other's status.
+- ponytail: `vpn_flow_loc` is chosen among copies valid in *some* VRF, so a copy only one VRF finds valid can lose to another valid elsewhere; a per-VRF selection if that shows.
 
 ### Policy hooks on VPN routes (#582)
 

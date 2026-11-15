@@ -27,6 +27,7 @@ use super::{
     best_index, best_path, debug, info, warn, BgpRib, Candidate, FlowspecRoute, OutboundUpdate,
     RouteOrigin, VpnFlowKey, VpnRoute,
 };
+use crate::flowspec::FlowSpec;
 use crate::message::{self, PathAttributes, UpdateMessage};
 use crate::vpn::format_rd;
 
@@ -402,54 +403,68 @@ impl BgpRib {
         }
     }
 
-    /// The VPN flow rules valid in each VRF, as `nos-acld` takes them
-    /// (#1083): per table, one copy per rule (the same flow under two RDs or
-    /// peers is one rule), IPv4 first, RFC 8955 section 5.1 order. `None`
-    /// while deferring. A table with no rule is listed empty, so the push
-    /// clears it.
-    // ponytail: no selection between copies (#1085): the first valid one by
-    // (peer, family, RD) stands in for it.
+    /// The copy of each VPN flow rule that `table` enforces (#1086, owner
+    /// D7): among the selected copies (`vpn_flow_loc`, one per (RD, rule))
+    /// valid in `table`, the one with the lowest RD per (family, rule),
+    /// matching `best_import`'s tie-break. IPv4 first, RFC 8955 section 5.1
+    /// order.
+    // ponytail: `vpn_flow_loc` is chosen among copies valid in *some* VRF, so
+    // a copy that only `table` finds valid can lose to one valid elsewhere;
+    // a per-VRF selection if that ever shows.
+    fn vpn_flows_of(&self, table: &str) -> Vec<(&VpnFlowKey, IpAddr, &FlowspecRoute)> {
+        let mut best: HashMap<(AddressFamily, &FlowSpec), (&VpnFlowKey, IpAddr, &FlowspecRoute)> =
+            HashMap::new();
+        for (k, (peer, r)) in &self.vpn_flow_loc {
+            let valid = self
+                .vpn_flow_validity
+                .get(&(*peer, k.clone()))
+                .and_then(|m| m.get(table))
+                == Some(&FlowValidity::Valid);
+            if !valid {
+                continue;
+            }
+            let slot = best.entry((k.0, &(k.1).1)).or_insert((k, *peer, r));
+            if (k.1).0 < ((slot.0).1).0 {
+                *slot = (k, *peer, r);
+            }
+        }
+        let mut out: Vec<_> = best.into_values().collect();
+        let v6 = |r: &FlowspecRoute| r.family == AddressFamily::Vpnv6Flowspec;
+        out.sort_by(|a, b| {
+            v6(a.2)
+                .cmp(&v6(b.2))
+                .then_with(|| crate::flowspec::cmp_precedence(&a.2.nlri, &b.2.nlri))
+        });
+        out
+    }
+
+    /// The VPN flow rules enforced in each VRF, as `nos-acld` takes them
+    /// (#1083, #1086): per table, `vpn_flows_of`. `None` while deferring. A
+    /// table with no rule is listed empty, so the push clears it.
     pub fn vpn_flowspec_push_snapshot(&self) -> Option<Vec<(String, Vec<nos_proto::FlowRule>)>> {
         if self.deferring() {
             return None;
         }
-        let mut out = Vec::new();
-        for table in self.vpn_vrfs.tables() {
-            let mut held: Vec<(&IpAddr, &VpnFlowKey, &FlowspecRoute)> = self
-                .vpn_flow_adj_rib_in
-                .iter()
-                .flat_map(|(p, t)| t.iter().map(move |(k, r)| (p, k, r)))
-                .filter(|(p, k, _)| {
-                    self.vpn_flow_validity
-                        .get(&(**p, (*k).clone()))
-                        .and_then(|m| m.get(table))
-                        == Some(&FlowValidity::Valid)
+        Some(
+            self.vpn_vrfs
+                .tables()
+                .map(|table| {
+                    let rules = self
+                        .vpn_flows_of(table)
+                        .into_iter()
+                        .map(|(_, _, r)| crate::acl_push_client::flow_rule(r))
+                        .collect();
+                    (table.to_string(), rules)
                 })
-                .collect();
-            held.sort_by(|a, b| {
-                (a.0, a.1 .0.to_string(), &a.1 .1 .0).cmp(&(b.0, b.1 .0.to_string(), &b.1 .1 .0))
-            });
-            let mut seen = std::collections::HashSet::new();
-            let mut rules: Vec<&FlowspecRoute> = held
-                .into_iter()
-                .filter(|(_, k, _)| seen.insert((k.0, (k.1).1.clone())))
-                .map(|(_, _, r)| r)
-                .collect();
-            let v6 = |r: &FlowspecRoute| r.family == AddressFamily::Vpnv6Flowspec;
-            rules.sort_by(|a, b| {
-                v6(a)
-                    .cmp(&v6(b))
-                    .then_with(|| crate::flowspec::cmp_precedence(&a.nlri, &b.nlri))
-            });
-            out.push((
-                table.to_string(),
-                rules
-                    .into_iter()
-                    .map(crate::acl_push_client::flow_rule)
-                    .collect(),
-            ));
-        }
-        Some(out)
+                .collect(),
+        )
+    }
+
+    /// `k`, held from `peer`, is the copy `table` enforces.
+    pub fn vpn_flow_enforced(&self, table: &str, peer: IpAddr, k: &VpnFlowKey) -> bool {
+        self.vpn_flows_of(table)
+            .iter()
+            .any(|(key, p, _)| *key == k && *p == peer)
     }
 
     /// The VRF set changed: every rule may import elsewhere.

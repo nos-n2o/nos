@@ -304,6 +304,42 @@ fn the_acld_snapshot_holds_the_valid_rules_of_each_vrf() {
     assert_eq!(rules[0].1[0].flow, flow().to_string());
 }
 
+/// #1086 (owner D7): per VRF, the copy of a flow from the lowest RD is the
+/// one enforced; two VRFs importing the same flow each enforce their own;
+/// nothing is pushed while deferring.
+#[test]
+fn the_lowest_rd_copy_is_enforced_per_vrf() {
+    let mut rib = setup();
+    rib.set_vpn_vrfs(VrfSet(vec![
+        vrf("red", vec![RT], None),
+        vrf("blue", vec![RT, RT2], None),
+    ]));
+    unicast(&mut rib, SRC, 65001, "10.10.0.0/24");
+    // The higher RD arrives first.
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD2, flow()));
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
+    let k = |rd| (AddressFamily::Vpnv4Flowspec, (rd, flow()));
+    for table in ["red", "blue"] {
+        assert!(rib.vpn_flow_enforced(table, addr(SRC), &k(RD1)), "{table}");
+        assert!(!rib.vpn_flow_enforced(table, addr(SRC), &k(RD2)), "{table}");
+    }
+    let sizes: Vec<_> = rib
+        .vpn_flowspec_push_snapshot()
+        .unwrap()
+        .into_iter()
+        .map(|(t, r)| (t, r.len()))
+        .collect();
+    assert_eq!(sizes, [("red".into(), 1), ("blue".into(), 1)]);
+    // Withdrawn: the other copy takes over.
+    feed(&mut rib, SRC, &flow_unreach(RD1, flow()));
+    assert!(rib.vpn_flow_enforced("red", addr(SRC), &k(RD2)));
+    // A rule only `blue` imports is not enforced in `red`.
+    feed(&mut rib, SRC, &flow_unreach(RD2, flow()));
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT2], RD2, flow()));
+    assert!(rib.vpn_flow_enforced("blue", addr(SRC), &k(RD2)));
+    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k(RD2)));
+}
+
 /// The IGP admits a VPN path late (its next hop was unresolved): the rules
 /// that path covers are revalidated then (#1083).
 #[test]
