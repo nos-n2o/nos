@@ -79,10 +79,44 @@ where
     Ev: Serialize + Send + 'static,
     H: Fn(&Req) -> Reply<Ev> + Send + Sync + 'static,
 {
-    let listener = nos_pki::testing::shared()
-        .identity(role, name)
-        .listen(path)
-        .unwrap();
+    serve_with(path, role, name, false, handler)
+}
+
+/// `serve` for the one socket where a client without a certificate may
+/// connect (the watchdog's login, `listen_optional_client_auth`).
+pub fn serve_optional_client_auth<Req, Ev, H>(
+    path: &Path,
+    role: &str,
+    name: &str,
+    handler: H,
+) -> Server<Req>
+where
+    Req: DeserializeOwned + Send + 'static,
+    Ev: Serialize + Send + 'static,
+    H: Fn(&Req) -> Reply<Ev> + Send + Sync + 'static,
+{
+    serve_with(path, role, name, true, handler)
+}
+
+fn serve_with<Req, Ev, H>(
+    path: &Path,
+    role: &str,
+    name: &str,
+    optional_client_auth: bool,
+    handler: H,
+) -> Server<Req>
+where
+    Req: DeserializeOwned + Send + 'static,
+    Ev: Serialize + Send + 'static,
+    H: Fn(&Req) -> Reply<Ev> + Send + Sync + 'static,
+{
+    let id = nos_pki::testing::shared().identity(role, name);
+    let listener = if optional_client_auth {
+        id.listen_optional_client_auth(path)
+    } else {
+        id.listen(path)
+    }
+    .unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let connections = Arc::new(AtomicUsize::new(0));
     let (generation, _) = watch::channel(0u64);
