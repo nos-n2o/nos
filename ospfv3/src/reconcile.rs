@@ -587,7 +587,12 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
         running?.vrf.clone()
     };
     let (link_local_address, prefix, mtu) = if let Some(l) = r.link {
-        (l.link_local_address, l.prefix, Some(l.mtu))
+        (
+            l.link_local_address,
+            l.prefix,
+            // An unobserved MTU (bridge not reporting yet) keeps the running one.
+            l.mtu.or_else(|| running.map(|c| u32::from(c.mtu))),
+        )
     } else {
         fell_back.push("address");
         let c = running?;
@@ -903,7 +908,8 @@ async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
 struct ResolvedLink {
     link_local_address: Ipv6Addr,
     prefix: Ipv6Net,
-    mtu: u32,
+    /// `None` = not observed (a bridge whose MTU `nos-interfaced` cannot read yet).
+    mtu: Option<u32>,
 }
 
 /// Resolves a subinterface's link-local address (populated by
@@ -929,7 +935,7 @@ async fn resolve_local_address(
     Some(ResolvedLink {
         link_local_address,
         prefix,
-        mtu,
+        mtu: Some(mtu),
     })
 }
 
@@ -997,6 +1003,7 @@ async fn resolve_broadcast_domain(
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
     let link_local_address = status.link_local_address?;
+    let mtu = status.mtu;
     let prefix = status.addresses.into_iter().find_map(|a| match a.address {
         IpNet::V6(v6) => Some(v6),
         IpNet::V4(_) => None,
@@ -1005,12 +1012,8 @@ async fn resolve_broadcast_domain(
         ResolvedLink {
             link_local_address,
             prefix,
-            // A broadcast domain's own bridge has no separate MTU concept
-            // in this schema (see `nos_proto::BroadcastDomainStatus`) —
-            // `resolve_effective_mtu` always falls back to
-            // `DEFAULT_OSPF_MTU` for this attach-point kind, matching
-            // `ospf::reconcile`'s identical `None` here.
-            mtu: 0,
+            // The bridge's observed kernel MTU (follows its ports).
+            mtu,
         },
         bridge_name,
     ))
@@ -1244,7 +1247,7 @@ mod tests {
             link: Some(ResolvedLink {
                 link_local_address: "fe80::2".parse().unwrap(),
                 prefix: "2001:db8::2/64".parse().unwrap(),
-                mtu: 1500,
+                mtu: Some(1500),
             }),
             kernel_interface: Some("br-new".into()),
         }

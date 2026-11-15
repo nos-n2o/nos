@@ -125,6 +125,9 @@ impl InterfaceDriver for RecordingDriver {
     async fn link_local_address(&self, k: &str) -> Option<std::net::Ipv6Addr> {
         NoopInterfaceDriver.link_local_address(k).await
     }
+    async fn bridge_mtu(&self, k: &str) -> Option<u32> {
+        NoopInterfaceDriver.bridge_mtu(k).await
+    }
     async fn set_bridge_port_state(
         &self,
         p: &BridgePortRef,

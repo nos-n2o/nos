@@ -93,6 +93,10 @@ pub struct BroadcastDomainStatus {
     /// `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB" for why per-link binding,
     /// not VRF-wide binding, is required).
     pub bridge_name: Option<String>,
+    /// The bridge's observed kernel `IFLA_MTU` (it follows its ports' minimum
+    /// while nothing sets it explicitly). `None` until the bridge exists, or
+    /// under the `noop` driver; consumers fall back to 1500 and retry.
+    pub mtu: Option<u32>,
 }
 
 /// The wire twin of `schema::PortAggregate` — a static Linux bonding

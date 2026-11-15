@@ -1316,6 +1316,14 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         None
     }
 
+    async fn bridge_mtu(&self, kernel_interface: &str) -> Option<u32> {
+        let link = self.find_link(kernel_interface).await.ok()??;
+        link.attributes.iter().find_map(|a| match a {
+            LinkAttribute::Mtu(mtu) => Some(*mtu),
+            _ => None,
+        })
+    }
+
     async fn set_bridge_port_state(
         &self,
         port: &BridgePortRef,

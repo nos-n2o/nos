@@ -154,6 +154,7 @@ mod tests {
                     routing_table: Some("rt1".into()),
                     link_local_address: None,
                     bridge_name: None,
+                    mtu: None,
                 })
             }
             _ => InterfaceEvent::NotFound,

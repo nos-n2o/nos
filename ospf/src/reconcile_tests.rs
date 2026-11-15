@@ -167,6 +167,7 @@ fn bd_status(name: &str, bridge: Option<&str>, addrs: &[&str]) -> BroadcastDomai
         routing_table: Some("rt1".into()),
         link_local_address: None,
         bridge_name: bridge.map(Into::into),
+        mtu: Some(1400),
     }
 }
 
@@ -1067,7 +1068,12 @@ async fn resolve_broadcast_domain_cases() {
 
     assert_eq!(
         resolve_broadcast_domain(&wd, "ok").await,
-        Some((Ipv4Addr::new(10, 1, 0, 1), 24, "br1".to_string()))
+        Some((
+            Ipv4Addr::new(10, 1, 0, 1),
+            24,
+            "br1".to_string(),
+            Some(1400)
+        ))
     );
     assert_eq!(resolve_broadcast_domain(&wd, "nobridge").await, None);
     assert_eq!(resolve_broadcast_domain(&wd, "noaddr").await, None);

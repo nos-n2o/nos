@@ -46,6 +46,8 @@ pub struct BroadcastDomainState {
     /// see `SubinterfaceState.link_local_address`'s doc comment. `None`
     /// until `bridge_name` itself is known (queried against it once it is).
     pub link_local_address: Option<Ipv6Addr>,
+    /// The bridge's observed kernel MTU (`driver.bridge_mtu`); `None` until known.
+    pub mtu: Option<u32>,
 }
 
 /// What spanning tree wants of one port (an interface or an aggregate): the
@@ -429,10 +431,12 @@ async fn ensure_broadcast_domains(
             routing_table: domain.routing_table.clone(),
             bridge_name: None,
             link_local_address: None,
+            mtu: None,
         };
         match driver.ensure_broadcast_domain(&state).await {
             Ok(bridge_name) => {
                 state.link_local_address = driver.link_local_address(&bridge_name).await;
+                state.mtu = driver.bridge_mtu(&bridge_name).await;
                 state.bridge_name = Some(bridge_name);
             }
             Err(e) => {
@@ -743,6 +747,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDriver {
         calls: Mutex<Vec<Call>>,
+        bridge_mtu: Option<u32>,
     }
 
     #[async_trait]
@@ -803,6 +808,10 @@ mod tests {
 
         async fn link_local_address(&self, _kernel_interface: &str) -> Option<Ipv6Addr> {
             None
+        }
+
+        async fn bridge_mtu(&self, _kernel_interface: &str) -> Option<u32> {
+            self.bridge_mtu
         }
 
         async fn set_bridge_port_state(
@@ -1085,7 +1094,25 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             bridge_name: None,
             link_local_address: None,
+            mtu: None,
         })));
+    }
+
+    #[tokio::test]
+    async fn domain_carries_observed_bridge_mtu() {
+        let mut config = cfg(vec![]);
+        config.broadcast_domains = vec![nos_proto::BroadcastDomain {
+            name: "bd1".to_string(),
+            ..Default::default()
+        }];
+        let driver = RecordingDriver {
+            bridge_mtu: Some(1400),
+            ..Default::default()
+        };
+        let interfaces = build_from_config(&config, &driver, &Interfaces::new()).await;
+        assert_eq!(interfaces.get_domain("bd1").unwrap().mtu, Some(1400));
+        let noop = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        assert_eq!(noop.get_domain("bd1").unwrap().mtu, None);
     }
 
     #[tokio::test]

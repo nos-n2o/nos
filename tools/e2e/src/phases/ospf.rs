@@ -1178,7 +1178,8 @@ pub async fn ospf_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
     })
     .await?;
-    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+    ospf_bridge_mtu(w).await
 }
 
 /// RFC 3623 graceful restart (requires `ospf`, runs after `ospf-auth`):
@@ -2982,7 +2983,8 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
     })
     .await?;
-    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+    ospfv3_bridge_mtu(w).await
 }
 
 /// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its
@@ -5176,4 +5178,88 @@ pub async fn ospf_forged_lsa(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.established().await
+}
+
+/// #954: a broadcast-domain attach point reads its bridge's observed kernel
+/// MTU. `--mtu 1400` on router-a's eth0 lowers the `eth0.<tag>` bridge port
+/// and so `br<N>` (no profile override): router-a rejects router-b's
+/// 1500-byte DBDs on the bridge link only; the same on router-b reaches Full;
+/// clearing both restores 1500 and Full.
+async fn ospf_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let link = format!("link=broadcast-domain:{BD}");
+    let full = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}");
+    let reject = format!("ospf dbd rejected.*local_mtu=1400 neighbor_mtu=1500 {link}");
+    let fa = |extra: &[&str]| {
+        let mut f = ospf(OSPF_ROUTER_ID);
+        f.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_A));
+        f.extend(strings(extra));
+        with_base(A, f)
+    };
+    let fb = |extra: &[&str]| {
+        let mut f = ospf(OSPF_ROUTER_ID_B);
+        f.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_B));
+        f.extend(strings(extra));
+        with_base(B, f)
+    };
+    log("bridge segment: ospf on the broadcast domain at mtu 1500");
+    a.provision_flags(&fa(&[])).await?;
+    b.provision_flags(&fb(&[])).await?;
+    a.wait(&full).await?;
+    let (before, rejects) = (a.count(&full), a.count(&reject));
+    log("eth0 mtu 1400 on router-a only: the bridge follows its port");
+    a.provision_flags(&fa(&["--mtu", "1400"])).await?;
+    a.wait_new(&reject, rejects, 90).await?;
+    a.assert_quiet(&full, before, 30).await?;
+    log("eth0 mtu 1400 on router-b too");
+    b.provision_flags(&fb(&["--mtu", "1400"])).await?;
+    a.wait_new(&full, before, 90).await?;
+    log("clearing both eth0 mtus");
+    let before = a.count(&full);
+    a.provision_flags(&fa(&["--clear-mtu"])).await?;
+    b.provision_flags(&fb(&["--clear-mtu"])).await?;
+    a.wait_new(&full, before, 90).await
+}
+
+/// `ospf_bridge_mtu` for OSPFv3.
+async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let link = format!("link=broadcast-domain:{BD}");
+    let full = format!("ospfv3 neighbor reached full {link} neighbor={OSPFV3_ROUTER_ID_B}");
+    let reject = format!("ospfv3 dbd rejected.*local_mtu=1400 neighbor_mtu=1500 {link}");
+    let fa = |extra: &[&str]| {
+        let mut f = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        f.extend(ospfv3_broadcast_with_l2(
+            OSPF_BROADCAST_ADDRESS_A,
+            OSPFV3_BROADCAST_ADDRESS_A,
+        ));
+        f.extend(strings(extra));
+        with_base(A, f)
+    };
+    let fb = |extra: &[&str]| {
+        let mut f = ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B);
+        f.extend(ospfv3_broadcast_with_l2(
+            OSPF_BROADCAST_ADDRESS_B,
+            OSPFV3_BROADCAST_ADDRESS_B,
+        ));
+        f.extend(strings(extra));
+        with_base(B, f)
+    };
+    log("bridge segment: ospfv3 on the broadcast domain at mtu 1500");
+    a.provision_flags(&fa(&[])).await?;
+    b.provision_flags(&fb(&[])).await?;
+    a.wait(&full).await?;
+    let (before, rejects) = (a.count(&full), a.count(&reject));
+    log("eth0 mtu 1400 on router-a only: the bridge follows its port");
+    a.provision_flags(&fa(&["--mtu", "1400"])).await?;
+    a.wait_new(&reject, rejects, 90).await?;
+    a.assert_quiet(&full, before, 30).await?;
+    log("eth0 mtu 1400 on router-b too");
+    b.provision_flags(&fb(&["--mtu", "1400"])).await?;
+    a.wait_new(&full, before, 90).await?;
+    log("clearing both eth0 mtus");
+    let before = a.count(&full);
+    a.provision_flags(&fa(&["--clear-mtu"])).await?;
+    b.provision_flags(&fb(&["--clear-mtu"])).await?;
+    a.wait_new(&full, before, 90).await
 }

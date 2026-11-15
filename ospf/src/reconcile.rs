@@ -379,7 +379,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             vrf,
             local_addr: bridge.as_ref().map(|b| b.0),
             local_prefix_len: bridge.as_ref().map(|b| b.1),
-            mtu: None,
+            mtu: bridge.as_ref().and_then(|b| b.3),
             kernel_interface: bridge.map(|b| b.2),
         };
         let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
@@ -1027,8 +1027,8 @@ async fn resolve_local_address(
 
 /// Linux's own default MTU, used as the ultimate fallback when neither an
 /// `OspfProfile.mtu` override nor a real resolved interface MTU is
-/// available (a broadcast-domain bridge attach point, which has no
-/// per-domain MTU of its own — see root `CLAUDE.md`'s scope note on this).
+/// available (a broadcast-domain bridge whose MTU `nos-interfaced` cannot
+/// read yet, retried on the next resync).
 const DEFAULT_OSPF_MTU: u16 = 1500;
 
 /// Resolves the effective MTU OSPF uses for a link — for the wire's
@@ -1074,13 +1074,14 @@ async fn resolve_loopback_prefix(
 async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
-) -> Option<(Ipv4Addr, u8, String)> {
+) -> Option<(Ipv4Addr, u8, String, Option<u32>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
+    let mtu = status.mtu;
     let net = status.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name)),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name, mtu)),
         std::net::IpAddr::V6(_) => None,
     }
 }
