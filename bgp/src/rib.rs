@@ -1755,6 +1755,9 @@ impl BgpRib {
         for prefix in prefixes {
             self.recompute_and_propagate(prefix);
         }
+        // A VRF imports only feasible VPN paths: a rule's validity there
+        // moves with the IGP too (#1083).
+        self.revalidate_all_vpn_flows();
     }
 
     /// RFC 4271 §9.1.2: a candidate is feasible if it has no next hop of its

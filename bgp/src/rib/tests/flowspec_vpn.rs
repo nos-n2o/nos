@@ -303,3 +303,16 @@ fn the_acld_snapshot_holds_the_valid_rules_of_each_vrf() {
     let rules = rib.vpn_flowspec_push_snapshot().unwrap();
     assert_eq!(rules[0].1[0].flow, flow().to_string());
 }
+
+/// The IGP admits a VPN path late (its next hop was unresolved): the rules
+/// that path covers are revalidated then (#1083).
+#[test]
+fn an_igp_change_revalidates_the_rules() {
+    let mut rib = setup();
+    rib.set_igp(HashMap::new());
+    unicast(&mut rib, SRC, 65001, "10.10.0.0/24");
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
+    assert_eq!(view(&rib, "red"), ["invalid:no-covering-unicast-route"]);
+    rib.set_igp(HashMap::from([("10.0.0.0/24".parse().unwrap(), 0)]));
+    assert_eq!(view(&rib, "red"), ["valid"]);
+}
