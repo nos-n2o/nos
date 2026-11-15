@@ -58,7 +58,7 @@ pub mod switching_profile;
 pub mod user;
 
 pub use acl::{flowspec_points, Acl, AclAction, AclProtocol, AclRule, FlowspecPoint, PortRange};
-pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN};
+pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN, SSH_HOST_KEY_LABEL};
 pub use as_path_list::AsPathList;
 pub use bfd_profile::{BfdAuth, BfdAuthMethod, BfdMode, BfdProfile, EchoMode};
 pub use bgp_instance::{

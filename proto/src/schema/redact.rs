@@ -21,6 +21,8 @@ struct Visible {
     ospf: bool,
     ospfv3: bool,
     bfd: bool,
+    /// The reserved `ssh-host-key` label (#1104).
+    ssh_host_key: bool,
 }
 
 fn visible(role: Role) -> Visible {
@@ -31,6 +33,7 @@ fn visible(role: Role) -> Visible {
         ospf: false,
         ospfv3: false,
         bfd: false,
+        ssh_host_key: false,
     };
     match role {
         Role::User | Role::Restd => Visible {
@@ -67,8 +70,11 @@ fn visible(role: Role) -> Visible {
         | Role::Lldpd
         | Role::Fdbd
         | Role::Stpd
-        | Role::Acld
-        | Role::Sshd => none,
+        | Role::Acld => none,
+        Role::Sshd => Visible {
+            ssh_host_key: true,
+            ..none
+        },
     }
 }
 
@@ -173,6 +179,9 @@ impl Config {
                     .filter_map(|p| p.auth.as_ref().map(|a| a.key.clone())),
             );
         }
+        if v.ssh_host_key {
+            keep.insert(super::SSH_HOST_KEY_LABEL.to_string());
+        }
         admin.keys.retain(|k| keep.contains(&k.label));
         (users, admin)
     }
@@ -187,7 +196,8 @@ mod tests {
         RpkiCache, User,
     };
 
-    const SENTINELS: [&str; 6] = [
+    const SENTINELS: [&str; 7] = [
+        "SECRET-ssh-host-key",
         "SECRET-bgp",
         "SECRET-rpki",
         "SECRET-ospf2",
@@ -212,7 +222,9 @@ mod tests {
         };
         let mut c = Config::default();
         c.hostname = "visible-host".into();
-        c.admin.keys = ["bgp", "rpki", "ospf2", "ospfv3", "bfd"].map(key).to_vec();
+        c.admin.keys = ["bgp", "rpki", "ospf2", "ospfv3", "bfd", "ssh-host-key"]
+            .map(key)
+            .to_vec();
         c.users = vec![User {
             name: "u".into(),
             password: "SECRET-user".into(),
@@ -296,8 +308,8 @@ mod tests {
                 | Role::Lldpd
                 | Role::Fdbd
                 | Role::Stpd
-                | Role::Acld
-                | Role::Sshd => vec![],
+                | Role::Acld => vec![],
+                Role::Sshd => vec!["SECRET-ssh-host-key"],
             };
             let got = cfg.for_role(role);
             assert_eq!(seen(&got), want, "{role:?}");

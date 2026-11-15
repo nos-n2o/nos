@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nos_daemon::{config, ipc, watchdog};
-use nos_proto::{DiffScope, RibEvent, RibRequest, Role, ServiceRef, SshServer};
+use nos_proto::{DiffScope, Event, Request, RibEvent, RibRequest, Role, ServiceRef, SshServer};
 use socket2::SockRef;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{mpsc, watch};
@@ -103,6 +103,19 @@ impl Source for Daemons {
             Some(RibEvent::VrfName(name)) => name,
             _ => None,
         }
+    }
+}
+
+impl crate::hostkey::Keys for Daemons {
+    async fn get(&self) -> Option<Option<String>> {
+        let cfg = config::fetch_config(&self.config_socket).await.ok()?;
+        Some(cfg.key(nos_proto::SSH_HOST_KEY_LABEL).map(str::to_owned))
+    }
+
+    async fn set(&self, seed: &str) {
+        let req = Request::SetSshHostKey { seed: seed.into() };
+        // Refused when another table's daemon won: `get` then adopts its key.
+        let _ = ipc::one_shot::<_, Event>(&self.config_socket, Role::Configd, req).await;
     }
 }
 

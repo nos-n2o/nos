@@ -16,6 +16,10 @@ pub enum ConfigError {
         "validation failed: password hash upgrade refused: no such user, stale hash, or not a hash"
     )]
     HashUpgradeRefused,
+    #[error(
+        "validation failed: ssh host key refused: already set, or not the base64 of a 32-byte seed"
+    )]
+    SshHostKeyRefused,
     #[error("validation failed: {0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
     MaskedSecret(String),
     #[error("no transaction named '{0}'")]
@@ -65,6 +69,7 @@ mod tests {
                 reason: "r".into(),
             },
             ConfigError::HashUpgradeRefused,
+            ConfigError::SshHostKeyRefused,
             ConfigError::MaskedSecret("user 'u'".into()),
             ConfigError::TooManyClearPasswords(4),
         ] {

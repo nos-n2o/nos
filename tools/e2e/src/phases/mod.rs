@@ -10,6 +10,7 @@ mod drivers;
 mod ospf;
 mod pam;
 mod pki;
+mod ssh;
 
 use anyhow::bail;
 
@@ -155,6 +156,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospf-forged-lsa" => ospf::ospf_forged_lsa(w).await,
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pam" => pam::pam(w).await,
+        "ssh-hostkey" => ssh::ssh_hostkey(w).await,
         "pki" => pki::pki(w).await,
         "pki-crl" => pki::pki_crl(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
@@ -183,6 +185,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ao",
             "gtsm",
             "pam",
+            "ssh-hostkey",
         ],
         "drivers" => &[
             "up",
@@ -346,6 +349,7 @@ pub const ALL: &[&str] = &[
     "ao",
     "gtsm",
     "pam",
+    "ssh-hostkey",
     "loopback",
     "routes-paging",
     "vrf-unknown",

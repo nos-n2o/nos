@@ -35,6 +35,7 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 | `ospfd` | no | OSPFv2 auth (profiles, virtual links) and BFD profiles |
 | `ospfv3d` | no | OSPFv3 auth and BFD profiles |
 | `ribd`, `bfdd` | no | BFD profile auth |
+| `sshd` | no | `ssh-host-key` only (#1104) |
 | every other role | no | none |
 
 - Adding a secret-bearing field: extend `for_role` and the sentinel fixture in `redact.rs` (the test cannot notice a field missing from the fixture). Adding a role: classify it in `visible()` (exhaustive `match`).

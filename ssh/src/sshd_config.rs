@@ -63,7 +63,7 @@ mod tests {
 
     fn text() -> String {
         render(&Settings {
-            host_key: "/var/lib/nos/sshd/ssh_host_ed25519_key".into(),
+            host_key: "/run/nos-sshd/rt1/ssh_host_ed25519_key".into(),
         })
     }
 
@@ -77,7 +77,7 @@ mod tests {
             "KbdInteractiveAuthentication yes",
             "PubkeyAuthentication no",
             "PermitRootLogin no",
-            "HostKey /var/lib/nos/sshd/ssh_host_ed25519_key",
+            "HostKey /run/nos-sshd/rt1/ssh_host_ed25519_key",
             "AllowTcpForwarding no",
             "PermitTunnel no",
             "PermitUserEnvironment no",
