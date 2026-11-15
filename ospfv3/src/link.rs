@@ -1898,6 +1898,8 @@ pub struct LinkManager {
     /// Inter-Area-Router and AS-External LSA at `LSInfinity`, so the e2e can
     /// prove a receiver never installs one.
     originate_lsinfinity: AtomicBool,
+    /// The one-time no-backbone `warn!` was logged and the state still holds.
+    no_backbone_warned: AtomicBool,
     /// Test-only (`--router-lsa-max-links`): cap links per Router-LSA fragment
     /// so the e2e splits a small router; `0` = unset.
     router_lsa_max_links: AtomicUsize,
@@ -2087,6 +2089,7 @@ impl LinkManager {
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
             originate_lsinfinity: AtomicBool::new(false),
+            no_backbone_warned: AtomicBool::new(false),
             router_lsa_max_links: AtomicUsize::new(0),
             grace_period: AtomicU16::new(0),
             bfd: std::sync::Mutex::new(HashMap::new()),
@@ -2241,6 +2244,14 @@ impl LinkManager {
         }
     }
 
+    /// RFC 5340 §3.1 / RFC 2328 §3.1: an ABR is attached to 2+ areas, one of
+    /// them the backbone (no virtual links in v3). B-bit and every summary
+    /// follow this (#610).
+    async fn is_backbone_abr(&self) -> bool {
+        let areas = self.attached_areas().await;
+        areas.len() >= 2 && areas.contains(&Ipv4Addr::UNSPECIFIED)
+    }
+
     /// The areas this router has a live link or loopback in.
     async fn attached_areas(&self) -> HashSet<Ipv4Addr> {
         let mut areas: HashSet<Ipv4Addr> = self
@@ -2304,7 +2315,7 @@ impl LinkManager {
         // same set `originate_as_external_lsas` reads, so the bit and the
         // LSAs come and go in the same tick.
         let mut flags = 0;
-        if self.attached_areas().await.len() >= 2 {
+        if self.is_backbone_abr().await {
             flags |= lsa::ROUTER_FLAG_B;
         }
         if !self.redistribute_filtered.lock().await.is_empty() {
@@ -2533,16 +2544,25 @@ impl LinkManager {
     }
 
     /// RFC 5340 §4.4.3.3/§4.4.3.4 (port of `ospf::link::
-    /// originate_summary_lsas`): as an ABR, into every attached area, one
-    /// Inter-Area-Prefix-LSA per prefix intra-area in another attached area
-    /// and one Inter-Area-Router-LSA per ASBR reachable in one. Never an
-    /// inter-area or external route (`spf::intra_area_routes`). Run after the
-    /// intra-area passes, so this tick's own prefixes are summarized.
-    /// `ponytail:` no area ranges, no backbone check (ABR = 2+ areas), no
-    /// up/down-bit loop prevention — `docs/protocols/ospf-internals.md`'s ABR ceilings.
+    /// originate_summary_lsas`, RFC 2328 §12.4.3): as a backbone-attached
+    /// ABR, one Inter-Area-Prefix-LSA per prefix and one Inter-Area-Router-LSA
+    /// per ASBR: the backbone's intra- and inter-area routes into every
+    /// non-backbone area, a non-backbone area's intra-area routes into the
+    /// backbone only, and nothing a destination area already reaches
+    /// intra-area. Run after the intra-area passes, so this tick's own
+    /// prefixes are summarized. Without the backbone: no summaries, one
+    /// `warn!` while that lasts.
+    /// `ponytail:` no area ranges, no up/down-bit loop prevention —
+    /// `docs/protocols/ospf-internals.md`'s ABR ceilings.
     async fn originate_inter_area_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
         let attached = self.attached_areas().await;
-        if attached.len() < 2 {
+        let abr = self.is_backbone_abr().await;
+        if abr || attached.len() < 2 {
+            self.no_backbone_warned.store(false, Ordering::Relaxed);
+        } else if !self.no_backbone_warned.swap(true, Ordering::Relaxed) {
+            warn!("ospfv3 attached to 2+ areas without the backbone: not an ABR, no summaries");
+        }
+        if !abr {
             return;
         }
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
@@ -2553,24 +2573,49 @@ impl LinkManager {
             .filter(|(id, _)| attached.contains(id))
             .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
             .collect();
+        // Per source area: what it offers, and its own intra-area view (what
+        // a destination area reaches itself is never summarized into it).
         let mut views = Vec::new();
         for (area_id, lsdb) in &areas {
             let lsas = lsdb.lock().await.all();
-            views.push((*area_id, spf::intra_area_routes(local_router_id, &lsas)));
+            let (prefixes, asbrs, own) = if area_id.is_unspecified() {
+                let v = spf::backbone_view(local_router_id, &lsas);
+                let mut prefixes = v.intra.prefixes.clone();
+                prefixes.extend(v.inter_prefixes);
+                let mut asbrs = v.intra.asbrs.clone();
+                asbrs.extend(v.inter_asbrs);
+                (prefixes, asbrs, v.intra)
+            } else {
+                let v = spf::intra_area_routes(local_router_id, &lsas);
+                (v.prefixes.clone(), v.asbrs.clone(), v)
+            };
+            views.push((*area_id, prefixes, asbrs, own));
         }
         let types = self.lsa_types();
         let infinity = self.originate_lsinfinity.load(Ordering::Relaxed);
         for (dest, lsdb) in &areas {
-            // Cheapest over every other area; 24-bit metrics (LSInfinity
+            // Cheapest over every source area; 24-bit metrics (LSInfinity
             // excluded).
             let mut prefixes: HashMap<Ipv6Net, u32> = HashMap::new();
             let mut asbrs: HashMap<Ipv4Addr, (u32, u32)> = HashMap::new();
-            for (_, view) in views.iter().filter(|(src, _)| src != dest) {
-                for &(prefix, cost) in &view.prefixes {
+            let own = views.iter().find(|v| v.0 == *dest).map(|v| &v.3);
+            for (src, src_prefixes, src_asbrs, _) in &views {
+                // The backbone feeds every area, a non-backbone area only
+                // the backbone.
+                if src == dest || (!src.is_unspecified() && !dest.is_unspecified()) {
+                    continue;
+                }
+                for &(prefix, cost) in src_prefixes {
+                    if own.is_some_and(|o| o.prefixes.iter().any(|(p, _)| *p == prefix)) {
+                        continue;
+                    }
                     let e = prefixes.entry(prefix).or_insert(cost);
                     *e = (*e).min(cost);
                 }
-                for &(asbr, cost, options) in &view.asbrs {
+                for &(asbr, cost, options) in src_asbrs {
+                    if own.is_some_and(|o| o.asbrs.iter().any(|(id, _, _)| *id == asbr)) {
+                        continue;
+                    }
                     let e = asbrs.entry(asbr).or_insert((cost, options));
                     if cost < e.0 {
                         *e = (cost, options);
@@ -2915,6 +2960,7 @@ impl LinkManager {
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
         let mut merged: HashMap<Ipv6Net, spf::RouteEntry> = HashMap::new();
+        let backbone_abr = self.is_backbone_abr().await;
         for (area_id, lsdb) in areas {
             let mut lsas = lsdb.lock().await.all();
             for (_, link_lsdb) in self.link_local_lsdbs_in(area_id).await {
@@ -2924,7 +2970,8 @@ impl LinkManager {
             // intra-area ASBR or an Inter-Area-Router-LSA there); the cheapest
             // wins in the merge below.
             lsas.extend(self.as_lsdb.lock().await.all());
-            for entry in spf::compute(router_id, &lsas) {
+            let skip = backbone_abr && !area_id.is_unspecified();
+            for entry in spf::compute_in(router_id, &lsas, skip) {
                 merged
                     .entry(entry.prefix)
                     .and_modify(|existing| {
@@ -5508,6 +5555,109 @@ pub(crate) mod tests {
             "{routes:?}"
         );
         assert_eq!(router_flags(&b, area1, id(3)).await, Some(0));
+    }
+
+    /// #610: a (area 1, ASBR) — b (ABR) — c (ABR, area 0 between) — d
+    /// (area 2): c passes b's backbone Inter-Area-Prefix/Router-LSAs on into
+    /// area 2, so d routes to a's loopback and external prefix; a router in
+    /// two non-backbone areas is no ABR.
+    #[tokio::test(start_paused = true)]
+    async fn abr_resummarizes_backbone_inter_area_routes() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b, c, d) = (router(&wire), router(&wire), router(&wire), router(&wire));
+        let (area0, area1, area2) = (
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::new(0, 0, 0, 1),
+            Ipv4Addr::new(0, 0, 0, 2),
+        );
+        let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
+            area_id,
+            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let loopback: Ipv6Net = "2001:db8:ff::1/128".parse().unwrap();
+        let external: Ipv6Net = "2001:db8:e::/48".parse().unwrap();
+        a.reconcile(
+            vec![seg(1, 1, area1)],
+            HashMap::from([(area1, vec![(loopback, 1)])]),
+            id(1),
+        )
+        .await;
+        a.apply_redistribute_update(RedistributeUpdate::Full(vec![
+            nos_proto::RedistributedRoute {
+                prefix: IpNet::V6(external),
+                gateway: "2001:db8:1::99".parse().unwrap(),
+            },
+        ]))
+        .await;
+        b.reconcile(
+            vec![seg(2, 1, area1), seg(3, 2, area0)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        c.reconcile(
+            vec![seg(4, 2, area0), seg(5, 3, area2)],
+            HashMap::new(),
+            id(3),
+        )
+        .await;
+        d.reconcile(vec![seg(6, 3, area2)], HashMap::new(), id(4))
+            .await;
+        settle(90).await;
+
+        let routes = d.compute_routes().await;
+        let route = |p: Ipv6Net| routes.iter().find(|r| r.prefix == p);
+        let inter = route(loopback).unwrap_or_else(|| panic!("{routes:?}"));
+        assert_eq!(inter.next_hop, "fe80::5".parse::<Ipv6Addr>().unwrap());
+        assert!(route(external).is_some(), "{routes:?}");
+        let db = d.database_summaries().await;
+        assert!(db
+            .iter()
+            .any(|l| l.lsa_type == lsa::LSA_TYPE_INTER_AREA_ROUTER
+                && l.advertising_router == id(3)
+                && l.link_state_id == id(1)));
+
+        a.reconcile(vec![seg(1, 1, area1)], HashMap::new(), id(1))
+            .await;
+        a.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
+            .await;
+        settle(60).await;
+        let routes = d.compute_routes().await;
+        assert!(
+            routes
+                .iter()
+                .all(|r| r.prefix != loopback && r.prefix != external),
+            "{routes:?}"
+        );
+    }
+
+    /// #610: two non-backbone areas and no backbone: no B-bit, no summaries.
+    #[tokio::test(start_paused = true)]
+    async fn router_in_two_non_backbone_areas_is_no_abr() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let (area1, area2) = (Ipv4Addr::new(0, 0, 0, 1), Ipv4Addr::new(0, 0, 0, 2));
+        let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
+            area_id,
+            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        a.reconcile(
+            vec![seg(1, 1, area1), seg(2, 2, area2)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.reconcile(vec![seg(3, 1, area1)], HashMap::new(), id(2))
+            .await;
+        settle(60).await;
+        assert_eq!(router_flags(&b, area1, id(1)).await, Some(0));
+        assert!(b
+            .database_summaries()
+            .await
+            .iter()
+            .all(|l| l.lsa_type != lsa::LSA_TYPE_INTER_AREA_PREFIX));
     }
 
     fn trailer(key: &[u8]) -> packet::TrailerAuth {
