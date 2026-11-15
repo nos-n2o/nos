@@ -977,6 +977,7 @@ mod tests {
     fn build_from_config_table_without_static_instance_is_empty() {
         let tables = vec![RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,
@@ -1284,6 +1285,7 @@ mod tests {
     fn build_from_config_resolves_static_routes() {
         let tables = vec![RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
             ospfv3_instance: None,

@@ -637,6 +637,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Serve the REST API on an address inside this routing table.",
             "Makes nos-watchdogd run nos-restd for this routing table, listening on the given address (and port, default 8080) inside the table's VRF over mutual TLS. `delete` stops it.",
         ),
+        Topic::RoutingTableSshServer => (
+            "Serve SSH on an address inside this routing table.",
+            "Makes nos-watchdogd run nos-sshd for this routing table, listening on the given address (and port, default 22) inside the table's VRF. `delete` stops it.",
+        ),
         Topic::RoutingTableEvpn => (
             "Make this routing table an EVPN IP-VRF with an L3 VNI.",
             "nos-ribd creates a VXLAN device for the l3-vni on a bridge in the table's VRF, \

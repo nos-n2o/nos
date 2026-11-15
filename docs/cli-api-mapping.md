@@ -84,6 +84,7 @@ Each `set`/`delete` corresponds to a `PUT`/`DELETE` on the URL of what it change
 | `set interface eth0 address 10.99.0.1/24` | `PUT …/interface/eth0/subinterface/0/address/10.99.0.1%2F24` body `{"address":"10.99.0.1/24","label":null}` |
 | `set routing-table rt1 static-routing-instance s1` | `PUT …/routing-table/rt1/static-routing-instance` body `"s1"` |
 | `delete routing-table rt1 rest-api` | `DELETE …/routing-table/rt1/rest-api` |
+| `delete routing-table rt1 ssh-server` | `DELETE …/routing-table/rt1/ssh-server` |
 | `delete bgp instance r1` | `DELETE …/bgp-instance/r1` |
 
 **`edit` has no REST counterpart,** because there is no current position to move to: every URL is absolute. `edit` also creates the object if it is missing. Over REST, you create an object by `PUT`ting it whole, with every required field:

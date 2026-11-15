@@ -100,7 +100,7 @@ pub use port_aggregate::{
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
-    RoutingTableVpn, REST_API_PORT_DEFAULT,
+    RoutingTableVpn, SshServer, REST_API_PORT_DEFAULT, SSH_SERVER_PORT_DEFAULT,
 };
 pub use sbfd::SbfdReflector;
 pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};

@@ -579,6 +579,10 @@ mod tests {
             super::super::REST_API_LABEL
         );
         assert_eq!(
+            label(list_node("routing_tables"), "ssh_server"),
+            super::super::SSH_SERVER_LABEL
+        );
+        assert_eq!(
             label(list_node("broadcast_domains"), "vni"),
             super::super::VNI_LABEL
         );

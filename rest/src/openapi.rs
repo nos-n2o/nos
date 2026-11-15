@@ -250,6 +250,7 @@ mod tests {
             "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/profile/{profile}",
             "/v1/transactions/{tx}/community-alias/{community_alias}",
             "/v1/transactions/{tx}/routing-table/{routing_table}/rest-api",
+            "/v1/transactions/{tx}/routing-table/{routing_table}/ssh-server",
             "/v1/config",
             "/v1/transactions/{tx}/commit",
             "/v1/config/save",
