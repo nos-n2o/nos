@@ -1,0 +1,24 @@
+[package]
+name    = "nos-nss"
+publish = false
+version = "0.1.0"
+# 2021, not the workspace's 2024: `libnss_passwd_hooks!` emits a bare `#[no_mangle]`,
+# a hard error in edition 2024.
+edition = "2021"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# `libnss_nos.so`; the Dockerfile installs it as `libnss_nos.so.2` (glibc's NSS soname).
+name       = "nss_nos"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libnss = "0.9.0"
+# The hooks macro names `libc` directly.
+libc   = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

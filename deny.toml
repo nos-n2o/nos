@@ -23,6 +23,8 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CDLA-Permissive-2.0",
+    # libnss (nos-nss): only ever dynamically linked into a cdylib; compatible with the GPL-3.0-only workspace.
+    "LGPL-3.0",
 ]
 
 [bans]

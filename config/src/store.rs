@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
+use crate::nss_users::{names_differ, UserDb};
 use crate::path_edit::{self, Planned};
 use crate::secrets::unmask_op;
 use crate::users::{hash_clear_passwords, is_clear, normalize_names};
@@ -206,6 +207,8 @@ struct Inner {
     diff_subscribers: std::sync::Mutex<HashMap<ViewClass, usize>>,
     config_path: Option<PathBuf>,
     idle_ttl: Duration,
+    /// Mirrors the user names to the NSS passwd file (#999); `None` in tests.
+    user_db: Option<UserDb>,
 }
 
 /// A cheap, cloneable handle to the daemon's config state: the running
@@ -225,6 +228,25 @@ impl ConfigStore {
     /// `new` with an explicit broadcast capacity; only tests pass anything but
     /// `BROADCAST_CAPACITY` (a test that must not lag, #976).
     fn with_broadcast_capacity(initial: Config, config_path: Option<PathBuf>, cap: usize) -> Self {
+        Self::build(initial, config_path, cap, None)
+    }
+
+    /// `new`, plus keeping `db`'s passwd file in step with the users (#999): written once
+    /// now (the seeded `admin`, a restart) and on every commit that changes the user names.
+    pub fn new_with_user_db(initial: Config, config_path: Option<PathBuf>, db: UserDb) -> Self {
+        let store = Self::build(initial, config_path, BROADCAST_CAPACITY, Some(db));
+        if let (Some(db), Ok(running)) = (&store.0.user_db, store.0.running.try_read()) {
+            db.sync(&running.users);
+        }
+        store
+    }
+
+    fn build(
+        initial: Config,
+        config_path: Option<PathBuf>,
+        cap: usize,
+        user_db: Option<UserDb>,
+    ) -> Self {
         let mut initial = initial;
         sync_routing_table_refs(&mut initial);
         // A name loaded from the file is PRECIS-normalized before a clear-text
@@ -240,6 +262,7 @@ impl ConfigStore {
             diff_subscribers: std::sync::Mutex::default(),
             config_path,
             idle_ttl: TX_IDLE_TTL,
+            user_db,
         }))
     }
 
@@ -644,6 +667,13 @@ impl ConfigStore {
 
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         info!(transaction = %name, "config committed");
+        // Under the `running` write guard, so two commits never write out of order.
+        // ponytail: sync IO, a few hundred bytes on tmpfs; spawn_blocking if user counts grow.
+        if let Some(db) = &self.0.user_db
+            && names_differ(&prev.users, &config.users)
+        {
+            db.sync(&config.users);
+        }
         self.broadcast(config, prev);
         drop(running);
         #[cfg(feature = "dhat-heap")]
@@ -807,6 +837,37 @@ mod tests {
     use nos_proto::{BgpInstance, BgpInstanceOp};
 
     use super::*;
+
+    /// #999: the passwd file follows user names only; a password change leaves it alone.
+    #[tokio::test]
+    async fn commits_mirror_user_names_to_the_passwd_file() {
+        use nos_proto::{ConfigOp, TransactionBase, UserOp};
+        let t = tempfile::tempdir().unwrap();
+        let passwd = t.path().join("passwd");
+        let db = UserDb::open(passwd.clone(), &t.path().join("ids")).unwrap();
+        let store = ConfigStore::new_with_user_db(Config::default(), None, db);
+        assert_eq!(std::fs::read_to_string(&passwd).unwrap(), "");
+        let set = |n: &str, pw: &str| {
+            ConfigOp::User(UserOp::SetPassword {
+                name: n.into(),
+                password: pw.into(),
+            })
+        };
+        for (ops, want_rewrite) in [
+            (vec![set("alice", "pw")], true),
+            (vec![set("alice", "other")], false),
+        ] {
+            store.open_transaction("t", TransactionBase::Current).await.unwrap();
+            for op in ops {
+                store.apply_op("t", op).await.unwrap();
+            }
+            std::fs::write(&passwd, "sentinel").unwrap();
+            store.commit_transaction("t", None).await.unwrap();
+            let rewritten = std::fs::read_to_string(&passwd).unwrap() != "sentinel";
+            assert_eq!(rewritten, want_rewrite);
+        }
+        assert!(!std::fs::read_to_string(&passwd).unwrap().contains("argon2"));
+    }
 
     /// #755: `user_exists` follows the running config, not open transactions.
     #[tokio::test]

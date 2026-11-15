@@ -23,7 +23,7 @@ ARG CARGO_FEATURES=
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
-    && cargo build --release -p nos-pam
+    && cargo build --release -p nos-pam -p nos-nss
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
@@ -152,6 +152,17 @@ RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
     && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
     && rm /tmp/pam_nos.so
 COPY pam/nos-sshd.pam /etc/pam.d/nos-sshd
+
+# The NSS module that makes NOS users resolvable (#999): glibc reads
+# /run/nos-users/passwd, which nos-configd writes (docs/architecture/pam.md).
+# `nos` is appended to the `passwd` database only, after `files`, and
+# /run/nos-users is created at start by nos-wd (a tmpfs in compose/nos-e2e).
+COPY --from=builder /app/target/release/libnss_nos.so /tmp/libnss_nos.so
+RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")" \
+    && install -m 0644 -o root -g root /tmp/libnss_nos.so "$d/libnss_nos.so.2" \
+    && rm /tmp/libnss_nos.so \
+    && sed -i 's/^passwd:.*/passwd:         files nos/' /etc/nsswitch.conf \
+    && mkdir -p /run/nos-users && chown nos-configd:nos /run/nos-users && chmod 0755 /run/nos-users
 
 # The `cli` compose service and `nos-e2e`'s execs run as `nos` (group `nos`
 # reaches the 0660 sockets).

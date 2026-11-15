@@ -12,6 +12,10 @@ pub const E2E_PASSWORD: &str = "e2e-password";
 /// password and a user that does not exist (no NSS is needed: `pamtester` names the user).
 pub const PAM_SERVICE: &str = "nos-sshd";
 pub const PAM_WRONG_PASSWORD: &str = "not-the-password";
+/// The `pam` phase's NSS step (#999): a user created and deleted over REST.
+pub const NSS_USER: &str = "nss-alice";
+pub const NSS_PASSWORD: &str = "nss-alice-pw";
+pub const NSS_TX: &str = "pam-nss";
 pub const PAM_UNKNOWN_USER: &str = "nobody-here";
 /// The `rest` phase's throwaway user for password-change checks.
 pub const REST_USER: &str = "rest-user";

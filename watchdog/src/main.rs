@@ -244,6 +244,11 @@ struct Args {
     #[arg(long, default_value = "/var/lib/nos")]
     state_dir: PathBuf,
 
+    /// Directory `nos-configd` writes the NSS passwd file into (#999); created for it
+    /// at startup in privileged mode.
+    #[arg(long, default_value = "/run/nos-users")]
+    users_dir: PathBuf,
+
     /// Seconds a daemon's IPC certificate is valid for.
     #[arg(long, default_value_t = 24 * 3600)]
     pki_leaf_lifetime: u64,
@@ -338,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let me = std::fs::metadata("/proc/self").context("reading our own ids")?;
         nos_watchdog::uids::ensure_state_dirs(&args.state_dir, (me.uid(), me.gid()), gid)?;
+        nos_watchdog::uids::ensure_users_dir(&args.users_dir, (me.uid(), me.gid()), gid)?;
     }
     let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin.clone(), logd_args)
         .with_identity(pki.clone(), Role::Logd, "")

@@ -13,6 +13,7 @@ ospf-common/CLAUDE.md 8192
 daemon/CLAUDE.md 8192
 ospf/CLAUDE.md 12288
 ospfv3/CLAUDE.md 8192
+nss/CLAUDE.md 8192
 pam/CLAUDE.md 8192
 pki/CLAUDE.md 8192
 proto/CLAUDE.md 8192
