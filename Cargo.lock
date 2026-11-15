@@ -1862,6 +1862,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "futures",
  "ipnet",
  "nos-daemon",
@@ -1872,7 +1873,6 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "shlex",
  "tempfile",
  "thiserror",
  "time",

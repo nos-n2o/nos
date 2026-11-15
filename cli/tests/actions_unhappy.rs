@@ -5,11 +5,11 @@
 //! Asserts on the `Mode` each action returns and, where an edit lands, on
 //! the transaction as `nos-configd` holds it; what is printed is proven
 //! reachable by coverage, not captured (#345, decision 1). This is a test
-//! binary of its own because `EDITOR` is process-global.
+//! binary of its own because one test sets `EDITOR` (process-global).
 
 #![allow(
     unsafe_code,
-    reason = "edition 2024: set_var is unsafe; tests set EDITOR/PATH on purpose"
+    reason = "edition 2024: set_var is unsafe; a test sets EDITOR on purpose"
 )]
 #![allow(clippy::excessive_nesting, clippy::match_wildcard_for_single_variants)]
 
@@ -747,14 +747,6 @@ async fn config_edit_lands_where_the_grammar_says() {
     assert!(matches!(mode, Mode::Configuration { .. }));
 }
 
-/// A shell script at `dir/name` that is run as `$EDITOR file`.
-fn editor(dir: &Path, name: &str, body: &str) -> String {
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path.to_str().unwrap().to_string()
-}
-
 async fn policy_source(lab: &Lab) -> String {
     let snap = nos_cli::client::get_transaction(&lab.config, "t")
         .await
@@ -768,112 +760,31 @@ async fn policy_source(lab: &Lab) -> String {
         .clone()
 }
 
+/// `edit source` without a terminal reports the editor error, applies
+/// nothing, and never runs an `$EDITOR` from the environment (#1000).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn policy_source_is_edited_in_an_external_editor() {
+async fn edit_source_without_a_tty_applies_nothing_and_runs_no_editor() {
     let lab = world(Wd::Resolves, Daemons::Populated, Configd::Healthy);
     let tools = tempfile::tempdir().unwrap();
+    let marker = tools.path().join("ran");
+    let script = tools.path().join("editor");
+    std::fs::write(&script, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let policy = configuration("t", &["policy-definition", "p1"], false);
-
-    // Rewrites its argument to a policy that uses every kind of symbol.
-    let good = editor(
-        tools.path(),
-        "good",
-        r#"cat > "$1" <<'EOF'
-if this.bgp.communities.contains(CUST):
-    reject
-if this.bgp.communities.contains(GROUP):
-    reject
-if this.prefix in BLOCKS:
-    reject
-if this.bgp.as_path in TRANSIT:
-    reject
-accept
-EOF"#,
-    );
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", &good) };
-    let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    assert!(matches!(mode, Mode::Configuration { .. }));
-    assert!(
-        policy_source(&lab).await.contains("TRANSIT"),
-        "edit applied"
-    );
-
-    // A script that does not compile is discarded.
-    let bad = editor(tools.path(), "bad", r#"echo 'this is not rpl' > "$1""#);
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", &bad) };
-    let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    assert!(
-        policy_source(&lab).await.contains("TRANSIT"),
-        "edit discarded"
-    );
-
-    // An editor that fails, and one that cannot be started.
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", "false") };
-    let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    assert!(matches!(mode, Mode::Configuration { .. }));
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", "/nonexistent/editor") };
-    let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    assert!(matches!(mode, Mode::Configuration { .. }));
-
-    // The transaction vanishes while the editor runs: nothing is applied.
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", &good) };
-    let flaky = world(Wd::Resolves, Daemons::Populated, Configd::Healthy);
-    let flaky_policy = configuration("flaky", &["policy-definition", "p1"], false);
-    let (mode, _) = run(&flaky, flaky_policy.clone(), &["edit source"], leave_open).await;
-    assert_eq!(mode, flaky_policy);
-
-    // An editor value with arguments: the argument precedes the file path.
-    let argv = tools.path().join("argv");
-    let rec = editor(
-        tools.path(),
-        "rec",
-        &format!(
-            r#"echo "$1" > {a}; echo "$2" >> {a}; echo 'accept' > "$2""#,
-            a = argv.display()
-        ),
-    );
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", format!("{rec} --flag")) };
-    let _ = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    let rec_out = std::fs::read_to_string(&argv).unwrap();
-    assert!(rec_out.starts_with("--flag\n/"), "{rec_out}");
-
-    // An unparsable value discards the edit without running anything.
-    std::fs::remove_file(&argv).unwrap();
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", format!("{rec} \"unbalanced")) };
-    let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    assert!(matches!(mode, Mode::Configuration { .. }));
-    assert!(!argv.exists());
-
-    // The fallbacks: no $EDITOR means $VISUAL, then vim (absent here: an error).
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::remove_var("EDITOR") };
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("VISUAL", "true") };
-    let (_, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::remove_var("VISUAL") };
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("PATH", tools.path()) };
-    let (mode, _) = run(&lab, policy, &["edit source"], leave_open).await;
-    assert!(matches!(mode, Mode::Configuration { .. }));
+    let before = policy_source(&lab).await;
+    // Only meaningful (and non-blocking) when the test harness has no tty.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // SAFETY: test-only env mutation; this is the only test in this binary that sets it.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation
+        unsafe { std::env::set_var("EDITOR", &script) };
+        // SAFETY: as above.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation
+        unsafe { std::env::set_var("VISUAL", &script) };
+        let (mode, _) = run(&lab, policy.clone(), &["edit source"], leave_open).await;
+        assert!(matches!(mode, Mode::Configuration { .. }));
+        assert_eq!(policy_source(&lab).await, before, "nothing applied");
+        assert!(!marker.exists(), "$EDITOR must never be run");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -151,7 +151,7 @@ pub enum Command {
     /// `config_grammar` once the current position and config are known.
     Config(String),
     /// `edit source` — only valid while navigated into a policy-definition;
-    /// opens `$EDITOR`/`$VISUAL`/`vim` on its current source. See root
+    /// opens the built-in editor on its current source. See root
     /// `CLAUDE.md`'s "nos-cli editing UX".
     EditSource,
     /// `show source` — only valid while navigated into a policy-definition.
