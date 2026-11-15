@@ -2077,6 +2077,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sshd_hears_about_its_key_on_an_admin_diff_subscription() {
+        let store = ConfigStore::new(Config::default(), None);
+        let (out, mut rx) = mpsc::channel(4);
+        let (_initial, _task) = store
+            .subscribe_diff(Role::Sshd, vec![DiffScope::Admin], out)
+            .await;
+        store.set_ssh_host_key("A".repeat(43) + "=").await.unwrap();
+        let Some(Event::Diff(d)) = rx.recv().await else {
+            panic!("no diff")
+        };
+        assert!(!d.is_empty());
+    }
+
+    #[tokio::test]
     async fn password_hash_upgrade_is_a_compare_and_swap_of_hashes() {
         let store = ConfigStore::new(Config::default(), None);
         commit_password(&store, "t1", "alice", "one").await;

@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use futures::StreamExt;
 use nos_daemon::{bootstrap, watchdog};
-use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{DiffScope, ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_ssh::conn::{Limits, Spec};
 use nos_ssh::hostkey::{Keeper, KEY_NAME};
 use nos_ssh::listen::{config_trigger, Daemons, LinuxBinder, Listener};
@@ -127,14 +128,31 @@ async fn main() -> anyhow::Result<()> {
 
 /// Re-renders the key file when the keystore's `ssh-host-key` changes (deleted
 /// and regenerated, or replaced); `sshd -i` reads the file per connection.
+/// Driven by an `Admin` diff subscription (resubscribed, after a sync, if the
+/// stream drops).
 async fn follow_key(mut keeper: Keeper<Daemons>, mut shutdown: watch::Receiver<bool>) {
-    // ponytail: 1s poll of `Get` (the listener polls the same way); a diff subscription if it ever matters.
     while !*shutdown.borrow() {
+        let sub =
+            nos_daemon::config::subscribe_diff(&keeper.keys.config_socket, vec![DiffScope::Admin])
+                .await;
+        // After (re)subscribing, so a change in the gap is not missed.
+        keeper.sync().await;
+        if let Ok(mut events) = sub {
+            loop {
+                tokio::select! {
+                    ev = events.next() => if matches!(ev, Some(Ok(_))) {
+                        keeper.sync().await;
+                    } else {
+                        break;
+                    },
+                    _ = shutdown.changed() => return,
+                }
+            }
+        }
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
             _ = shutdown.changed() => {}
         }
-        keeper.sync().await;
     }
 }
 
