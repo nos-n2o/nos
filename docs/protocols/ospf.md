@@ -302,7 +302,7 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 ### Add a second area (ABR)
 
-A router attached to two or more areas is an area border router (ABR): it advertises each area's prefixes into the others as summary LSAs (type 3). There is no switch to turn this on; declaring a second area and attaching a profile from it is enough. Here router-a's loopback moves into area 0.0.0.1, while `eth0.0` stays in the backbone:
+A router attached to two or more areas, one of them the backbone (a virtual link counts), is an area border router (ABR): it advertises each area's prefixes into the others as summary LSAs (type 3). There is no switch to turn this on; declaring a second area and attaching a profile from it is enough. Here router-a's loopback moves into area 0.0.0.1, while `eth0.0` stays in the backbone:
 
 ```
 configure abr
@@ -598,7 +598,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 - If both IDs of a prefix are already taken (`10.0.0.0/16` and `10.0.0.0/24`, then the host route `10.0.0.255/32`), that prefix is not advertised, and the router logs `ospf lsa link state id collision, not originating`.
 - LSAs from other routers that use host-bits IDs are read as their prefix, so they compete with and merge into routes for the same prefix.
 
-**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. A configured virtual link counts as a backbone attachment. An ABR attached to the backbone computes inter-area routes from the backbone's summaries only (RFC 2328 §16.2), and an intra-area route always wins over an inter-area one to the same prefix. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
+**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. A configured virtual link counts as a backbone attachment. An ABR attached to the backbone computes inter-area routes from the backbone's summaries only (RFC 2328 §16.2), and an intra-area route always wins over an inter-area one to the same prefix. A router in two or more areas without the backbone is not an ABR (RFC 2328 §3.1): no B-bit, no summaries, and one `ospf attached to 2+ areas without the backbone` warning while that lasts. A backbone ABR also re-advertises, into its non-backbone areas, the inter-area routes and ASBRs it learned from other ABRs' backbone summaries (§12.4.3), except a prefix or ASBR the destination area already reaches intra-area; a non-backbone area's routes go to the backbone only. Several ABRs connecting the same areas work this way; there are no up/down bits for looped topologies.
 
 **Transit-only networks (RFC 6860).** Described [above](#hide-transit-only-networks-rfc-6860). With prefix suppression on, an NSSA type-7 LSA's forwarding address is a loopback's address, or `0.0.0.0` if the router has no loopback in the area, never a hidden link's.
 

@@ -237,7 +237,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Ospfv3"
 
 ### Add a second area (ABR)
 
-As in [OSPF](ospf.md#add-a-second-area-abr), a router with links or loopbacks in two or more areas is an area border router; there is no switch. Here router-a's loopback goes into area 0.0.0.1 while `eth0.0` stays in the backbone:
+As in [OSPF](ospf.md#add-a-second-area-abr), a router with links or loopbacks in two or more areas, one of them the backbone, is an area border router; there is no switch. Here router-a's loopback goes into area 0.0.0.1 while `eth0.0` stays in the backbone:
 
 ```
 configure v3abr
@@ -286,7 +286,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
 | routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
-| area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas make an ABR | `show ospfv3 database` |
+| area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas, one the backbone, make an ABR | `show ospfv3 database` |
 | redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
