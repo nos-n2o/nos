@@ -600,9 +600,14 @@ fn p2p_next_hop(
     parent_router: Ipv4Addr,
     child_router: Ipv4Addr,
 ) -> Option<(Ipv6Addr, u32)> {
-    let l = routers.get(&parent_router)?.links.iter().find(|l| {
-        l.link_type == LINK_TYPE_POINT_TO_POINT && l.neighbor_router_id == child_router
-    })?;
+    // Parallel links to one neighbor: the cheapest, the edge Dijkstra took
+    // (#618), not whichever the LSA happens to list first.
+    let l = routers
+        .get(&parent_router)?
+        .links
+        .iter()
+        .filter(|l| l.link_type == LINK_TYPE_POINT_TO_POINT && l.neighbor_router_id == child_router)
+        .min_by_key(|l| l.metric)?;
     let addr = links
         .get(&(child_router, lsa::interface_id_key(l.neighbor_interface_id)))
         .copied()?;
@@ -1389,6 +1394,31 @@ mod tests {
         // `p2p(w, 1, 2, 1)`'s own_if=1) — never x's own interface id.
         assert_eq!(routes[0].interface_id, 1);
         assert_eq!(routes[0].metric, 3);
+    }
+
+    /// #618: two parallel links to one neighbor: the route leaves over the
+    /// cheaper one whatever the LSA's link order.
+    #[test]
+    fn parallel_links_use_the_cheapest_interface() {
+        let (root, w) = (router_id(1), router_id(2));
+        let stub: Ipv6Net = "2001:db8:2::/64".parse().unwrap();
+        for links in [
+            vec![p2p(w, 10, 10, 5), p2p(w, 20, 20, 1)],
+            vec![p2p(w, 20, 20, 1), p2p(w, 10, 10, 5)],
+        ] {
+            let routes = compute(
+                root,
+                &[
+                    router_lsa(root, links),
+                    router_lsa(w, vec![p2p(root, 10, 10, 5), p2p(root, 20, 20, 1)]),
+                    link_lsa(w, 10, "fe80::2".parse().unwrap()),
+                    link_lsa(w, 20, "fe80::2".parse().unwrap()),
+                    router_prefix_lsa(w, vec![(stub, 1)]),
+                ],
+            );
+            assert_eq!(routes.len(), 1);
+            assert_eq!((routes[0].interface_id, routes[0].metric), (20, 2));
+        }
     }
 
     #[test]

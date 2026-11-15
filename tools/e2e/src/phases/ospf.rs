@@ -3953,6 +3953,8 @@ pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
             &profile,
         ]);
         if delete {
+            // A profile on a deleted subinterface fails validation.
+            f.truncate(f.len() - 2);
             f.push("--delete-subinterface".into());
         }
         f
