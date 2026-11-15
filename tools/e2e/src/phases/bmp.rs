@@ -323,9 +323,9 @@ async fn adj_rib_out(w: &mut World, a_flags: &[String]) -> anyhow::Result<()> {
     )?;
     let mut flags = a_flags.to_vec();
     flags.extend(strings(&super::bgp::redistribute()));
+    // #629: the export policy is applied in place; land it before the denied
+    // prefix exists, or the prefix could be advertised and then withdrawn.
     flags.extend(strings(&[
-        "--static-route",
-        DENIED_PREFIX,
         "--policy-name",
         "bmp-out-deny",
         "--policy-source-file",
@@ -333,6 +333,12 @@ async fn adj_rib_out(w: &mut World, a_flags: &[String]) -> anyhow::Result<()> {
         "--export-policy",
         "bmp-out-deny",
     ]));
+    let applied = w.a()?.count(&super::bgp::in_place(IP_B.s(), "export"));
+    w.a()?.provision_flags(&flags).await?;
+    w.a()?
+        .wait_new(&super::bgp::in_place(IP_B.s(), "export"), applied, 30)
+        .await?;
+    flags.extend(strings(&["--static-route", DENIED_PREFIX]));
     let mut both = flags.clone();
     both.extend(strings(&["--bmp-monitor-out", "both"]));
     w.a()?.provision_flags(&both).await?;

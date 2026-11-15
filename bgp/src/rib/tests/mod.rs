@@ -30,6 +30,7 @@ mod next_hop;
 mod outbox;
 mod policy;
 mod propagation;
+mod reexport;
 mod retain;
 mod rpl_path;
 mod rtc;

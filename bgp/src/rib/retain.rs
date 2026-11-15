@@ -300,6 +300,20 @@ impl BgpRib {
             .collect()
     }
 
+    /// Installs `policies`' EVPN and Flowspec policies, which later UPDATEs of
+    /// `peer` are judged by (the unicast one lives in the `PeerSlot`). No
+    /// held route is re-run: a route refresh re-sends them (#629).
+    pub fn set_peer_import_maps(&mut self, peer: IpAddr, policies: &ImportPolicies) {
+        match &policies.evpn {
+            Some(p) => self.evpn_import.insert(peer, p.clone()),
+            None => self.evpn_import.remove(&peer),
+        };
+        match &policies.flowspec {
+            Some(p) => self.flowspec_import.insert(peer, p.clone()),
+            None => self.flowspec_import.remove(&peer),
+        };
+    }
+
     /// Starts a pass: `policies` is what every later UPDATE of `peer` is
     /// judged by (the caller installs the unicast one in its slot in the same
     /// critical section; the EVPN and Flowspec ones are installed here), the
@@ -313,14 +327,7 @@ impl BgpRib {
             return None;
         }
         let policies = policies.into();
-        match &policies.evpn {
-            Some(p) => self.evpn_import.insert(peer, p.clone()),
-            None => self.evpn_import.remove(&peer),
-        };
-        match &policies.flowspec {
-            Some(p) => self.flowspec_import.insert(peer, p.clone()),
-            None => self.flowspec_import.remove(&peer),
-        };
+        self.set_peer_import_maps(peer, &policies);
         let mut keys: Vec<ReevalKey> = self
             .retained
             .tables

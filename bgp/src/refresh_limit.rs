@@ -1,6 +1,6 @@
 //! Per-session limiter for peer-driven ROUTE-REFRESH requests (#396): each
 //! one resends the whole Loc-RIB, so an unthrottled peer is a CPU/bandwidth
-//! amplifier. Hard-coded (no knob): burst 2, one token back per 10 s.
+//! amplifier. Hard-coded (no knob): per address family, burst 2, one token back per 10 s.
 
 use std::time::Duration;
 

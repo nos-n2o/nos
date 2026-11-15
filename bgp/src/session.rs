@@ -1311,7 +1311,7 @@ impl SessionManager {
         let is_rr_client = slot.peer.route_reflector_client;
         let is_rs_client = slot.peer.route_server_client;
         let import_policy = slot.peer.import_policy.clone();
-        let export_policy = slot.peer.export_policy.clone();
+        let export_policy = slot.export_policies().0;
         let bgp_rib = self.bgp_rib.clone();
         let task_slot = slot.clone();
         let task = tokio::spawn(async move {
@@ -1365,10 +1365,10 @@ impl SessionManager {
                 None => false,
             };
             match slot {
-                // Enabling needs the peer to re-send; without Route Refresh
-                // only a new session retains everything.
+                // Enabling or refreshing needs the peer to re-send; without
+                // Route Refresh only a new session learns everything again.
                 Some(s)
-                    if !(kind == Reapply::Enable
+                    if !(matches!(kind, Reapply::Enable | Reapply::Refresh)
                         && established
                         && !s.route_refresh_negotiated()) =>
                 {
@@ -1412,13 +1412,38 @@ impl SessionManager {
                 peer.flowspec_import_policy.clone(),
             );
             slot.set_soft_reconfig(peer.soft_reconfiguration_inbound);
+            let export_changed = current.get(&addr).is_some_and(|c| {
+                c.export_policy != peer.export_policy
+                    || c.flowspec_export_policy != peer.flowspec_export_policy
+            });
+            slot.set_export_policies((
+                peer.export_policy.clone(),
+                peer.flowspec_export_policy.clone(),
+            ));
             if let Some(task) = tasks.get_mut(&addr) {
                 task.peer = peer;
             }
             if !established {
                 continue; // the next session retains from its first UPDATE
             }
+            if export_changed {
+                let (unicast, flowspec) = slot.export_policies();
+                let mut rib = self.bgp_rib.lock().await;
+                rib.reexport_peer(addr, unicast, flowspec);
+                info!(peer = %addr, kind = "export", "policy changed in place");
+            }
             match kind {
+                Reapply::Export => {}
+                Reapply::Refresh => {
+                    // Later UPDATEs are judged by the RIB's copies of the
+                    // EVPN and Flowspec policies, not the slot's.
+                    self.bgp_rib
+                        .lock()
+                        .await
+                        .set_peer_import_maps(addr, &slot.import_policies());
+                    slot.send_command(FsmCommand::SendRouteRefresh);
+                    info!(peer = %addr, kind = "import", "policy changed in place");
+                }
                 Reapply::Policy => self.start_reeval(slot, true, None),
                 Reapply::Enable => {
                     self.bgp_rib
@@ -1772,10 +1797,16 @@ enum Reapply {
     Enable,
     /// Flag on to off with the policy unchanged: free the retention.
     Disable,
+    /// Flag off before and after, an import policy changed (#629): ask the
+    /// peer to re-send, the new policy judges the refreshed routes.
+    Refresh,
+    /// Only an export policy changed (#629): re-diff against what was sent.
+    Export,
 }
 
-/// `None`: restart. Anything else changing (an export policy included) or a
-/// policy change without the flag restarts.
+/// `None`: restart. Anything else changing, or dropping the flag together
+/// with an import policy change, restarts. Export policies ride along with any
+/// kind (`reconcile_peers` re-exports when they differ).
 fn reapply_kind(running: &ResolvedPeer, wanted: &ResolvedPeer) -> Option<Reapply> {
     let mut same = running.clone();
     same.import_policy.clone_from(&wanted.import_policy);
@@ -1784,6 +1815,9 @@ fn reapply_kind(running: &ResolvedPeer, wanted: &ResolvedPeer) -> Option<Reapply
     same.flowspec_import_policy
         .clone_from(&wanted.flowspec_import_policy);
     same.soft_reconfiguration_inbound = wanted.soft_reconfiguration_inbound;
+    same.export_policy.clone_from(&wanted.export_policy);
+    same.flowspec_export_policy
+        .clone_from(&wanted.flowspec_export_policy);
     if same != *wanted {
         return None;
     }
@@ -1795,6 +1829,8 @@ fn reapply_kind(running: &ResolvedPeer, wanted: &ResolvedPeer) -> Option<Reapply
         wanted.soft_reconfiguration_inbound,
     ) {
         (true, true) if policy_changed => Some(Reapply::Policy),
+        (false, false) if policy_changed => Some(Reapply::Refresh),
+        (a, b) if a == b => Some(Reapply::Export),
         (false, true) => Some(Reapply::Enable),
         (true, false) if !policy_changed => Some(Reapply::Disable),
         _ => None,
@@ -1868,7 +1904,7 @@ async fn active_connect_loop(
                                 is_rr_client: slot.peer.route_reflector_client,
                                 is_rs_client: slot.peer.route_server_client,
                                 import_policy: slot.peer.import_policy.clone(),
-                                export_policy: slot.peer.export_policy.clone(),
+                                export_policy: slot.export_policies().0,
                             },
                             slot.clone(),
                             bgp_rib.clone(),
@@ -2661,11 +2697,24 @@ mod tests {
     }
 
     #[test]
-    fn diff_peers_policy_change_without_the_flag_restarts() {
+    fn diff_peers_policy_change_without_the_flag_refreshes_in_place() {
         assert_eq!(
             reapply(&flagged(false, false), &flagged(false, true)),
-            (true, None)
+            (false, Some(Reapply::Refresh))
         );
+    }
+
+    #[test]
+    fn diff_peers_export_only_change_is_in_place_with_or_without_the_flag() {
+        for on in [false, true] {
+            let a = flagged(on, false);
+            let mut b = a.clone();
+            b.export_policy = Arc::new(nos_rpl::DENY_ALL.clone());
+            assert_eq!(reapply(&a, &b), (false, Some(Reapply::Export)));
+            // Another field alongside still restarts.
+            b.remote_as += 1;
+            assert_eq!(reapply(&a, &b), (true, None));
+        }
     }
 
     #[test]
@@ -2684,7 +2733,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_peers_evpn_or_flowspec_import_change_is_reapplied_but_export_restarts() {
+    fn diff_peers_evpn_or_flowspec_import_and_export_changes_are_reapplied() {
         let deny = Arc::new(nos_rpl::DENY_ALL.clone());
         let a = flagged(true, false);
         let mut evpn = a.clone();
@@ -2695,13 +2744,13 @@ mod tests {
         assert_eq!(reapply(&a, &flow), (false, Some(Reapply::Policy)));
         let mut export = a.clone();
         export.flowspec_export_policy = Some(deny);
-        assert_eq!(reapply(&a, &export), (true, None));
-        // Without the flag the same change restarts.
+        assert_eq!(reapply(&a, &export), (false, Some(Reapply::Export)));
+        // Without the flag an import change is a route refresh.
         let mut off = flagged(false, false);
         let mut off_evpn = off.clone();
         off_evpn.evpn_import_policy = Some(Arc::new(nos_rpl::DENY_ALL.clone()));
         off.soft_reconfiguration_inbound = false;
-        assert_eq!(reapply(&off, &off_evpn), (true, None));
+        assert_eq!(reapply(&off, &off_evpn), (false, Some(Reapply::Refresh)));
     }
 
     #[test]

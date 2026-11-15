@@ -809,7 +809,9 @@ async fn classify_inbound(
 #[derive(Default)]
 struct RefreshState {
     stale_until: HashMap<AddressFamily, Instant>,
-    limiter: crate::refresh_limit::RefreshLimiter,
+    /// One limiter per family (#629): a policy change asks for every
+    /// negotiated family at once, which one shared burst of 2 would cut off.
+    limiter: HashMap<AddressFamily, crate::refresh_limit::RefreshLimiter>,
 }
 
 /// RFC 2918 inbound: re-send the Loc-RIB for the requested address family.
@@ -852,7 +854,12 @@ async fn resend_loc_rib(
     let mut rib = bgp_rib.lock().await;
     match rr.subtype {
         message::REFRESH_REQUEST => {
-            if refresh.limiter.allow(Instant::now()) {
+            if refresh
+                .limiter
+                .entry(family)
+                .or_default()
+                .allow(Instant::now())
+            {
                 rib.resend_all(peer.remote_address, family, remote.enhanced_refresh);
                 info!(
                     peer = %peer.remote_address, afi = rr.afi,
@@ -1508,7 +1515,7 @@ async fn report_established(
     rib.set_peer_flowspec_policies(
         peer.remote_address,
         slot.flowspec_import_policy(),
-        slot.peer.flowspec_export_policy.clone(),
+        slot.export_policies().1,
     );
     rib.set_peer_local_as(
         peer.remote_address,
@@ -1539,7 +1546,7 @@ async fn report_established(
         peer.is_rr_client,
         peer.is_rs_client,
         add_path_tx,
-        peer.export_policy.clone(),
+        slot.export_policies().0,
         outbox_tx.clone(),
     );
     slot.status.send_modify(|s| {
