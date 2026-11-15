@@ -305,7 +305,11 @@ jobs:
       # failing; only usage errors and a red unmutated baseline fail the job (#362).
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev
       - name: Run shard ${{ matrix.shard }}/32
-        run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/32"
+        env:
+          # Default 256 cases make the whole nos-bgp suite 90-180 s per surviving mutant (#1089).
+          PROPTEST_CASES: 32
+        # round-robin mixes files across shards; slice put message.rs/fsm.rs mutants in few shards (#1089).
+        run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/32 --sharding round-robin"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
