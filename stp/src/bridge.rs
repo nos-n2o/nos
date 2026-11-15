@@ -73,22 +73,88 @@ impl Bridge {
             actions: Vec::new(),
         };
         for i in 0..b.ports.len() {
-            prx::enter(&mut b, i, prx::State::Discard);
-            pim::enter(&mut b, i, pim::State::Disabled);
-            prt::enter(&mut b, i, prt::State::InitPort);
-            pst::enter(&mut b, i, pst::State::Discarding);
-            tcm::enter(&mut b, i, tcm::State::Inactive);
-            ppm::enter(&mut b, i, ppm::State::CheckingRstp);
-            ptx::enter(&mut b, i, ptx::State::TransmitInit);
-            let s = if b.ports[i].admin_edge {
-                bdm::State::Edge
-            } else {
-                bdm::State::NotEdge
-            };
-            bdm::enter(&mut b, i, s);
+            b.init_port(i);
         }
         b.run();
         b
+    }
+
+    /// BEGIN for one port: every port machine in its initial state.
+    fn init_port(&mut self, i: usize) {
+        let b = self;
+        prx::enter(b, i, prx::State::Discard);
+        pim::enter(b, i, pim::State::Disabled);
+        prt::enter(b, i, prt::State::InitPort);
+        pst::enter(b, i, pst::State::Discarding);
+        tcm::enter(b, i, tcm::State::Inactive);
+        ppm::enter(b, i, ppm::State::CheckingRstp);
+        ptx::enter(b, i, ptx::State::TransmitInit);
+        let s = if b.ports[i].admin_edge {
+            bdm::State::Edge
+        } else {
+            bdm::State::NotEdge
+        };
+        bdm::enter(b, i, s);
+    }
+
+    /// A new port, disabled and discarding; returns its index (#662).
+    pub fn add_port(&mut self, p: PortParams) -> usize {
+        let pv = PriorityVector {
+            root: self.id,
+            root_path_cost: 0,
+            designated_bridge: self.id,
+            designated_port: PortId::from_u16(0),
+            bridge_port: PortId::from_u16(0),
+        };
+        self.ports.push(Port::new(
+            p.id,
+            p.path_cost,
+            p.admin_edge,
+            p.auto_edge,
+            pv,
+            self.bridge_times,
+        ));
+        let i = self.ports.len() - 1;
+        self.init_port(i);
+        self.run();
+        i
+    }
+
+    /// New Port Identifier (priority) for `port`; re-runs role selection.
+    pub fn set_port_priority(&mut self, port: usize, id: PortId) {
+        let p = &mut self.ports[port];
+        p.port_id = id;
+        p.reselect = true;
+        p.selected = false;
+        self.run();
+    }
+
+    /// Admin and auto edge of `port` (BDM reads both on every pass).
+    pub fn set_edge(&mut self, port: usize, admin: bool, auto: bool) {
+        let p = &mut self.ports[port];
+        p.admin_edge = admin;
+        p.auto_edge = auto;
+        self.run();
+    }
+
+    /// New bridge timers: the root's too while this bridge is the root.
+    pub fn set_timers(&mut self, timers: Timers) {
+        self.timers = timers;
+        let times = Times {
+            message_age: 0,
+            max_age: timers.max_age,
+            hello: timers.hello,
+            forward_delay: timers.forward_delay,
+        };
+        self.bridge_times = times;
+        if self.root_port.is_none() {
+            self.root_times = times;
+        }
+        for p in &mut self.ports {
+            p.reselect = true;
+            p.selected = false;
+        }
+        self.run();
     }
 
     pub fn take_actions(&mut self) -> Vec<Action> {

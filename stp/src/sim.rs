@@ -491,4 +491,40 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn live_edits_and_a_new_port_leave_forwarding_ports_alone() {
+        // #662: priority, timers and a added port apply without a restart.
+        let mut s = started(&[4096, 32768], &[p2p(0, 1)]);
+        s.converge(60).unwrap();
+        let t = Timers {
+            forward_delay: 10,
+            ..Timers::default()
+        };
+        s.bridges[0].set_timers(t);
+        s.bridges[0].set_port_priority(0, PortId::new(64, 1).unwrap());
+        s.bridges[0].set_edge(0, false, true);
+        let new = s.bridges[0].add_port(PortParams {
+            id: PortId::new(128, 2).unwrap(),
+            path_cost: 20_000,
+            admin_edge: false,
+            auto_edge: false,
+        });
+        assert_eq!(new, 1);
+        for _ in 0..30 {
+            s.tick();
+            for b in &s.bridges {
+                assert_eq!(b.port_state(0), PortState::Forwarding, "{}", s.dump());
+            }
+        }
+        assert_eq!(s.bridges[0].port_state(new), PortState::Discarding);
+        assert_eq!(s.bridges[1].root_times.forward_delay, 10, "{}", s.dump());
+        assert!(s.bridges[0].ports[0].port_id.priority() == 64);
+        // The new port comes up and joins as a designated port of the root.
+        s.bridges[0].set_oper_point_to_point(new, true);
+        s.bridges[0].set_port_enabled(new, true);
+        s.settle();
+        s.run(30);
+        assert_eq!(s.bridges[0].port_state(new), PortState::Forwarding);
+    }
 }

@@ -693,3 +693,42 @@ async fn run_with_applies_plans_serves_commands_and_stops() {
     stop_tx.send(true).unwrap();
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_cost_priority_or_port_edit_applies_in_place() {
+    let mut l = Lab::new();
+    l.d.apply_plan(Some(plan(&["eth1", "eth3"]))).await;
+    l.d.sync_links().await;
+    for _ in 0..40 {
+        l.d.on_tick().await;
+    }
+    let before = l.d.engine.as_ref().unwrap().port_state(0);
+    assert_eq!(before, crate::actions::PortState::Forwarding);
+    l.pushes();
+    let opened = l.fakes.opened();
+
+    let mut p = plan(&["eth1", "eth2", "eth3"]);
+    p.priority = 4096;
+    p.ports[0].cost = Some(1000);
+    l.d.apply_plan(Some(p.clone())).await;
+    let e = l.d.engine.as_ref().unwrap();
+    assert_eq!(e.port_state(0), crate::actions::PortState::Forwarding);
+    assert_eq!(e.numbers()["eth3"], 2, "eth3 keeps its port number");
+    assert_eq!(l.d.rt.len(), 3);
+    assert_eq!(l.fakes.opened(), opened + 1, "only eth2 opens");
+    assert_eq!(l.d.plan.as_ref(), Some(&p));
+
+    l.d.apply_plan(Some(plan(&["eth1", "eth2"]))).await;
+    assert_eq!(l.d.io.len(), 2, "eth3's socket closed");
+    assert_eq!(l.summary().ports.len(), 2);
+
+    // A structural change rebuilds and renumbers from the kept names.
+    let mut q = plan(&["eth1", "eth2"]);
+    q.rstp_version = false;
+    l.d.apply_plan(Some(q)).await;
+    assert_eq!(
+        l.d.engine.as_ref().unwrap().numbers()["eth2"],
+        3,
+        "a rebuild keeps numbers too"
+    );
+}

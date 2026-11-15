@@ -87,6 +87,7 @@ Field values follow the message in the order shown. The strings are frozen by a 
 | `msti port role changed`, `msti port state changed`, `msti root bridge changed` | `msti`, `port`, ... | The same per MSTI |
 | `pvst port role changed`, `pvst port state changed`, `pvst root bridge changed`, `pvst port migrated to ...` | `domain`, ... | The same per Rapid-PVST+ tree |
 | `pvid inconsistent` / `pvid consistent` | `domain`, `port`, ... | A tree's port is blocked for a BPDU of another VLAN, or released |
+| `spanning tree plan updated in place` / `spanning tree plan applied` | `ports`, `priority` | A config change was applied without restarting the protocol, or the bridge was rebuilt (mode, `force-version`, `mstp`, `rapid-pvst`) |
 | `spanning tree state machines did not reach quiescence` | (error) | A bug in the state machines; report it |
 
 ## Troubleshoot

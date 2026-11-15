@@ -30,6 +30,7 @@ pub const MST_REGION_MATCH: &str = "mst region match";
 pub const MSTI_PORT_ROLE_CHANGED: &str = "msti port role changed";
 pub const MSTI_PORT_STATE_CHANGED: &str = "msti port state changed";
 pub const MSTI_ROOT_CHANGED: &str = "msti root bridge changed";
+pub const PLAN_UPDATED_IN_PLACE: &str = "spanning tree plan updated in place";
 pub const PVID_INCONSISTENT: &str = "pvid inconsistent";
 pub const PVID_CONSISTENT: &str = "pvid consistent";
 
@@ -73,6 +74,7 @@ mod tests {
             (MSTI_PORT_ROLE_CHANGED, "msti port role changed"),
             (MSTI_PORT_STATE_CHANGED, "msti port state changed"),
             (MSTI_ROOT_CHANGED, "msti root bridge changed"),
+            (PLAN_UPDATED_IN_PLACE, "spanning tree plan updated in place"),
             (PVID_INCONSISTENT, "pvid inconsistent"),
             (PVID_CONSISTENT, "pvid consistent"),
         ];
