@@ -352,3 +352,66 @@ fn an_igp_change_revalidates_the_rules() {
     rib.set_igp(HashMap::from([("10.0.0.0/24".parse().unwrap(), 0)]));
     assert_eq!(view(&rib, "red"), ["valid"]);
 }
+
+/// Two peers send the same (RD, rule): SRC's copy is valid only in `red`,
+/// OTHER's only in `blue`. Each VRF enforces the copy valid in it (#1111).
+fn two_copies(other_first: bool) -> BgpRib {
+    let mut rib = setup();
+    unicast(&mut rib, SRC, 65001, "10.10.0.0/24");
+    let mut u = reach(OTHER, vec![65002], vec![nlri(RD1, "10.10.0.0/24", 1)]);
+    u.attributes.as_mut().unwrap().extended_communities = vec![RT2];
+    feed(&mut rib, OTHER, &u);
+    let src = flow_reach(65001, vec![RT], RD1, flow());
+    let other = flow_reach(65002, vec![RT2], RD1, flow());
+    if other_first {
+        feed(&mut rib, OTHER, &other);
+        feed(&mut rib, SRC, &src);
+    } else {
+        feed(&mut rib, SRC, &src);
+        feed(&mut rib, OTHER, &other);
+    }
+    rib
+}
+
+fn sizes(rib: &BgpRib) -> Vec<(String, usize)> {
+    rib.vpn_flowspec_push_snapshot()
+        .unwrap()
+        .into_iter()
+        .map(|(t, r)| (t, r.len()))
+        .collect()
+}
+
+#[test]
+fn each_vrf_enforces_the_copy_valid_in_it_whichever_peer_wins() {
+    let k = (AddressFamily::Vpnv4Flowspec, (RD1, flow()));
+    for other_first in [false, true] {
+        let rib = two_copies(other_first);
+        assert!(rib.vpn_flow_enforced("red", addr(SRC), &k), "{other_first}");
+        assert!(!rib.vpn_flow_enforced("red", addr(OTHER), &k));
+        assert!(
+            rib.vpn_flow_enforced("blue", addr(OTHER), &k),
+            "{other_first}"
+        );
+        assert!(!rib.vpn_flow_enforced("blue", addr(SRC), &k));
+        assert_eq!(sizes(&rib), [("red".into(), 1), ("blue".into(), 1)]);
+    }
+}
+
+#[test]
+fn invalidating_the_copy_in_a_vrf_leaves_nothing_there() {
+    let mut rib = two_copies(false);
+    let mut w = empty_update();
+    w.mp_unreach = vec![message::MpUnreachNlri {
+        afi: 1,
+        safi: message::SAFI_VPN,
+        withdrawn: vec![],
+        withdrawn_path_ids: vec![],
+        evpn: vec![],
+        flowspec: vec![],
+        flowspec_vpn: vec![],
+        vpn: vec![nlri(RD1, "10.10.0.0/24", 0)],
+        rtc: vec![],
+    }];
+    feed(&mut rib, OTHER, &w);
+    assert_eq!(sizes(&rib), [("red".into(), 1), ("blue".into(), 0)]);
+}
