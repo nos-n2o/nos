@@ -662,10 +662,10 @@ impl BgpRib {
         let rd = format_rd(&(k.1).0);
         let table = self.vpn_flow_adj_rib_in.entry(peer).or_default();
         let changed = if accepted {
-            if let Some(old) = table.get(k) {
-                if old.attributes == route.attributes {
-                    route.received_at = old.received_at;
-                }
+            if let Some(old) = table.get(k)
+                && old.attributes == route.attributes
+            {
+                route.received_at = old.received_at;
             }
             let changed = table.get(k).map(|o| &o.attributes) != Some(&route.attributes);
             if changed {
