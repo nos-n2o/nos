@@ -17,7 +17,7 @@ use crate::message::{
     BgpCodec, BgpMessage, MpReachNlri, MpUnreachNlri, PathAttributes, Pmsi, UpdateMessage,
     AFI_IPV4, AFI_IPV6, AFI_L2VPN, SAFI_EVPN, SAFI_VPN,
 };
-use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, VpnRoute};
+use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, VpnFlowKey, VpnRoute};
 use crate::vpn::{VpnKey, VpnNlri};
 
 const TYPE_ROUTE_MONITORING: u8 = 0;
@@ -153,6 +153,35 @@ pub fn flowspec_withdraw_to_update(k: &FlowspecKey) -> UpdateMessage {
     let (afi, safi) = crate::gr::afi_safi(k.0);
     let mut mp = unreach(afi, safi);
     mp.flowspec = vec![k.1.clone()];
+    UpdateMessage {
+        mp_unreach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE announcing a stored VPN Flowspec rule (SAFI 134, no next hop).
+pub fn vpn_flowspec_to_update(k: &VpnFlowKey, r: &FlowspecRoute) -> UpdateMessage {
+    let (afi, safi) = crate::gr::afi_safi(k.0);
+    let mut mp = reach(afi, safi, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    mp.flowspec_vpn = vec![crate::flowspec::FlowSpecVpn {
+        rd: (k.1).0,
+        flow: (k.1).1.clone(),
+    }];
+    UpdateMessage {
+        attributes: Some(r.attributes.clone()),
+        mp_reach: vec![mp],
+        ..Default::default()
+    }
+}
+
+/// The UPDATE withdrawing a VPN Flowspec rule.
+pub fn vpn_flowspec_withdraw_to_update(k: &VpnFlowKey) -> UpdateMessage {
+    let (afi, safi) = crate::gr::afi_safi(k.0);
+    let mut mp = unreach(afi, safi);
+    mp.flowspec_vpn = vec![crate::flowspec::FlowSpecVpn {
+        rd: (k.1).0,
+        flow: (k.1).1.clone(),
+    }];
     UpdateMessage {
         mp_unreach: vec![mp],
         ..Default::default()

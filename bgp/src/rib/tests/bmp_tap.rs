@@ -416,5 +416,5 @@ fn the_dump_walks_every_family_post_and_pre_policy() {
             .count()
     };
     assert_eq!((evpn(true), evpn(false)), (0, 1));
-    assert_eq!(rib.bmp_families(peer).len(), 7);
+    assert_eq!(rib.bmp_families(peer).len(), 9);
 }

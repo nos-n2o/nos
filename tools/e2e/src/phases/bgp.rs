@@ -4393,6 +4393,8 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
         "address families negotiated peer={IP_G} families=\\[.*\"vpnv4-flowspec\""
     ))
     .await?;
+    flowspec_vpn_propagation(w).await?;
+    let a = w.a()?;
 
     let route = |verb: &'static str| {
         let mut v = vec![
@@ -4581,6 +4583,178 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
     })
     .await?;
+    Ok(())
+}
+
+/// `flowspec-vpn`, propagation half (#1085): router-b peers router-a over
+/// `vpnv4` + `vpnv4-flowspec` + RT-Constraint. The valid rule router-a learned
+/// from GoBGP is advertised to router-b (the invalid one, imported nowhere, is
+/// not), router-b learns it and validates it against the VPN route it
+/// received from router-a; a `flowspec-export-policy` reject and a membership
+/// that excludes the rule's Route Target each take it away again.
+async fn flowspec_vpn_propagation(w: &mut World) -> anyhow::Result<()> {
+    log("router-b peers router-a with vpnv4-flowspec + rt-constraint (#1085)");
+    // Its own route and rules (RDs 65001:3/4), withdrawn again at the end.
+    let route = |verb: &'static str| {
+        let mut v = vec![
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "vpnv4",
+            "10.30.0.0/24",
+            "label",
+            "300",
+            "rd",
+            "65001:3",
+        ];
+        if verb == "add" {
+            v.extend(["rt", "65000:1"]);
+        }
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let rule = |rd: &'static str, rt: &'static str, verb: &'static str| {
+        let mut v = vec![
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "ipv4-l3vpn-flowspec",
+            "rd",
+            rd,
+            "rt",
+            rt,
+            "match",
+            "destination",
+            "10.30.0.0/24",
+            "protocol",
+            "tcp",
+            "destination-port",
+            "==25",
+        ];
+        if verb == "add" {
+            v.extend(["then", "discard"]);
+        }
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    gobgp_owned(w, route("add")).await?;
+    gobgp_owned(w, rule("65001:3", "65000:1", "add")).await?;
+    gobgp_owned(w, rule("65001:4", "65000:99", "add")).await?;
+    let advertised = format!("flowspec route advertised peer={IP_B} family=vpnv4-flowspec");
+    let withdrawn_to_b =
+        format!("flowspec route advertisement withdrawn peer={IP_B} family=vpnv4-flowspec");
+    let withdrawn_on_b = format!("flowspec route withdrawn peer={IP_A} family=vpnv4-flowspec");
+    let b_flags = |rt: &str| {
+        let mut f = B.base_flags();
+        f.extend(strings(&[
+            "--vpn",
+            "--vpn-flowspec",
+            "--rtc",
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            VPN_RD_B,
+            "--vpn-rt-export",
+            VPN_RD_B,
+            "--vpn-rt-import",
+            rt,
+        ]));
+        f
+    };
+    let a_to_b = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-b",
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B.s(),
+            "--vpn",
+            "--vpn-flowspec",
+            "--rtc",
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let a = w.a()?;
+    let (adv_base, quiet_base) = (
+        a.count(&format!("{advertised} rd=65001:3")),
+        a.count(&format!("{advertised} rd=65001:4")),
+    );
+    w.start(B, Some(b_flags(VPN_RT)), &[]).await?;
+    mpls_ready(w, &["router-b"]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&a_to_b(&[])).await?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_B} families=\\[.*\"vpnv4-flowspec\""
+    ))
+    .await?;
+    a.wait_new(&format!("{advertised} rd=65001:3"), adv_base, 60)
+        .await?;
+    a.assert_quiet(&format!("{advertised} rd=65001:4"), quiet_base, 3)
+        .await?;
+    b.wait(&format!(
+        "flowspec route learned peer={IP_A} family=vpnv4-flowspec rd=65001:3"
+    ))
+    .await?;
+    b.wait(&format!(
+        "flowspec validity changed peer={IP_A} family=vpnv4-flowspec rd=65001:3 table={VPN_TABLE}.*validity=valid"
+    ))
+    .await?;
+
+    log("a flowspec-export-policy reject keeps the rule from router-b");
+    let reject = policy_file("vpn-flow-reject", "reject\n")?;
+    let accept = policy_file("vpn-flow-accept", "accept\n")?;
+    let (gone, gone_b) = (a.count(&withdrawn_to_b), b.count(&withdrawn_on_b));
+    a.provision_flags(&a_to_b(&[
+        "--policy-name",
+        "vpn-flow-reject",
+        "--policy-source-file",
+        &reject,
+        "--flowspec-export-policy",
+        "vpn-flow-reject",
+    ]))
+    .await?;
+    a.wait_new(&withdrawn_to_b, gone, 30).await?;
+    b.wait_new(&withdrawn_on_b, gone_b, 30).await?;
+    let base = a.count(&advertised);
+    a.assert_quiet(&advertised, base, 3).await?;
+
+    log("loosening it brings the rule back, in place");
+    a.provision_flags(&a_to_b(&[
+        "--policy-name",
+        "vpn-flow-accept",
+        "--policy-source-file",
+        &accept,
+        "--flowspec-export-policy",
+        "vpn-flow-accept",
+    ]))
+    .await?;
+    a.wait_new(&format!("{advertised} rd=65001:3"), base, 30)
+        .await?;
+
+    log("router-b's membership no longer covers the Route Target: the rule is withdrawn");
+    let gone = a.count(&withdrawn_to_b);
+    b.provision_flags(&b_flags("65000:7")).await?;
+    a.wait_new(&withdrawn_to_b, gone, 60).await?;
+    let base = a.count(&advertised);
+    a.assert_quiet(&advertised, base, 3).await?;
+    b.provision_flags(&b_flags(VPN_RT)).await?;
+    a.wait_new(&format!("{advertised} rd=65001:3"), base, 60)
+        .await?;
+
+    log("withdrawing the rules and the route again");
+    let gone = a.count(&withdrawn_to_b);
+    gobgp_owned(w, rule("65001:3", "65000:1", "del")).await?;
+    gobgp_owned(w, rule("65001:4", "65000:99", "del")).await?;
+    gobgp_owned(w, route("del")).await?;
+    w.a()?.wait_new(&withdrawn_to_b, gone, 30).await?;
     Ok(())
 }
 

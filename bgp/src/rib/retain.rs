@@ -16,7 +16,7 @@ use super::vpn_out::vpn_family;
 use super::{
     apply_policy, family_index, info, ov_state, warn, Arc, BgpRib, CompiledPolicy, EvpnNlri,
     EvpnRoute, FlowspecKey, FlowspecRoute, HashMap, HashSet, IpAddr, IpNet, PolicyPeer, RibRoute,
-    VpnRoute,
+    VpnFlowKey, VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 use nos_proto::{AddressFamily, FamilyReeval, ReevalFamily};
@@ -42,6 +42,8 @@ pub(super) struct Retained {
     pub(super) flow: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
     /// VPN paths as received (the policy rewrites the held copy).
     pub(super) vpn: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    /// VPN Flowspec rules as received (#1085).
+    pub(super) vpn_flow: HashMap<IpAddr, HashMap<VpnFlowKey, FlowspecRoute>>,
 }
 
 /// The import policies a re-evaluation applies, as the peer slot holds them.
@@ -107,6 +109,21 @@ impl Retained {
         }
     }
 
+    pub(super) fn vpn_flow_slot(
+        &mut self,
+        peer: IpAddr,
+    ) -> Option<&mut HashMap<VpnFlowKey, FlowspecRoute>> {
+        self.enabled
+            .contains(&peer)
+            .then(|| self.vpn_flow.entry(peer).or_default())
+    }
+
+    pub(super) fn take_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) {
+        if let Some(t) = self.vpn_flow.get_mut(&peer) {
+            t.remove(k);
+        }
+    }
+
     pub(super) fn take_vpn(&mut self, peer: IpAddr, k: &VpnKey<IpNet>) {
         if let Some(t) = self.vpn.get_mut(&peer) {
             t.remove(k);
@@ -126,6 +143,7 @@ impl Retained {
         self.evpn.remove(&peer);
         self.flow.remove(&peer);
         self.vpn.remove(&peer);
+        self.vpn_flow.remove(&peer);
         self.enabled.remove(&peer);
         self.awaiting_eorr.retain(|(p, _)| *p != peer);
     }
@@ -140,6 +158,7 @@ enum ReevalKey {
     Unicast(IpNet),
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
+    VpnFlow(VpnFlowKey),
     Vpn(VpnKey<IpNet>),
 }
 
@@ -153,9 +172,9 @@ pub struct ReevalPass {
     keys: Vec<ReevalKey>,
     next: usize,
     /// Indexed like `ReevalFamily`.
-    stats: [Tally; 7],
+    stats: [Tally; 9],
     /// Families reported even when empty: unicast, plus what was negotiated.
-    shown: [bool; 7],
+    shown: [bool; 9],
 }
 
 /// What `reevaluate_chunk` did.
@@ -169,7 +188,7 @@ pub enum ChunkOutcome {
     Gone,
 }
 
-const FAMILIES: [ReevalFamily; 7] = [
+const FAMILIES: [ReevalFamily; 9] = [
     ReevalFamily::Ipv4Unicast,
     ReevalFamily::Ipv6Unicast,
     ReevalFamily::L2vpnEvpn,
@@ -177,6 +196,8 @@ const FAMILIES: [ReevalFamily; 7] = [
     ReevalFamily::Ipv6Flowspec,
     ReevalFamily::Vpnv4,
     ReevalFamily::Vpnv6,
+    ReevalFamily::Vpnv4Flowspec,
+    ReevalFamily::Vpnv6Flowspec,
 ];
 
 fn family_slot(f: AddressFamily) -> usize {
@@ -188,10 +209,10 @@ fn family_slot(f: AddressFamily) -> usize {
         AddressFamily::Ipv6Flowspec => 4,
         AddressFamily::Vpnv4Unicast => 5,
         AddressFamily::Vpnv6Unicast => 6,
-        AddressFamily::RtConstraint
-        | AddressFamily::Vpnv4Flowspec
-        | AddressFamily::Vpnv6Flowspec => {
-            unreachable!("RT-Constraint and VPN Flowspec routes are never re-evaluated")
+        AddressFamily::Vpnv4Flowspec => 7,
+        AddressFamily::Vpnv6Flowspec => 8,
+        AddressFamily::RtConstraint => {
+            unreachable!("RT-Constraint routes are never re-evaluated")
         }
     }
 }
@@ -286,6 +307,7 @@ impl BgpRib {
             + n(self.retained.evpn.get(&peer).map(HashMap::len))
             + n(self.retained.flow.get(&peer).map(HashMap::len))
             + n(self.retained.vpn.get(&peer).map(HashMap::len))
+            + n(self.retained.vpn_flow.get(&peer).map(HashMap::len))
     }
 
     /// Whether retention is on for `peer`.
@@ -365,7 +387,16 @@ impl BgpRib {
                 .copied()
                 .map(ReevalKey::Vpn),
         );
-        let mut shown = [false; 7];
+        keys.extend(
+            self.retained
+                .vpn_flow
+                .get(&peer)
+                .into_iter()
+                .flat_map(HashMap::keys)
+                .cloned()
+                .map(ReevalKey::VpnFlow),
+        );
+        let mut shown = [false; 9];
         shown[0] = true;
         shown[1] = true;
         for f in self
@@ -373,14 +404,7 @@ impl BgpRib {
             .get(&peer)
             .into_iter()
             .flat_map(|o| o.negotiated_afs.iter())
-            .filter(|f| {
-                !matches!(
-                    **f,
-                    AddressFamily::RtConstraint
-                        | AddressFamily::Vpnv4Flowspec
-                        | AddressFamily::Vpnv6Flowspec
-                )
-            })
+            .filter(|f| **f != AddressFamily::RtConstraint)
         {
             shown[family_slot(*f)] = true;
         }
@@ -389,7 +413,7 @@ impl BgpRib {
             policies,
             keys,
             next: 0,
-            stats: [(0, 0, 0); 7],
+            stats: [(0, 0, 0); 9],
             shown,
         })
     }
@@ -408,6 +432,7 @@ impl BgpRib {
         let mut touched = Vec::new();
         let mut flows = Vec::new();
         let mut vpns = Vec::new();
+        let mut vflows = Vec::new();
         let mut macs = Vec::new();
         for key in &pass.keys[pass.next..end] {
             match key {
@@ -424,6 +449,12 @@ impl BgpRib {
                     let policy = pass.policies.flowspec.as_deref();
                     if self.reeval_flow(peer, k, policy, &mut pass.stats) {
                         flows.push(k.clone());
+                    }
+                }
+                ReevalKey::VpnFlow(k) => {
+                    let policy = pass.policies.flowspec.as_deref();
+                    if self.reeval_vpn_flow(peer, k, policy, &mut pass.stats) {
+                        vflows.push(k.clone());
                     }
                 }
                 ReevalKey::Vpn(k) => {
@@ -446,6 +477,9 @@ impl BgpRib {
         for k in vpns {
             self.select_vpn(&k);
         }
+        for k in vflows {
+            self.revalidate_vpn_flow(peer, &k);
+        }
         for (vni, mac) in macs {
             self.mac_mobility_recheck(vni, mac);
         }
@@ -462,7 +496,7 @@ impl BgpRib {
         peer: IpAddr,
         prefix: IpNet,
         policy: &CompiledPolicy,
-        stats: &mut [Tally; 7],
+        stats: &mut [Tally; 9],
     ) -> bool {
         let Some(paths) = self.retained.tables.get(&peer).and_then(|t| t.get(&prefix)) else {
             return false;
@@ -557,7 +591,7 @@ impl BgpRib {
         peer: IpAddr,
         k: &FlowspecKey,
         policy: Option<&CompiledPolicy>,
-        stats: &mut [Tally; 7],
+        stats: &mut [Tally; 9],
     ) -> bool {
         let Some(mut route) = self
             .retained
@@ -604,6 +638,52 @@ impl BgpRib {
         changed
     }
 
+    /// One retained VPN Flowspec rule, from its raw copy; whether the held
+    /// rule changed (the caller re-validates and re-selects it).
+    fn reeval_vpn_flow(
+        &mut self,
+        peer: IpAddr,
+        k: &VpnFlowKey,
+        policy: Option<&CompiledPolicy>,
+        stats: &mut [Tally; 9],
+    ) -> bool {
+        let Some(mut route) = self
+            .retained
+            .vpn_flow
+            .get(&peer)
+            .and_then(|t| t.get(k))
+            .cloned()
+        else {
+            return false;
+        };
+        let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
+        let confed = self.confed_peers.contains(&peer);
+        let accepted = policy.is_none_or(|p| import_flow(p, &mut route, peer, peer_as, confed));
+        let rd = format_rd(&(k.1).0);
+        let table = self.vpn_flow_adj_rib_in.entry(peer).or_default();
+        let changed = if accepted {
+            if let Some(old) = table.get(k)
+                && old.attributes == route.attributes
+            {
+                route.received_at = old.received_at;
+            }
+            let changed = table.get(k).map(|o| &o.attributes) != Some(&route.attributes);
+            if changed {
+                info!(peer = %peer, family = %k.0, rd = %rd, route = %(k.1).1, "flowspec route learned");
+                table.insert(k.clone(), route);
+            }
+            changed
+        } else {
+            let removed = table.remove(k).is_some();
+            if removed {
+                warn!(peer = %peer, family = %k.0, rd = %rd, route = %(k.1).1, "flowspec route rejected by import policy");
+            }
+            removed
+        };
+        tally(&mut stats[family_slot(k.0)], accepted, changed);
+        changed
+    }
+
     /// One retained VPN path, from its raw copy; whether the held path
     /// changed (the caller re-selects it).
     fn reeval_vpn(
@@ -611,7 +691,7 @@ impl BgpRib {
         peer: IpAddr,
         k: &VpnKey<IpNet>,
         policy: &CompiledPolicy,
-        stats: &mut [Tally; 7],
+        stats: &mut [Tally; 9],
     ) -> bool {
         let Some(raw) = self.retained.vpn.get(&peer).and_then(|t| t.get(k)).cloned() else {
             return false;

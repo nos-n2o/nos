@@ -659,6 +659,23 @@ impl BgpRib {
                 }
             }
         }
+        if let Some(stale) = self.vpn_flow_stale.get_mut(&from) {
+            for (m_afi, n) in update
+                .mp_reach
+                .iter()
+                .flat_map(|m| m.flowspec_vpn.iter().map(move |n| (m.afi, n)))
+                .chain(
+                    update
+                        .mp_unreach
+                        .iter()
+                        .flat_map(|m| m.flowspec_vpn.iter().map(move |n| (m.afi, n))),
+                )
+            {
+                if let Some(f) = super::flowspec_vpn::vpn_flow_family(m_afi) {
+                    stale.remove(&(f, (n.rd, n.flow.clone())));
+                }
+            }
+        }
         for u in &update.mp_unreach {
             if let Some(family) = super::flowspec_vpn::vpn_flow_family(u.afi) {
                 for n in &u.flowspec_vpn {

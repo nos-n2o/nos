@@ -19,7 +19,9 @@ use ipnet::IpNet;
 use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
-use super::{build_advertisement, family_of, message, BgpRib, FlowspecKey, OutboundUpdate};
+use super::{
+    build_advertisement, family_of, message, BgpRib, FlowspecKey, OutboundUpdate, VpnFlowKey,
+};
 use crate::evpn::EvpnNlri;
 use crate::vpn::VpnKey;
 
@@ -46,6 +48,8 @@ pub(super) struct Backlog {
     evpns: HashSet<EvpnNlri>,
     /// Flowspec rules whose latest update was dropped.
     flows: HashSet<FlowspecKey>,
+    /// VPN Flowspec rules whose latest update was dropped.
+    vpn_flows: HashSet<VpnFlowKey>,
     /// VPN keys whose latest update was dropped.
     vpns: HashSet<VpnKey<IpNet>>,
     /// RT-Constraint keys whose latest update was dropped.
@@ -58,6 +62,7 @@ impl Backlog {
     fn is_empty(&self) -> bool {
         self.dirty.is_empty()
             && self.flows.is_empty()
+            && self.vpn_flows.is_empty()
             && self.vpns.is_empty()
             && self.rtcs.is_empty()
             && self.markers.is_empty()
@@ -87,6 +92,12 @@ impl Backlog {
             OutboundUpdate::WithdrawFlowspec(family, nlri) => {
                 self.flows.insert((family, nlri));
             }
+            OutboundUpdate::AnnounceVpnFlowspec(rd, adv) => {
+                self.vpn_flows.insert((adv.family, (rd, adv.nlri)));
+            }
+            OutboundUpdate::WithdrawVpnFlowspec(k) => {
+                self.vpn_flows.insert(k);
+            }
             OutboundUpdate::AnnounceVpn(adv) => {
                 self.vpns.insert(adv.key);
             }
@@ -111,6 +122,7 @@ impl Backlog {
     fn merge(&mut self, newer: Backlog) {
         self.dirty.extend(newer.dirty);
         self.flows.extend(newer.flows);
+        self.vpn_flows.extend(newer.vpn_flows);
         self.vpns.extend(newer.vpns);
         self.rtcs.extend(newer.rtcs);
         for (prefix, ids) in newer.lost_ids {
@@ -248,6 +260,9 @@ impl BgpRib {
         // small); batch like `dirty` if one ever overflows the queue alone.
         for k in std::mem::take(&mut backlog.flows) {
             self.sync_flow_to(peer, &k, true);
+        }
+        for k in std::mem::take(&mut backlog.vpn_flows) {
+            self.sync_vpn_flow_to(peer, &k, true);
         }
         // Membership first: it gates what the VPN/EVPN resync may send.
         for k in std::mem::take(&mut backlog.rtcs) {

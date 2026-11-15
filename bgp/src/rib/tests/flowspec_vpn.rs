@@ -9,16 +9,16 @@ use crate::vpn::{Rd, Vrf, VrfSet};
 
 const SRC: &str = "10.0.0.1"; // eBGP, AS 65001
 const OTHER: &str = "10.0.0.2"; // eBGP, AS 65002
-const RT2: u64 = 0x0002_fde8_0000_0002; // RT:65000:2
-const SOO: u64 = 0x0003_fde8_0000_0077; // SoO:65000:119
-const RD2: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 2];
+pub(super) const RT2: u64 = 0x0002_fde8_0000_0002; // RT:65000:2
+pub(super) const SOO: u64 = 0x0003_fde8_0000_0077; // SoO:65000:119
+pub(super) const RD2: Rd = [0, 0, 0xfd, 0xe9, 0, 0, 0, 2];
 
 /// 10.10.0.0/24, the prefix `vpn::P` announces.
-fn flow() -> FlowSpec {
+pub(super) fn flow() -> FlowSpec {
     FlowSpec::decode(Afi::V4, &[5, 1, 24, 10, 10, 0]).unwrap().0
 }
 
-fn vrf(table: &str, import: Vec<u64>, soo: Option<u64>) -> Vrf {
+pub(super) fn vrf(table: &str, import: Vec<u64>, soo: Option<u64>) -> Vrf {
     Vrf {
         table: table.to_string(),
         rd: [0; 8],
@@ -47,15 +47,15 @@ fn setup() -> BgpRib {
     rib
 }
 
-fn feed(rib: &mut BgpRib, peer: &str, u: &UpdateMessage) {
+pub(super) fn feed(rib: &mut BgpRib, peer: &str, u: &UpdateMessage) {
     rib.handle_update(addr(peer), false, v4("2.2.2.2"), u, &nos_rpl::ACCEPT_ALL);
 }
 
-fn unicast(rib: &mut BgpRib, peer: &str, asn: u32, p: &str) {
+pub(super) fn unicast(rib: &mut BgpRib, peer: &str, asn: u32, p: &str) {
     feed(rib, peer, &reach(peer, vec![asn], vec![nlri(RD1, p, 100)]));
 }
 
-fn flow_reach(peer_asn: u32, rts: Vec<u64>, rd: Rd, rule: FlowSpec) -> UpdateMessage {
+pub(super) fn flow_reach(peer_asn: u32, rts: Vec<u64>, rd: Rd, rule: FlowSpec) -> UpdateMessage {
     let mut u = ebgp_update(vec![], vec![peer_asn], "0.0.0.0");
     let mut ext = vec![0x8006_0000_0000_0000];
     ext.extend(rts);

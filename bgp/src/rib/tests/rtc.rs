@@ -7,7 +7,7 @@ use crate::message::RtcNlri;
 use crate::rib::rtc::RtcInterest;
 
 const RT2: u64 = 0x0002_fde8_0000_0002; // RT:65000:2
-const OBS_AS: u32 = 65003;
+pub(super) const OBS_AS: u32 = 65003;
 
 fn key(origin_as: u32, rt: u64, bits: u8) -> RtcNlri {
     RtcNlri {
@@ -17,7 +17,7 @@ fn key(origin_as: u32, rt: u64, bits: u8) -> RtcNlri {
     }
 }
 
-fn exact(rt: u64) -> RtcNlri {
+pub(super) fn exact(rt: u64) -> RtcNlri {
     key(OBS_AS, rt, 96)
 }
 
@@ -62,7 +62,7 @@ fn reg(
     rx
 }
 
-fn rtc_update(peer_as: u32, next_hop: &str, rtc: Vec<RtcNlri>) -> UpdateMessage {
+pub(super) fn rtc_update(peer_as: u32, next_hop: &str, rtc: Vec<RtcNlri>) -> UpdateMessage {
     let mut u = ebgp_update(vec![], vec![peer_as], "0.0.0.0");
     u.mp_reach = vec![message::MpReachNlri {
         afi: 1,
@@ -79,7 +79,7 @@ fn rtc_update(peer_as: u32, next_hop: &str, rtc: Vec<RtcNlri>) -> UpdateMessage 
     u
 }
 
-fn rtc_withdraw(rtc: Vec<RtcNlri>) -> UpdateMessage {
+pub(super) fn rtc_withdraw(rtc: Vec<RtcNlri>) -> UpdateMessage {
     let mut u = empty_update();
     u.mp_unreach = vec![message::MpUnreachNlri {
         afi: 1,

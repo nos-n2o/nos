@@ -151,6 +151,13 @@ impl BgpRib {
                 .flat_map(HashMap::values)
                 .map(|a| OutboundUpdate::AnnounceVpn(a.clone())),
         );
+        snap.post.extend(
+            self.vpn_flow_adj_rib_out
+                .get(&peer)
+                .into_iter()
+                .flat_map(HashMap::iter)
+                .map(|(k, a)| OutboundUpdate::AnnounceVpnFlowspec((k.1).0, a.clone())),
+        );
         snap
     }
 
@@ -187,7 +194,8 @@ impl BgpRib {
         let pre_v4 = pre.map_or(0, |s| s.iter().filter(|p| p.addr().is_ipv4()).count()) as u64;
         let other = self.evpn_adj_rib_out.get(&peer).map_or(0, HashMap::len)
             + self.flowspec_adj_rib_out.get(&peer).map_or(0, HashMap::len)
-            + self.vpn_adj_rib_out.get(&peer).map_or(0, HashMap::len);
+            + self.vpn_adj_rib_out.get(&peer).map_or(0, HashMap::len)
+            + self.vpn_flow_adj_rib_out.get(&peer).map_or(0, HashMap::len);
         OutCounts {
             pre: pre.map_or(0, HashSet::len) as u64,
             pre_v4,

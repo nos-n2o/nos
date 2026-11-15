@@ -2018,6 +2018,54 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 ..Default::default()
             })
         }
+        // RFC 8955 section 4: SAFI 134 carries no next hop either.
+        OutboundUpdate::AnnounceVpnFlowspec(rd, f) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: Some(advertised_attributes(
+                f.route,
+                Ipv4Addr::UNSPECIFIED,
+                f.ipv6_extended_communities,
+            )),
+            mp_reach: vec![message::MpReachNlri {
+                afi: afi_of(f.family),
+                safi: message::SAFI_FLOWSPEC_VPN,
+                next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                evpn: Vec::new(),
+                flowspec: Vec::new(),
+                flowspec_vpn: vec![crate::flowspec::FlowSpecVpn { rd, flow: f.nlri }],
+                vpn: Vec::new(),
+                rtc: Vec::new(),
+            }],
+            mp_unreach: Vec::new(),
+            ..Default::default()
+        }),
+        OutboundUpdate::WithdrawVpnFlowspec((family, (rd, flow))) => {
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: None,
+                mp_reach: Vec::new(),
+                mp_unreach: vec![message::MpUnreachNlri {
+                    afi: afi_of(family),
+                    safi: message::SAFI_FLOWSPEC_VPN,
+                    withdrawn: Vec::new(),
+                    withdrawn_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: Vec::new(),
+                    flowspec_vpn: vec![crate::flowspec::FlowSpecVpn { rd, flow }],
+                    vpn: Vec::new(),
+                    rtc: Vec::new(),
+                }],
+                ..Default::default()
+            })
+        }
         OutboundUpdate::AnnounceRtc(a) => {
             let (key, next_hop) = (a.key, a.route.next_hop);
             BgpMessage::Update(message::UpdateMessage {

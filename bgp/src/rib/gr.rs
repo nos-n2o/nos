@@ -128,6 +128,7 @@ impl BgpRib {
         self.announce_evpn_to(peer);
         self.announce_flowspec_to(peer);
         self.announce_vpn_to(peer);
+        self.announce_vpn_flow_to(peer);
         if add_path {
             let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
             for prefix in prefixes {
@@ -224,7 +225,7 @@ impl BgpRib {
             family,
             AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec
         ) {
-            // Received only: nothing is originated or re-advertised (#1085).
+            self.resend_vpn_flow(peer, family);
         } else if crate::fsm::is_vpn(family) {
             self.resend_vpn(peer, family);
         } else if family == AddressFamily::RtConstraint {
@@ -392,6 +393,20 @@ impl BgpRib {
         for k in vpn {
             self.sync_vpn_to(peer, &k, false);
         }
+        let vpn_flow: HashSet<_> = self
+            .vpn_flow_loc
+            .keys()
+            .chain(
+                self.vpn_flow_adj_rib_out
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(std::collections::HashMap::keys),
+            )
+            .cloned()
+            .collect();
+        for k in vpn_flow {
+            self.sync_vpn_flow_to(peer, &k, false);
+        }
     }
 
     /// RFC 7313 `BoRR` received: every `family` route currently held from
@@ -484,7 +499,9 @@ impl BgpRib {
                 self.purge_stale_flowspec(peer, family)
             }
             AddressFamily::RtConstraint => self.purge_stale_rtc(peer),
-            AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec => 0,
+            AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec => {
+                self.purge_stale_vpn_flow(peer, family)
+            }
             _ => self.end_refresh_in(peer, family),
         }
     }
@@ -508,7 +525,11 @@ impl BgpRib {
         });
         let rtc = family.is_none_or(|f| f == AddressFamily::RtConstraint)
             && self.rtc_stale.get(&peer).is_some_and(|s| !s.is_empty());
-        ip || evpn || flowspec || vpn || rtc
+        let vpn_flow = self
+            .vpn_flow_stale
+            .get(&peer)
+            .is_some_and(|s| s.iter().any(|k| family.is_none_or(|x| x == k.0)));
+        ip || evpn || flowspec || vpn || rtc || vpn_flow
     }
 
     /// `BgpGracefulRestart.stale_time`.
@@ -544,6 +565,7 @@ impl BgpRib {
             + self.evpn_stale.get(&peer).map_or(0, HashSet::len)
             + self.flowspec_stale.get(&peer).map_or(0, HashSet::len)
             + self.vpn_stale.get(&peer).map_or(0, HashSet::len)
+            + self.vpn_flow_stale.get(&peer).map_or(0, HashSet::len)
             + self.rtc_stale.get(&peer).map_or(0, HashSet::len);
         u32::try_from(n).unwrap_or(u32::MAX)
     }
@@ -698,6 +720,16 @@ impl BgpRib {
         self.vpn_stale.entry(peer).or_default().extend(keep);
         for k in drop {
             self.drop_vpn(peer, &k);
+        }
+        let (keep, drop): (Vec<_>, Vec<_>) = self
+            .vpn_flow_adj_rib_in
+            .get(&peer)
+            .into_iter()
+            .flat_map(|t| t.keys().cloned())
+            .partition(|k| families.contains(&k.0));
+        self.vpn_flow_stale.entry(peer).or_default().extend(keep);
+        for k in drop {
+            self.drop_vpn_flow(peer, &k);
         }
         // Not listed: `peer_disconnected` already dropped it.
         if families.contains(&AddressFamily::RtConstraint) {

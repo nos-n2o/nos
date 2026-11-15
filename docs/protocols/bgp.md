@@ -502,13 +502,17 @@ The traffic actions are decoded from the route's extended communities and shown 
 - Interference (RFC 8955 section 7.7): when a route carries several traffic-rates, the first in attribute order wins and the others are shown with `(ignored)`.
 - What the dataplane does with each action: [Filter DDoS traffic with flowspec](#filter-ddos-traffic-with-flowspec).
 
-### VPN Flowspec (SAFI 134, receive only)
+### VPN Flowspec (SAFI 134)
 
 - Add `address-family vpnv4-flowspec` (and/or `vpnv6-flowspec`) next to `vpnv4` (`vpnv6`) on the peer-group; commit refuses it alone. It is negotiated only when both sides advertise AFI 1|2 / SAFI 134, and is accepted from any peer that negotiated it (RFC 8955 section 8), with no per-peer opt-in. `maximum-prefix vpnv4-flowspec`/`vpnv6-flowspec` caps it.
 - A rule is carried with its Route Distinguisher and Route Targets. It is imported into every VRF whose `route-targets import` matches one of them (a rule with the VRF's own Site of Origin is not); a rule matching no VRF stays in the Adj-RIB-In and shows only under `family`.
 - Each rule is validated per VRF (RFC 8955 section 6) against the VPN routes that VRF imports: `valid`, or `invalid:no-covering-unicast-route`, `invalid:originator-mismatch`, `invalid:more-specific-from-other-as`. It is re-validated when a VPN route is added, withdrawn or changes best.
 - `show bgp flowspec vrf <table>` (`GET /v1/bgp/flowspec?vrf=<table>`) lists the rules imported into one VRF with their validity there; `show bgp flowspec family vpnv4-flowspec` (`?family=`) lists every held rule with its RD. The plain `show bgp flowspec` stays the SAFI 133 rules.
-- Not yet: re-advertisement (#1085) and enforcement (#1086). The next hop is empty on the wire (RFC 8955 section 4) and ignored on receipt.
+- Re-advertisement (#1085): a rule that is `valid` in at least one VRF importing it is a best-path candidate (unicast decision process, no IGP step); the winner is re-advertised under its RD and RTs with the unicast rules (split horizon, route reflection with originator-id and cluster list, eBGP AS prepend, confederations). A rule imported by no VRF, or invalid everywhere, is held and shown but never re-advertised; a rule that becomes invalid is withdrawn.
+- `flowspec-import-policy` / `flowspec-export-policy` of the peer-group apply to SAFI 134 as to SAFI 133 (`this.prefix` is the destination prefix, `this.bgp.rd` the RD). An import reject is a withdraw; changing either policy is applied in place, an export one by a diff (`reexport_peer`), an import one to the held rules.
+- With `rt-constraint` negotiated, a rule goes only to a peer whose membership covers one of its RTs and is withdrawn when that membership goes.
+- Route refresh, soft reconfiguration inbound (`soft-reconfiguration-inbound`, family `vpnv4-flowspec` in `soft-in`), graceful restart (the rules stay stale until End-of-RIB) and BMP (Adj-RIB-In and Adj-RIB-Out, `vpnv4-flowspec` End-of-RIB) cover the family like any other.
+- Not yet: enforcement (#1086). The next hop is empty on the wire (RFC 8955 section 4) and ignored on receipt, so re-advertisement carries none whichever peer it goes to.
 
 To see the rules received, use `show bgp flowspec` (`GET /v1/bgp/flowspec`):
 
