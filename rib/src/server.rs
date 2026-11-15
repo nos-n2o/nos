@@ -57,6 +57,23 @@ pub fn start(
 /// that source. No wildcard arm: a new request must be classified.
 // ponytail: role-level only. `bgpd/r2` could still push into `rt1`; binding
 // an instance to its table needs a config lookup — add it if that matters.
+/// Roles that resolve a VRF (or a loopback VTEP's table id) through this instance.
+fn vrf_resolver(role: Role) -> bool {
+    matches!(
+        role,
+        Role::User
+            | Role::Logd
+            | Role::Restd
+            | Role::Interfaced
+            | Role::Bgpd
+            | Role::Ospfd
+            | Role::Ospfv3d
+            | Role::Ribd
+            | Role::Fdbd
+            | Role::Bfdd
+    )
+}
+
 fn allowed(role: Role, req: &RibRequest) -> bool {
     match req {
         RibRequest::GetRoutes
@@ -68,19 +85,9 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // `ribd`/`fdbd` name a loopback VTEP's device (`lo<table id>`) of
         // the underlay table.
         // `logd` scopes a syslog collector's socket into its table's VRF.
-        RibRequest::GetVrfName | RibRequest::GetTableId => matches!(
-            role,
-            Role::User
-                | Role::Logd
-                | Role::Restd
-                | Role::Interfaced
-                | Role::Bgpd
-                | Role::Ospfd
-                | Role::Ospfv3d
-                | Role::Ribd
-                | Role::Fdbd
-                | Role::Bfdd
-        ),
+        // `sshd` binds its listener inside the VRF; it never needs the table id.
+        RibRequest::GetVrfName => role == Role::Sshd || vrf_resolver(role),
+        RibRequest::GetTableId => vrf_resolver(role),
         // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
         RibRequest::PushBgpRoutes(_)
         | RibRequest::PushEvpnRoutes(_)
@@ -1157,9 +1164,11 @@ mod authz_tests {
             Role::Fdbd,
             Role::Logd,
             Role::Bfdd,
+            Role::Sshd,
         ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }
+        assert!(!allowed(Role::Sshd, &RibRequest::GetTableId));
         assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));
     }
 

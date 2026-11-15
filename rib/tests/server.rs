@@ -819,6 +819,8 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
         Role::Fdbd,
         Role::Bfdd,
     ];
+    // `nos-sshd` binds inside the VRF but never needs the table id.
+    let vrf_name = [&vrf[..], &[Role::Sshd]].concat();
     let igp = [Role::User, Role::Restd, Role::Bgpd];
     let cases: [Case; 7] = [
         (
@@ -839,7 +841,7 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
         (
             "GetVrfName",
             || RibRequest::GetVrfName,
-            &vrf,
+            &vrf_name,
             |e| matches!(e, RibEvent::VrfName(None)),
         ),
         (

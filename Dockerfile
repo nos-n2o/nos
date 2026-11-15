@@ -22,7 +22,7 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
     && cargo build --release -p nos-pam
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
@@ -72,6 +72,7 @@ COPY --from=builder /app/target/release/nos-acld       /usr/local/bin/nos-acld
 COPY --from=builder /app/target/release/nos-bfdd       /usr/local/bin/nos-bfdd
 COPY --from=builder /app/target/release/nos-fdbd       /usr/local/bin/nos-fdbd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
+COPY --from=builder /app/target/release/nos-sshd       /usr/local/bin/nos-sshd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
@@ -107,6 +108,8 @@ COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-st
 # program the bridge FDB via rtnetlink (see fdb/CLAUDE.md).
 # nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
 # inside its routing table's VRF (see rest/CLAUDE.md).
+# nos-sshd has no file capabilities: it runs as root (uid 0) and drops its own
+# bounding set at startup (see ssh/CLAUDE.md).
 # nos-watchdogd runs as `nos-wd` and needs CAP_SETUID/CAP_SETGID to start every
 # child as its role's user, and CAP_CHOWN to create their state directories; the
 # children's own file capabilities above are computed at their exec, so they
@@ -146,12 +149,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g \
+        openssh-server \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/libpam_nos.so /tmp/pam_nos.so
 RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
     && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
     && rm /tmp/pam_nos.so
 COPY pam/nos-sshd.pam /etc/pam.d/nos-sshd
+# bookworm's OpenSSH has no `PAMServiceName`: sshd names its PAM service after its argv[0]
+# basename, so `nos-sshd` runs it through this symlink (#994, ssh/CLAUDE.md).
+RUN mkdir -p /usr/libexec/nos-sshd && ln -s /usr/sbin/sshd /usr/libexec/nos-sshd/nos-sshd
 
 # The `cli` compose service and `nos-e2e`'s execs run as `nos` (group `nos`
 # reaches the 0660 sockets).
