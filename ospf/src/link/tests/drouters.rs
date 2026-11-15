@@ -78,3 +78,41 @@ fn never_on_point_to_point_or_multipoint() {
         assert!(!joined(&wire, 1));
     }
 }
+
+/// #608: Hello DR/BDR fields are interface addresses (RFC 2328 A.3.2) even
+/// when router IDs differ from them.
+#[test]
+fn wire_fields_are_interface_addresses_not_router_ids() {
+    use rx::{dr_wire_addr, resolve_declared};
+    let local_id = id(1);
+    let local_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 2);
+    let mut n = HashMap::new();
+    n.insert(id(2), neighbor_info(NeighborState::TwoWay, peer_addr));
+    let un = Ipv4Addr::UNSPECIFIED;
+
+    assert_eq!(
+        dr_wire_addr(Some(local_id), local_id, local_addr, &n),
+        local_addr
+    );
+    assert_eq!(
+        dr_wire_addr(Some(id(2)), local_id, local_addr, &n),
+        peer_addr
+    );
+    assert_eq!(dr_wire_addr(Some(id(9)), local_id, local_addr, &n), un);
+    assert_eq!(dr_wire_addr(None, local_id, local_addr, &n), un);
+
+    let res = |a, src, sender| resolve_declared(a, src, sender, local_id, local_addr, &n);
+    // Sender declares itself (its own address, a different router ID).
+    assert_eq!(res(peer_addr, peer_addr, id(2)), id(2));
+    assert_eq!(res(local_addr, peer_addr, id(2)), local_id);
+    let third = Ipv4Addr::new(10, 0, 0, 3);
+    assert_eq!(res(third, peer_addr, id(2)), un, "unknown address");
+    assert_eq!(res(un, peer_addr, id(2)), un);
+    // A third known neighbor, declared by the sender.
+    n.insert(id(3), neighbor_info(NeighborState::TwoWay, third));
+    assert_eq!(
+        resolve_declared(third, peer_addr, id(2), local_id, local_addr, &n),
+        id(3)
+    );
+}

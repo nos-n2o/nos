@@ -235,6 +235,47 @@ pub(super) fn accept_crypto_sequence(
     true
 }
 
+/// RFC 2328 A.3.2: the DR/BDR Hello field is the elected router's interface
+/// address on this segment; internal state is router-ID keyed.
+pub(super) fn dr_wire_addr(
+    elected: Option<Ipv4Addr>,
+    local_router_id: Ipv4Addr,
+    local_addr: Ipv4Addr,
+    neighbors: &HashMap<Ipv4Addr, NeighborInfo>,
+) -> Ipv4Addr {
+    match elected {
+        Some(id) if id == local_router_id => local_addr,
+        Some(id) => neighbors
+            .get(&id)
+            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.address),
+        None => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
+/// Inverse of `dr_wire_addr`: a received DR/BDR address back to a router ID
+/// (`source`/`sender_id` is the Hello's sender), `UNSPECIFIED` if unknown.
+pub(super) fn resolve_declared(
+    addr: Ipv4Addr,
+    source: Ipv4Addr,
+    sender_id: Ipv4Addr,
+    local_router_id: Ipv4Addr,
+    local_addr: Ipv4Addr,
+    neighbors: &HashMap<Ipv4Addr, NeighborInfo>,
+) -> Ipv4Addr {
+    if addr.is_unspecified() {
+        Ipv4Addr::UNSPECIFIED
+    } else if addr == source {
+        sender_id
+    } else if addr == local_addr {
+        local_router_id
+    } else {
+        neighbors
+            .iter()
+            .find(|(_, n)| n.address == addr)
+            .map_or(Ipv4Addr::UNSPECIFIED, |(id, _)| *id)
+    }
+}
+
 pub(super) fn send_hello(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -256,9 +297,20 @@ pub(super) fn send_hello(
         NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
             (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
         }
+        // RFC 2328 A.3.2: the fields carry interface addresses, not router IDs.
         NetworkType::Broadcast => (
-            current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
-            current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            dr_wire_addr(
+                current.dr,
+                local_router_id,
+                cfg.local_addr,
+                &current.neighbors,
+            ),
+            dr_wire_addr(
+                current.bdr,
+                local_router_id,
+                cfg.local_addr,
+                &current.neighbors,
+            ),
         ),
     };
     drop(current);
@@ -421,6 +473,23 @@ pub(super) fn handle_hello(
     {
         warn!(link = %cfg.attach_point, neighbor = %hello.router_id, "ospf neighbor adjacency torn down, back to init");
     }
+    let (dr_id, bdr_id) = {
+        let current = status.borrow();
+        let resolve = |a| {
+            resolve_declared(
+                a,
+                source,
+                hello.router_id,
+                local_router_id,
+                cfg.local_addr,
+                &current.neighbors,
+            )
+        };
+        (
+            resolve(hello.designated_router),
+            resolve(hello.backup_designated_router),
+        )
+    };
     status.send_modify(|s| {
         let entry = s
             .neighbors
@@ -439,8 +508,8 @@ pub(super) fn handle_hello(
             });
         entry.state = new_state;
         entry.priority = hello.router_priority;
-        entry.declared_dr = hello.designated_router;
-        entry.declared_bdr = hello.backup_designated_router;
+        entry.declared_dr = dr_id;
+        entry.declared_bdr = bdr_id;
         entry.last_hello_received = Instant::now();
         entry.last_heard = Instant::now();
         entry.address = source;
@@ -450,7 +519,11 @@ pub(super) fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
+        NetworkType::Broadcast
+            if waiting
+                && (hello.designated_router == source
+                    || hello.backup_designated_router == source) =>
+        {
             run_election(cfg, local_router_id, status);
             true
         }
