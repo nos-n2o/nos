@@ -12,6 +12,7 @@
 - Only names matching `^[a-z_][a-z0-9_-]{0,31}$` get an entry; wider names (PRECIS allows Unicode and upper case) are skipped with a warning and cannot use ssh.
 - The file is rewritten, atomically (temp file + rename, 0644), at startup and on every commit that changes the set of user names (a password change does not), under the `running` lock so writes never reorder. The uid map is persisted first. A write failure is logged and never fails the commit.
 - `/run/nos-users` must be writable although the image is read-only: a tmpfs in `docker-compose.yml` and `nos-e2e`. `nos-watchdogd --users-dir` creates it 0755 owned by the configd role at startup (privileged mode). Without it (non-docker run) configd logs a warning and carries on.
+- `/run/nos-sshd` (`nos-sshd`'s `sshd_config`, #995) is likewise a tmpfs in `docker-compose.yml` and `nos-e2e`; `nos-sshd` runs as root and creates it itself.
 - `libnss_nos` is read-only, no network; a missing or unreadable file is `UNAVAIL`, an unknown name `NOTFOUND`, a panic is caught (`UNAVAIL`), and a buffer too small is reported as `ERANGE`. It allocates inside the `libnss` crate, not only in the caller's buffer.
 - License: `libnss` is LGPL-3.0, linked as a library into a cdylib; `deny.toml` allows it.
 - Verified by the `pam` e2e phase: a created user resolves with `getent`, authenticates, a deleted one disappears, a re-created one keeps its uid.
