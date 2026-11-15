@@ -361,13 +361,15 @@ pub enum CmpKind {
     Ge,
 }
 
-/// A compiled policy: bytecode plus the stack depth it needs.
+/// A compiled policy: bytecode plus the stack depth it needs. Only
+/// `codegen::compile` builds one (fields are `pub(crate)`), so `run` may trust
+/// its jump targets and stack depth (#673).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledPolicy {
     /// The instructions.
-    pub code: Vec<Op>,
+    pub(crate) code: Vec<Op>,
     /// Maximum operand-stack depth any path reaches.
-    pub max_stack_depth: usize,
+    pub(crate) max_stack_depth: usize,
 }
 
 impl CompiledPolicy {
@@ -1105,6 +1107,23 @@ fn as_prefix(v: Value) -> IpNet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_policies_satisfy_the_invariants_run_trusts() {
+        for src in [
+            "accept\n",
+            "if this.prefix.length > 24:\n    reject\naccept\n",
+            "if this.bgp.local_pref > 100:\n    accept\nelif this.bgp.med < 5:\n    reject\nelse:\n    accept\n",
+        ] {
+            let p = crate::compile(src, &crate::Symbols::EMPTY).unwrap();
+            assert!(p.max_stack_depth <= MAX_STACK_DEPTH, "{src}");
+            for op in &p.code {
+                if let Op::Jump(t) | Op::JumpIfFalse(t) = op {
+                    assert!(*t < p.code.len(), "{src}");
+                }
+            }
+        }
+    }
 
     fn m(pat: &str, text: &str) -> bool {
         AsPathRegexes::new(&[pat]).unwrap().is_match(text)
