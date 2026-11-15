@@ -334,6 +334,9 @@ pub enum DiffScope {
 /// section carries it with `new` = `"unset"` when the API is not pinned.
 pub const REST_API_LABEL: &str = "rest-api";
 
+/// Like `REST_API_LABEL`, for the table's `nos-sshd`.
+pub const SSH_SERVER_LABEL: &str = "ssh-server";
+
 /// The field label `nos-watchdogd` keys its `nos-fdbd` claim on (see
 /// `Managed::claim_label`): a domain runs one while its vni is set.
 pub const VNI_LABEL: &str = "vni";

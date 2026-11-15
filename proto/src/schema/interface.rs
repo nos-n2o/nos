@@ -663,6 +663,7 @@ mod tests {
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,

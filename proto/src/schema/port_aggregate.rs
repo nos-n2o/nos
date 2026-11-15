@@ -774,6 +774,7 @@ mod tests {
         let mut cfg = config_with(vec![agg]);
         cfg.routing_tables = vec![crate::schema::RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
             ospfv3_instance: None,

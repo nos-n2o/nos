@@ -159,6 +159,8 @@ topics! {
     RoutingTableRedistribute,
     /// `RoutingTable.rest_api`
     RoutingTableRestApi,
+    /// `RoutingTable.ssh_server`
+    RoutingTableSshServer,
     /// `RoutingTable.evpn`
     RoutingTableEvpn,
     /// `RoutingTableEvpn.l3_vni`

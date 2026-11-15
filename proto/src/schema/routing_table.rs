@@ -144,6 +144,49 @@ fn rest_api_valid(rest_api: Option<&RestApi>) -> garde::Result {
     Ok(())
 }
 
+/// Where `nos-sshd` listens for a routing table: one specific address inside
+/// the table's VRF. Same stance as `RestApi`: no wildcard, whether the address
+/// exists is operational state, not validated at commit.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct SshServer {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = RoutingTableSshServer)]
+    /// Address the SSH listener binds inside the VRF; no wildcard.
+    pub address: IpAddr,
+    #[cli(topic = RoutingTableSshServer)]
+    /// TCP port of the SSH listener.
+    pub port: u16,
+}
+
+/// The placeholder a new `SshServer` starts from (`edit` on a missing one).
+impl Default for SshServer {
+    fn default() -> Self {
+        SshServer {
+            address: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: SSH_SERVER_PORT_DEFAULT,
+        }
+    }
+}
+
+/// Default `SshServer.port` when `nos-cli` is given none.
+pub const SSH_SERVER_PORT_DEFAULT: u16 = 22;
+
+fn ssh_server_valid(ssh_server: Option<&SshServer>) -> garde::Result {
+    let Some(s) = ssh_server else {
+        return Ok(());
+    };
+    if s.address.is_unspecified() || s.address.is_multicast() {
+        return Err(garde::Error::new(
+            "ssh server address must be a specific unicast address",
+        ));
+    }
+    if s.port == 0 {
+        return Err(garde::Error::new("ssh server port must be 1-65535"));
+    }
+    Ok(())
+}
+
 /// An IP-VRF's EVPN L3 VNI (RFC 9136 Type-5 routes, RFC 9135 symmetric
 /// IRB in its "interface-less" form): `nos-ribd` creates `vx<l3_vni>` on a
 /// bridge `brv<l3_vni>` in this table's VRF, originates every best route of
@@ -274,6 +317,13 @@ pub struct RoutingTable {
     #[garde(custom(|r: &Option<RestApi>, _ctx: &Config| rest_api_valid(r.as_ref())))]
     #[cli(topic = RoutingTableRestApi)]
     pub rest_api: Option<RestApi>,
+
+    /// Pins a `nos-sshd` to this table, listening on `ssh_server.address`
+    /// inside its VRF. `serde(default)` so older on-disk config still loads.
+    #[serde(default)]
+    #[garde(custom(|r: &Option<SshServer>, _ctx: &Config| ssh_server_valid(r.as_ref())))]
+    #[cli(topic = RoutingTableSshServer)]
+    pub ssh_server: Option<SshServer>,
 
     /// EVPN IP-VRF: this table's L3 VNI. `serde(default)` like `rest_api`.
     /// `#[garde(skip)]`: checked by `valid_table_evpn` (it needs the other
@@ -643,6 +693,7 @@ mod tests {
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: RoutingTableVpn::default(),
             ospfv3_instance: None,
@@ -1227,5 +1278,34 @@ mod tests {
             let cfg = config_with_policy(rt, vec![]);
             cfg.validate_with(&cfg).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod ssh_server_tests {
+    use super::*;
+
+    fn s(addr: &str, port: u16) -> SshServer {
+        SshServer {
+            address: addr.parse().unwrap(),
+            port,
+        }
+    }
+
+    #[test]
+    fn ssh_server_validator() {
+        assert!(ssh_server_valid(None).is_ok());
+        assert!(ssh_server_valid(Some(&s("10.0.0.1", 22))).is_ok());
+        assert!(ssh_server_valid(Some(&s("fd00::1", 2222))).is_ok());
+        for bad in ["0.0.0.0", "::", "224.0.0.1", "ff02::1"] {
+            assert!(ssh_server_valid(Some(&s(bad, 22))).is_err(), "{bad}");
+        }
+        assert!(ssh_server_valid(Some(&s("10.0.0.1", 0))).is_err());
+    }
+
+    #[test]
+    fn ssh_server_defaults_to_none_when_absent() {
+        let t: RoutingTable = serde_json::from_str(r#"{"name":"rt1"}"#).unwrap();
+        assert_eq!(t.ssh_server, None);
     }
 }

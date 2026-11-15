@@ -336,6 +336,21 @@ pub struct Args {
     #[arg(long)]
     pub clear_rest_api: bool,
 
+    /// If set, pins `nos-sshd` to `--routing-table`, listening on this
+    /// address inside its VRF (`RoutingTableOp::SetSshServer`). Mutually
+    /// exclusive with `--clear-ssh-server`.
+    #[arg(long)]
+    pub ssh_server_address: Option<IpAddr>,
+
+    /// TCP port for `--ssh-server-address`.
+    #[arg(long, default_value_t = nos_proto::SSH_SERVER_PORT_DEFAULT)]
+    pub ssh_server_port: u16,
+
+    /// If set, unpins `nos-sshd` from `--routing-table`
+    /// (`RoutingTableOp::ClearSshServer`).
+    #[arg(long)]
+    pub clear_ssh_server: bool,
+
     #[arg(long, default_value = "r1")]
     pub bgp_instance: String,
     #[arg(long)]
@@ -3951,6 +3966,21 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    if let Some(address) = args.ssh_server_address {
+        if args.clear_ssh_server {
+            bail!("--ssh-server-address and --clear-ssh-server are mutually exclusive");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetSshServer {
+            name: args.routing_table.clone(),
+            address,
+            port: args.ssh_server_port,
+        }));
+    } else if args.clear_ssh_server {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearSshServer {
+            name: args.routing_table.clone(),
+        }));
+    }
+
     if let Some(name) = args.ospf_instance.clone() {
         let router_id = args
             .ospf_router_id
@@ -4923,6 +4953,8 @@ mod tests {
             "l",
             "--rest-api-address",
             "10.0.0.1",
+            "--ssh-server-address",
+            "10.0.0.2",
             "--hostname",
             "h",
             "--user",
@@ -5061,6 +5093,14 @@ mod tests {
             &ConfigOp::Admin(AdminOp::SetKey {
                 label: "k1".into(),
                 secret: "s=1".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::RoutingTable(RoutingTableOp::SetSshServer {
+                name: "rt1".into(),
+                address: "10.0.0.2".parse().unwrap(),
+                port: nos_proto::SSH_SERVER_PORT_DEFAULT,
             }),
         );
         has(
@@ -6981,6 +7021,8 @@ mod tests {
             "10.0.0.1",
             "--rest-api-port",
             "8443",
+            "--ssh-server-address",
+            "10.0.0.2",
             "--switching-profile",
             "sp1",
             "--switching-profile-member",
@@ -7034,6 +7076,7 @@ mod tests {
             "SetSyslogFacility",
             "RemoveSyslog { name: \"old\" }",
             "SetRestApi",
+            "SetSshServer",
             "8443",
             "Dot1q(30)",
             "Untagged",
@@ -7061,7 +7104,12 @@ mod tests {
             "--delete-broadcast-domain-svi",
         ])
         .unwrap();
-        for m in ["Delete {", "ClearRestApi", "ClearSwitchingProfile"] {
+        for m in [
+            "Delete {",
+            "ClearRestApi",
+            "ClearSshServer",
+            "ClearSwitchingProfile",
+        ] {
             shows(&o, m);
         }
         assert!(err(&[
