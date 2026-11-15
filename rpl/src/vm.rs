@@ -586,9 +586,9 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 let b = as_int(pop!());
                 let a = as_int(pop!());
                 push!(Value::Int(if matches!(op, Op::Add) {
-                    a + b
+                    a.saturating_add(b)
                 } else {
-                    a - b
+                    a.saturating_sub(b)
                 }));
             }
             Op::CmpEq | Op::CmpNe => {
@@ -987,8 +987,14 @@ fn set_field(id: FieldId, v: i64, local_pref: &mut u32, med: &mut Option<u32>) {
 /// `Op::AddField`, split out of `run` for length.
 fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>) {
     match id {
-        FieldId::BgpLocalPref => *local_pref = to_u32_saturating(i64::from(*local_pref) + d),
-        FieldId::BgpMed => *med = Some(to_u32_saturating(i64::from(med.unwrap_or(0)) + d)),
+        FieldId::BgpLocalPref => {
+            *local_pref = to_u32_saturating(i64::from(*local_pref).saturating_add(d));
+        }
+        FieldId::BgpMed => {
+            *med = Some(to_u32_saturating(
+                i64::from(med.unwrap_or(0)).saturating_add(d),
+            ));
+        }
         _ => unreachable!("check.rs rejects AddField for {id:?}"),
     }
 }

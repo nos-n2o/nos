@@ -1438,6 +1438,69 @@ mod tests {
         assert_eq!((local_pref, med), (150, Some(20)));
     }
 
+    /// #627: the compiler rejects big literals, so hand-build the bytecode a
+    /// runtime-computed value could produce; nothing may panic or wrap.
+    #[test]
+    fn vm_arithmetic_saturates() {
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 100, Some(7), &cluster);
+        let run = |code: Vec<Op>| {
+            let mut policy = compile_src("accept\n");
+            policy.code = code;
+            policy.max_stack_depth = 4;
+            let Verdict::Accept {
+                local_pref, med, ..
+            } = vm::run(&policy, &input)
+            else {
+                panic!("expected accept");
+            };
+            (local_pref, med)
+        };
+        let lp = FieldId::BgpLocalPref;
+        let med = FieldId::BgpMed;
+        // i64::MAX + 1 and i64::MIN - 1 saturate instead of overflowing.
+        let max_plus = vec![
+            Op::LoadConstInt(i64::MAX),
+            Op::LoadConstInt(1),
+            Op::Add,
+            Op::SetField(lp),
+            Op::Accept,
+        ];
+        assert_eq!(run(max_plus).0, u32::MAX);
+        let min_minus = vec![
+            Op::LoadConstInt(i64::MIN),
+            Op::LoadConstInt(1),
+            Op::Sub,
+            Op::SetField(lp),
+            Op::Accept,
+        ];
+        assert_eq!(run(min_minus).0, 0);
+        // `+=` / `-=` with extreme deltas clamp to the u32 range.
+        for (d, want) in [(i64::MAX, u32::MAX), (i64::MIN, 0)] {
+            let lp_run = run(vec![Op::LoadConstInt(d), Op::AddField(lp), Op::Accept]);
+            let med_run = run(vec![Op::LoadConstInt(d), Op::AddField(med), Op::Accept]);
+            assert_eq!((lp_run.0, med_run.1), (want, Some(want)));
+        }
+    }
+
+    #[test]
+    fn oversized_integer_literal_is_a_compile_error() {
+        for src in [
+            "set this.bgp.local_pref += 9223372036854775807\naccept\n",
+            "if this.bgp.local_pref + 4294967296 > 0:\n    reject\naccept\n",
+        ] {
+            let err = crate::compile(src, &Symbols::EMPTY).unwrap_err();
+            assert!(
+                err.message.contains("out of range"),
+                "{src}: {}",
+                err.message
+            );
+        }
+        compile_src("set this.bgp.local_pref += 4294967295\naccept\n");
+        // Colon-literal parts are not plain integers.
+        compile_src("this.bgp.extended_communities.add(0:2:279172874250000)\naccept\n");
+    }
+
     #[test]
     fn relative_set_rejects_non_numeric_field() {
         let err = compile_err("set this.bgp.origin += 1\naccept\n");
