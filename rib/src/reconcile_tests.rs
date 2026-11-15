@@ -814,6 +814,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             routing_table: Some("rt1".into()),
             link_local_address: None,
             bridge_name: None,
+            mtu: None,
         },
     );
     let wd = f.watchdog_socket();

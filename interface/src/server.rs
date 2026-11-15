@@ -370,6 +370,7 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         routing_table: domain.routing_table,
         bridge_name: domain.bridge_name,
         link_local_address: domain.link_local_address,
+        mtu: domain.mtu,
     }
 }
 

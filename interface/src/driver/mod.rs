@@ -154,6 +154,11 @@ pub trait InterfaceDriver: Send + Sync {
     /// RFC 5340 Hello/Link-LSA traffic from it).
     async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
 
+    /// Observed kernel `IFLA_MTU` of `kernel_interface` (a bridge): a pure
+    /// read; the kernel derives it from the bridge's ports. `None` = not
+    /// resolvable now (retried on the next resync).
+    async fn bridge_mtu(&self, kernel_interface: &str) -> Option<u32>;
+
     /// Puts one bridge port in `state` right now (`InterfaceRequest::
     /// SetStpPortStates`). The port must exist and be a bridge port. A
     /// resync keeps the state through `InterfaceState.stp`.

@@ -121,6 +121,7 @@ mod tests {
                 }],
                 routing_table: Some("rt1".to_string()),
                 bridge_name: Some("br1".to_string()),
+                mtu: None,
             }))
         });
 

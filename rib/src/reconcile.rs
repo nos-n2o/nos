@@ -879,6 +879,7 @@ mod tests {
             routing_table: rt.map(String::from),
             link_local_address: None,
             bridge_name: None,
+            mtu: None,
         }
     }
 

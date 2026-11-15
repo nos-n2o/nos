@@ -184,6 +184,7 @@ fn bd_status(
         routing_table: Some("rt1".into()),
         link_local_address: ll.map(|l| l.parse().unwrap()),
         bridge_name: bridge.map(Into::into),
+        mtu: Some(1400),
     }
 }
 
@@ -432,7 +433,7 @@ async fn resync_broadcast_domain_builds_link() {
     assert_eq!(l.kernel_interface, "br-bd1");
     assert_eq!(l.interface_id, 9);
     assert_eq!(l.network_type, NetworkType::Broadcast);
-    assert_eq!(l.mtu, DEFAULT_OSPF_MTU);
+    assert_eq!(l.mtu, 1400, "the bridge's observed MTU");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(l.vrf, "vrf100");
     assert_eq!(names(&e.state.watched), ["br-bd1"]);
@@ -1066,7 +1067,7 @@ async fn resolve_local_address_cases() {
         "2001:db8::1/64".parse::<Ipv6Net>().unwrap(),
         "first IPv6 address wins"
     );
-    assert_eq!(ok.mtu, 1500);
+    assert_eq!(ok.mtu, Some(1500));
     assert!(
         resolve_local_address(&wd, "eth0", 5).await.is_none(),
         "no such tag"
@@ -1129,7 +1130,7 @@ async fn resolve_broadcast_domain_cases() {
     assert_eq!(bridge, "br1");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(l.prefix, V6.parse::<Ipv6Net>().unwrap());
-    assert_eq!(l.mtu, 0, "a bridge has no MTU of its own here");
+    assert_eq!(l.mtu, Some(1400), "the bridge's observed MTU");
     for name in ["nobridge", "noll", "noaddr", "v4", "gone"] {
         assert!(
             resolve_broadcast_domain(&wd, name).await.is_none(),

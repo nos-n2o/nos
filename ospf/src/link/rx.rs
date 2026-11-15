@@ -614,7 +614,7 @@ pub(super) async fn handle_dbd(
         && !exchange::mtu_acceptable(dbd.interface_mtu, cfg.mtu, cfg.mtu_ignore)
     {
         warn!(
-            neighbor = %dbd.router_id, local_mtu = cfg.mtu, neighbor_mtu = dbd.interface_mtu,
+            neighbor = %dbd.router_id, local_mtu = cfg.mtu, neighbor_mtu = dbd.interface_mtu, link = %cfg.attach_point,
             "ospf dbd rejected, neighbor interface mtu exceeds ours"
         );
         return None;

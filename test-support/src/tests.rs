@@ -271,6 +271,7 @@ async fn interfaced_lookups_links_and_pushed() {
             routing_table: None,
             link_local_address: None,
             bridge_name: Some("br1".into()),
+            mtu: None,
         },
     );
     assert!(matches!(q(bd()).await, InterfaceEvent::BroadcastDomain(d) if d.bridge_name.is_some()));
