@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,6 +77,9 @@ struct Slot {
     /// RFC 7130 §2.2: a micro-BFD session only takes packets that arrived on
     /// its member link.
     member: Option<String>,
+    /// The `by_peer` table half (`peer_table`): a packet must arrive on it.
+    table: String,
+    peer: IpAddr,
 }
 
 /// The `by_peer` table half of `key`: the routing table, or a member's own.
@@ -126,6 +129,8 @@ impl Demux {
             multihop: key.multihop,
             min_ttl,
             member: key.aggregate.as_ref().and(key.interface.clone()),
+            table: peer_table(key),
+            peer: key.peer,
         };
         t.by_disc.insert(disc, slot.clone());
         t.by_peer
@@ -214,6 +219,13 @@ impl Demux {
                 .filter(|s| s.multihop == multihop && s.member.as_deref() == member)
         };
         let Some(s) = session else { return false };
+        // §6.8.6 selects by discriminator alone; hardening: the packet must
+        // also come in on the session's table (VRF), and from its peer when
+        // single-hop (multihop sources may legitimately differ).
+        if s.table != table || (!s.multihop && s.peer != src) {
+            debug!(peer = %src, table, "bfd packet discarded: wrong table/source");
+            return false;
+        }
         if !ttl_ok(multihop, ttl, s.min_ttl) {
             debug!(peer = %src, ttl = ?ttl, multihop, "bfd packet discarded: ttl");
             return false;
@@ -241,7 +253,6 @@ pub struct Manager {
     net: Arc<dyn Net>,
     demux: Demux,
     sessions: Mutex<HashMap<SessionKey, Entry>>,
-    next_disc: AtomicU32,
     next_client: AtomicU64,
     reflector: Arc<Reflector>,
     /// The subinterfaces that answer unsolicited BFD (`set_unsolicited`).
@@ -258,8 +269,6 @@ impl Manager {
             net,
             demux,
             sessions: Mutex::default(),
-            // Random start (§6.8.1: not guessable), never 0.
-            next_disc: AtomicU32::new(session::rand_u32() | 1),
             next_client: AtomicU64::new(1),
             reflector: Arc::default(),
             rules: Mutex::default(),
@@ -311,11 +320,11 @@ impl Manager {
         self.next_client.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// A discriminator from the daemon-wide counter, skipping 0 and any in
+    /// A random discriminator (§6.8.1: not guessable), skipping 0 and any in
     /// use (4 billion values, so the scan is nearly never a second step).
-    fn alloc_disc(&self, taken: &HashMap<SessionKey, Entry>) -> u32 {
+    fn alloc_disc(taken: &HashMap<SessionKey, Entry>) -> u32 {
         loop {
-            let d = self.next_disc.fetch_add(1, Ordering::Relaxed);
+            let d = session::rand_u32();
             if d != 0 && !taken.values().any(|e| e.disc == d) {
                 return d;
             }
@@ -382,7 +391,7 @@ impl Manager {
             }
             return e.status.clone();
         }
-        let disc = self.alloc_disc(sessions);
+        let disc = Self::alloc_disc(sessions);
         let core = Core::new(
             profile.clone(),
             self.resolve(profile),
@@ -1014,13 +1023,20 @@ pub(crate) mod tests {
         );
         reply.state = BfdState::Init;
         reply.your_discriminator = rx.borrow().local_discriminator;
-        assert!(demux.route(
+        // The same discriminator from another table or another single-hop
+        // source is dropped (#619).
+        assert!(!demux.route("rt2", k.peer, false, Some(255), &reply.encode()));
+        assert!(!demux.route(
             "rt1",
             "192.0.2.77".parse().unwrap(),
             false,
             Some(255),
             &reply.encode()
         ));
+        reply.state = BfdState::AdminDown;
+        assert!(!demux.route("rt2", k.peer, false, Some(255), &reply.encode()));
+        reply.state = BfdState::Init;
+        assert!(demux.route("rt1", k.peer, false, Some(255), &reply.encode()));
         assert!(
             !demux.route("rt1", k.peer, false, Some(255), &[0u8; 3]),
             "garbage"
@@ -1033,6 +1049,20 @@ pub(crate) mod tests {
             !demux.route("rt1", k.peer, true, Some(255), &reply.encode()),
             "wrong port"
         );
+    }
+
+    #[tokio::test]
+    async fn discriminators_are_not_consecutive() {
+        let (m, _, _) = mgr(false);
+        let c = m.new_client();
+        let d: Vec<u32> = (1..=4)
+            .map(|i| {
+                m.register(c, &key(&format!("192.0.2.{i}")), &BfdProfile::default())
+                    .borrow()
+                    .local_discriminator
+            })
+            .collect();
+        assert!(d.windows(2).any(|w| w[1] != w[0].wrapping_add(1)));
     }
 
     #[test]
