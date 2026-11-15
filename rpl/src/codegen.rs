@@ -6,12 +6,13 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use crate::ast::{BinOp, Expr, ExprKind, ExtKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
 use crate::vm::{
-    AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, Role, ValidationState,
+    AsPathRegexes, CmpKind, CommunityValue, CompiledPolicy, Op, PrefixSet, Role, ValidationState,
     MAX_CODE_OPS, MAX_STACK_DEPTH,
 };
 use crate::CompileError;
@@ -34,6 +35,8 @@ pub fn compile(policy: &Policy, symbols: &Symbols) -> Result<CompiledPolicy, Com
         call_stack: Vec::new(),
         accept_patches: Vec::new(),
         callees: HashMap::new(),
+        prefix_sets: HashMap::new(),
+        regex_lists: HashMap::new(),
     };
     cg.compile_stmts(policy)?;
     if cg.max_depth > MAX_STACK_DEPTH {
@@ -60,12 +63,38 @@ struct Codegen<'a> {
     accept_patches: Vec<Vec<usize>>,
     /// Parsed + termination-checked callees, so one used N times is parsed once.
     callees: HashMap<String, Policy>,
+    /// Lists built once per `compile`, so N references (also through inlined
+    /// callees) share one index / one regex compile (#672).
+    prefix_sets: HashMap<String, Arc<PrefixSet>>,
+    regex_lists: HashMap<String, Arc<AsPathRegexes>>,
 }
 
 /// Deepest `call` nesting (owner decision, #870).
 const MAX_CALL_DEPTH: usize = 8;
 
 impl Codegen<'_> {
+    fn regex_list(
+        &mut self,
+        name: &str,
+        patterns: &[&str],
+        line: usize,
+    ) -> Result<Arc<AsPathRegexes>, CompileError> {
+        if let Some(re) = self.regex_lists.get(name) {
+            return Ok(Arc::clone(re));
+        }
+        let re = Arc::new(AsPathRegexes::new(patterns).map_err(|e| CompileError::new(line, e))?);
+        self.regex_lists.insert(name.to_string(), Arc::clone(&re));
+        Ok(re)
+    }
+
+    fn prefix_set(&mut self, name: &str, entries: &[crate::PrefixListEntry]) -> Arc<PrefixSet> {
+        Arc::clone(
+            self.prefix_sets
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(PrefixSet::new(entries))),
+        )
+    }
+
     fn emit(&mut self, op: Op, delta: isize) -> usize {
         let idx = self.code.len();
         self.code.push(op);
@@ -484,7 +513,8 @@ impl Codegen<'_> {
                                     format!("undefined prefix-list '{name}'"),
                                 ));
                             };
-                            self.emit(Op::OptIpInList(id, entries.to_vec()), 1);
+                            let set = self.prefix_set(name, entries);
+                            self.emit(Op::OptIpInList(id, set), 1);
                         }
                         _ => {
                             return Err(CompileError::new(
@@ -507,8 +537,7 @@ impl Codegen<'_> {
                             format!("undefined as-path-list '{name}'"),
                         ));
                     };
-                    let re =
-                        AsPathRegexes::new(patterns).map_err(|e| CompileError::new(rhs.line, e))?;
+                    let re = self.regex_list(name, patterns, rhs.line)?;
                     self.emit(Op::AsPathMatches(re), 1);
                     return Ok(Ty::Bool);
                 }
@@ -524,7 +553,7 @@ impl Codegen<'_> {
                             format!("undefined prefix-list '{name}'"),
                         ));
                     };
-                    let entries = entries.to_vec();
+                    let entries = self.prefix_set(name, entries);
                     let lt = self.compile_expr(lhs)?;
                     expect_ty(lt, Ty::Prefix, lhs.line)?;
                     self.emit(Op::PrefixInList(entries), 0);
@@ -650,7 +679,7 @@ impl Codegen<'_> {
                 if name == "matches" && info.id == schema::FieldId::BgpAsPath =>
             {
                 let re = str_lit_regex("as-path", args, line)?;
-                self.emit(Op::AsPathMatches(re), 1);
+                self.emit(Op::AsPathMatches(Arc::new(re)), 1);
                 Ok(Ty::Bool)
             }
             Postfix::Call(name, args) if name == "matches" && is_community_list(info.ty) => {
@@ -2498,5 +2527,36 @@ mod tests {
         srcs.push(("p7".into(), "set this.bgp.local_pref = 1\naccept\n".into()));
         let p: Vec<(&str, &str)> = srcs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         assert!(call_err("call p0\naccept\n", &p).contains("too large"));
+    }
+
+    #[test]
+    fn lists_are_shared_across_references() {
+        let entries = [PrefixListEntry {
+            cidr: "10.0.0.0/8".parse().unwrap(),
+            range: Some((8, 24)),
+        }];
+        let patterns: &[&str] = &["^65001$"];
+        let symbols = Symbols {
+            prefix_lists: &[("PL", &entries)],
+            as_path_lists: &[("AP", patterns)],
+            ..Symbols::EMPTY
+        };
+        let policy = compile_src_with(
+            "if this.bgp.as_path in AP:\n    reject\nif this.bgp.as_path in AP:\n    reject\n\
+             if this.bgp.next_hop in PL:\n    reject\nif this.bgp.next_hop in PL:\n    reject\n\
+             if this.prefix in PL:\n    reject\nif this.prefix in PL:\n    reject\naccept\n",
+            &symbols,
+        );
+        let (mut aps, mut pls) = (Vec::new(), Vec::new());
+        for op in &policy.code {
+            match op {
+                Op::AsPathMatches(a) => aps.push(a),
+                Op::OptIpInList(_, p) | Op::PrefixInList(p) => pls.push(p),
+                _ => {}
+            }
+        }
+        assert_eq!((aps.len(), pls.len()), (2, 4));
+        assert!(Arc::ptr_eq(aps[0], aps[1]));
+        assert!(pls.iter().all(|p| Arc::ptr_eq(p, pls[0])));
     }
 }

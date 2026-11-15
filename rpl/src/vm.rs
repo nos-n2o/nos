@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use ipnet::IpNet;
 
@@ -259,7 +261,7 @@ pub enum Op {
     ListContainsCommunity(FieldId, CommunityValue),
     /// `this.bgp.as_path.matches(..)` / `this.bgp.as_path in LIST` — true if
     /// any regex matches the current path.
-    AsPathMatches(AsPathRegexes),
+    AsPathMatches(Arc<AsPathRegexes>),
     /// Pushes whether any value of the community list matches (rendered as
     /// decimal `AA:NN` / `type:subtype:value` / `ga:ld1:ld2`).
     CommunityMatches(FieldId, AsPathRegexes),
@@ -278,7 +280,7 @@ pub enum Op {
     /// `this.bgp.<optional-ip field> in <cidr>`: false when unset.
     OptIpIn(FieldId, IpNet),
     /// `this.bgp.<optional-ip field> in <prefix-list>`: false when unset.
-    OptIpInList(FieldId, Vec<PrefixListEntry>),
+    OptIpInList(FieldId, Arc<PrefixSet>),
     /// `this.bgp.as_path.path_length` (RFC 4271 section 9.1.2.2) over the
     /// effective path.
     AsPathLen,
@@ -320,7 +322,7 @@ pub enum Op {
     /// compiled in at codegen time (not pushed as a runtime value), unlike
     /// `PrefixIn`'s plain-literal rhs. See `PrefixListEntry`'s doc comment
     /// for exact-vs-range matching.
-    PrefixInList(Vec<PrefixListEntry>),
+    PrefixInList(Arc<PrefixSet>),
     /// Pops two booleans, pushes their conjunction.
     And,
     /// Pops two booleans, pushes their disjunction.
@@ -609,7 +611,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::PrefixInList(entries) => {
                 let candidate = as_prefix(pop!());
-                push!(Value::Bool(prefix_in_list(entries, candidate)));
+                push!(Value::Bool(entries.contains(candidate)));
             }
             Op::And | Op::Or => {
                 let b = as_bool(pop!());
@@ -881,8 +883,7 @@ fn read_op(
             Value::Bool(opt_ip(*id, input, next_hop_edit).is_some_and(|a| net.contains(&a)))
         }
         Op::OptIpInList(id, entries) => Value::Bool(
-            opt_ip(*id, input, next_hop_edit)
-                .is_some_and(|a| prefix_in_list(entries, IpNet::from(a))),
+            opt_ip(*id, input, next_hop_edit).is_some_and(|a| entries.contains(IpNet::from(a))),
         ),
         Op::AsPathLen => Value::Int(as_path_len(input, lists)),
         _ => unreachable!("run() routes only read ops here"),
@@ -990,14 +991,69 @@ fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>) {
     }
 }
 
-/// `Op::PrefixInList`, split out of `run` for length.
-fn prefix_in_list(entries: &[PrefixListEntry], candidate: IpNet) -> bool {
-    entries.iter().any(|entry| match entry.range {
-        None => candidate == entry.cidr,
-        Some((min, max)) => {
-            entry.cidr.contains(&candidate) && (min..=max).contains(&candidate.prefix_len())
+/// A prefix-list indexed for lookup: a candidate costs at most one hash probe
+/// per distinct entry prefix length (<= 33 / 129), not one compare per entry.
+/// Same semantics as the linear scan it replaces: no `range` is an exact
+/// match, a `range` is containment plus an inclusive bound on the
+/// candidate's own length.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixSet {
+    exact: HashSet<IpNet>,
+    /// Ranged entries by truncated network: the `(min, max)` bounds of each.
+    ranged: HashMap<IpNet, Vec<(u8, u8)>>,
+    /// Distinct prefix lengths in `ranged`, ascending, per family.
+    lens_v4: Vec<u8>,
+    lens_v6: Vec<u8>,
+}
+
+impl PrefixSet {
+    /// Indexes `entries`.
+    pub fn new(entries: &[PrefixListEntry]) -> Self {
+        let mut set = Self {
+            exact: HashSet::new(),
+            ranged: HashMap::new(),
+            lens_v4: Vec::new(),
+            lens_v6: Vec::new(),
+        };
+        for e in entries {
+            match e.range {
+                None => {
+                    set.exact.insert(e.cidr);
+                }
+                Some(b) => {
+                    set.ranged.entry(e.cidr.trunc()).or_default().push(b);
+                    let lens = match e.cidr {
+                        IpNet::V4(_) => &mut set.lens_v4,
+                        IpNet::V6(_) => &mut set.lens_v6,
+                    };
+                    lens.push(e.cidr.prefix_len());
+                }
+            }
         }
-    })
+        for l in [&mut set.lens_v4, &mut set.lens_v6] {
+            l.sort_unstable();
+            l.dedup();
+        }
+        set
+    }
+
+    /// Whether any entry matches `candidate`.
+    pub fn contains(&self, candidate: IpNet) -> bool {
+        if self.exact.contains(&candidate) {
+            return true;
+        }
+        let len = candidate.prefix_len();
+        let lens = match candidate {
+            IpNet::V4(_) => &self.lens_v4,
+            IpNet::V6(_) => &self.lens_v6,
+        };
+        lens.iter().take_while(|&&l| l <= len).any(|&l| {
+            IpNet::new(candidate.addr(), l)
+                .ok()
+                .and_then(|anc| self.ranged.get(&anc.trunc()))
+                .is_some_and(|b| b.iter().any(|&(min, max)| (min..=max).contains(&len)))
+        })
+    }
 }
 
 /// The `Edits` of an `Accept`, split out of `run` for length.
@@ -1094,5 +1150,88 @@ mod tests {
         assert!(!m("^65001_", "{65001 2}"));
         assert!(m(r"^\{", "{65001 2}"));
         assert!(m(r"^\(", "(65001) 1"));
+    }
+
+    /// The linear scan `PrefixSet` replaced, kept as the oracle.
+    fn linear(entries: &[PrefixListEntry], c: IpNet) -> bool {
+        entries.iter().any(|e| match e.range {
+            None => c == e.cidr,
+            Some((min, max)) => e.cidr.contains(&c) && (min..=max).contains(&c.prefix_len()),
+        })
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_lossless,
+        clippy::cast_possible_wrap,
+        clippy::precedence,
+        reason = "test PRNG, values bounded by construction"
+    )]
+    fn prefix_set_matches_linear_scan() {
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut rnd = move |n: u64| {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 33) % n
+        };
+        // A small address space so entries and candidates collide often.
+        let net = |rnd: &mut dyn FnMut(u64) -> u64| -> IpNet {
+            if rnd(2) == 0 {
+                let len = rnd(33) as u8;
+                let a = Ipv4Addr::from(((rnd(4) as u32) << 30) | (rnd(1 << 16) as u32 * 7));
+                IpNet::new(IpAddr::V4(a), len).unwrap()
+            } else {
+                let len = rnd(129) as u8;
+                let a = std::net::Ipv6Addr::from(((rnd(4) as u128) << 126) | rnd(1 << 16) as u128);
+                IpNet::new(IpAddr::V6(a), len).unwrap()
+            }
+        };
+        for _ in 0..300 {
+            let entries: Vec<PrefixListEntry> = (0..rnd(12))
+                .map(|_| {
+                    let cidr = net(&mut rnd);
+                    let range = (rnd(3) > 0).then(|| {
+                        let (a, b) = (rnd(130) as u8, rnd(130) as u8);
+                        (a.min(b), a.max(b))
+                    });
+                    PrefixListEntry { cidr, range }
+                })
+                .collect();
+            let set = PrefixSet::new(&entries);
+            for _ in 0..60 {
+                // Half the candidates derive from an entry so hits happen.
+                let c = if entries.is_empty() || rnd(2) == 0 {
+                    net(&mut rnd)
+                } else {
+                    let e = entries[rnd(entries.len() as u64) as usize].cidr;
+                    let max = if e.addr().is_ipv4() { 32 } else { 128 };
+                    let len = (e.prefix_len() as u64 + rnd(4)).min(max) as u8;
+                    IpNet::new(e.addr(), len).unwrap()
+                };
+                assert_eq!(set.contains(c), linear(&entries, c), "{entries:?} {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_set_range_edges() {
+        let e = |c: &str, range| PrefixListEntry {
+            cidr: c.parse().unwrap(),
+            range,
+        };
+        let set = PrefixSet::new(&[
+            e("10.0.0.0/8", Some((16, 16))),
+            e("::ffff:10.0.0.0/104", None),
+        ]);
+        let has = |c: &str| set.contains(c.parse().unwrap());
+        assert!(has("10.1.0.0/16"));
+        assert!(!has("10.0.0.0/8")); // shorter than min
+        assert!(!has("10.1.0.0/17")); // above max
+        assert!(!has("11.1.0.0/16"));
+        assert!(!has("fe80::/16")); // other family
+        assert!(has("::ffff:10.0.0.0/104")); // v4-mapped is plain v6
+        assert!(!has("::ffff:10.0.0.0/105"));
     }
 }
