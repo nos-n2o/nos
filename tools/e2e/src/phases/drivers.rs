@@ -456,7 +456,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -810,7 +810,7 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -1358,7 +1358,7 @@ async fn lldp_tagged(w: &World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -4150,7 +4150,7 @@ pub async fn l2_socket_race(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )

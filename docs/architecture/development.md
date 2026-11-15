@@ -18,14 +18,14 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260).
 
 To bump:
 
-- Change `RUST_TOOLCHAIN` (ci.yml) and `channel` (rust-toolchain.toml) together; `make toolchain-check` enforces it.
+- Change `RUST_TOOLCHAIN` (ci.yml) and `channel` (rust-toolchain.toml) together; `make toolchain-check` enforces it. Also bump the `rust:<channel>-slim-trixie` tag and digest of the release `Dockerfile` builder.
 - Bump `MIRI_TOOLCHAIN` to a recent nightly date that ships `miri`.
 - Run `make ci-image check miri` — on a host without the new toolchain it runs in the new `nos-ci` image automatically.
 - Fix the new lints and deprecations in the same PR. A lint an older toolchain doesn't know only prints an `unknown_lints` warning, which `-D warnings` doesn't promote.
 - The PR touches `ci.yml`, so every job runs on it: don't merge until `gh pr checks` is all green, Miri included.
 - Close any open `ci-red` issue the bump fixes.
 
-The release `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since release builds don't use `-D warnings`.
+The release `Dockerfile` builds on `rust:<channel>-slim-trixie` (digest-pinned, same Rust version as `rust-toolchain.toml`; the runtime stage is `debian:trixie-slim`, so build and runtime glibc match). Bump its tag with `channel`; Dependabot bumps the digest.
 
 **Image hardening (#405)**:
 - Both base images are pinned by manifest-list digest (tag kept beside it); `.github/dependabot.yml` (docker ecosystem, weekly) bumps them. apt packages stay unpinned (DL3008 ignored): pinned versions break on every Debian security update.

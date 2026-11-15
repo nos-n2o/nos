@@ -3745,7 +3745,7 @@ async fn rpki_cache_auth(w: &mut World) -> anyhow::Result<()> {
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
 fn gobgp_dockerfile() -> String {
     format!(
-        "FROM debian:bookworm-slim\n\
+        "FROM debian:trixie-slim\n\
          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \\\n \
          && curl -fsSL https://github.com/osrg/gobgp/releases/download/v{GOBGP_VERSION}/gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz \\\n \
          | tar -xz -C /usr/local/bin gobgp gobgpd \\\n \
@@ -5609,7 +5609,7 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -5850,7 +5850,7 @@ async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -8026,7 +8026,7 @@ async fn dataplane_setup(
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -9340,7 +9340,7 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -9794,7 +9794,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
