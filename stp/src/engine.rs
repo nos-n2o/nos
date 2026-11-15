@@ -275,7 +275,7 @@ impl Engine {
     /// Apply `plan` to the running bridge without restarting the protocol:
     /// bridge priority, timers, per-port cost/priority/edge/protections and
     /// ports added or removed. `Err(Rebuild)` for anything structural (mode,
-    /// force-version, MSTP, Rapid-PVST+); nothing has changed then.
+    /// force-version, MSTP, Rapid-PVST+; `Pvst::apply_plan` calls this per tree); nothing has changed then.
     pub fn apply_plan(&mut self, plan: &Plan) -> Result<Vec<Out>, Rebuild> {
         let old = &self.plan;
         if self.mst.is_some()

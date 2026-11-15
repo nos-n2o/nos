@@ -652,6 +652,43 @@ async fn pvst_ticks_resync_every_ten_seconds_and_follow_links() {
     assert_eq!(rx.await.unwrap(), 0, "mcheck is a classic-mode command");
 }
 
+#[tokio::test]
+async fn pvst_plan_edit_in_place_keeps_the_other_trees_sockets() {
+    let mut l = Lab::new();
+    l.d.links = table(&[
+        ("eth1.10", true),
+        ("eth2.10", true),
+        ("eth1.20", true),
+        ("eth2.20", true),
+        ("eth1", true),
+        ("eth2", true),
+    ]);
+    let p = pvst_plan();
+    l.d.apply_plan(Some(p.clone())).await;
+    let opened = l.fakes.opened();
+    assert_eq!(opened, 4);
+    // bd1's priority is edited in place: nothing reopens.
+    let mut q = p.clone();
+    q.pvst.as_mut().unwrap()[0].plan.priority = 4096;
+    l.d.apply_plan(Some(q.clone())).await;
+    assert_eq!(l.fakes.opened(), opened);
+    assert!(l.d.prt[1][0].enabled, "bd2 untouched");
+    // Remove bd2: its sockets close, bd1's stay.
+    q.pvst.as_mut().unwrap().remove(1);
+    l.d.apply_plan(Some(q.clone())).await;
+    assert_eq!(l.fakes.opened(), opened);
+    assert_eq!(l.d.plinks.len(), 2);
+    assert_eq!(l.d.io.len(), 2);
+    assert_eq!(l.summary().pvst.len(), 1);
+    // A tag change on bd1 restarts that tree only and opens its new links.
+    q.pvst.as_mut().unwrap()[0].tags = vec![VlanTag::Untagged; 2];
+    l.d.apply_plan(Some(q)).await;
+    assert!(l.d.plinks.contains_key("eth1") && !l.d.plinks.contains_key("eth1.10"));
+    assert_eq!(l.d.io.len(), 2);
+    assert_eq!(l.fakes.opened(), opened + 2);
+    assert!(l.d.prt[0][0].enabled);
+}
+
 #[tokio::test(start_paused = true)]
 async fn run_with_applies_plans_serves_commands_and_stops() {
     let fakes = Fakes::default();
