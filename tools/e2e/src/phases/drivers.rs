@@ -2739,12 +2739,13 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
         "32768",
         "--stp-domain-priority",
         "pv-d2:32768",
+        "--stp-domain-priority",
+        "pv-d1:8192",
     ];
 
     log("router-a: pv-d1 priority and member cost edit, applied in place");
     let in_place = a.count(IN_PLACE);
-    let mut extra = vec!["--stp-domain-priority", "pv-d1:8192"];
-    extra.extend(["--stp-member-cost", "pvst-sp1:pv-d1:200"]);
+    let mut extra = vec!["--stp-member-cost", "pvst-sp1:pv-d1:200"];
     extra.extend(rapid);
     a.provision(&edit("eth1", "pvst-sp1", &extra)).await?;
     a.wait_new(IN_PLACE, in_place, 20).await?;
@@ -2752,12 +2753,10 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
 
     log("router-a: third tagged domain pv-x on eth2, applied in place");
     let in_place = a.count(IN_PLACE);
-    let mut with_x = edit(
-        "eth2",
-        "pvst-sp2",
-        &["--switching-profile-member", "pv-x:130"],
-    );
-    with_x.extend(strings(&["--stp-domain-priority", "pv-x:4096"]));
+    let mut extra = vec!["--switching-profile-member", "pv-x:130"];
+    extra.extend(["--stp-domain-priority", "pv-x:4096"]);
+    extra.extend(rapid);
+    let with_x = edit("eth2", "pvst-sp2", &extra);
     a.provision(&with_x).await?;
     a.wait_new(IN_PLACE, in_place, 20).await?;
     pvst_wait(a, "pv-x", 30, |i| i.ports.len() == 1).await?;
@@ -2768,11 +2767,9 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
     log("router-a: pv-x removed again (eth2 moves to a profile without it)");
     let in_place = a.count(IN_PLACE);
     // (the new profile repeats the expensive pv-d2 member of `pvst-sp2`)
-    let sp3 = edit(
-        "eth2",
-        "pvst-sp3",
-        &["--stp-member-cost", "pvst-sp3:pv-d2:100000"],
-    );
+    let mut extra = vec!["--stp-member-cost", "pvst-sp3:pv-d2:100000"];
+    extra.extend(rapid);
+    let sp3 = edit("eth2", "pvst-sp3", &extra);
     a.provision(&sp3).await?;
     a.wait_new(IN_PLACE, in_place, 20).await?;
     if stp_summary(a).await?.pvst.len() != 3 {
