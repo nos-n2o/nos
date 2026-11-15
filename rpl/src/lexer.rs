@@ -175,11 +175,16 @@ fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<()
             i += 1;
             continue;
         }
+        if let Some((tok, n)) = scan_ipv6(&line[i..]) {
+            out.push(SpannedToken {
+                token: tok,
+                line: lineno,
+            });
+            i += n;
+            continue;
+        }
         if c.is_ascii_digit() {
-            // IPv4-dotted-decimal and prefix literals only in v1 — a bare
-            // IPv6 literal's own colons would be ambiguous with the block
-            // ':' that immediately follows one in real policy source (e.g.
-            // `this.prefix in 2001:db8::/32:`), so it isn't supported here.
+            // IPv4-dotted-decimal and prefix literals (IPv6 is tried above).
             let start = i;
             while i < bytes.len() {
                 let c = bytes[i] as char;
@@ -274,6 +279,33 @@ fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<()
         i += width;
     }
     Ok(())
+}
+
+/// Bare IPv6 address/prefix literal at the start of `rest`: the maximal run of
+/// `[0-9A-Fa-f:./]` parsed by `std`; on failure ONE trailing `:` (the block
+/// colon, as in `this.prefix in 2001:db8::/32:`) is dropped and it retries.
+/// `None` for anything the std parser rejects (communities such as `65000:100`,
+/// identifiers like `fe80`), so those keep their existing lexing.
+fn scan_ipv6(rest: &str) -> Option<(Token, usize)> {
+    let len = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_hexdigit() || b":./".contains(b))
+        .count();
+    let mut run = &rest[..len];
+    if !run.contains(':') {
+        return None;
+    }
+    for _ in 0..2 {
+        if run.contains('/') {
+            if let Ok(n @ IpNet::V6(_)) = run.parse::<IpNet>() {
+                return Some((Token::Prefix(n), run.len()));
+            }
+        } else if let Ok(a @ IpAddr::V6(_)) = run.parse::<IpAddr>() {
+            return Some((Token::IpAddr(a), run.len()));
+        }
+        run = run.strip_suffix(':')?;
+    }
+    None
 }
 
 fn keyword_or_ident(word: &str) -> Token {
@@ -468,5 +500,51 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn ipv6_literals() {
+        let p = |s: &str| Token::Prefix(s.parse().unwrap());
+        let a = |s: &str| Token::IpAddr(s.parse().unwrap());
+        let nl = |mut v: Vec<Token>| {
+            v.extend([Token::Newline, Token::Eof]);
+            v
+        };
+        for (src, tok) in [
+            ("2001:db8::/32", p("2001:db8::/32")),
+            ("::/0", p("::/0")),
+            ("::1", a("::1")),
+            ("fe80::1", a("fe80::1")),
+        ] {
+            assert_eq!(tokens_of(src), nl(vec![tok]), "{src}");
+        }
+        // Trailing block colon is not part of the literal.
+        assert_eq!(
+            tokens_of("2001:db8::/32:"),
+            nl(vec![p("2001:db8::/32"), Token::Colon])
+        );
+        assert_eq!(
+            tokens_of("2001:db8:::"),
+            nl(vec![a("2001:db8::"), Token::Colon])
+        );
+        assert_eq!(tokens_of("2001:db8::"), nl(vec![a("2001:db8::")]));
+        // Communities and identifiers are unchanged.
+        let i = |n| Token::Int(n);
+        assert_eq!(
+            tokens_of("65000:100"),
+            nl(vec![i(65000), Token::Colon, i(100)])
+        );
+        assert_eq!(
+            tokens_of("3:2:900"),
+            nl(vec![i(3), Token::Colon, i(2), Token::Colon, i(900)])
+        );
+        assert_eq!(tokens_of("fe80"), nl(vec![Token::Ident("fe80".into())]));
+        assert_eq!(tokens_of("abcd"), nl(vec![Token::Ident("abcd".into())]));
+        // Malformed: lexes as pieces, which the parser rejects.
+        assert!(crate::compile(
+            "if this.prefix in 2001:db8:::/32:\n  accept\nreject\n",
+            &crate::Symbols::EMPTY
+        )
+        .is_err());
     }
 }

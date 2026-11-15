@@ -1224,6 +1224,38 @@ mod tests {
         }
     }
 
+    /// #630: bare IPv6 literals compile and run (prefix match, next-hop eq/set).
+    #[test]
+    fn ipv6_literals() {
+        let (_, as_path, cl) = default_input("10.0.0.0/8");
+        let run = |src: &str, prefix: &str, nh: Option<&str>| {
+            let mut input = make_input(prefix.parse().unwrap(), &as_path, 100, None, &cl);
+            input.bgp.next_hop = nh.map(|a| a.parse().unwrap());
+            vm::run(&compile_src(src), &input)
+        };
+        let src = "if this.prefix in 2001:db8::/32:\n    accept\nreject\n";
+        assert!(matches!(
+            run(src, "2001:db8:1::/48", None),
+            Verdict::Accept { .. }
+        ));
+        assert_eq!(run(src, "2001:db9::/48", None), Verdict::Reject);
+        assert_eq!(run(src, "10.0.0.0/8", None), Verdict::Reject);
+        let src = "if this.bgp.next_hop == 2001:db8::1:\n    accept\nreject\n";
+        assert!(matches!(
+            run(src, "::/0", Some("2001:db8::1")),
+            Verdict::Accept { .. }
+        ));
+        assert_eq!(run(src, "::/0", Some("2001:db8::2")), Verdict::Reject);
+        let src = "set this.bgp.next_hop = 2001:db8::9\naccept\n";
+        match run(src, "::/0", None) {
+            Verdict::Accept { edits, .. } => assert_eq!(
+                edits.next_hop,
+                NextHopSet::Addr("2001:db8::9".parse().unwrap())
+            ),
+            Verdict::Reject => panic!("rejected"),
+        }
+    }
+
     /// RFC 9234 / #872: `this.bgp.{local,remote}_role` and `this.bgp.otc`.
     #[test]
     fn role_and_otc_fields() {
