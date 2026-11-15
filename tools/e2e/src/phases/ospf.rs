@@ -2085,20 +2085,131 @@ pub async fn ospf_virtual_link(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
-    // §16.2: router-c still summarizes its loopback into area 1, but
-    // router-b, a backbone ABR, doesn't route on area 1's summaries, so
-    // both routes go with the virtual link.
-    log("both routes are removed, while router-c's area-1 summary stays at router-b");
+    // §16.2: router-b, a backbone ABR, doesn't route on area 1's summaries, so
+    // both routes go with the virtual link; router-c, now in areas 1 and 2
+    // with no backbone, is no ABR (RFC 2328 §3.1) and flushes its summary.
+    log("both routes are removed, and router-c flushes its area-1 summary");
     let removed = format!("removed route prefix={OSPF_VLINK_LOOPBACK_ADDRESS} ");
     b.wait_new(&removed, 0, 30).await?;
     a.wait_new(&removed, 0, 30).await?;
-    wait_lsa(b, "router-c's area-2 summary in area 1", |l| {
-        l["area_id"] == OSPF_AREA_1
-            && l["lsa_type"] == 3
-            && l["advertising_router"] == OSPF_ROUTER_ID_C
-            && l["link_state_id"] == loopback_id
-            && l["age"].as_u64().is_some_and(|a| a < 3600)
+    c.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=3 link_state_id={loopback_id} advertising_router={OSPF_ROUTER_ID_C}"
+    ))
+    .await
+}
+
+/// RFC 2328 §12.4.3 ABR transit (#610), self-contained, three routers (the
+/// `ospf-external-flood` topology): router-c, on the bd-ospf bridge in area 1,
+/// is an ASBR with an area-1 loopback; router-b is the ABR (area 0 over
+/// eth0.0, area 1 on the bridge); router-a is area 0 plus a loopback in area 2,
+/// so it is a second ABR behind the backbone. router-a must re-summarize what
+/// it only learns from router-b's backbone Type-3/Type-4 into area 2: a
+/// Type-3 for router-c's loopback and a Type-4 for the ASBR router-c. Removing
+/// both at router-c flushes them again.
+pub async fn ospf_abr_transit(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let lsid = ASBR_PREFIX.split('/').next().unwrap_or(ASBR_PREFIX);
+    let loopback = OSPF_ABR_LOOPBACK_ADDRESS.trim_end_matches("/32");
+    let area1 = |router_id: &str, svi: &str| {
+        let mut flags = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            "--ospf-area",
+            OSPF_AREA_1,
+            "--ospf-profile",
+            OSPF_PROFILE_AREA1,
+        ]);
+        flags.extend(ospf_broadcast_profile(svi, OSPF_PROFILE_AREA1));
+        flags
+    };
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    a.provision_flags(&with_base(
+        A,
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-area",
+            OSPF_AREA_2,
+            "--ospf-profile",
+            OSPF_PROFILE_AREA2,
+            "--loopback-address",
+            OSPF_VLINK_LOOPBACK_ADDRESS,
+            "--ospf-loopback-profile",
+            OSPF_PROFILE_AREA2,
+        ]),
+    ))
+    .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&with_base(
+        B,
+        area1(OSPF_ROUTER_ID_B, OSPF_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    let mut c_flags = area1(OSPF_ROUTER_ID_C, OSPF_BROADCAST_ADDRESS_C);
+    c_flags.extend(strings(&[
+        "--loopback-address",
+        OSPF_ABR_LOOPBACK_ADDRESS,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE_AREA1,
+    ]));
+    c.provision_flags(&with_base(C, asbr(c_flags))).await?;
+
+    both_full_p2p(a, b).await?;
+    c.wait(&format!(
+        "ospf neighbor reached full link=broadcast-domain:{BD} neighbor={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    log("router-a re-summarizes router-b's backbone Type-3 and Type-4 into area 2");
+    let t3 = format!(
+        "ospf lsa originated lsa_type=3 link_state_id={loopback} advertising_router={OSPF_ROUTER_ID}"
+    );
+    let t4 = format!(
+        "ospf lsa originated lsa_type=4 link_state_id={OSPF_ROUTER_ID_C} advertising_router={OSPF_ROUTER_ID}"
+    );
+    a.wait(&t3).await?;
+    a.wait(&t4).await?;
+    for (lsa_type, id) in [(3, loopback), (4, OSPF_ROUTER_ID_C)] {
+        wait_lsa(a, &format!("a type-{lsa_type} for {id} in area 2"), |l| {
+            l["area_id"] == OSPF_AREA_2
+                && l["lsa_type"] == lsa_type
+                && l["advertising_router"] == OSPF_ROUTER_ID
+                && l["link_state_id"] == id
+                && l["age"].as_u64().is_some_and(|age| age < 3600)
+        })
+        .await?;
+    }
+    // The type-5 crossed into area 2 too, and nothing area 1 offered went
+    // sideways: router-a's area-2 loopback is the only thing it summarizes
+    // into area 0 on its own.
+    wait_lsa(a, "router-c's type-5 in area 2", |l| {
+        l["area_id"] == OSPF_AREA_2 && l["lsa_type"] == 5 && l["link_state_id"] == lsid
     })
+    .await?;
+
+    log("router-c stops being an ASBR and drops its loopback: both summaries are flushed");
+    c.provision(&[
+        "--clear-redistribute-to-ospf",
+        "--loopback-remove-address",
+        OSPF_ABR_LOOPBACK_ADDRESS,
+        "--clear-ospf-loopback-profile",
+    ])
+    .await?;
+    a.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=3 link_state_id={loopback} advertising_router={OSPF_ROUTER_ID}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=4 link_state_id={OSPF_ROUTER_ID_C} advertising_router={OSPF_ROUTER_ID}"
+    ))
     .await
 }
 
@@ -3675,6 +3786,147 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
     }
     w.dock.network_remove(NET_OSPFV3_A1).await;
     Ok(())
+}
+
+/// RFC 5340 §4.4.3.4 / RFC 2328 §12.4.3 ABR transit (#610), self-contained,
+/// the `ospfv3-lsinfinity-asbr` topology: router-c (ASBR, area-1 link to
+/// router-b over eth1) — router-b (ABR, area 0 over eth0.0) — router-a, which
+/// also has a loopback in area 2 and is therefore a second ABR behind the
+/// backbone. Router-a must pass router-b's backbone Inter-Area-Router-LSA for
+/// router-c on into area 2 (its own Inter-Area-Router-LSA), and flush it when
+/// router-c stops being an ASBR.
+pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
+            .await?;
+    }
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
+        .await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
+        .await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let area1 = |id: Id, v4: &str, v6: &str, router_id: &str| {
+        strings(&[
+            "--interface",
+            "eth1",
+            "--address",
+            v4,
+            "--address6",
+            v6,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ])
+    };
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    a.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID,
+        "--ospfv3-area",
+        OSPFV3_AREA_2,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE_AREA2,
+        "--ospfv3-loopback-address",
+        OSPFV3_TRANSIT_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA2,
+    ])
+    .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&area1(
+        B,
+        &format!("{OSPFV3_A1_IP_B}/24"),
+        OSPFV3_A1_ADDRESS_B.s(),
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+    c.provision_flags(&with_base(C, vec![])).await?;
+    let mut c_flags = area1(
+        C,
+        &format!("{OSPFV3_A1_IP_C}/24"),
+        OSPFV3_A1_ADDRESS_C.s(),
+        OSPFV3_ROUTER_ID_C,
+    );
+    c_flags.extend(strings(&[
+        "--static-route",
+        OSPFV3_A1_ASBR_PREFIX,
+        "--static-gateway",
+        OSPFV3_A1_ADDRESS_B.s().trim_end_matches("/64"),
+        "--redistribute-to-ospfv3",
+    ]));
+    c.provision_flags(&c_flags).await?;
+
+    a.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        90,
+    )
+    .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+        0,
+        90,
+    )
+    .await?;
+
+    log("router-a re-summarizes router-b's backbone Inter-Area-Router-LSA into area 2");
+    let originated = either_form(
+        LSA_TYPE_INTER_AREA_ROUTER,
+        LSA_TYPE_E_INTER_AREA_ROUTER,
+        |t| {
+            format!(
+                "ospfv3 lsa originated lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
+            )
+        },
+    );
+    a.wait_new(&originated, 0, 90).await?;
+
+    log("router-c stops redistributing: the Inter-Area-Router-LSAs are flushed");
+    c.provision(&["--clear-redistribute-to-ospfv3"]).await?;
+    let aged = either_form(
+        LSA_TYPE_INTER_AREA_ROUTER,
+        LSA_TYPE_E_INTER_AREA_ROUTER,
+        |t| {
+            format!(
+                "ospfv3 lsa prematurely aged lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
+            )
+        },
+    );
+    let flushed = a.wait_new(&aged, 0, 60).await;
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+    flushed
 }
 
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
