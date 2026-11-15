@@ -43,8 +43,16 @@ pub enum Out {
 pub struct Engine {
     /// The Rapid-PVST+ tree this engine runs (labels its log lines).
     domain: Option<String>,
+    mac: [u8; 6],
+    /// The plan last built or applied in place.
+    plan: Plan,
     bridge: Bridge,
+    /// One slot per port ever planned since the last rebuild; the slot index
+    /// is the core's port index. A removed port keeps its slot (`gone`).
     ports: Vec<PortCfg>,
+    /// The Port Identifier number of each slot, stable while the port stays.
+    numbers: Vec<u16>,
+    gone: Vec<bool>,
     mst: Option<Mst>,
     /// The last state pushed per `(tree, port)`.
     pushed: HashMap<(u16, usize), PortState>,
@@ -148,23 +156,58 @@ fn sync_mst(cist: &Bridge, mst: &mut Mst) {
     }
 }
 
+/// The Port Identifier number of each of `names`: a name in `prev` keeps its
+/// number, a new one takes the lowest number nobody holds.
+fn allocate(names: &[&str], prev: &HashMap<String, u16>) -> Vec<u16> {
+    let mut used = std::collections::HashSet::new();
+    let mut out: Vec<Option<u16>> = names
+        .iter()
+        .map(|n| prev.get(*n).copied().filter(|&v| used.insert(v)))
+        .collect();
+    let mut next = 1u16;
+    for slot in out.iter_mut().filter(|s| s.is_none()) {
+        while used.contains(&next) {
+            next += 1;
+        }
+        used.insert(next);
+        *slot = Some(next);
+    }
+    out.into_iter().flatten().collect()
+}
+
+fn port_params(p: &PortCfg, number: u16) -> Result<PortParams, IdError> {
+    Ok(PortParams {
+        id: PortId::new(p.priority, number)?,
+        path_cost: crate::link::path_cost(p.cost, crate::link::LinkInfo::default()),
+        admin_edge: p.edge == EdgePort::Admin,
+        auto_edge: p.edge == EdgePort::Auto,
+    })
+}
+
+/// A plan change only a rebuilt bridge can take (#662).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Rebuild;
+
 impl Engine {
     /// A bridge with every port disabled; the returned outputs are its
     /// initial (blocking) states.
     pub fn new(plan: &Plan, mac: [u8; 6]) -> Result<(Self, Vec<Out>), IdError> {
+        Self::new_keeping(plan, mac, &HashMap::new())
+    }
+
+    /// Like [`Engine::new`], a port named in `prev` keeps its number (#662).
+    pub fn new_keeping(
+        plan: &Plan,
+        mac: [u8; 6],
+        prev: &HashMap<String, u16>,
+    ) -> Result<(Self, Vec<Out>), IdError> {
+        let names: Vec<&str> = plan.ports.iter().map(|p| p.name.as_str()).collect();
+        let numbers = allocate(&names, prev);
         let params = plan
             .ports
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let number = u16::try_from(i + 1).map_err(|_| IdError::PortNumber(u16::MAX))?;
-                Ok(PortParams {
-                    id: PortId::new(p.priority, number)?,
-                    path_cost: crate::link::path_cost(p.cost, crate::link::LinkInfo::default()),
-                    admin_edge: p.edge == EdgePort::Admin,
-                    auto_edge: p.edge == EdgePort::Auto,
-                })
-            })
+            .zip(&numbers)
+            .map(|(p, &n)| port_params(p, n))
             .collect::<Result<Vec<_>, IdError>>()?;
         let mut bridge = Bridge::new(
             BridgeId::new(plan.priority, plan.ext, mac)?,
@@ -193,8 +236,12 @@ impl Engine {
         };
         let mut e = Engine {
             domain: plan.domain.clone(),
+            mac,
+            plan: plan.clone(),
             bridge,
             ports: plan.ports.clone(),
+            numbers,
+            gone: vec![false; plan.ports.len()],
             mst,
             pushed: HashMap::new(),
             counters: vec![StpPortCounters::default(); plan.ports.len()],
@@ -207,12 +254,106 @@ impl Engine {
         Ok((e, out))
     }
 
+    /// Whether slot `port` is a live port (not removed by an in-place update).
+    pub fn is_live(&self, port: usize) -> bool {
+        !self.gone[port]
+    }
+
+    /// Port number of each live port, to carry over a rebuild.
+    pub fn numbers(&self) -> HashMap<String, u16> {
+        (0..self.ports.len())
+            .filter(|&i| !self.gone[i])
+            .map(|i| (self.ports[i].name.clone(), self.numbers[i]))
+            .collect()
+    }
+
+    /// The slot of live port `name`.
+    pub fn live_slot(&self, name: &str) -> Option<usize> {
+        (0..self.ports.len()).find(|&i| !self.gone[i] && self.ports[i].name == name)
+    }
+
+    /// Apply `plan` to the running bridge without restarting the protocol:
+    /// bridge priority, timers, per-port cost/priority/edge/protections and
+    /// ports added or removed. `Err(Rebuild)` for anything structural (mode,
+    /// force-version, MSTP, Rapid-PVST+); nothing has changed then.
+    pub fn apply_plan(&mut self, plan: &Plan) -> Result<Vec<Out>, Rebuild> {
+        let old = &self.plan;
+        if self.mst.is_some()
+            || plan.mst.is_some()
+            || plan.pvst.is_some()
+            || old.pvst.is_some()
+            || plan.rstp_version != old.rstp_version
+            || plan.ext != old.ext
+            || plan.domain != old.domain
+        {
+            return Err(Rebuild);
+        }
+        let live: HashMap<String, u16> = self.numbers();
+        let kept: Vec<Option<usize>> = plan.ports.iter().map(|p| self.live_slot(&p.name)).collect();
+        let names: Vec<&str> = plan.ports.iter().map(|p| p.name.as_str()).collect();
+        let numbers = allocate(&names, &live);
+        let mut news = Vec::new();
+        for ((cfg, slot), &n) in plan.ports.iter().zip(&kept).zip(&numbers) {
+            let params = port_params(cfg, n).map_err(|_| Rebuild)?;
+            if slot.is_none() {
+                news.push((cfg.clone(), params, n));
+            }
+        }
+        if plan.priority != old.priority {
+            let id = BridgeId::new(plan.priority, plan.ext, self.mac).map_err(|_| Rebuild)?;
+            self.bridge.set_bridge_id(id);
+        }
+        if plan.timers != old.timers {
+            self.bridge.set_timers(plan.timers);
+        }
+        for i in 0..self.ports.len() {
+            if !self.gone[i] && !plan.ports.iter().any(|p| p.name == self.ports[i].name) {
+                // Err-disabled: release first so `nos-interfaced` is told.
+                self.bridge.clear_err_disabled(i);
+                self.bridge.set_port_enabled(i, false);
+                self.gone[i] = true;
+            }
+        }
+        for (cfg, slot) in plan.ports.iter().zip(&kept) {
+            let Some(&i) = slot.as_ref() else { continue };
+            let was = std::mem::replace(&mut self.ports[i], cfg.clone());
+            if was.priority != cfg.priority {
+                let id = PortId::new(cfg.priority, self.numbers[i]).map_err(|_| Rebuild)?;
+                self.bridge.set_port_priority(i, id);
+            }
+            if was.edge != cfg.edge {
+                self.bridge
+                    .set_edge(i, cfg.edge == EdgePort::Admin, cfg.edge == EdgePort::Auto);
+            }
+            if was.prot != cfg.prot {
+                self.bridge.set_protections(i, cfg.prot);
+                if !cfg.prot.bpdu_guard {
+                    self.bridge.clear_err_disabled(i);
+                }
+            }
+            if was.domains != cfg.domains {
+                // The new domains need their state pushed.
+                self.pushed.retain(|&(_, p), _| p != i);
+            }
+        }
+        for (cfg, params, number) in news {
+            let i = self.bridge.add_port(params);
+            debug_assert_eq!(i, self.ports.len());
+            self.ports.push(cfg);
+            self.numbers.push(number);
+            self.gone.push(false);
+            self.counters.push(StpPortCounters::default());
+        }
+        self.plan = plan.clone();
+        Ok(self.drain())
+    }
+
     /// `mcheck` on the named port, or on every port (`None`); how many ports
     /// matched.
     pub fn mcheck(&mut self, interface: Option<&str>) -> (u32, Vec<Out>) {
         let mut n = 0;
         for i in 0..self.ports.len() {
-            if interface.is_none_or(|name| name == self.ports[i].name) {
+            if !self.gone[i] && interface.is_none_or(|name| name == self.ports[i].name) {
                 self.bridge.mcheck(i);
                 n += 1;
             }
@@ -223,6 +364,7 @@ impl Engine {
     /// Err-disabled ports and their seconds to recovery (`None`: manual).
     pub fn err_disabled(&self) -> Vec<(String, Option<u32>)> {
         (0..self.ports.len())
+            .filter(|&i| !self.gone[i])
             .filter_map(|i| Some((self.ports[i].name.clone(), self.bridge.err_disabled(i)?)))
             .collect()
     }
@@ -231,9 +373,8 @@ impl Engine {
     /// plan no longer has the port or its guard.
     pub fn restore_err_disabled(&mut self, name: &str, remaining: Option<u32>) -> bool {
         let Some(i) = self
-            .ports
-            .iter()
-            .position(|p| p.name == name && p.prot.bpdu_guard)
+            .live_slot(name)
+            .filter(|&i| self.ports[i].prot.bpdu_guard)
         else {
             return false;
         };
@@ -248,7 +389,7 @@ impl Engine {
 
     /// `clear spanning-tree err-disabled`: whether `name` was err-disabled.
     pub fn clear_err_disabled(&mut self, name: &str) -> (bool, Vec<Out>) {
-        let Some(i) = self.ports.iter().position(|p| p.name == name) else {
+        let Some(i) = self.live_slot(name) else {
             return (false, Vec::new());
         };
         let was = self.bridge.err_disabled(i).is_some();
@@ -360,6 +501,7 @@ impl Engine {
                 .ports
                 .iter()
                 .enumerate()
+                .filter(|(i, _)| !self.gone[*i])
                 .map(|(i, cfg)| {
                     let p = &b.ports[i];
                     let (designated_bridge, designated_port) = if p.role == Role::Disabled {
@@ -512,6 +654,7 @@ impl Engine {
                 .ports
                 .iter()
                 .enumerate()
+                .filter(|(i, _)| !self.gone[*i])
                 .map(|(i, cfg)| {
                     let p = &b.ports[i];
                     let (designated_bridge, designated_port) = if p.role == Role::Disabled {
@@ -812,9 +955,11 @@ impl Engine {
             .trees()
             .into_iter()
             .flat_map(|t| {
-                (0..self.ports.len()).flat_map(move |i| {
-                    ports::assignments(&self.ports[i], self.mst_plan(), t, self.effective(t, i))
-                })
+                (0..self.ports.len())
+                    .filter(|&i| !self.gone[i])
+                    .flat_map(move |i| {
+                        ports::assignments(&self.ports[i], self.mst_plan(), t, self.effective(t, i))
+                    })
             })
             .collect();
         if states.is_empty() {
@@ -829,7 +974,7 @@ impl Engine {
         let trees = self.trees();
         let mut states = Vec::new();
         for tree in trees {
-            for i in 0..self.ports.len() {
+            for i in (0..self.ports.len()).filter(|&i| !self.gone[i]) {
                 let now = self.effective(tree, i);
                 if self.pushed.insert((tree, i), now) == Some(now) {
                     continue;
@@ -1130,5 +1275,79 @@ mod tests {
         let mut p = plan();
         p.priority = 100;
         assert!(Engine::new(&p, [2; 6]).is_err());
+    }
+
+    fn named(names: &[&str]) -> Plan {
+        let mut p = plan();
+        p.ports = names
+            .iter()
+            .map(|n| PortCfg {
+                name: (*n).into(),
+                ..plan().ports[0].clone()
+            })
+            .collect();
+        p
+    }
+
+    fn number(e: &Engine, name: &str) -> u16 {
+        e.numbers()[name]
+    }
+
+    #[test]
+    fn a_plan_edit_keeps_port_numbers_and_forwarding_ports() {
+        let mac = [2, 0, 0, 0, 0, 1];
+        let (mut e, _) = Engine::new(&named(&["eth1", "eth3"]), mac).unwrap();
+        e.set_link(0, true, true, 20_000);
+        e.set_link(1, true, true, 20_000);
+        for _ in 0..40 {
+            e.tick();
+        }
+        assert_eq!(e.port_state(0), PortState::Forwarding);
+
+        // eth2 joins between them, eth1 gets another priority and cost.
+        let mut p = named(&["eth1", "eth2", "eth3"]);
+        p.ports[0].priority = 64;
+        p.ports[0].cost = Some(500);
+        p.priority = 4096;
+        p.timers.forward_delay = 10;
+        e.apply_plan(&p).unwrap();
+        assert_eq!(number(&e, "eth1"), 1);
+        assert_eq!(number(&e, "eth3"), 2, "eth3 keeps its number");
+        assert_eq!(number(&e, "eth2"), 3, "a new port takes a free number");
+        assert_eq!(e.port_state(0), PortState::Forwarding);
+        assert_eq!(e.port_state(1), PortState::Forwarding);
+        assert_eq!(e.summary().ports.len(), 3);
+        assert_eq!(e.summary().bridge_id, identity::show(&e.bridge.id));
+        assert_eq!(e.bridge.id.priority(), 4096);
+
+        // eth3 leaves: its slot stays, hidden; eth2 keeps number 3.
+        e.apply_plan(&named(&["eth1", "eth2"])).unwrap();
+        assert_eq!(e.summary().ports.len(), 2);
+        assert!(!e.is_live(1) && e.live_slot("eth3").is_none());
+        assert_eq!(number(&e, "eth2"), 3);
+        assert_eq!(e.port_state(0), PortState::Forwarding);
+        // and returns in a new slot, taking the lowest free number.
+        e.apply_plan(&named(&["eth1", "eth2", "eth3"])).unwrap();
+        assert_eq!(number(&e, "eth3"), 2);
+        assert_eq!(e.live_slot("eth3"), Some(3));
+    }
+
+    #[test]
+    fn a_structural_change_asks_for_a_rebuild() {
+        let (mut e, _) = Engine::new(&plan(), [2, 0, 0, 0, 0, 1]).unwrap();
+        let mut p = plan();
+        p.rstp_version = false;
+        assert_eq!(e.apply_plan(&p), Err(Rebuild));
+        let mut p = plan();
+        p.domain = Some("d".into());
+        assert_eq!(e.apply_plan(&p), Err(Rebuild));
+        assert_eq!(e.apply_plan(&plan()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn allocation_keeps_known_names_and_fills_gaps() {
+        let prev = HashMap::from([("b".to_string(), 2), ("c".to_string(), 3)]);
+        assert_eq!(allocate(&["a", "b", "c", "d"], &prev), [1, 2, 3, 4]);
+        assert_eq!(allocate(&["b", "d"], &prev), [2, 1]);
     }
 }
