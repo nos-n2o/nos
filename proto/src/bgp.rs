@@ -176,6 +176,12 @@ pub struct FlowspecRouteSummary {
     /// device in this instance's table) or `unknown` (`nos-acld` did not
     /// answer); `None` for any other copy.
     pub dataplane: Option<String>,
+    /// The address family of the rule (`ipv4-flowspec`, `vpnv4-flowspec`, ...).
+    #[serde(default)]
+    pub family: String,
+    /// The Route Distinguisher of a VPN rule (SAFI 134); `None` for the others.
+    #[serde(default)]
+    pub rd: Option<String>,
 }
 
 /// One received VPN-IPv4/VPN-IPv6 path (RFC 4364/4659, SAFI 128), for
@@ -556,6 +562,13 @@ pub enum BgpRequest {
         after: Option<FlowspecRouteCursor>,
         /// Most routes wanted.
         limit: u32,
+        /// Only this family (`ipv4-flowspec`, `ipv6-flowspec`, `vpnv4-flowspec`,
+        /// `vpnv6-flowspec`); `None` is every SAFI 133 rule, as before
+        /// SAFI 134 (#1084).
+        family: Option<crate::AddressFamily>,
+        /// Only the SAFI 134 rules imported into this VRF table, with their
+        /// validity there (#1084).
+        vrf: Option<String>,
     },
     /// One-shot: up to `limit` received VPN paths of `family` (only those of
     /// Route Distinguisher `rd` when set) strictly after `after`, in

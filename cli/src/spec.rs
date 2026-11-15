@@ -719,12 +719,58 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      nos-watchdogd) for the Flowspec (RFC 8955/8956, SAFI 133) rules its peers \
                      sent: peer, the rule's components and extended communities (the actions). \
                      Only peers whose peer-group has `address-family ipv4-flowspec` or \
-                     `ipv6-flowspec` exchange them. Receive-only: rules are neither validated \
-                     nor enforced. An instance whose nos-bgpd isn't running is reported \
-                     individually rather than aborting the whole command.",
+                     `ipv6-flowspec` exchange them; the VPN Flowspec (SAFI 134) rules are shown \
+                     with `family` or `vrf`. An instance whose nos-bgpd isn't running is \
+                     reported individually rather than aborting the whole command.",
         },
         Always,
-        Command::ShowBgpFlowspec),
+        Command::ShowBgpFlowspec { family: None, vrf: None }),
+    cmd!(["show" "bgp" "flowspec" "family" "ipv4-flowspec"],
+        Doc::Local {
+            summary: "Show the ipv4-flowspec rules received from BGP peers.",
+            detail: "Same as show bgp flowspec, restricted to the ipv4-flowspec family. A VPN \
+                     Flowspec (SAFI 134) rule shows its Route Distinguisher and its validity in \
+                     each VRF that imports it (`-` when it is imported nowhere).",
+        },
+        Always,
+        Command::ShowBgpFlowspec { family: Some(nos_proto::AddressFamily::Ipv4Flowspec), vrf: None }),
+    cmd!(["show" "bgp" "flowspec" "family" "ipv6-flowspec"],
+        Doc::Local {
+            summary: "Show the ipv6-flowspec rules received from BGP peers.",
+            detail: "Same as show bgp flowspec, restricted to the ipv6-flowspec family. A VPN \
+                     Flowspec (SAFI 134) rule shows its Route Distinguisher and its validity in \
+                     each VRF that imports it (`-` when it is imported nowhere).",
+        },
+        Always,
+        Command::ShowBgpFlowspec { family: Some(nos_proto::AddressFamily::Ipv6Flowspec), vrf: None }),
+    cmd!(["show" "bgp" "flowspec" "family" "vpnv4-flowspec"],
+        Doc::Local {
+            summary: "Show the vpnv4-flowspec rules received from BGP peers.",
+            detail: "Same as show bgp flowspec, restricted to the vpnv4-flowspec family. A VPN \
+                     Flowspec (SAFI 134) rule shows its Route Distinguisher and its validity in \
+                     each VRF that imports it (`-` when it is imported nowhere).",
+        },
+        Always,
+        Command::ShowBgpFlowspec { family: Some(nos_proto::AddressFamily::Vpnv4Flowspec), vrf: None }),
+    cmd!(["show" "bgp" "flowspec" "family" "vpnv6-flowspec"],
+        Doc::Local {
+            summary: "Show the vpnv6-flowspec rules received from BGP peers.",
+            detail: "Same as show bgp flowspec, restricted to the vpnv6-flowspec family. A VPN \
+                     Flowspec (SAFI 134) rule shows its Route Distinguisher and its validity in \
+                     each VRF that imports it (`-` when it is imported nowhere).",
+        },
+        Always,
+        Command::ShowBgpFlowspec { family: Some(nos_proto::AddressFamily::Vpnv6Flowspec), vrf: None }),
+    cmd!(["show" "bgp" "flowspec" "vrf" (table: Plain)],
+        Doc::Local {
+            summary: "Show the VPN Flowspec rules imported into one VRF.",
+            detail: "The VPN Flowspec (SAFI 134) rules whose Route Targets match <table>'s \
+                     import set, with their validity in that VRF (RFC 8955 section 6, against \
+                     the VPN routes the VRF imports). A rule with no matching Route Target is \
+                     in no VRF view.",
+        },
+        Always,
+        |table| Command::ShowBgpFlowspec { family: None, vrf: Some(table.to_string()) }),
     cmd!(["show" "bgp" "rpki"],
         Doc::Local {
             summary: "Show every BGP instance's RPKI cache sessions (RFC 8210).",

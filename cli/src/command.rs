@@ -84,9 +84,13 @@ pub enum Command {
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
-    /// `show bgp flowspec` — every Flowspec rule received by every configured
-    /// BGP instance.
-    ShowBgpFlowspec,
+    /// `show bgp flowspec [family <f> | vrf <table>]` — every Flowspec rule
+    /// received by every configured BGP instance (#1084: the VPN families
+    /// and one VRF's view).
+    ShowBgpFlowspec {
+        family: Option<nos_proto::AddressFamily>,
+        vrf: Option<String>,
+    },
     /// `show bgp rpki` — every configured BGP instance's RPKI cache sessions.
     ShowBgpRpki,
     /// `show bgp bmp` — every configured BGP instance's BMP station status.
@@ -591,7 +595,24 @@ mod tests {
         assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
         assert_eq!(
             Command::parse("show bgp flowspec"),
-            Command::ShowBgpFlowspec
+            Command::ShowBgpFlowspec {
+                family: None,
+                vrf: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show bgp flowspec family vpnv4-flowspec"),
+            Command::ShowBgpFlowspec {
+                family: Some(nos_proto::AddressFamily::Vpnv4Flowspec),
+                vrf: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show bgp flowspec vrf red"),
+            Command::ShowBgpFlowspec {
+                family: None,
+                vrf: Some("red".into())
+            }
         );
         assert_eq!(Command::parse("show bgp rpki"), Command::ShowBgpRpki);
         assert_eq!(Command::parse("show bgp bmp"), Command::ShowBgpBmp);

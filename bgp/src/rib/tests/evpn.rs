@@ -570,6 +570,7 @@ fn evpn_routes_are_stored_per_peer_withdrawn_and_cleared_on_disconnect() {
         withdrawn_path_ids: vec![],
         evpn: vec![evpn_nlri(1)],
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -630,6 +631,7 @@ fn evpn_labels_and_esi_are_not_part_of_the_route_key() {
         withdrawn_path_ids: vec![],
         evpn: vec![with(vec![0], 0)],
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];

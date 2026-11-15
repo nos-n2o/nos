@@ -630,6 +630,7 @@ async fn fake_evpn_peer(
             nlri: vec![],
             nlri_path_ids: vec![],
             flowspec: vec![],
+            flowspec_vpn: vec![],
             vpn: Vec::new(),
             rtc: Vec::new(),
             evpn: vec![

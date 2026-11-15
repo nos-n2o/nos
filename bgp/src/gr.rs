@@ -14,7 +14,7 @@ use crate::message::{CeaseSubcode, GrFamily, GracefulRestartCap};
 
 /// The families this crate knows, as one bit each (`AddressFamily::ALL`
 /// order) — keeps `PeerGr` `Copy`, like `fsm::RemoteInfo`.
-fn bit(family: AddressFamily) -> u8 {
+fn bit(family: AddressFamily) -> u16 {
     match family {
         AddressFamily::Ipv4Unicast => 1,
         AddressFamily::Ipv6Unicast => 2,
@@ -24,6 +24,8 @@ fn bit(family: AddressFamily) -> u8 {
         AddressFamily::Vpnv4Unicast => 32,
         AddressFamily::Vpnv6Unicast => 64,
         AddressFamily::RtConstraint => 128,
+        AddressFamily::Vpnv4Flowspec => 256,
+        AddressFamily::Vpnv6Flowspec => 512,
     }
 }
 
@@ -38,6 +40,8 @@ pub fn afi_safi(family: AddressFamily) -> (u16, u8) {
         AddressFamily::Vpnv4Unicast => (1, crate::message::SAFI_VPN),
         AddressFamily::Vpnv6Unicast => (2, crate::message::SAFI_VPN),
         AddressFamily::RtConstraint => (1, crate::message::SAFI_RTC),
+        AddressFamily::Vpnv4Flowspec => (1, crate::message::SAFI_FLOWSPEC_VPN),
+        AddressFamily::Vpnv6Flowspec => (2, crate::message::SAFI_FLOWSPEC_VPN),
     }
 }
 
@@ -56,8 +60,8 @@ pub struct PeerGr {
     pub time: u16,
     /// Families listed in the capability (a family this crate doesn't know
     /// is dropped), and the ones among them whose F bit is set.
-    families: u8,
-    forwarding: u8,
+    families: u16,
+    forwarding: u16,
 }
 
 impl PeerGr {
@@ -318,14 +322,14 @@ mod tests {
 
     #[test]
     fn every_family_has_its_own_bit_and_tuple_including_rtc() {
-        let mut seen = 0u8;
+        let mut seen = 0u16;
         for f in AddressFamily::ALL {
             assert_eq!(seen & bit(f), 0, "{f} shares a bit");
             seen |= bit(f);
             let (afi, safi) = afi_safi(f);
             assert_eq!(family_of(afi, safi), Some(f));
         }
-        assert_eq!(seen, u8::MAX);
+        assert_eq!(seen, 0x3ff);
         assert_eq!(afi_safi(AddressFamily::RtConstraint), (1, 132));
         let gr = cap(true, &[(AddressFamily::RtConstraint, true)]);
         assert!(gr.has(AddressFamily::RtConstraint) && !gr.has(AddressFamily::Vpnv4Unicast));

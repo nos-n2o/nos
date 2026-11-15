@@ -149,15 +149,22 @@ impl BgpRib {
         out
     }
 
-    /// The families `peer` negotiated, one End-of-RIB each (RT-Constraint is
-    /// not monitored).
+    /// The families `peer` negotiated, one End-of-RIB each (RT-Constraint and
+    /// VPN Flowspec are not monitored).
     pub(crate) fn bmp_families(&self, peer: IpAddr) -> Vec<(u16, u8)> {
         let Some(o) = self.peer_outboxes.get(&peer) else {
             return Vec::new();
         };
         AddressFamily::ALL
             .into_iter()
-            .filter(|f| *f != AddressFamily::RtConstraint && o.negotiated_afs.contains(f))
+            .filter(|f| {
+                !matches!(
+                    f,
+                    AddressFamily::RtConstraint
+                        | AddressFamily::Vpnv4Flowspec
+                        | AddressFamily::Vpnv6Flowspec
+                ) && o.negotiated_afs.contains(f)
+            })
             .map(crate::gr::afi_safi)
             .collect()
     }

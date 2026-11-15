@@ -28,7 +28,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
-| `show bgp flowspec` | `GET /v1/bgp/flowspec` |
+| `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` |
 | `show bgp vpnv4` / `show bgp vpnv4 rd <rd>` | `GET /v1/bgp/vpnv4` / `GET /v1/bgp/vpnv4?rd=<rd>` |
 | `show bgp vpnv6` / `show bgp vpnv6 rd <rd>` | `GET /v1/bgp/vpnv6` / `GET /v1/bgp/vpnv6?rd=<rd>` |
 | `show bgp rpki` | `GET /v1/bgp/rpki` |

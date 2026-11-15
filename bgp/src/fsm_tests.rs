@@ -159,6 +159,7 @@ fn remote(enhanced: bool, route_refresh: bool) -> RemoteInfo {
         negotiated_evpn: false,
         negotiated_flowspec: [false; 2],
         negotiated_vpn: [false; 2],
+        negotiated_flowspec_vpn: [false; 2],
         negotiated_rtc: false,
         add_path: [AddPathDir::default(); 2],
         four_octet_as: true,

@@ -161,6 +161,7 @@ impl BgpRib {
         }
         for k in keys {
             self.select_vpn(&k);
+            self.revalidate_vpn_flows_around(k.1);
         }
     }
 
@@ -180,6 +181,7 @@ impl BgpRib {
                 h.vpn_post(peer, k, None);
             }
             self.select_vpn(k);
+            self.revalidate_vpn_flows_around(k.1);
         }
         removed
     }

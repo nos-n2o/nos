@@ -123,7 +123,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 - A reflector holds every VPN path whatever its RTs (no VRF needed) and keeps label, RD and next hop; a VRF export is next-hop-self.
 - Imported routes are never re-exported; a route with a VRF's own Site of Origin is not imported into it.
 - The label is owned and persisted by `nos-ribd`, never `nos-bgpd`.
-- `bgp/src/vpn/` is the shared RD/RT core (`VpnKey<T>`, `VrfSet`); VPN Flowspec (#574) must reuse it. Policies see `this.bgp.rd`.
+- `bgp/src/vpn/` is the shared RD/RT core (`VpnKey<T>`, `VrfSet`); VPN Flowspec: `rib/flowspec_vpn.rs`. Policies see `this.bgp.rd`.
 
 ## Backup path, multipath (#70)
 

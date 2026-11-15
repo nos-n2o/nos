@@ -170,6 +170,7 @@ fn a_withdrawal_drops_the_rejected_copy_and_a_chunk_skips_it() {
         withdrawn_path_ids: vec![],
         evpn: vec![evpn_nlri(1), evpn_nlri(2)],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc: Vec::new(),
     }];

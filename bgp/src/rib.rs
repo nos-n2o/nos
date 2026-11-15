@@ -108,6 +108,7 @@ mod decision;
 mod evpn_out;
 mod flowspec_out;
 mod flowspec_validate;
+mod flowspec_vpn;
 mod gr;
 mod outbox;
 mod retain;
@@ -412,10 +413,46 @@ impl FlowspecRoute {
 /// A snapshot key of a paged `show bgp evpn` walk (#723).
 pub type EvpnKey = Keyed<nos_proto::EvpnRouteCursor, EvpnNlri>;
 /// A snapshot key of a paged `show bgp flowspec` walk (#723).
-pub type FlowKey = Keyed<nos_proto::FlowspecRouteCursor, FlowspecKey>;
+pub type FlowKey = Keyed<nos_proto::FlowspecRouteCursor, FlowRow>;
+
+/// The table key of a `show bgp flowspec` row: a SAFI 133 rule, or a SAFI 134
+/// one with the VRF table it is shown for (`None`: the global view).
+#[derive(Debug, Clone)]
+pub enum FlowRow {
+    /// A SAFI 133 rule.
+    Plain(FlowspecKey),
+    /// A SAFI 134 rule (#1084).
+    Vpn(VpnFlowKey, Option<String>),
+}
+
+/// Which rows a `show bgp flowspec` walk wants (`flowspec_keys`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FlowFilter<'a> {
+    /// Only this family.
+    pub family: Option<AddressFamily>,
+    /// Only the SAFI 134 rules imported into this VRF table.
+    pub vrf: Option<&'a str>,
+}
+
+/// One `show bgp flowspec` row as the RIB holds it.
+pub struct FlowShown<'a> {
+    /// The advertising peer.
+    pub peer: IpAddr,
+    /// The held rule.
+    pub route: &'a FlowspecRoute,
+    /// The RD of a SAFI 134 rule.
+    pub rd: Option<crate::vpn::Rd>,
+    /// A SAFI 134 rule's validity text (per VRF); `None` for SAFI 133, whose
+    /// own `route.validity` applies.
+    pub validity: Option<String>,
+}
 
 /// A Flowspec Adj-RIB-In key: the NLRI itself, per family.
 pub(crate) type FlowspecKey = (AddressFamily, FlowSpec);
+
+/// A VPN Flowspec (SAFI 134) Adj-RIB-In key: the family (the bytes differ per
+/// AFI) and `(RD, rule)` (#1084).
+pub(crate) type VpnFlowKey = (AddressFamily, VpnKey<FlowSpec>);
 
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,6 +824,12 @@ pub struct BgpRib {
     /// Received VPN-IPv4/IPv6 paths per peer, keyed by (RD, prefix), every
     /// RT kept (see `vpn_out`).
     vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    /// Received VPN Flowspec (SAFI 134) rules per peer (#1084).
+    vpn_flow_adj_rib_in: HashMap<IpAddr, HashMap<VpnFlowKey, FlowspecRoute>>,
+    /// Per held SAFI 134 rule, its validity in each VRF table that imports it.
+    vpn_flow_validity: HashMap<(IpAddr, VpnFlowKey), HashMap<String, FlowValidity>>,
+    /// SAFI 134 revalidations so far (what the tests count).
+    vpn_flow_visits: u64,
     /// Per key, the selected copy and where it came from (`select_vpn`).
     vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
@@ -964,6 +1007,9 @@ impl BgpRib {
             vpn_local: HashMap::new(),
             vpn_adj_rib_out: HashMap::new(),
             vpn_stale: HashMap::new(),
+            vpn_flow_adj_rib_in: HashMap::new(),
+            vpn_flow_validity: HashMap::new(),
+            vpn_flow_visits: 0,
             vpn_vrfs: crate::vpn::VrfSet::default(),
             rtc_adj_rib_in: HashMap::new(),
             rtc_local: std::collections::BTreeSet::new(),
@@ -1431,34 +1477,97 @@ impl BgpRib {
         Some((peer, route))
     }
 
-    /// The sort key of every received Flowspec route, sorted (#723).
-    pub fn flowspec_keys(&self) -> Vec<FlowKey> {
-        let mut keys: Vec<_> = self
-            .flowspec_adj_rib_in
-            .iter()
-            .flat_map(|(peer, t)| {
-                t.iter().map(move |(k, r)| Keyed {
-                    cursor: nos_proto::FlowspecRouteCursor {
-                        peer: *peer,
-                        family: r.family.to_string(),
-                        nlri: r.nlri.to_string(),
-                    },
-                    row: Some(k.clone()),
-                })
-            })
-            .collect();
+    /// The sort key of every received Flowspec route that `filter` selects,
+    /// sorted (#723): no filter is every SAFI 133 rule; a SAFI 134 family
+    /// its rules (rows are validated per VRF, `-` when imported nowhere); a
+    /// `vrf` only the SAFI 134 rules imported into that table (#1084).
+    pub fn flowspec_keys(&self, filter: &FlowFilter<'_>) -> Vec<FlowKey> {
+        let vpn_wanted = filter.vrf.is_some()
+            || filter.family.is_some_and(|f| {
+                matches!(
+                    f,
+                    AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec
+                )
+            });
+        let mut keys: Vec<FlowKey> = Vec::new();
+        if vpn_wanted {
+            for (peer, t) in &self.vpn_flow_adj_rib_in {
+                for (k, r) in t {
+                    if filter.family.is_some_and(|f| f != k.0) {
+                        continue;
+                    }
+                    let held = |v: &str| {
+                        self.vpn_flow_validity
+                            .get(&(*peer, k.clone()))
+                            .is_some_and(|m| m.contains_key(v))
+                    };
+                    if filter.vrf.is_some_and(|v| !held(v)) {
+                        continue;
+                    }
+                    let table = filter.vrf.map(str::to_string);
+                    keys.push(Keyed {
+                        cursor: nos_proto::FlowspecRouteCursor {
+                            peer: *peer,
+                            family: r.family.to_string(),
+                            nlri: format!("{} {}", crate::vpn::format_rd(&(k.1).0), r.nlri),
+                        },
+                        row: Some(FlowRow::Vpn(k.clone(), table)),
+                    });
+                }
+            }
+        } else {
+            for (peer, t) in &self.flowspec_adj_rib_in {
+                for (k, r) in t {
+                    if filter.family.is_some_and(|f| f != k.0) {
+                        continue;
+                    }
+                    keys.push(Keyed {
+                        cursor: nos_proto::FlowspecRouteCursor {
+                            peer: *peer,
+                            family: r.family.to_string(),
+                            nlri: r.nlri.to_string(),
+                        },
+                        row: Some(FlowRow::Plain(k.clone())),
+                    });
+                }
+            }
+        }
         keys.sort_unstable();
         keys
     }
 
     /// The route for one `flowspec_keys` key; `None` when it is gone.
-    pub fn flowspec_at(&self, key: &FlowKey) -> Option<(IpAddr, &FlowspecRoute)> {
+    pub fn flowspec_at(&self, key: &FlowKey) -> Option<FlowShown<'_>> {
         let peer = key.cursor.peer;
-        let route = self
-            .flowspec_adj_rib_in
-            .get(&peer)?
-            .get(key.row.as_ref()?)?;
-        Some((peer, route))
+        Some(match key.row.as_ref()? {
+            FlowRow::Plain(k) => FlowShown {
+                peer,
+                route: self.flowspec_adj_rib_in.get(&peer)?.get(k)?,
+                rd: None,
+                validity: None,
+            },
+            FlowRow::Vpn(k, table) => {
+                let route = self.vpn_flow_adj_rib_in.get(&peer)?.get(k)?;
+                let held = self.vpn_flow_validity.get(&(peer, k.clone()));
+                let validity = match table {
+                    Some(t) => held?.get(t).map(ToString::to_string),
+                    None => held.map(|m| {
+                        let mut v: Vec<_> = m.iter().collect();
+                        v.sort_by_key(|(t, _)| *t);
+                        v.iter()
+                            .map(|(t, v)| format!("{t}:{v}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    }),
+                };
+                FlowShown {
+                    peer,
+                    route,
+                    rd: Some((k.1).0),
+                    validity: Some(validity.unwrap_or_else(|| "-".to_string())),
+                }
+            }
+        })
     }
 
     /// Every received Flowspec route, ordered by peer then rule.
@@ -1583,6 +1692,8 @@ impl BgpRib {
             AddressFamily::Vpnv4Unicast => self.accepted_vpn(peer)[0],
             AddressFamily::Vpnv6Unicast => self.accepted_vpn(peer)[1],
             AddressFamily::RtConstraint => self.accepted_rtc(peer),
+            AddressFamily::Vpnv4Flowspec => self.accepted_vpn_flow(peer)[0],
+            AddressFamily::Vpnv6Flowspec => self.accepted_vpn_flow(peer)[1],
         }
     }
 
@@ -1706,6 +1817,7 @@ impl BgpRib {
                 .collect(),
             _ => Vec::new(),
         };
+        self.drop_peer_vpn_flows(peer);
         self.max_prefix_warned.retain(|(p, _)| *p != peer);
         self.first_as_warned.remove(&peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows

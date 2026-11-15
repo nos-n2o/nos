@@ -115,7 +115,12 @@ impl Snapshots {
                     .await;
                 BgpEvent::EvpnRoutesPage { routes, next }
             }
-            BgpRequest::GetFlowspecRoutesPage { after, limit } => {
+            BgpRequest::GetFlowspecRoutesPage {
+                after,
+                limit,
+                family,
+                vrf,
+            } => {
                 let acld = crate::acl_push_client::show(watchdog_socket).await;
                 let (routes, next) = sessions
                     .flowspec_page(
@@ -124,6 +129,10 @@ impl Snapshots {
                         *limit,
                         PAGE_BYTES,
                         acld.as_deref(),
+                        &crate::rib::FlowFilter {
+                            family: *family,
+                            vrf: vrf.as_deref(),
+                        },
                     )
                     .await;
                 BgpEvent::FlowspecRoutesPage { routes, next }
@@ -617,6 +626,8 @@ mod authz_tests {
                 BgpRequest::GetFlowspecRoutesPage {
                     after: None,
                     limit: 10,
+                    family: None,
+                    vrf: None,
                 },
                 BgpRequest::GetVpnRoutesPage {
                     family: nos_proto::AddressFamily::Vpnv4Unicast,

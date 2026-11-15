@@ -72,6 +72,7 @@ fn rtc_update(peer_as: u32, next_hop: &str, rtc: Vec<RtcNlri>) -> UpdateMessage 
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc,
     }];
@@ -87,6 +88,7 @@ fn rtc_withdraw(rtc: Vec<RtcNlri>) -> UpdateMessage {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc,
     }];

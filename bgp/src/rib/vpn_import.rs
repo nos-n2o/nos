@@ -49,6 +49,7 @@ impl BgpRib {
     /// The VRFs whose `vpn.bgp_instance` is this instance (`reconcile.rs`).
     pub fn set_vpn_vrfs(&mut self, vrfs: VrfSet) {
         self.vpn_vrfs = vrfs;
+        self.revalidate_all_vpn_flows();
     }
 
     pub fn vpn_vrfs(&self) -> &VrfSet {

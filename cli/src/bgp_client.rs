@@ -115,9 +115,12 @@ pub async fn for_each_evpn_routes_page(
     .await
 }
 
-/// Walks the instance's received Flowspec rules (`show bgp flowspec`).
+/// Walks the instance's received Flowspec rules (`show bgp flowspec [family
+/// <f> | vrf <table>]`).
 pub async fn for_each_flowspec_routes_page(
     bgp_socket: &Path,
+    family: Option<nos_proto::AddressFamily>,
+    vrf: Option<&str>,
     on_page: impl FnMut(&[FlowspecRouteSummary]),
 ) -> Result<(), BgpClientError> {
     walk(
@@ -125,6 +128,8 @@ pub async fn for_each_flowspec_routes_page(
         |after| BgpRequest::GetFlowspecRoutesPage {
             after,
             limit: nos_proto::BGP_PAGE_MAX,
+            family,
+            vrf: vrf.map(str::to_string),
         },
         |e| match e {
             BgpEvent::FlowspecRoutesPage { routes, next } => Ok((routes, next)),

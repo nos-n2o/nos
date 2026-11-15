@@ -4367,6 +4367,158 @@ async fn flowspec_soft_reconfig(
     Ok(())
 }
 
+/// VPN Flowspec (RFC 8955 section 8, SAFI 134), receive side (#1084). GoBGP
+/// announces a VPNv4 route and SAFI 134 rules (`ipv4-l3vpn-flowspec`) to
+/// router-a, whose peer-group has `vpnv4` and `vpnv4-flowspec`: router-a must
+/// negotiate AFI 1 SAFI 134, learn the RD-prefixed rule, import it into
+/// `VPN_TABLE` by Route Target and validate it there against the VPN route
+/// (`valid`; `invalid:no-covering-unicast-route` once the route is withdrawn).
+/// A rule under another Route Target is held but in no VRF view. The next-hop
+/// length GoBGP sends is recorded: `nos-bgpd` logs `vpn flowspec next hop
+/// stated` for anything but the RFC's length 0, and this phase asserts it
+/// never does. Nothing is advertised or enforced (#1085, #1086).
+pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
+    let mut flags = vpn_flags("65000:1");
+    flags.push("--vpn-flowspec".into());
+    gobgp_speaker(
+        w,
+        flags,
+        &["l3vpn-ipv4-unicast", "l3vpn-ipv4-flowspec"],
+        &[],
+    )
+    .await?;
+    let a = w.a()?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_G} families=\\[.*\"vpnv4-flowspec\""
+    ))
+    .await?;
+
+    let route = |verb: &'static str| {
+        let mut v = vec![
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "vpnv4",
+            "10.10.0.0/24",
+            "label",
+            "100",
+            "rd",
+            "65001:1",
+        ];
+        if verb == "add" {
+            v.extend(["rt", "65000:1"]);
+        }
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let rule = |rd: &str, rt: &str, port: &str, verb: &'static str| {
+        let mut v = vec![
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "ipv4-l3vpn-flowspec",
+            "rd",
+            rd,
+            "rt",
+            rt,
+            "match",
+            "destination",
+            "10.10.0.0/24",
+            "protocol",
+            "tcp",
+            "destination-port",
+            port,
+        ];
+        if verb == "add" {
+            v.extend(["then", "discard"]);
+        }
+        v.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let changed = |validity: &str| {
+        format!(
+            "flowspec validity changed peer={IP_G} family=vpnv4-flowspec rd=65001:1 table={VPN_TABLE}.*validity={validity}"
+        )
+    };
+    let stated = "vpn flowspec next hop stated";
+    let stated_before = a.count(stated);
+
+    log("a VPNv4 route and a rule under the VRF's import RT: learned, imported, valid");
+    gobgp_owned(w, route("add")).await?;
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24"
+    ))
+    .await?;
+    gobgp_owned(w, rule("65001:1", "65000:1", "==25", "add")).await?;
+    a.wait(&format!(
+        "flowspec route learned peer={IP_G} family=vpnv4-flowspec rd=65001:1"
+    ))
+    .await?;
+    a.wait(&changed("valid")).await?;
+
+    let show = |q: &str| {
+        let path = format!("/v1/bgp/flowspec{q}");
+        async move { a.rest_expect(Method::GET, &path, None, 200).await }
+    };
+    let body = show(&format!("?vrf={VPN_TABLE}")).await?;
+    for want in [
+        "dest 10.10.0.0/24",
+        "dst-port =25",
+        "\"rd\":\"65001:1\"",
+        "\"validity\":\"valid\"",
+        "vpnv4-flowspec",
+    ] {
+        if !body.contains(want) {
+            bail!("show bgp flowspec vrf {VPN_TABLE} is missing {want}: {body}");
+        }
+    }
+    let body = show("").await?;
+    if body.contains("dest 10.10.0.0/24") {
+        bail!("the global SAFI 133 listing shows a VPN rule: {body}");
+    }
+    let body = show("?family=vpnv4-flowspec").await?;
+    if !body.contains("dest 10.10.0.0/24") || !body.contains(&format!("{VPN_TABLE}:valid")) {
+        bail!("show bgp flowspec family vpnv4-flowspec: {body}");
+    }
+
+    log("a rule under a Route Target no VRF imports: held, in no VRF view");
+    gobgp_owned(w, rule("65001:2", "65000:99", "==26", "add")).await?;
+    a.wait(&format!(
+        "flowspec route learned peer={IP_G} family=vpnv4-flowspec rd=65001:2"
+    ))
+    .await?;
+    let in_vrf = show(&format!("?vrf={VPN_TABLE}")).await?;
+    let held = show("?family=vpnv4-flowspec").await?;
+    if in_vrf.contains("dst-port =26") || !held.contains("dst-port =26") {
+        bail!("the foreign-RT rule must be in the family view only: {in_vrf} / {held}");
+    }
+
+    log("withdrawing the covering VPN route invalidates the rule in the VRF");
+    let invalid = changed("invalid:no-covering-unicast-route");
+    let base = a.count(&invalid);
+    gobgp_owned(w, route("del")).await?;
+    a.wait_new(&invalid, base, 30).await?;
+    let body = show(&format!("?vrf={VPN_TABLE}")).await?;
+    if !body.contains("invalid:no-covering-unicast-route") {
+        bail!("the VRF view must show the rule invalid: {body}");
+    }
+
+    log("withdrawing the rules");
+    let gone = format!("flowspec route withdrawn peer={IP_G} family=vpnv4-flowspec rd=65001:1");
+    let base = a.count(&gone);
+    gobgp_owned(w, rule("65001:1", "65000:1", "==25", "del")).await?;
+    a.wait_new(&gone, base, 30).await?;
+    if show(&format!("?vrf={VPN_TABLE}"))
+        .await?
+        .contains("dst-port =25")
+    {
+        bail!("the withdrawn rule is still in the VRF view");
+    }
+
+    log("the next hop GoBGP sends is RFC 8955's length 0");
+    a.assert_quiet(stated, stated_before, 1).await
+}
+
 /// RFC 4364/4659 VPN-IPv4/VPN-IPv6 (SAFI 128), receive side (#578). GoBGP
 /// announces labelled VPN routes to router-a, whose peer-group has
 /// `address-family vpnv4`/`vpnv6`: router-a must negotiate AFI 1/2 SAFI 128,

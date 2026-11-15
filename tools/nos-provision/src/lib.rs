@@ -515,6 +515,11 @@ pub struct Args {
     #[arg(long)]
     pub vpn: bool,
 
+    /// If set, adds `address-family vpnv4-flowspec` and `vpnv6-flowspec`
+    /// (RFC 8955 section 8, SAFI 134) to `--peer-group`; needs `--vpn`.
+    #[arg(long)]
+    pub vpn_flowspec: bool,
+
     /// If set, adds `address-family rt-constraint` (RFC 4684, SAFI 132) to
     /// `--peer-group`; needs `--vpn` or `--evpn`.
     #[arg(long)]
@@ -1658,7 +1663,7 @@ fn parse_family(s: &str) -> Result<AddressFamily, String> {
     AddressFamily::ALL
         .into_iter()
         .find(|af| af.as_str() == s)
-        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn, ipv4-flowspec, ipv6-flowspec, vpnv4, vpnv6)"))
+        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn, ipv4-flowspec, ipv6-flowspec, vpnv4, vpnv6, vpnv4-flowspec, vpnv6-flowspec)"))
 }
 
 fn parse_add_path(s: &str) -> Result<nos_proto::BgpAddPath, String> {
@@ -2904,10 +2909,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
     let flowspec = [AddressFamily::Ipv4Flowspec, AddressFamily::Ipv6Flowspec];
     let vpn = [AddressFamily::Vpnv4Unicast, AddressFamily::Vpnv6Unicast];
+    let vpn_flowspec = [AddressFamily::Vpnv4Flowspec, AddressFamily::Vpnv6Flowspec];
     let rtc = [AddressFamily::RtConstraint];
     for (on, families) in [
         (args.flowspec, &flowspec[..]),
         (args.vpn, &vpn[..]),
+        (args.vpn_flowspec, &vpn_flowspec[..]),
         (args.rtc, &rtc[..]),
     ] {
         if !on {

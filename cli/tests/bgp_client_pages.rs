@@ -94,6 +94,8 @@ async fn flowspec_routes_are_walked_page_by_page() {
             validity: "valid".into(),
             actions: vec![],
             dataplane: None,
+            family: "ipv4-flowspec".into(),
+            rd: None,
         };
         match after {
             None => BgpEvent::FlowspecRoutesPage {
@@ -111,7 +113,7 @@ async fn flowspec_routes_are_walked_page_by_page() {
         }
     }));
     let mut seen = Vec::new();
-    nos_cli::bgp_client::for_each_flowspec_routes_page(&path, |p| {
+    nos_cli::bgp_client::for_each_flowspec_routes_page(&path, None, None, |p| {
         seen.extend(p.iter().map(|r| r.nlri.clone()));
     })
     .await

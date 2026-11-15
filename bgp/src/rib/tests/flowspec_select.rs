@@ -84,6 +84,7 @@ fn flow_update(
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule()],
+        flowspec_vpn: vec![],
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -209,6 +210,7 @@ fn a_withdrawn_flow_is_withdrawn_downstream() {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule()],
+        flowspec_vpn: vec![],
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -618,6 +620,7 @@ fn reevaluation_readmits_a_rejected_rule_and_never_rewrites_twice() {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule()],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc: Vec::new(),
     }];
