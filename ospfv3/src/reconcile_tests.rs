@@ -433,7 +433,7 @@ async fn resync_broadcast_domain_builds_link() {
     assert_eq!(l.kernel_interface, "br-bd1");
     assert_eq!(l.interface_id, 9);
     assert_eq!(l.network_type, NetworkType::Broadcast);
-    assert_eq!(l.mtu, DEFAULT_OSPF_MTU);
+    assert_eq!(l.mtu, 1400, "the bridge's observed MTU");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(l.vrf, "vrf100");
     assert_eq!(names(&e.state.watched), ["br-bd1"]);

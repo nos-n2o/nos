@@ -408,7 +408,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             cost,
             network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
             priority,
-            mtu: resolve_effective_mtu(profile, None),
+            mtu: resolve_effective_mtu(profile, m.mtu),
             mtu_ignore: profile.mtu_ignore,
             auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
