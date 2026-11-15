@@ -1,0 +1,31 @@
+[package]
+name    = "nos-pam"
+publish = false
+version = "0.1.0"
+# 2021, not the workspace's 2024: nonstick's `pam_export!` emits a bare
+# `#[no_mangle]`, which is a hard error in edition 2024.
+edition = "2021"
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# `libpam_nos.so` is what #998 installs as `pam_nos.so`; rlib so tests link the logic.
+name       = "pam_nos"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nonstick   = "0.1.2"
+nos-proto  = { workspace = true }
+nos-pki    = { workspace = true }
+tokio      = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true }
+futures    = { workspace = true }
+zeroize    = { workspace = true }
+
+[dev-dependencies]
+nos-test-support = { workspace = true, features = ["fakes"] }
+nos-pki          = { workspace = true, features = ["testing"] }
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["rt", "macros"] }

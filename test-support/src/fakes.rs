@@ -16,7 +16,7 @@ use nos_proto::{
 };
 use tokio::sync::broadcast;
 
-use crate::{serve, Reply, Server};
+use crate::{serve, serve_optional_client_auth, Reply, Server};
 
 type Shared<T> = Arc<Mutex<T>>;
 
@@ -197,6 +197,66 @@ impl FakeWatchdog {
     /// Every service asked about so far, in order.
     pub fn resolutions(&self) -> Vec<ServiceRef> {
         self.state.lock().unwrap().resolved.clone()
+    }
+}
+
+// ------------------------------------------------------------ login broker
+
+/// The watchdog's login socket (identity `watchdog/`, the client's
+/// certificate optional, like `nos-watchdogd`'s): `handler` answers every
+/// request.
+pub struct FakeLogin {
+    server: Server<WatchdogRequest>,
+}
+
+impl FakeLogin {
+    pub fn new<H>(path: &Path, handler: H) -> Self
+    where
+        H: Fn(&WatchdogRequest) -> Reply<WatchdogEvent> + Send + Sync + 'static,
+    {
+        Self {
+            server: serve_optional_client_auth(path, "watchdog", "", handler),
+        }
+    }
+
+    /// Accepts exactly `user`/`password`: signs the CSR with the shared test
+    /// CA and answers `Issued`; anything else is `Denied(INVALID_CREDENTIALS)`.
+    pub fn accepting(
+        path: &Path,
+        user: &'static str,
+        password: &'static str,
+        lifetime_secs: u64,
+    ) -> Self {
+        Self::new(path, move |req| match req {
+            WatchdogRequest::Login {
+                user: u,
+                password: p,
+                csr_der,
+            } if u == user && p == password => {
+                match nos_pki::testing::shared().ca().sign_csr(
+                    csr_der,
+                    &nos_pki::PeerId::new("user", user),
+                    std::time::Duration::from_secs(lifetime_secs),
+                ) {
+                    Ok(cert_der) => Reply::One(WatchdogEvent::Issued {
+                        cert_der,
+                        lifetime_secs,
+                    }),
+                    Err(e) => Reply::One(WatchdogEvent::Denied(e.to_string())),
+                }
+            }
+            _ => Reply::One(WatchdogEvent::Denied(
+                nos_proto::INVALID_CREDENTIALS.to_string(),
+            )),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.server.path
+    }
+    /// Drains the requests received so far.
+    pub fn take_seen(&self) -> Vec<WatchdogRequest> {
+        self.server.take_seen()
     }
 }
 
