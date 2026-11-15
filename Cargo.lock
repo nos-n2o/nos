@@ -2334,9 +2334,11 @@ dependencies = [
  "nos-daemon",
  "nos-pki",
  "nos-proto",
+ "serde",
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

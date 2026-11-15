@@ -67,7 +67,12 @@ async fn main() -> anyhow::Result<()> {
     );
     info!(table = %args.table, "nos-sshd starting");
 
-    let config_path = prepare(&args)?;
+    let config_path = prepare(
+        Path::new("/run/sshd"),
+        &args.run_dir,
+        &args.host_key_dir,
+        &args.table,
+    )?;
 
     let Some(config_socket) = watchdog::resolve_with_retry(
         &args.watchdog_socket,
@@ -111,13 +116,18 @@ async fn main() -> anyhow::Result<()> {
 
 /// Host key, rendered `sshd_config`, and the directories sshd needs; returns
 /// the config path.
-fn prepare(args: &Args) -> anyhow::Result<PathBuf> {
+fn prepare(
+    privsep_dir: &Path,
+    run_dir: &Path,
+    host_key_dir: &Path,
+    table: &str,
+) -> anyhow::Result<PathBuf> {
     // sshd's privilege-separation chroot; absent in the container image.
-    mkdir(Path::new("/run/sshd"), 0o755)?;
-    let dir = args.run_dir.join(&args.table);
-    mkdir(&args.run_dir, 0o755)?;
+    mkdir(privsep_dir, 0o755)?;
+    let dir = run_dir.join(table);
+    mkdir(run_dir, 0o755)?;
     mkdir(&dir, 0o700)?;
-    let host_key = hostkey::ensure(&args.host_key_dir).context("host key")?;
+    let host_key = hostkey::ensure(host_key_dir).context("host key")?;
     let path = dir.join("sshd_config");
     sshd_config::write_if_changed(
         &path,
@@ -161,5 +171,39 @@ mod tests {
         assert_eq!(a.run_dir, PathBuf::from("/run/nos-sshd"));
         assert_eq!(a.host_key_dir, PathBuf::from("/var/lib/nos/sshd"));
         assert_eq!(a.max_connections, 64);
+    }
+
+    #[test]
+    fn prepare_creates_dirs_key_and_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let (privsep, run, keys) = (
+            d.path().join("sshd"),
+            d.path().join("run"),
+            d.path().join("keys"),
+        );
+        let cfg = prepare(&privsep, &run, &keys, "rt1").unwrap();
+        assert_eq!(cfg, run.join("rt1/sshd_config"));
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains(&format!(
+            "HostKey {}",
+            keys.join("ssh_host_ed25519_key").display()
+        )));
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            (mode(&privsep), mode(&run.join("rt1")), mode(&cfg)),
+            (0o755, 0o700, 0o600)
+        );
+        // A second start keeps the same key and config.
+        assert_eq!(prepare(&privsep, &run, &keys, "rt1").unwrap(), cfg);
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text);
+    }
+
+    #[test]
+    fn prepare_fails_when_a_directory_cannot_be_made() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(prepare(&file.join("sub"), d.path(), d.path(), "rt1").is_err());
     }
 }

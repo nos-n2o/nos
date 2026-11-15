@@ -99,7 +99,7 @@ impl Source for Daemons {
             &ServiceRef::RibTable(self.table.clone()),
         )
         .await?;
-        match ipc::one_shot::<_, RibEvent>(&rib, Role::Sshd, RibRequest::GetVrfName).await {
+        match ipc::one_shot::<_, RibEvent>(&rib, Role::Ribd, RibRequest::GetVrfName).await {
             Some(RibEvent::VrfName(name)) => name,
             _ => None,
         }
@@ -223,7 +223,12 @@ impl<S: Source, B: Binder> Listener<S, B> {
 mod tests {
     use super::*;
     use crate::conn::Limits;
+    use futures::SinkExt;
+    use nos_proto::IpcCodec;
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
     use std::sync::Mutex;
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
     #[derive(Default)]
     struct Fake {
@@ -360,6 +365,111 @@ mod tests {
         let b = bound.take().unwrap();
         let _ = b.stop.send(true);
         b.task.await.unwrap();
+    }
+
+    /// Serves `reply` to every request on `path`, as the daemon `identity` names.
+    fn serve<Req, Ev>(path: &Path, identity: &str, reply: impl Fn() -> Ev + Send + Sync + 'static)
+    where
+        Req: DeserializeOwned + Send + 'static,
+        Ev: Serialize + Send + 'static,
+    {
+        let listener = nos_pki::testing::shared()
+            .identity(identity, if identity == "ribd" { "rt1" } else { "" })
+            .listen(path)
+            .unwrap();
+        let reply = std::sync::Arc::new(reply);
+        tokio::spawn(async move {
+            loop {
+                let Ok(conn) = listener.accept().await else {
+                    break;
+                };
+                let Ok((stream, _)) = conn.handshake().await else {
+                    continue;
+                };
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let (r, w) = tokio::io::split(stream);
+                    let mut r = FramedRead::new(r, IpcCodec::<Req>::default());
+                    let mut w = FramedWrite::new(w, IpcCodec::<Ev>::default());
+                    while r.next().await.is_some() && w.send(reply()).await.is_ok() {}
+                });
+            }
+        });
+    }
+
+    fn table_with(ssh: Option<SshServer>) -> nos_proto::Config {
+        let mut cfg = nos_proto::Config::default();
+        cfg.routing_tables.push(nos_proto::RoutingTable {
+            name: "rt1".into(),
+            ssh_server: ssh,
+            ..nos_proto::RoutingTable::default()
+        });
+        cfg
+    }
+
+    #[tokio::test]
+    async fn daemons_read_the_table_config_and_the_vrf_name() {
+        let d = tempfile::tempdir().unwrap();
+        let (cfg_sock, wd_sock, rib_sock) = (
+            d.path().join("c.sock"),
+            d.path().join("w.sock"),
+            d.path().join("r.sock"),
+        );
+        serve::<nos_proto::Request, _>(&cfg_sock, "configd", || {
+            nos_proto::Event::Config(table_with(Some(ssh(22))))
+        });
+        serve::<nos_proto::WatchdogRequest, _>(&wd_sock, "watchdog", {
+            let p = rib_sock.clone();
+            move || nos_proto::WatchdogEvent::Endpoint(p.clone())
+        });
+        serve::<RibRequest, _>(&rib_sock, "ribd", || RibEvent::VrfName(Some("vrf1".into())));
+        let src = Daemons {
+            table: "rt1".into(),
+            watchdog_socket: wd_sock,
+            config_socket: cfg_sock,
+        };
+        assert_eq!(src.wanted().await, Some(Some(ssh(22))));
+        assert_eq!(src.vrf_name().await.as_deref(), Some("vrf1"));
+        let other = Daemons {
+            table: "nope".into(),
+            ..src
+        };
+        assert_eq!(
+            other.wanted().await,
+            Some(None),
+            "unknown table is unpinned"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemons_keep_going_when_the_peers_are_down() {
+        let d = tempfile::tempdir().unwrap();
+        let src = Daemons {
+            table: "rt1".into(),
+            watchdog_socket: d.path().join("no-w.sock"),
+            config_socket: d.path().join("no-c.sock"),
+        };
+        assert_eq!(src.wanted().await, None, "unreadable config");
+        assert_eq!(src.vrf_name().await, None);
+        assert!(config_trigger(&src.config_socket).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn config_trigger_fires_on_a_diff() {
+        let d = tempfile::tempdir().unwrap();
+        let sock = d.path().join("c.sock");
+        serve::<nos_proto::Request, _>(&sock, "configd", || nos_proto::Event::Saved);
+        let mut rx = config_trigger(&sock).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn linux_binder_reports_no_ifindex_for_a_missing_device() {
+        assert_eq!(LinuxBinder.ifindex("no-such-vrf0"), None);
+        assert!(LinuxBinder.ifindex("lo").is_some());
     }
 
     #[tokio::test]
