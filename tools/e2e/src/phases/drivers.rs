@@ -1784,6 +1784,8 @@ async fn stp_live_edit(w: &World) -> anyhow::Result<()> {
     let discard = a.count(DISCARD);
     let root_b = b.count("root bridge changed");
     w.ensure_veth("eth05").await?;
+    // router-b has no config for it, so nothing else brings its end up.
+    w.set_link("router-b", "eth05", true).await?;
 
     // The same provision as the phase's, plus the edit; priority stays.
     let on = |extra: &[&str]| {
@@ -1838,8 +1840,16 @@ async fn stp_live_edit(w: &World) -> anyhow::Result<()> {
 
     log("router-a: eth05 removed again, applied in place");
     let in_place = a.count(IN_PLACE);
-    a.provision(&["--link-interface", "eth05", "--delete-switching-profile"])
-        .await?;
+    a.provision(&strings(&[
+        "--link-interface",
+        "eth05",
+        "--delete-switching-profile",
+        "--stp-mode",
+        "rstp",
+        "--stp-priority",
+        "4096",
+    ]))
+    .await?;
     a.wait_new(IN_PLACE, in_place, 20).await?;
     let sa = stp_summary(a).await?;
     if sa.ports.len() != 2 {

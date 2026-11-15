@@ -519,7 +519,7 @@ mod tests {
         }
         assert_eq!(s.bridges[0].port_state(new), PortState::Discarding);
         assert_eq!(s.bridges[1].root_times.forward_delay, 10, "{}", s.dump());
-        assert!(s.bridges[0].ports[0].port_id.priority() == 64);
+        assert_eq!(s.bridges[0].ports[0].port_id.priority(), 64);
         // The new port comes up and joins as a designated port of the root.
         s.bridges[0].set_oper_point_to_point(new, true);
         s.bridges[0].set_port_enabled(new, true);
