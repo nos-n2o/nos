@@ -420,6 +420,18 @@ impl Parser<'_> {
                     parts.push(next);
                 }
                 if parts.len() == 1 {
+                    // Every integer attribute is u32-range; a bigger plain
+                    // literal can only overflow arithmetic (#627). Colon-literal
+                    // parts (raw extended communities) may legitimately exceed it.
+                    if parts[0] > i64::from(u32::MAX) {
+                        return Err(CompileError::new(
+                            line,
+                            format!(
+                                "integer literal {} out of range (0 to 4294967295)",
+                                parts[0]
+                            ),
+                        ));
+                    }
                     ExprKind::IntLit(parts[0])
                 } else {
                     ExprKind::ColonLit(parts)
