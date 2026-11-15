@@ -2579,6 +2579,8 @@ async fn pvst_provision(r: &Router, iface: &str, profile: &str, rapid: bool) -> 
 /// over the links themselves (SSTP plus the IEEE form). Cutting the root port
 /// of `pv-d1` moves it to the blocked link.
 pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
+    const IN_PLACE: &str = "spanning tree plan updated in place";
+    const REBUILT: &str = "spanning tree plan applied";
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
 
@@ -2692,6 +2694,100 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
     w.set_link("router-b", "eth2", true).await?;
     pvst_wait(b, "pv-d1", 90, blocked("eth1")).await?;
     pvst_wait(a, "pv-d2", 90, blocked("eth2")).await?;
+
+    // #1122: edits of router-a's plan are applied in place, tree by tree, and
+    // router-b's untouched trees (pv-d2, pv-nat) do not move.
+    let view = |i: &nos_proto::StpInstance| -> Vec<(String, String, String)> {
+        i.ports
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    format!("{:?}", p.state),
+                    p.designated_port.clone(),
+                )
+            })
+            .collect()
+    };
+    let before = [
+        view(&pvst_domain(b, "pv-d2").await?),
+        view(&pvst_domain(b, "pv-nat").await?),
+    ];
+    let rebuilt = a.count(REBUILT);
+    // The base provision of `pvst_provision`, plus the edit; `eth1` carries
+    // the rapid settings, `eth2` only the members.
+    let edit = |iface: &str, profile: &str, extra: &[&str]| {
+        let mut args = strings(&[
+            "--link-interface",
+            iface,
+            "--switching-profile",
+            profile,
+            "--switching-profile-member",
+            "pv-d1:110",
+            "--switching-profile-member",
+            "pv-d2:120",
+            "--switching-profile-member",
+            "pv-nat:untagged",
+        ]);
+        args.extend(strings(extra));
+        args
+    };
+    let rapid = [
+        "--stp-mode",
+        "rapid-pvst",
+        "--stp-priority",
+        "32768",
+        "--stp-domain-priority",
+        "pv-d2:32768",
+    ];
+
+    log("router-a: pv-d1 priority and member cost edit, applied in place");
+    let in_place = a.count(IN_PLACE);
+    let mut extra = vec!["--stp-domain-priority", "pv-d1:8192"];
+    extra.extend(["--stp-member-cost", "pvst-sp1:pv-d1:200"]);
+    extra.extend(rapid);
+    a.provision(&edit("eth1", "pvst-sp1", &extra)).await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+    pvst_wait(a, "pv-d1", 30, |i| i.bridge_id.starts_with("206e.")).await?;
+
+    log("router-a: third tagged domain pv-x on eth2, applied in place");
+    let in_place = a.count(IN_PLACE);
+    let mut with_x = edit(
+        "eth2",
+        "pvst-sp2",
+        &["--switching-profile-member", "pv-x:130"],
+    );
+    with_x.extend(strings(&["--stp-domain-priority", "pv-x:4096"]));
+    a.provision(&with_x).await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+    pvst_wait(a, "pv-x", 30, |i| i.ports.len() == 1).await?;
+    if stp_summary(a).await?.pvst.len() != 4 {
+        bail!("router-a should list four trees with pv-x");
+    }
+
+    log("router-a: pv-x removed again (eth2 moves to a profile without it)");
+    let in_place = a.count(IN_PLACE);
+    // (the new profile repeats the expensive pv-d2 member of `pvst-sp2`)
+    let sp3 = edit(
+        "eth2",
+        "pvst-sp3",
+        &["--stp-member-cost", "pvst-sp3:pv-d2:100000"],
+    );
+    a.provision(&sp3).await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+    if stp_summary(a).await?.pvst.len() != 3 {
+        bail!("router-a should be back to three trees");
+    }
+
+    a.assert_quiet(REBUILT, rebuilt, 5).await?;
+    let after = [
+        view(&pvst_domain(b, "pv-d2").await?),
+        view(&pvst_domain(b, "pv-nat").await?),
+    ];
+    if before != after {
+        bail!("router-b's pv-d2/pv-nat moved: {before:?} -> {after:?}");
+    }
+    kernel_wait(a, "eth2.120", true, 30).await?;
 
     for r in routers {
         for iface in ["eth1", "eth2"] {

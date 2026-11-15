@@ -222,6 +222,11 @@ async fn read_loop(socket: Arc<L2Socket>, name: String, tx: Frames) {
     }
 }
 
+/// Trees of a Rapid-PVST+ bridge that are not hidden slots.
+fn pv_live(pv: Option<&Pvst>) -> usize {
+    pv.map_or(0, |p| p.trees().iter().filter(|t| !t.is_gone()).count())
+}
+
 impl Daemon {
     /// Disabled mode (no engine) answers `enabled: false`.
     fn publish(&self) {
@@ -235,6 +240,21 @@ impl Daemon {
 
     async fn apply_plan(&mut self, plan: Option<Plan>) {
         if plan == self.plan {
+            return;
+        }
+        if let (Some(pv), Some(p)) = (self.pvst.as_mut(), plan.as_ref())
+            && let Ok((out, restarted)) = pv.apply_plan(p)
+        {
+            self.pvst_updated(&restarted);
+            info!(
+                trees = pv_live(self.pvst.as_ref()),
+                priority = p.priority,
+                "{}",
+                events::PLAN_UPDATED_IN_PLACE
+            );
+            self.plan = plan;
+            self.emit_pvst(out).await;
+            self.sync_links().await;
             return;
         }
         if let (Some(e), Some(p)) = (self.engine.as_mut(), plan.as_ref())
@@ -355,6 +375,39 @@ impl Daemon {
         self.sync_links().await;
     }
 
+    /// After `Pvst::apply_plan`: size `prt` to the slots, reset the trees
+    /// that got a fresh engine, rebuild the link table from the live slots
+    /// and close the sockets nothing uses any more.
+    fn pvst_updated(&mut self, restarted: &[usize]) {
+        let Some(pv) = self.pvst.as_ref() else { return };
+        self.prt.resize_with(pv.trees().len(), Vec::new);
+        self.plinks.clear();
+        for (t, tree) in pv.trees().iter().enumerate() {
+            let n = tree.engine().ports().len();
+            if restarted.contains(&t) {
+                self.prt[t].clear();
+            }
+            self.prt[t].resize_with(n, PortRt::default);
+            self.prt[t].iter_mut().for_each(|r| r.resync = true);
+            if tree.is_gone() {
+                continue;
+            }
+            for (j, (port, &tag)) in tree.engine().ports().iter().zip(&tree.tags).enumerate() {
+                if tree.engine().is_live(j) {
+                    self.plinks.insert(pvst::link_name(&port.name, tag), (t, j));
+                }
+            }
+        }
+        let plinks = &self.plinks;
+        self.io.retain(|name, io| {
+            let keep = plinks.contains_key(name);
+            if !keep {
+                io.reader.abort();
+            }
+            keep
+        });
+    }
+
     /// Builds the Rapid-PVST+ trees and the link table of their sockets.
     fn build_pvst(&mut self, p: &Plan) -> Outs {
         let (pv, out) = match Pvst::new(p, self.mac) {
@@ -462,7 +515,8 @@ impl Daemon {
     /// (the sub-link of a tagged member), so carrier is per link.
     async fn sync_pvst_links(&mut self) {
         let Some(pv) = self.pvst.as_ref() else { return };
-        let shape: Vec<Vec<PvstPort>> = pv
+        // A gone tree or port keeps its slot but is skipped (`None`).
+        let shape: Vec<Vec<Option<PvstPort>>> = pv
             .trees()
             .iter()
             .map(|t| {
@@ -470,12 +524,19 @@ impl Daemon {
                     .ports()
                     .iter()
                     .zip(&t.tags)
-                    .map(|(p, &tag)| (p.name.clone(), tag, p.cost, p.link_type))
+                    .enumerate()
+                    .map(|(j, (p, &tag))| {
+                        (!t.is_gone() && t.engine().is_live(j))
+                            .then(|| (p.name.clone(), tag, p.cost, p.link_type))
+                    })
                     .collect()
             })
             .collect();
         for (t, ports) in shape.into_iter().enumerate() {
-            for (j, (port, tag, cost, link_type)) in ports.into_iter().enumerate() {
+            for (j, slot) in ports.into_iter().enumerate() {
+                let Some((port, tag, cost, link_type)) = slot else {
+                    continue;
+                };
                 let link = pvst::link_name(&port, tag);
                 let carrier = !matches!(gate(&self.links, &link), Gate::Down(_));
                 if self.prt[t][j].carrier != Some(carrier) {
@@ -491,11 +552,15 @@ impl Daemon {
                     self.prt[t][j].open_warned = warned;
                 }
                 let enabled = carrier && self.io.contains_key(&link);
-                if self.prt[t][j].carrier == Some(carrier) && self.prt[t][j].enabled == enabled {
+                if self.prt[t][j].carrier == Some(carrier)
+                    && self.prt[t][j].enabled == enabled
+                    && !self.prt[t][j].resync
+                {
                     continue;
                 }
                 self.prt[t][j].carrier = Some(carrier);
                 self.prt[t][j].enabled = enabled;
+                self.prt[t][j].resync = false;
                 let info = link::read(&port);
                 if enabled && info.speed_mbps.is_none() {
                     warn!(port = %port, fallback_mbps = link::FALLBACK_SPEED_MBPS, "link speed unknown, using the fallback cost");
