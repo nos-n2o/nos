@@ -492,6 +492,9 @@ pub const OSPF_FRR_SUBNET: Addr = Addr("10.51.0.0/24");
 pub const OSPF_FRR_IP_A: Addr = Addr("10.51.0.2");
 pub const OSPF_FRR_IP_F: Addr = Addr("10.51.0.6");
 pub const OSPF_ROUTER_ID_F: &str = "9.9.9.6";
+/// `ospf-dr-frr`: FRR's address on the OSPF broadcast domain (dot1q 400 over
+/// `NET`), next to `OSPF_BROADCAST_ADDRESS_A`/`_B`.
+pub const OSPF_BROADCAST_ADDRESS_F: &str = "203.0.113.68/28";
 /// Scales nos-ospfd's LSA age clock: 1800/180 = 10s, 3600/180 = 20s.
 pub const OSPF_AGE_MULTIPLIER: u32 = 180;
 pub const ASBR_PREFIX: &str = "192.0.2.128/25";

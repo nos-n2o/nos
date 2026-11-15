@@ -2128,6 +2128,73 @@ async fn wait_lsa(
     bail!("{}: no {what} in its database: {last}", r.name())
 }
 
+/// #608 / RFC 2328 A.3.2 against an independent implementation, self-contained.
+/// FRR (`router-f`, priority 0, so never DR/BDR) joins the OSPF broadcast
+/// domain through a dot1q 400 sub-interface of its `NET` interface; router-b
+/// (higher router-id) becomes DR and router-a BDR. Router IDs (9.9.9.x) differ
+/// from the bridge addresses (203.0.113.x), so FRR only identifies the DR/BDR,
+/// and only forms Full adjacencies as a DROther, if router-a/b's Hellos carry
+/// their interface addresses: FRR's own `drAddress`/`bdrAddress` must be those.
+pub async fn ospf_dr_frr(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let mut fa = ospf_instance_only(OSPF_ROUTER_ID);
+    fa.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_A));
+    a.provision_flags(&with_base(A, fa)).await?;
+    let mut fb = ospf_instance_only(OSPF_ROUTER_ID_B);
+    fb.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_B));
+    b.provision_flags(&with_base(B, fb)).await?;
+
+    w.dock.container_remove("router-f").await;
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\n\
+         interface eth0.{OSPF_BROADCAST_TAG}\n ip ospf area {OSPF_AREA}\n ip ospf priority 0\nexit\n!\n\
+         router ospf\n ospf router-id {OSPF_ROUTER_ID_F}\nexit\n"
+    );
+    let setup = format!(
+        "ip link add link eth0 name eth0.{OSPF_BROADCAST_TAG} type vlan id {OSPF_BROADCAST_TAG} && \
+         ip addr add {OSPF_BROADCAST_ADDRESS_F} dev eth0.{OSPF_BROADCAST_TAG} && \
+         ip link set eth0.{OSPF_BROADCAST_TAG} up && \
+         sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start"
+    );
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET,
+            IP_G.s(),
+            &["sh", "-c", &setup],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await?;
+
+    let link = format!("link=broadcast-domain:{BD}");
+    b.wait(&format!(
+        "ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}"
+    ))
+    .await?;
+    let ifc = format!("show ip ospf interface eth0.{OSPF_BROADCAST_TAG} json");
+    let dr = OSPF_BROADCAST_ADDRESS_B.split('/').next().unwrap();
+    let bdr = OSPF_BROADCAST_ADDRESS_A.split('/').next().unwrap();
+    frr_until(w, &ifc, 60, |out| {
+        let out: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        out.contains(&format!("\"drAddress\":\"{dr}\""))
+            && out.contains(&format!("\"bdrAddress\":\"{bdr}\""))
+            && out.contains(&format!("\"drId\":\"{OSPF_ROUTER_ID_B}\""))
+    })
+    .await
+}
+
 /// RFC 5250 opaque LSAs against a real third-party router, self-contained.
 /// FRR (`router-f`) peers router-a over router-a's eth1 on its own network
 /// and originates a type 10 (segment routing's Extended Link, opaque type 8)
