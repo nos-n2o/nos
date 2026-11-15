@@ -785,6 +785,62 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>], ctx: &Context) -> In
     }
 }
 
+/// The backbone's routing table as RFC 2328 §12.4.3 re-summarizes it: its
+/// intra-area view plus what only Type-3/4 from other ABRs reveal.
+pub struct BackboneView {
+    pub intra: IntraAreaRoutes,
+    /// Inter-area routes (Type-3 learned) for prefixes with no intra-area route.
+    pub inter: Vec<RouteEntry>,
+    /// ASBRs reachable only through a Type-4, `(router_id, distance)`.
+    pub inter_asbrs: Vec<(Ipv4Addr, u32)>,
+}
+
+/// §12.4.3: a backbone-attached ABR passes the backbone's inter-area routes
+/// and Type-4-learned ASBRs on into its non-backbone areas, which
+/// `intra_area_routes` alone never shows. `ctx` is the backbone's.
+pub fn backbone_view(root: Ipv4Addr, lsas: &[Arc<Lsa>], ctx: &Context) -> BackboneView {
+    let intra = intra_area_routes(root, lsas, ctx);
+    let own: HashSet<Ipv4Net> = intra.routes.iter().map(|r| r.prefix).collect();
+    let inter = compute_in(root, lsas, ctx)
+        .into_iter()
+        .filter(|r| {
+            r.class == PathClass::Inter && !r.next_hops.is_empty() && !own.contains(&r.prefix)
+        })
+        .collect();
+
+    let live = live_lsas(lsas);
+    let (routers, networks, hosts) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts, ctx);
+    let type4: Vec<(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)> = live
+        .iter()
+        .filter_map(|l| match &l.body {
+            LsaBody::Summary(s)
+                if l.header.lsa_type == LSA_TYPE_ASBR_SUMMARY
+                    && s.metric < LS_INFINITY
+                    && l.header.advertising_router != root =>
+            {
+                Some((l.header.advertising_router, l.header.link_state_id, s))
+            }
+            _ => None,
+        })
+        .collect();
+    let known: HashSet<Ipv4Addr> = intra.asbrs.iter().map(|&(id, _)| id).collect();
+    let ids: HashSet<Ipv4Addr> = type4
+        .iter()
+        .map(|&(_, id, _)| id)
+        .filter(|id| *id != root && !known.contains(id))
+        .collect();
+    let inter_asbrs = ids
+        .into_iter()
+        .filter_map(|id| asbr_distance(id, &type4, &dist, &next_hop).map(|(d, _, _)| (id, d)))
+        .collect();
+    BackboneView {
+        intra,
+        inter,
+        inter_asbrs,
+    }
+}
+
 /// RFC 3101 §3.1 translator election, for `root` as one ABR of an NSSA whose
 /// LSDB is `lsas`: `root` translates unless `always` is off and another ABR
 /// (B-bit Router-LSA) reachable in the area has the Nt-bit or a higher
@@ -1763,6 +1819,35 @@ mod tests {
             ..Context::default()
         };
         assert_eq!(compute_in(root, &lsas, &ctx), []);
+    }
+
+    /// §12.4.3 (#610): the backbone view adds the Type-3 inter-area routes and
+    /// the Type-4 ASBRs that `intra_area_routes` never shows, none of them
+    /// our own or already intra-area.
+    #[test]
+    fn backbone_view_adds_inter_area_routes_and_type4_asbrs() {
+        let root = router_id(1);
+        let abr = router_id(2);
+        let asbr = router_id(9);
+        let lsas = [
+            router_lsa(root, vec![p2p(abr, addr(10, 0, 0, 1), 1)]),
+            router_lsa(abr, vec![p2p(root, addr(10, 0, 0, 2), 1)]),
+            network_summary_lsa(addr(198, 51, 100, 0), addr(255, 255, 255, 0), abr, 10),
+            asbr_summary_lsa(asbr, abr, 5),
+            // Our own Type-4 echoed back is no source.
+            asbr_summary_lsa(router_id(8), root, 5),
+            as_external_lsa(addr(203, 0, 113, 0), addr(255, 255, 255, 0), asbr),
+        ];
+        let ctx = Context {
+            backbone: true,
+            ..Context::default()
+        };
+        let view = backbone_view(root, &lsas, &ctx);
+        assert!(view.intra.asbrs.is_empty());
+        assert_eq!(view.inter.len(), 1);
+        assert_eq!(view.inter[0].prefix, "198.51.100.0/24".parse().unwrap());
+        assert_eq!(view.inter[0].metric, 11);
+        assert_eq!(view.inter_asbrs, [(asbr, 6)]);
     }
 
     /// §16.3: only a transit-capable area (a reachable V-bit Router-LSA)

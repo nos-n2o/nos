@@ -914,7 +914,7 @@ impl LinkManager {
     /// RFC 2328 §12.4.3-style self-origination of this router's own ABR
     /// Summary-LSAs (Type-3 network-summary, Type-4 ASBR-summary) — see
     /// `docs/protocols/ospf-internals.md`'s "ABR and Summary-LSA origination". ABR-ness is
-    /// purely derived from live state (`self.lsdbs.keys().len() >= 2`),
+    /// purely derived from live state (`is_backbone_abr`),
     /// mirroring how this crate already derives DR-ness/ASBR-ness from live
     /// state rather than a config flag — no explicit "am I an ABR" field.
     /// Run from the same tick as `originate_router_lsas`/
@@ -923,6 +923,10 @@ impl LinkManager {
     /// code needed — `flood_full_neighbors` already resends each link's own
     /// area's full `Lsdb`, exactly as it already does for Type-5.
     pub(super) async fn originate_summary_lsas(&self, local_router_id: Ipv4Addr) {
+        // An attached area always has a database, even before its first LSA.
+        for area in self.attached_areas().await {
+            self.lsdb_for(area).await;
+        }
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
             .lock()
@@ -930,30 +934,57 @@ impl LinkManager {
             .iter()
             .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
             .collect();
-        // A single-area router summarizes nothing (and, `lsdbs` never
-        // shrinking, can't hold a stale summary either); the per-area
-        // withdrawal below is then a cheap no-op header scan.
+        // Not a backbone-attached ABR (RFC 2328 §3.1): nothing to summarize;
+        // the per-area withdrawal below then flushes any stale summary.
         let settings = self.area_settings.lock().await.clone();
+        let abr = self.is_backbone_abr().await;
+        if abr || self.attached_areas().await.len() < 2 {
+            self.no_backbone_warned.store(false, Ordering::Relaxed);
+        } else if !self.no_backbone_warned.swap(true, Ordering::Relaxed) {
+            warn!("ospf attached to 2+ areas without the backbone: not an ABR, no summaries");
+        }
         // Per source area: what to summarize from it (its area ranges
-        // applied, RFC 2328 §12.4.3) and the ASBRs in it.
-        let mut per_area: HashMap<Ipv4Addr, (spf::Summaries, Vec<(Ipv4Addr, u32)>)> =
-            HashMap::new();
+        // applied, RFC 2328 §12.4.3), the ASBRs in it, and its own intra-area
+        // prefixes/ASBRs (a destination area never receives what it already
+        // reaches intra-area, §12.4.3's next-hop-in-destination-area rule).
+        let mut per_area: HashMap<Ipv4Addr, SourceView> = HashMap::new();
         let mut active_ranges = HashMap::new();
-        if areas.len() >= 2 {
+        if abr {
             let virtual_hops = self.virtual_next_hops(local_router_id).await;
             for (area_id, lsdb) in &areas {
                 let lsas = lsdb.lock().await.all();
+                let backbone = area_id.is_unspecified();
                 let ctx = spf::Context {
-                    backbone: area_id.is_unspecified(),
+                    backbone,
                     skip_summaries: false,
                     virtual_links: &virtual_hops,
                     remote_lfa: false,
                 };
-                let view = spf::intra_area_routes(local_router_id, &lsas, &ctx);
+                let (intra, inter, inter_asbrs) = if backbone {
+                    let v = spf::backbone_view(local_router_id, &lsas, &ctx);
+                    (v.intra, v.inter, v.inter_asbrs)
+                } else {
+                    (
+                        spf::intra_area_routes(local_router_id, &lsas, &ctx),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                };
                 let ranges = settings.get(area_id).map_or(&[][..], |s| &s.ranges[..]);
-                let (prefixes, active) = spf::apply_ranges(&view.routes, ranges);
+                let (mut prefixes, active) = spf::apply_ranges(&intra.routes, ranges);
                 active_ranges.extend(active);
-                per_area.insert(*area_id, (prefixes, view.asbrs));
+                prefixes.extend(inter.iter().map(|r| (r.prefix, r.metric)));
+                let mut asbrs = intra.asbrs.clone();
+                asbrs.extend(inter_asbrs);
+                per_area.insert(
+                    *area_id,
+                    SourceView {
+                        prefixes,
+                        asbrs,
+                        own_prefixes: intra.routes.iter().map(|r| r.prefix.trunc()).collect(),
+                        own_asbrs: intra.asbrs.iter().map(|&(id, _)| id).collect(),
+                    },
+                );
             }
         }
         *self.active_ranges.lock().await = active_ranges;
@@ -968,17 +999,24 @@ impl LinkManager {
             let mut type4: HashMap<Ipv4Addr, u32> = HashMap::new();
             // RFC 2328 §12.4.3.1: an ABR sends a default Type-3 into a stub
             // area — and, totally stubby (no `ImportSummaries`), nothing else.
-            // ponytail: ABR-ness stays "2+ areas", with no check that one of
-            // them is the backbone.
             // RFC 3101 §2.3: into an NSSA, only when it's no-summary.
             if dest.stub && (!dest.nssa || !dest.import_summaries) && !per_area.is_empty() {
                 type3.insert(Ipv4Net::default(), dest.default_cost);
             }
-            for (src_area, (prefixes, asbrs)) in &per_area {
-                if src_area == dest_area || (dest.stub && !dest.import_summaries) {
+            let dest_own = per_area.get(dest_area);
+            for (src_area, src) in &per_area {
+                // §12.4.3: the backbone feeds every area, a non-backbone area
+                // only the backbone.
+                if src_area == dest_area
+                    || (dest.stub && !dest.import_summaries)
+                    || (!src_area.is_unspecified() && !dest_area.is_unspecified())
+                {
                     continue;
                 }
-                for &(prefix, metric) in prefixes {
+                for &(prefix, metric) in &src.prefixes {
+                    if dest_own.is_some_and(|d| d.own_prefixes.contains(&prefix.trunc())) {
+                        continue;
+                    }
                     let entry = type3.entry(prefix.trunc()).or_insert(metric);
                     *entry = (*entry).min(metric);
                 }
@@ -987,7 +1025,10 @@ impl LinkManager {
                 if dest.stub {
                     continue;
                 }
-                for &(asbr, dist) in asbrs {
+                for &(asbr, dist) in &src.asbrs {
+                    if dest_own.is_some_and(|d| d.own_asbrs.contains(&asbr)) {
+                        continue;
+                    }
                     let entry = type4.entry(asbr).or_insert(dist);
                     *entry = (*entry).min(dist);
                 }
@@ -1118,4 +1159,12 @@ impl LinkManager {
         }
         withdrawn
     }
+}
+
+/// One source area's contribution to `originate_summary_lsas`.
+struct SourceView {
+    prefixes: spf::Summaries,
+    asbrs: Vec<(Ipv4Addr, u32)>,
+    own_prefixes: HashSet<Ipv4Net>,
+    own_asbrs: HashSet<Ipv4Addr>,
 }

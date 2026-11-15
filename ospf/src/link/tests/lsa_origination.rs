@@ -1211,8 +1211,16 @@ async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
             external_route_tag: 0,
         }),
     });
-    // Make area1 exist (empty) so this router is a real 2-area ABR.
-    manager.lsdb_for(area1).await;
+    // Attach area1 (a stub, no LSAs of its own) so this is a real backbone ABR.
+    let stub1: Ipv4Net = "203.0.113.1/32".parse().unwrap();
+    let stub0: Ipv4Net = "203.0.113.2/32".parse().unwrap();
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(area0, vec![(stub0, 1)]), (area1, vec![(stub1, 1)])]),
+            router_id,
+        )
+        .await;
 
     manager.originate_summary_lsas(router_id).await;
 
@@ -1269,7 +1277,12 @@ async fn originate_summary_lsas_type4_takes_minimum_over_two_source_areas() {
     let area2 = Ipv4Addr::new(0, 0, 0, 2);
     let router_id = Ipv4Addr::new(1, 1, 1, 1);
     let asbr = Ipv4Addr::new(2, 2, 2, 2);
-    manager.lsdb_for(area0).await;
+    let stubs: HashMap<_, _> = [area0, area1, area2]
+        .into_iter()
+        .zip(["203.0.113.1/32", "203.0.113.2/32", "203.0.113.3/32"])
+        .map(|(a, p)| (a, vec![(p.parse::<Ipv4Net>().unwrap(), 1)]))
+        .collect();
+    manager.reconcile(Vec::new(), stubs, router_id).await;
     for (area, cost) in [(area1, 5), (area2, 9)] {
         let lsdb = manager.lsdb_for(area).await;
         let mut lsdb = lsdb.lock().await;
@@ -1305,7 +1318,17 @@ async fn originate_summary_lsas_type4_takes_minimum_over_two_source_areas() {
     // HashMap order is random per run: repeat so a regression fails reliably.
     for _ in 0..20 {
         manager.originate_summary_lsas(router_id).await;
-        for (area, want) in [(area0, 5), (area1, 9), (area2, 5)] {
+        // §12.4.3: a non-backbone area's ASBRs reach the backbone only.
+        for area in [area1, area2] {
+            assert!(manager
+                .lsdb_for(area)
+                .await
+                .lock()
+                .await
+                .get(&key)
+                .is_none());
+        }
+        for (area, want) in [(area0, 5)] {
             let lsa = manager.lsdb_for(area).await.lock().await.get(&key).unwrap();
             let LsaBody::Summary(body) = &lsa.body else {
                 panic!("expected summary lsa")
@@ -1750,4 +1773,192 @@ fn stale_network_lsa_for_our_address_is_flushed() {
         flush_stale_network_lsas(&mut lsdb, id(1), &HashSet::from([ours])),
         Vec::<LsaKey>::new()
     );
+}
+
+fn transit_lsa(lsa_type: u8, id: Ipv4Addr, adv: Ipv4Addr, body: LsaBody) -> Lsa {
+    Lsa {
+        header: LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type,
+            link_state_id: id,
+            advertising_router: adv,
+            sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+            checksum: 0,
+            length: 0,
+        },
+        body,
+    }
+}
+
+fn transit_p2p(id: Ipv4Addr, peer: Ipv4Addr) -> Lsa {
+    transit_lsa(
+        lsa::LSA_TYPE_ROUTER,
+        id,
+        id,
+        LsaBody::Router(RouterLsaBody {
+            flags: 0,
+            links: vec![RouterLink {
+                tos: Vec::new(),
+                link_id: peer,
+                link_data: Ipv4Addr::new(10, 0, 0, 1),
+                link_type: LINK_TYPE_POINT_TO_POINT,
+                metric: 1,
+            }],
+        }),
+    )
+}
+
+/// #610, RFC 2328 §12.4.3: a backbone-attached ABR re-summarizes the
+/// backbone's inter-area routes and Type-4s (learned from another ABR) into
+/// its non-backbone area, but not a prefix already intra-area there (split
+/// horizon), and sends nothing from one non-backbone area to another.
+#[tokio::test]
+#[allow(clippy::too_many_lines, reason = "linear scenario")]
+async fn backbone_inter_area_routes_are_resummarized_into_non_backbone_areas() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let area0 = Ipv4Addr::UNSPECIFIED;
+    let area1 = Ipv4Addr::new(0, 0, 0, 1);
+    let area2 = Ipv4Addr::new(0, 0, 0, 2);
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    let abr2 = Ipv4Addr::new(2, 2, 2, 2);
+    let asbr = Ipv4Addr::new(9, 9, 9, 9);
+    let far: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+    let near: Ipv4Net = "198.51.101.0/24".parse().unwrap();
+    let stubs = [
+        (area0, "203.0.113.1/32"),
+        (area1, "203.0.113.2/32"),
+        (area2, "203.0.113.3/32"),
+    ]
+    .into_iter()
+    .map(|(a, p)| (a, vec![(p.parse::<Ipv4Net>().unwrap(), 1)]))
+    .collect();
+    manager.reconcile(Vec::new(), stubs, me).await;
+    for area in [area0, area1, area2] {
+        manager.lsdb_for(area).await;
+    }
+    let summary = |p: Ipv4Net, m| {
+        transit_lsa(
+            lsa::LSA_TYPE_NETWORK_SUMMARY,
+            p.network(),
+            abr2,
+            LsaBody::Summary(SummaryLsaBody {
+                tos: Vec::new(),
+                network_mask: p.netmask(),
+                metric: m,
+            }),
+        )
+    };
+    {
+        let lsdb0 = manager.lsdb_for(area0).await;
+        let mut l = lsdb0.lock().await;
+        l.install(transit_p2p(me, abr2));
+        l.install(transit_p2p(abr2, me));
+        l.install(summary(far, 10));
+        l.install(summary(near, 10));
+        l.install(transit_lsa(
+            lsa::LSA_TYPE_ASBR_SUMMARY,
+            asbr,
+            abr2,
+            LsaBody::Summary(SummaryLsaBody {
+                tos: Vec::new(),
+                network_mask: Ipv4Addr::UNSPECIFIED,
+                metric: 4,
+            }),
+        ));
+        // `near` is also reached intra-area in area 1: no summary there.
+        let lsdb1 = manager.lsdb_for(area1).await;
+        lsdb1.lock().await.install(transit_lsa(
+            lsa::LSA_TYPE_ROUTER,
+            me,
+            me,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![RouterLink {
+                    tos: Vec::new(),
+                    link_id: near.network(),
+                    link_data: near.netmask(),
+                    link_type: LINK_TYPE_STUB_NETWORK,
+                    metric: 1,
+                }],
+            }),
+        ));
+    }
+    manager.originate_summary_lsas(me).await;
+
+    let held = |area: Ipv4Addr, t: u8, id: Ipv4Addr| {
+        let manager = Arc::clone(&manager);
+        async move {
+            manager
+                .lsdb_for(area)
+                .await
+                .lock()
+                .await
+                .get(&LsaKey {
+                    lsa_type: t,
+                    link_state_id: id,
+                    advertising_router: me,
+                })
+                .is_some()
+        }
+    };
+    let (t3, t4) = (lsa::LSA_TYPE_NETWORK_SUMMARY, lsa::LSA_TYPE_ASBR_SUMMARY);
+    assert!(held(area1, t3, far.network()).await);
+    assert!(held(area2, t3, far.network()).await);
+    assert!(held(area1, t4, asbr).await);
+    assert!(held(area2, t4, asbr).await);
+    assert!(!held(area1, t3, near.network()).await, "split horizon");
+    assert!(held(area2, t3, near.network()).await);
+    // Area 1's intra-area prefix goes to the backbone only.
+    assert!(held(area0, t3, near.network()).await);
+    assert!(!held(area0, t3, far.network()).await);
+}
+
+/// #610, RFC 2328 §3.1: 2+ areas without the backbone is no ABR: no B-bit
+/// and no summaries.
+#[tokio::test]
+async fn router_in_two_non_backbone_areas_is_no_abr() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let area1 = Ipv4Addr::new(0, 0, 0, 1);
+    let area2 = Ipv4Addr::new(0, 0, 0, 2);
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+    let net2: Ipv4Net = "192.168.12.0/24".parse().unwrap();
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(area1, vec![(net1, 1)]), (area2, vec![(net2, 1)])]),
+            me,
+        )
+        .await;
+    manager.originate_router_lsas(me).await;
+    manager.originate_summary_lsas(me).await;
+    assert!(!manager.is_area_border_router().await);
+    for area in [area1, area2] {
+        let lsdb = manager.lsdb_for(area).await;
+        let lsdb = lsdb.lock().await;
+        assert!(lsdb
+            .all()
+            .iter()
+            .all(|l| l.header.lsa_type != lsa::LSA_TYPE_NETWORK_SUMMARY));
+        let router = lsdb
+            .get(&LsaKey {
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: me,
+                advertising_router: me,
+            })
+            .unwrap();
+        let LsaBody::Router(r) = &router.body else {
+            panic!("router lsa")
+        };
+        assert_eq!(r.flags & lsa::ROUTER_FLAG_B, 0);
+    }
 }
