@@ -238,7 +238,7 @@ build_gobgp_image() {
   fi
   log "building $GOBGP_IMAGE from the gobgp $GOBGP_VERSION release tarball"
   docker build -t "$GOBGP_IMAGE" - <<EOF
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \\
     && curl -fsSL https://github.com/osrg/gobgp/releases/download/v$GOBGP_VERSION/gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz \\
        | tar -xz -C /usr/local/bin gobgp gobgpd \\
@@ -249,7 +249,7 @@ EOF
 # See $GOBGP_ZEBRA_IMAGE/$GOBGP_ZEBRA_FRR_IMAGE above for why this exists
 # and why it is pinned to a specific old FRR release rather than reusing
 # $FRR_IMAGE. Built the same way build_gobgp_image is (curl -> tar into
-# /usr/local/bin), just FROM the FRR image instead of debian:bookworm-slim
+# /usr/local/bin), just FROM the FRR image instead of debian:trixie-slim
 # -- that gets zebra, watchfrr and /proc/net/route-readable capability
 # plumbing for free, and keeps gobgpd a plain static-linked drop-in
 # regardless of base distro (musl here, glibc in $GOBGP_IMAGE).

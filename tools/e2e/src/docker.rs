@@ -649,7 +649,7 @@ impl Dock {
     pub async fn ensure_helper_image(&self, tag: &str) -> anyhow::Result<()> {
         self.ensure_image(
             tag,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
