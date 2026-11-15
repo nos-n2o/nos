@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use nonstick::items::Items;
 use nonstick::{
-    AuthnFlags, BaseFlags, CredAction, ErrorCode, ModuleClient, PamModule, Result as PamResult,
+    AuthnFlags, BaseFlags, CredAction, EnvironMapMut, ErrorCode, ModuleClient, PamModule,
+    Result as PamResult,
 };
 use zeroize::Zeroizing;
 
 use crate::login::{login, LoginError};
 use crate::options::Options;
-use crate::session::NosSession;
+use crate::session::NosTicket;
 
 /// One overall deadline for the broker round trip (dial, TLS, request, reply).
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,7 +31,7 @@ pub fn authenticate_user(
     user: &OsStr,
     password: OsString,
     timeout: Duration,
-) -> PamResult<NosSession> {
+) -> PamResult<NosTicket> {
     let user = user.to_str().filter(|u| !u.is_empty());
     // ponytail: `into_string` drops a non-UTF-8 password un-zeroed, and nonstick's
     // `authtok` copy of it is plain memory; both live only until this returns.
@@ -39,7 +40,7 @@ pub fn authenticate_user(
         return Err(ErrorCode::AuthenticationError);
     };
     match login(&opts.socket, &opts.ca, user, &password, timeout) {
-        Ok(session) => Ok(session),
+        Ok(ticket) => Ok(ticket),
         Err(LoginError::Denied) => Err(ErrorCode::AuthenticationError),
         Err(LoginError::Unavailable) => Err(ErrorCode::AuthInfoUnavailable),
     }
@@ -48,14 +49,17 @@ pub fn authenticate_user(
 /// `account_management`'s decision: only a flow that authenticated *this* user
 /// through this module passes. Never `Ignore`: with `account required` that
 /// would let a stack that skipped `authenticate` through.
-pub fn check_account(session: Option<&NosSession>, user: &OsStr) -> PamResult<()> {
-    match session {
+pub fn check_account(ticket: Option<&NosTicket>, user: &OsStr) -> PamResult<()> {
+    match ticket {
         Some(s) if user.to_str() == Some(s.user.as_str()) => Ok(()),
         _ => Err(ErrorCode::AuthenticationError),
     }
 }
 
-fn outcome(r: &PamResult<NosSession>) -> &'static str {
+/// The variable `nos` (login-shell mode, #991) reads the ticket from.
+pub use nos_proto::LOGIN_TICKET_ENV;
+
+fn outcome(r: &PamResult<NosTicket>) -> &'static str {
     match r {
         Ok(_) => "success",
         Err(ErrorCode::AuthenticationError) => "denied",
@@ -88,14 +92,21 @@ impl<T: ModuleClient> PamModule<T> for NosPam {
                 service.to_string_lossy(),
                 outcome(&result)
             );
-            handle.set_module_data(NosSession::KEY, result?)
+            let ticket = result?;
+            // sshd runs authenticate + acct_mgmt in a forked child (keyboard-interactive) and
+            // copies that child's `pam_getenvlist()` to the session; open_session runs in the
+            // monitor, whose handle never saw this module data. So the export happens here.
+            handle
+                .environ_mut()
+                .insert(LOGIN_TICKET_ENV, ticket.encoded.as_str());
+            handle.set_module_data(NosTicket::KEY, ticket)
         })
     }
 
     fn account_management(handle: &mut T, _args: Vec<&CStr>, _flags: AuthnFlags) -> PamResult<()> {
         guard(|| {
             let user = handle.username(None)?;
-            check_account(handle.get_module_data::<NosSession>(NosSession::KEY), &user)
+            check_account(handle.get_module_data::<NosTicket>(NosTicket::KEY), &user)
         })
     }
 

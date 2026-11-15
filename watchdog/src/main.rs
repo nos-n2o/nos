@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
 use nos_proto::diff::REST_API_LABEL;
+use nos_proto::diff::SSH_SERVER_LABEL;
 use nos_proto::diff::VNI_LABEL;
 use nos_proto::{
     ConfigDiff, DiffScope, Role, SectionDiff, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET,
@@ -88,6 +89,16 @@ struct Args {
     /// `{name}` is replaced by the table name.
     #[arg(long = "restd-arg", allow_hyphen_values = true)]
     restd_flags: Vec<String>,
+
+    /// Path to the nos-sshd binary to supervise (one instance is spawned
+    /// per routing table that has `ssh-server` pinned to it).
+    #[arg(long, default_value = "/usr/local/bin/nos-sshd")]
+    sshd_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-sshd instance; a literal
+    /// `{name}` is replaced by the table name.
+    #[arg(long = "sshd-arg", allow_hyphen_values = true)]
+    sshd_flags: Vec<String>,
 
     /// Path to the nos-interfaced binary to supervise. Unlike nos-bgpd/
     /// nos-ribd, exactly one instance is always supervised regardless of how
@@ -644,6 +655,19 @@ fn managed_families(
             None,
             Some(REST_API_LABEL),
         ),
+        // Same opt-in shape on the `ssh-server` field; runs as root (uid 0).
+        family(
+            DiffScope::RoutingTables,
+            |d| &d.routing_tables,
+            &args.sshd_bin,
+            &args.sshd_flags,
+            "--table",
+            "nos-sshd",
+            Role::Sshd,
+            "SSH server",
+            None,
+            Some(SSH_SERVER_LABEL),
+        ),
     ]
 }
 
@@ -715,7 +739,8 @@ mod tests {
         assert_eq!(a.state_dir, PathBuf::from("/var/lib/nos"));
         let a = Args::try_parse_from(["x", "--child-gid", "992"]).unwrap();
         assert_eq!(a.child_gid, Some(992));
-        assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty());
+        assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty() && a.sshd_flags.is_empty());
+        assert_eq!(a.sshd_bin, PathBuf::from("/usr/local/bin/nos-sshd"));
     }
 
     #[test]
@@ -782,7 +807,7 @@ mod tests {
         )
         .unwrap();
         let mut cli_args = vec!["x".to_string()];
-        for f in ["bgpd", "ribd", "ospfd", "ospfv3d", "fdbd", "restd"] {
+        for f in ["bgpd", "ribd", "ospfd", "ospfv3d", "fdbd", "restd", "sshd"] {
             cli_args.push(format!("--{f}-bin"));
             cli_args.push(format!("/bin/{f}"));
             cli_args.push(format!("--{f}-arg"));
@@ -795,7 +820,7 @@ mod tests {
             BackoffPolicy::default(),
             &EndpointRegistry::default(),
         );
-        assert_eq!(ms.len(), 6);
+        assert_eq!(ms.len(), 7);
         // (daemon, name_flag, role, scope, noun, endpoint prefix, claim label)
         let want = [
             (
@@ -851,6 +876,15 @@ mod tests {
                 "REST API",
                 None,
                 Some(REST_API_LABEL),
+            ),
+            (
+                "nos-sshd",
+                "--table",
+                Role::Sshd,
+                DiffScope::RoutingTables,
+                "SSH server",
+                None,
+                Some(SSH_SERVER_LABEL),
             ),
         ];
         for (m, (daemon, name_flag, role, scope, noun, prefix, label)) in ms.iter().zip(want) {
@@ -908,7 +942,7 @@ mod tests {
             .iter()
             .map(|m| (m.section)(&diff)[0].name.clone())
             .collect();
-        assert_eq!(got, ["bgp", "rt", "ospf", "ospfv3", "bd", "rt"]);
+        assert_eq!(got, ["bgp", "rt", "ospf", "ospfv3", "bd", "rt", "rt"]);
     }
 
     #[test]

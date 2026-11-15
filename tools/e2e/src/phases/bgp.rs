@@ -3745,7 +3745,7 @@ async fn rpki_cache_auth(w: &mut World) -> anyhow::Result<()> {
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
 fn gobgp_dockerfile() -> String {
     format!(
-        "FROM debian:bookworm-slim\n\
+        "FROM debian:trixie-slim\n\
          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \\\n \
          && curl -fsSL https://github.com/osrg/gobgp/releases/download/v{GOBGP_VERSION}/gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz \\\n \
          | tar -xz -C /usr/local/bin gobgp gobgpd \\\n \
@@ -4572,6 +4572,8 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
         bail!("the withdrawn rule is still in the VRF view");
     }
 
+    flowspec_vpn_dataplane(w, &vrf_dev).await?;
+    let a = w.a()?;
     log("the next hop GoBGP sends is RFC 8955's length 0");
     a.assert_quiet(stated, stated_before, 1).await?;
     a.edit(|c| {
@@ -4583,6 +4585,143 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
     })
     .await?;
+    Ok(())
+}
+
+/// `flowspec-vpn`, dataplane half (#1086): router-b, on a VLAN subinterface
+/// of its own, sends TCP probes to router-a's address on the `flowspec`
+/// subinterface in `vrf-red`. GoBGP's SAFI 134 `then discard` rule (RT
+/// imported by the VRF) is enforced there: the probes count on the
+/// `GET /v1/flowspec` row of that table, `show bgp flowspec vrf` says
+/// `installed`, the global-table `eth0` is never touched, and withdrawing
+/// the rule clears the subinterface.
+async fn flowspec_vpn_dataplane(w: &mut World, vrf_dev: &str) -> anyhow::Result<()> {
+    const A_ADDR: &str = "10.200.0.1";
+    const B_ADDR: &str = "10.200.0.2";
+    const PORT: &str = "9999";
+    log("probes into the VRF subinterface are dropped by the VPN rule and counted (#1086)");
+    let addr_op = |addr: &str| -> anyhow::Result<ConfigOp> {
+        let address = format!("{addr}/24").parse()?;
+        Ok(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+            interface: "eth0".into(),
+            tag: VPN_FS_TAG,
+            address,
+            label: None,
+        }))
+    };
+    let a_op = addr_op(A_ADDR)?;
+    let b_op = addr_op(B_ADDR)?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.edit(|c| a_op.apply(c).map_err(|e| anyhow::anyhow!("{e}")))
+        .await?;
+    b.edit(|c| {
+        for op in [
+            ConfigOp::Subinterface(SubinterfaceOp::Ensure {
+                interface: "eth0".into(),
+                tag: VPN_FS_TAG,
+            }),
+            b_op,
+        ] {
+            op.apply(c).map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        Ok(())
+    })
+    .await?;
+    b.wait(&format!(
+        "created vlan sub-interface interface=eth0 sub_interface={vrf_dev}"
+    ))
+    .await?;
+    let gobgp = |verb: &str, rule: bool| -> Vec<String> {
+        let mut v = vec!["global", "rib", verb, "-a"];
+        if rule {
+            v.extend([
+                "ipv4-l3vpn-flowspec",
+                "rd",
+                "65001:5",
+                "rt",
+                "65000:1",
+                "match",
+                "destination",
+                "10.200.0.1/32",
+                "protocol",
+                "tcp",
+                "destination-port",
+                "==9999",
+            ]);
+            if verb == "add" {
+                v.extend(["then", "discard"]);
+            }
+        } else {
+            v.extend(["vpnv4", "10.200.0.0/24", "label", "500", "rd", "65001:5"]);
+            if verb == "add" {
+                v.extend(["rt", "65000:1"]);
+            }
+        }
+        v.into_iter().map(str::to_string).collect()
+    };
+    let applied = |n: usize| format!("flowspec applied interface={vrf_dev} rules={n}");
+    let own_table = a.count("flowspec applied interface=eth0 ");
+    let base = a.count(&applied(1));
+    gobgp_owned(w, gobgp("add", false)).await?;
+    gobgp_owned(w, gobgp("add", true)).await?;
+    let a = w.a()?;
+    a.wait_new(&applied(1), base, 60).await?;
+
+    let probe = format!("echo > /dev/tcp/{A_ADDR}/{PORT}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let row = loop {
+        // A dropped SYN would retry for minutes: `timeout` bounds it.
+        w.dock
+            .exec("router-b", &["timeout", "2", "bash", "-c", &probe])
+            .await?;
+        let body = a
+            .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+            .await?;
+        let rows: serde_json::Value = serde_json::from_str(&body)?;
+        let row = rows.as_array().and_then(|r| {
+            r.iter().find(|r| {
+                r["table"] == VPN_TABLE && r["flow"].as_str().is_some_and(|f| f.contains(A_ADDR))
+            })
+        });
+        if let Some(row) = row.filter(|r| r["packets"].as_u64() > Some(0)) {
+            break row.clone();
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("no probe counted on the {VPN_TABLE} rule: {body}");
+        }
+    };
+    if row["instance"] != "r1" || !row["unsupported"].is_null() {
+        bail!("VRF rule: {row}");
+    }
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bgp/flowspec?vrf={VPN_TABLE}"),
+            None,
+            200,
+        )
+        .await?;
+    if !body.contains("\"dataplane\":\"installed\"") {
+        bail!("show bgp flowspec vrf {VPN_TABLE} lacks dataplane installed: {body}");
+    }
+    a.assert_quiet("flowspec applied interface=eth0 ", own_table, 2)
+        .await?;
+
+    log("withdrawing the rule clears the VRF subinterface");
+    let cleared = a.count(&applied(0));
+    gobgp_owned(w, gobgp("del", true)).await?;
+    gobgp_owned(w, gobgp("del", false)).await?;
+    w.a()?.wait_new(&applied(0), cleared, 60).await?;
+    w.b()?
+        .edit(|c| {
+            ConfigOp::Subinterface(SubinterfaceOp::Delete {
+                interface: "eth0".into(),
+                tag: VPN_FS_TAG,
+            })
+            .apply(c)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?;
     Ok(())
 }
 
@@ -5470,7 +5609,7 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -5711,7 +5850,7 @@ async fn vpn_dp_setup(w: &mut World, v6: bool) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -7887,7 +8026,7 @@ async fn dataplane_setup(
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -9201,7 +9340,7 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -9655,7 +9794,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )

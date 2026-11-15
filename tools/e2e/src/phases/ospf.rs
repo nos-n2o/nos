@@ -4576,7 +4576,7 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             HOST_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
              RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
              iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -5038,7 +5038,7 @@ async fn forge(w: &World, f: &Forge) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )

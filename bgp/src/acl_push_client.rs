@@ -130,6 +130,22 @@ async fn run(
                     info!(instance = %instance, routes = sets[0].1.len(), "connected to nos-acld, pushing flowspec rules");
                 }
             }
+            // A table that left the VRF set (its `vpn` was removed) is
+            // pushed empty once, then forgotten (#1086).
+            let gone: Sets = sent
+                .iter()
+                .filter(|(t, _)| !sets.iter().any(|(w, _)| w == t))
+                .map(|(t, _)| (t.clone(), Vec::new()))
+                .collect();
+            for set in gone {
+                let Some(c) = conn.as_mut() else { break };
+                if c.push(snapshot(&instance, set.0.clone(), Vec::new())).await {
+                    sent.retain(|(t, _)| *t != set.0);
+                } else {
+                    warn!(instance = %instance, "flowspec push to nos-acld failed, reconnecting");
+                    conn = None;
+                }
+            }
             for set in sets {
                 let Some(c) = conn.as_mut() else { break };
                 if sent.contains(set) {
@@ -182,7 +198,14 @@ async fn run(
                 Some(c) => c,
                 None => Conn::connect(&watchdog_socket).await?,
             };
-            for (table, _) in want.iter().flatten() {
+            let mut tables: Vec<&Option<String>> = want.iter().flatten().map(|(t, _)| t).collect();
+            tables.extend(
+                sent.iter()
+                    .map(|(t, _)| t)
+                    .filter(|t| !tables.contains(t))
+                    .collect::<Vec<_>>(),
+            );
+            for table in tables {
                 if !c.push(snapshot(&instance, table.clone(), Vec::new())).await {
                     return None;
                 }
@@ -207,16 +230,22 @@ pub async fn show(watchdog_socket: &Path) -> Option<Vec<FlowspecRuleStatus>> {
     }
 }
 
-/// The `dataplane` column of a selected rule: `installed`, `unsupported
+/// The `dataplane` column of a selected rule (of `table`, a VRF, for a
+/// SAFI 134 one; `None` for the instance's own): `installed`, `unsupported
 /// (<why>)` or `not-attached` (no `flowspec` device, or not pushed yet), and
 /// `unknown` while `nos-acld` cannot be asked.
-pub fn dataplane(instance: &str, flow: &str, acld: Option<&[FlowspecRuleStatus]>) -> String {
+pub fn dataplane(
+    instance: &str,
+    table: Option<&str>,
+    flow: &str,
+    acld: Option<&[FlowspecRuleStatus]>,
+) -> String {
     let Some(rows) = acld else {
         return "unknown".to_string();
     };
     match rows
         .iter()
-        .find(|r| r.instance == instance && r.flow == flow)
+        .find(|r| r.instance == instance && r.table.as_deref() == table && r.flow == flow)
     {
         Some(FlowspecRuleStatus {
             unsupported: None, ..
@@ -515,12 +544,21 @@ mod tests {
             row("b1", "dest 192.0.2.2/32", Some("not attached")),
             row("b1", "len =64", Some("packet length: no flower key")),
         ];
-        let d = |flow| dataplane("b1", flow, Some(&rows));
+        let d = |flow| dataplane("b1", None, flow, Some(&rows));
         assert_eq!(d("dest 192.0.2.1/32"), "installed");
         assert_eq!(d("dest 192.0.2.2/32"), "not-attached");
         assert_eq!(d("len =64"), "unsupported (packet length: no flower key)");
         assert_eq!(d("dest 192.0.2.9/32"), "not-attached");
-        assert_eq!(dataplane("b1", "x", None), "unknown");
+        assert_eq!(dataplane("b1", None, "x", None), "unknown");
+        // A VRF's row is never another table's (or the instance's) status.
+        let mut red = row("b1", "dest 192.0.2.9/32", None);
+        red.table = Some("red".into());
+        let rows = [red, row("b1", "dest 192.0.2.7/32", None)];
+        let d = |t, f| dataplane("b1", t, f, Some(&rows));
+        assert_eq!(d(Some("red"), "dest 192.0.2.9/32"), "installed");
+        assert_eq!(d(None, "dest 192.0.2.9/32"), "not-attached");
+        assert_eq!(d(Some("blue"), "dest 192.0.2.9/32"), "not-attached");
+        assert_eq!(d(Some("red"), "dest 192.0.2.7/32"), "not-attached");
     }
 
     /// The requests `acld` received, once there are some.
@@ -579,5 +617,66 @@ mod tests {
             &acld.take_seen()[..],
             [AclRequest::PushFlowspec(s)] if s.rules.is_empty() && s.devices.is_empty()
         ));
+    }
+
+    /// A VRF whose `vpn` is removed is pushed empty once; an unchanged set
+    /// is not pushed again (#1086).
+    #[tokio::test]
+    async fn a_table_that_left_the_vrf_set_is_cleared_once() {
+        use crate::vpn::{Vrf, VrfSet};
+        let tmp = tempfile::tempdir().unwrap();
+        let acld_path = tmp.path().join("acl.sock");
+        let acld = serve(&acld_path, "acld", "", |req: &AclRequest| match req {
+            AclRequest::PushFlowspec(_) => Reply::One(AclEvent::Ack),
+            _ => Reply::Close,
+        });
+        let watchdog = FakeWatchdog::new(&tmp.path().join("wd.sock"));
+        watchdog.set(ServiceRef::Acl, acld_path);
+        let sessions = SessionManager::new("b1".into());
+        let red = Vrf {
+            table: "red".into(),
+            rd: [0; 8],
+            import: vec![],
+            export: vec![],
+            soo: None,
+        };
+        sessions.set_vpn_vrfs(VrfSet(vec![red])).await;
+        let (tx, rx) = watch::channel(false);
+        let task = spawn(watchdog.path().to_path_buf(), sessions.clone(), rx);
+        let tables = |seen: &[AclRequest]| -> Vec<Option<String>> {
+            seen.iter()
+                .filter_map(|r| match r {
+                    AclRequest::PushFlowspec(s) => Some(s.table.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut seen = Vec::new();
+        for _ in 0..100 {
+            seen.extend(acld.take_seen());
+            if seen.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(tables(&seen), [None, Some("red".to_string())]);
+        sessions.set_vpn_vrfs(VrfSet::default()).await;
+        let mut seen = Vec::new();
+        for _ in 0..100 {
+            seen.extend(acld.take_seen());
+            if !seen.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            matches!(&seen[..], [AclRequest::PushFlowspec(s)] if s.table.as_deref() == Some("red") && s.rules.is_empty()),
+            "{seen:?}"
+        );
+        // Nothing more: red is forgotten, unicast is unchanged.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(acld.take_seen().is_empty());
+        tx.send(true).unwrap();
+        task.await.unwrap();
     }
 }

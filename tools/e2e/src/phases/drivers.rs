@@ -456,7 +456,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -810,7 +810,7 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -1358,7 +1358,7 @@ async fn lldp_tagged(w: &World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )
@@ -1750,6 +1750,8 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     w.set_link("router-b", root_if, true).await?;
     stp_settle(routers, &base, 60).await?;
 
+    stp_live_edit(w).await?;
+
     for r in routers {
         for iface in ["eth1", "eth2"] {
             r.provision(&["--link-interface", iface, "--delete-switching-profile"])
@@ -1759,6 +1761,117 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     w.unlink_veths().await;
     a.established().await?;
     b.established().await
+}
+
+/// #662: on the converged tree, router-a (the root) gets a port cost edit and
+/// a new port that sorts before `eth1` (`eth05`), then loses it again. Each
+/// is applied in place: no existing port leaves Forwarding, no rebuild is
+/// logged, and router-b still sees the same designated Port Identifiers
+/// (a renumbering would change them on the wire).
+async fn stp_live_edit(w: &World) -> anyhow::Result<()> {
+    const IN_PLACE: &str = "spanning tree plan updated in place";
+    const REBUILT: &str = "spanning tree plan applied";
+    const DISCARD: &str = "port state changed port=eth[12] state=Discarding";
+    let (a, b) = (w.a()?, w.b()?);
+    let designated = |s: &nos_proto::StpSummary| -> Vec<(String, String)> {
+        s.ports
+            .iter()
+            .map(|p| (p.name.clone(), p.designated_port.clone()))
+            .collect()
+    };
+    let before = designated(&stp_summary(b).await?);
+    let rebuilt = a.count(REBUILT);
+    let discard = a.count(DISCARD);
+    let root_b = b.count("root bridge changed");
+    w.ensure_veth("eth05").await?;
+    // router-b has no config for it, so nothing else brings its end up.
+    w.set_link("router-b", "eth05", true).await?;
+
+    // The same provision as the phase's, plus the edit; priority stays.
+    let on = |extra: &[&str]| {
+        let mut args = strings(&[
+            "--link-interface",
+            "eth1",
+            "--switching-profile",
+            "stp-sp1",
+            "--switching-profile-member",
+            "stp-d:untagged",
+            "--stp-mode",
+            "rstp",
+            "--stp-priority",
+            "4096",
+        ]);
+        args.extend(strings(extra));
+        args
+    };
+    log("router-a: eth1 cost edit, applied in place");
+    let in_place = a.count(IN_PLACE);
+    a.provision(&on(&[
+        "--stp-profile-interface",
+        "eth1",
+        "--stp-profile-field",
+        "cost=500",
+    ]))
+    .await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+
+    log("router-a: new port eth05 (sorts before eth1), applied in place");
+    let in_place = a.count(IN_PLACE);
+    a.provision(&strings(&[
+        "--link-interface",
+        "eth05",
+        "--switching-profile",
+        "stp-sp3",
+        "--switching-profile-member",
+        "stp-d:untagged",
+        "--stp-mode",
+        "rstp",
+        "--stp-priority",
+        "4096",
+    ]))
+    .await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+    a.wait_new("port state changed port=eth05 state=Forwarding", 0, 60)
+        .await?;
+    let sa = stp_summary(a).await?;
+    if sa.ports.len() != 3 {
+        bail!("router-a should have three STP ports: {sa:?}");
+    }
+
+    log("router-a: eth05 removed again, applied in place");
+    let in_place = a.count(IN_PLACE);
+    a.provision(&strings(&[
+        "--link-interface",
+        "eth05",
+        "--delete-switching-profile",
+        "--stp-mode",
+        "rstp",
+        "--stp-priority",
+        "4096",
+    ]))
+    .await?;
+    a.wait_new(IN_PLACE, in_place, 20).await?;
+    let sa = stp_summary(a).await?;
+    if sa.ports.len() != 2 {
+        bail!("router-a should be back to two STP ports: {sa:?}");
+    }
+
+    a.assert_quiet(REBUILT, rebuilt, 5).await?;
+    a.assert_quiet(DISCARD, discard, 5).await?;
+    b.assert_quiet("root bridge changed", root_b, 5).await?;
+    let after = designated(&stp_summary(b).await?);
+    if before != after {
+        bail!("router-b sees other designated ports of router-a: {before:?} -> {after:?}");
+    }
+    a.provision(&on(&[
+        "--stp-profile-interface",
+        "eth1",
+        "--stp-profile-field",
+        "cost=",
+    ]))
+    .await?;
+    w.unlink_veth("eth05").await;
+    Ok(())
 }
 
 /// #319: router-b is forced to 802.1D (`force-version stp`), router-a stays
@@ -4150,7 +4263,7 @@ pub async fn l2_socket_race(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .ensure_image(
             PYTHON_HELPER_IMAGE,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )

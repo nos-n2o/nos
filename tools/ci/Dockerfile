@@ -2,7 +2,7 @@
 # distro rustc) runs the exact rustc/clippy/nightly CI runs (#180). Built and tagged by
 # `make ci-image` from rust-toolchain.toml and ci.yml's MIRI_TOOLCHAIN; never pushed.
 ARG RUST_TOOLCHAIN
-FROM rust:${RUST_TOOLCHAIN}-bookworm
+FROM rust:${RUST_TOOLCHAIN}-trixie
 ARG MIRI_TOOLCHAIN
 # nos-pam (#996) links -lpam.
 RUN apt-get update && apt-get install -y --no-install-recommends libpam0g-dev \

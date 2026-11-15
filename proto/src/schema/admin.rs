@@ -17,6 +17,10 @@ use super::Config;
 /// Longest secret a key may hold (the TCP-MD5 limit, the largest consumer).
 pub const SECRET_MAX_LEN: usize = 80;
 
+/// Reserved admin-key label holding `nos-sshd`'s host key (#1104): the base64 of
+/// the 32-byte ed25519 seed. Only `Role::Sshd` (besides people) sees it.
+pub const SSH_HOST_KEY_LABEL: &str = "ssh-host-key";
+
 /// The admin section: labelled secrets for other sections to reference.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]

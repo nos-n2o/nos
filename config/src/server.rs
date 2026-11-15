@@ -221,6 +221,13 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
                 }
             }
         }
+        Request::SetSshHostKey { seed } => match store.set_ssh_host_key(seed).await {
+            Ok(()) => Event::Committed { warnings: vec![] },
+            Err(e) => {
+                debug!(error = %e, "ssh host key refused");
+                Event::Error(e.to_string())
+            }
+        },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
 }

@@ -2,11 +2,10 @@
 //!
 //! The core is bridge-wide, so one task drives it deterministically: port
 //! reader tasks, the link table, plan changes and a 1 s tick all arrive as
-//! events on this task, no locks. A changed plan rebuilds the bridge (and the
-//! protocol restarts); sockets of ports that stay are kept.
-//! ponytail: no in-place update of priority/cost/timers, a config change
-//! costs one reconvergence; add `set_bridge_id`/`set_path_cost` calls if
-//! live tuning matters.
+//! events on this task, no locks. A changed plan is applied in place when
+//! the engine can take it (`Engine::apply_plan`: priority, cost, timers,
+//! edge, protections, ports added or removed); anything structural rebuilds
+//! the bridge (and the protocol restarts). Sockets of ports that stay are kept.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -97,6 +96,8 @@ struct PortRt {
     enabled: bool,
     open_warned: bool,
     rx: u64,
+    /// The plan changed in place: tell the core the link's cost/type again.
+    resync: bool,
 }
 
 struct Daemon {
@@ -236,6 +237,29 @@ impl Daemon {
         if plan == self.plan {
             return;
         }
+        if let (Some(e), Some(p)) = (self.engine.as_mut(), plan.as_ref())
+            && let Ok(out) = e.apply_plan(p)
+        {
+            self.rt.resize_with(e.ports().len(), PortRt::default);
+            self.rt.iter_mut().for_each(|r| r.resync = true);
+            self.io.retain(|name, io| {
+                let keep = p.ports.iter().any(|c| &c.name == name);
+                if !keep {
+                    io.reader.abort();
+                }
+                keep
+            });
+            info!(
+                ports = p.ports.len(),
+                priority = p.priority,
+                "{}",
+                events::PLAN_UPDATED_IN_PLACE
+            );
+            self.plan = plan;
+            self.emit(out).await;
+            self.sync_links().await;
+            return;
+        }
         let names: Vec<String> = plan
             .iter()
             .flat_map(|p| match &p.pvst {
@@ -265,6 +289,7 @@ impl Daemon {
             .collect();
         // A rebuilt bridge must not silently recover err-disabled ports.
         let mut carried = self.engine.as_ref().map_or_default(Engine::err_disabled);
+        let numbers = self.engine.as_ref().map_or_default(Engine::numbers);
         let first = self.engine.is_none() && self.pvst.is_none();
         // A fresh start asks `nos-interfaced` which ports it still holds down
         // (#697): they stay down with the full recovery timer; unreachable,
@@ -291,7 +316,7 @@ impl Daemon {
             if p.pvst.is_some() {
                 pvst_init = self.build_pvst(p);
             } else {
-                match Engine::new(p, self.mac) {
+                match Engine::new_keeping(p, self.mac, &numbers) {
                     Ok((e, out)) => {
                         self.engine = Some(e);
                         init = out;
@@ -361,7 +386,11 @@ impl Daemon {
             return;
         };
         for i in 0..n {
-            let cfg = self.engine.as_ref().expect("checked").ports()[i].clone();
+            let engine = self.engine.as_ref().expect("checked");
+            if !engine.is_live(i) {
+                continue;
+            }
+            let cfg = engine.ports()[i].clone();
             let g = gate(&self.links, &cfg.name);
             let carrier = !matches!(g, Gate::Down(_));
             if self.rt[i].carrier != Some(carrier) {
@@ -375,11 +404,15 @@ impl Daemon {
                 self.ensure_io(i, &cfg.name);
             }
             let enabled = carrier && self.io.contains_key(&cfg.name);
-            if self.rt[i].carrier == Some(carrier) && self.rt[i].enabled == enabled {
+            if self.rt[i].carrier == Some(carrier)
+                && self.rt[i].enabled == enabled
+                && !self.rt[i].resync
+            {
                 continue;
             }
             self.rt[i].carrier = Some(carrier);
             self.rt[i].enabled = enabled;
+            self.rt[i].resync = false;
             let info = link::read(&cfg.name);
             if enabled && info.speed_mbps.is_none() {
                 warn!(port = %cfg.name, fallback_mbps = link::FALLBACK_SPEED_MBPS, "link speed unknown, using the fallback cost");
@@ -519,7 +552,7 @@ impl Daemon {
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
-        let Some(i) = engine.ports().iter().position(|p| p.name == name) else {
+        let Some(i) = engine.live_slot(name) else {
             return;
         };
         self.rt[i].rx += 1;

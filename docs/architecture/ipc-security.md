@@ -5,7 +5,7 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Operator view: [docs
 
 Every daemon-to-daemon and client-to-daemon connection is mutually authenticated TLS (`nos-pki`), with `nos-watchdogd` as the CA:
 
-- **Identity.** Each certificate carries one URI SAN `nos://<role>/<name>` (`nos_proto::Role`: `watchdog`, `configd`, `logd`, `bgpd`, `ribd`, `ospfd`, `ospfv3d`, `interfaced`, `lacpd`, `lldpd`, `fdbd`, `restd`, `user`). A client dialing `ServiceRef::RibTable("rt1")` requires the server to prove it is `ribd/rt1` (`ServiceRef::role()`/`instance()`); a client that only has a socket path checks the role (`connect_role`).
+- **Identity.** Each certificate carries one URI SAN `nos://<role>/<name>` (`nos_proto::Role`: `watchdog`, `configd`, `logd`, `bgpd`, `ribd`, `ospfd`, `ospfv3d`, `interfaced`, `lacpd`, `lldpd`, `fdbd`, `restd`, `sshd`, `user`). A client dialing `ServiceRef::RibTable("rt1")` requires the server to prove it is `ribd/rt1` (`ServiceRef::role()`/`instance()`); a client that only has a socket path checks the role (`connect_role`).
 - **Post-quantum only.** No classical fallback anywhere: the only key-exchange group is hybrid `X25519MLKEM768`, the only cipher `TLS13_AES_256_GCM_SHA384`, and IPC certificates are ML-DSA-65 (a verifier that accepts nothing else, so an ECDSA leaf fails even when it chains to a trusted CA). One policy, in `pki/src/policy.rs`, on the aws-lc-rs provider. The REST listener has the same key exchange but **ECDSA P-256** certificates from a second CA, so browsers and stock clients can still present one; a REST certificate never opens an IPC socket, nor an IPC one the REST API. `Policy::Syslog` (`nos-logd` dialing a syslog collector, RFC 5425, #71) is the same key exchange and TLS 1.3 with the classical signatures webpki supports, since no deployed collector holds an ML-DSA certificate. The one classical path is the per-collector `allow-tls12` opt-in: TLS 1.2 with ECDHE-AES-GCM suites, confined to `pki/src/syslog.rs` (every classical group wrapped to be TLS 1.2-only, so TLS 1.3 stays post-quantum) and unreachable from IPC and REST.
 - **Handoff.** The watchdog creates two ephemeral in-memory CAs at start (writing only the public `ca.crt` and `rest-ca.crt` to `--pki-dir`, default `/run/nos/pki`) and, for **every spawn** in `supervisor::supervise_one`, mints a fresh keypair + leaf and writes it to the child's piped **stdin** — never argv, environment or disk. Daemons have no plaintext fallback. The watchdog's own identity rotates in-process.
 - **Rotation.** Leaves are valid `--pki-leaf-lifetime` (24h) and re-pushed down the same stdin every `--pki-rotate-every` (8h); daemons swap them in hot (`Identity::update`) — new connections use the new certificate, established ones are untouched, so a long-lived stream (e.g. `nos-bgpd`→`nos-ribd`'s route push) outlives its handshake certificate and only a *reconnect* needs the rotated one.
@@ -35,6 +35,7 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 | `ospfd` | no | OSPFv2 auth (profiles, virtual links) and BFD profiles |
 | `ospfv3d` | no | OSPFv3 auth and BFD profiles |
 | `ribd`, `bfdd` | no | BFD profile auth |
+| `sshd` | no | `ssh-host-key` only (#1104) |
 | every other role | no | none |
 
 - Adding a secret-bearing field: extend `for_role` and the sentinel fixture in `redact.rs` (the test cannot notice a field missing from the fixture). Adding a role: classify it in `visible()` (exhaustive `match`).
@@ -59,3 +60,5 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
   - An existing `nos-run` volume keeps its old owner: remove it (`docker volume rm`).
   - In an existing `nos-data` volume, move `config.yaml` to `configd/config.yaml`, `log/` to `logd/`, and `linux-driver/table-ids.yaml` to `ribd/`, `linux-driver/{bridge,port-aggregate}-ids.yaml` to `interfaced/`, `ospf/` to `ospfd/`. A missing `config.yaml` silently falls back to the default config, so a router that forgot the move boots unconfigured; the other files are only caches (a missing registry re-allocates ids, a missing log starts empty).
 - The `cli` compose service runs as `nos` (`user: nos`); `nos-e2e` execs into routers as `nos`, and as root (`Dock::exec_root`) where it must signal a daemon or read its state.
+
+- **`nos-sshd` uid.** Root (uid 0) by design (PAM, setuid); it reduces its own bounding set to SETUID, SETGID, SYS_CHROOT, CHOWN, NET_RAW, NET_BIND_SERVICE, AUDIT_WRITE, KILL, all in Docker's default set, so `docker-compose.yml` needs no `cap_add`.

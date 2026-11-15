@@ -15,6 +15,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
         Request::UpgradePasswordHash { .. } => role == Role::Watchdog,
+        Request::SetSshHostKey { .. } => role == Role::Sshd,
         Request::UserExists { .. }
         | Request::ListBgpInstances
         | Request::ListOspfInstances
@@ -71,6 +72,8 @@ mod tests {
                 new: "b".into(),
             };
             assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
+            let ssh = Request::SetSshHostKey { seed: "s".into() };
+            assert_eq!(allowed(role, &ssh), role == Role::Sshd, "{role:?} ssh key");
             let probe = Request::UserExists { name: "u".into() };
             assert_eq!(allowed(role, &probe), role == Role::Restd, "{role:?} probe");
             for r in [

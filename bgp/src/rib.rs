@@ -445,6 +445,8 @@ pub struct FlowShown<'a> {
     /// A SAFI 134 rule's validity text (per VRF); `None` for SAFI 133, whose
     /// own `route.validity` applies.
     pub validity: Option<String>,
+    /// The VRF of a SAFI 134 row listed for one table (`vrf` filter).
+    pub table: Option<String>,
 }
 
 /// A Flowspec Adj-RIB-In key: the NLRI itself, per family.
@@ -1558,6 +1560,7 @@ impl BgpRib {
                 route: self.flowspec_adj_rib_in.get(&peer)?.get(k)?,
                 rd: None,
                 validity: None,
+                table: None,
             },
             FlowRow::Vpn(k, table) => {
                 let route = self.vpn_flow_adj_rib_in.get(&peer)?.get(k)?;
@@ -1578,6 +1581,7 @@ impl BgpRib {
                     route,
                     rd: Some((k.1).0),
                     validity: Some(validity.unwrap_or_else(|| "-".to_string())),
+                    table: table.clone(),
                 }
             }
         })

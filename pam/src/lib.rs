@@ -11,7 +11,7 @@ pub mod session;
 mod tests;
 
 pub use module::NosPam;
-pub use session::NosSession;
+pub use session::NosTicket;
 
 // The only `unsafe` in this crate; nonstick's own code is the FFI.
 #[allow(

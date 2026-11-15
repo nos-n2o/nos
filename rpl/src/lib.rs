@@ -19,8 +19,8 @@ pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
 pub use vm::{
-    AsPathRegexes, BgpInput, CmpKind, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, Role,
-    SegKind, Segment, ValidationState, Value, Verdict,
+    AsPathRegexes, BgpInput, CmpKind, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin,
+    PrefixSet, Role, SegKind, Segment, ValidationState, Value, Verdict,
 };
 
 use std::fmt;

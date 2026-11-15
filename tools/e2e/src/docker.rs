@@ -308,13 +308,14 @@ impl Dock {
                 memory: Some(2 << 30),
                 memory_swap: Some(2 << 30),
                 // Mirrors docker-compose.yml: read-only rootfs, writable /tmp and
-                // /run/nos-users (the NSS passwd file nos-configd writes, #999);
+                // /run/nos-users (the NSS passwd file nos-configd writes, #999), /run/nos-sshd (nos-sshd's sshd_config, #995);
                 // no `no-new-privileges` (it ignores file capabilities, the
                 // watchdog's cap_setuid/cap_setgid/cap_chown included).
                 readonly_rootfs: Some(true),
                 tmpfs: Some(HashMap::from([
                     ("/tmp".to_string(), String::new()),
                     ("/run/nos-users".to_string(), String::new()),
+                    ("/run/nos-sshd".to_string(), String::new()),
                 ])),
                 network_mode: Some(network.to_string()),
                 ..Default::default()
@@ -649,7 +650,7 @@ impl Dock {
     pub async fn ensure_helper_image(&self, tag: &str) -> anyhow::Result<()> {
         self.ensure_image(
             tag,
-            "FROM debian:bookworm-slim\n\
+            "FROM debian:trixie-slim\n\
             RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \\\n \
             && rm -rf /var/lib/apt/lists/*\n",
         )

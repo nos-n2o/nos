@@ -15,7 +15,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod reeval;
 
@@ -30,6 +30,15 @@ use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
 
 const BGP_PORT: u16 = 179;
+
+/// Pauses before each retry of a failed listener bind (#977): 5 attempts in
+/// all, ~1.5 s; after that the 10 s resync is the long-term retry.
+const BIND_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
 
 /// How long after a VRP change the policy-reading peers are asked for a
 /// route refresh — a burst of serials (or a cache switch) costs one refresh.
@@ -1003,15 +1012,24 @@ impl SessionManager {
                 let shown = rib.flowspec_at(k)?;
                 let (peer, route) = (shown.peer, shown.route);
                 Some(nos_proto::FlowspecRouteSummary {
-                    dataplane: (shown.rd.is_none() && rib.flowspec_selected(peer, route)).then(
-                        || {
-                            crate::acl_push_client::dataplane(
-                                &self.instance,
-                                &route.nlri.to_string(),
-                                acld,
-                            )
-                        },
-                    ),
+                    dataplane: match (&shown.table, shown.rd) {
+                        (None, None) => rib.flowspec_selected(peer, route),
+                        // A SAFI 134 row is enforced per VRF: only in a VRF view.
+                        (Some(t), Some(rd)) => rib.vpn_flow_enforced(
+                            t,
+                            peer,
+                            &(route.family, (rd, route.nlri.clone())),
+                        ),
+                        _ => false,
+                    }
+                    .then(|| {
+                        crate::acl_push_client::dataplane(
+                            &self.instance,
+                            shown.table.as_deref(),
+                            &route.nlri.to_string(),
+                            acld,
+                        )
+                    }),
                     family: route.family.to_string(),
                     rd: shown.rd.map(|rd| crate::vpn::format_rd(&rd)),
                     peer,
@@ -1175,15 +1193,40 @@ impl SessionManager {
             info!(instance = %self.instance, vrf = %old.vrf, "bgp listener torn down");
         }
         if let Some(name) = desired_vrf_name {
-            match self.spawn_listeners(&name, desired) {
-                Ok(new) => {
-                    info!(instance = %self.instance, vrf = %name, "bgp listener bound");
-                    *listeners = Some(new);
+            // ponytail: retries inline under the `listeners` lock (~1.5 s
+            // worst case); the 10 s resync is the backstop.
+            let mut attempt = 0;
+            loop {
+                match self.spawn_listeners(&name, desired) {
+                    Ok(new) => {
+                        info!(instance = %self.instance, vrf = %name, attempts = attempt + 1, "bgp listener bound");
+                        *listeners = Some(new);
+                        break;
+                    }
+                    Err(e) if attempt < BIND_RETRY_DELAYS.len() => {
+                        if attempt == 0 {
+                            warn!(
+                                instance = %self.instance, vrf = %name, error = %e,
+                                "failed to bind bgp listener, retrying"
+                            );
+                        } else {
+                            debug!(
+                                instance = %self.instance, vrf = %name, error = %e,
+                                "failed to bind bgp listener, retrying"
+                            );
+                        }
+                        tokio::time::sleep(BIND_RETRY_DELAYS[attempt]).await;
+                        attempt += 1;
+                    }
+                    Err(e) => {
+                        error!(
+                            instance = %self.instance, vrf = %name, error = %e,
+                            attempts = attempt + 1,
+                            "giving up binding bgp listener until next resync"
+                        );
+                        break;
+                    }
                 }
-                Err(e) => warn!(
-                    instance = %self.instance, vrf = %name, error = %e,
-                    "failed to bind bgp listener"
-                ),
             }
         }
     }
@@ -2796,5 +2839,37 @@ mod tests {
 
     fn map_of(p: &ResolvedPeer) -> HashMap<IpAddr, ResolvedPeer> {
         HashMap::from([(p.remote_address, p.clone())])
+    }
+
+    fn resolved(name: &str) -> VrfRequirement {
+        VrfRequirement::Resolved(name.into())
+    }
+
+    /// #977: a port busy at first is bound by a later attempt.
+    #[tokio::test(start_paused = true)]
+    async fn rebind_retries_until_the_port_frees() {
+        let port = nos_test_support::free_port();
+        let hold = std::net::TcpListener::bind(("0.0.0.0", port)).unwrap();
+        let m = SessionManager::with_listen("r".into(), port, port, false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(hold);
+        });
+        m.rebind_listeners(&resolved("v"), &[]).await;
+        assert!(m.listeners.lock().await.is_some());
+    }
+
+    /// #977: a port that never frees ends the retry in bounded time; the
+    /// next call binds once it is free.
+    #[tokio::test(start_paused = true)]
+    async fn rebind_gives_up_then_next_call_binds() {
+        let port = nos_test_support::free_port();
+        let hold = std::net::TcpListener::bind(("0.0.0.0", port)).unwrap();
+        let m = SessionManager::with_listen("r".into(), port, port, false);
+        m.rebind_listeners(&resolved("v"), &[]).await;
+        assert!(m.listeners.lock().await.is_none());
+        drop(hold);
+        m.rebind_listeners(&resolved("v"), &[]).await;
+        assert!(m.listeners.lock().await.is_some());
     }
 }

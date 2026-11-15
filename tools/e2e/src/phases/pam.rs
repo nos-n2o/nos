@@ -39,7 +39,11 @@ fn refused(what: &str, (code, out): (i64, String), needle: &str) -> anyhow::Resu
 /// `acct_mgmt` needs a prior `authenticate`; a caller with no access to the CA fails closed. Needs `up`.
 pub async fn pam(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
-    let user_line = |verb: &str, user: &str| format!("login {verb} user=\"{user}\"");
+    // pam_nos asks for a login ticket (#992), not a certificate: success is `ticket issued`.
+    let user_line = |verb: &str, user: &str| match verb {
+        "accepted" => format!("login ticket issued user=\"{user}\""),
+        _ => format!("login {verb} user=\"{user}\""),
+    };
 
     log("pam: right password");
     let n = a.count(&user_line("accepted", E2E_USER));
@@ -70,7 +74,7 @@ pub async fn pam(w: &mut World) -> anyhow::Result<()> {
         .await?;
 
     log("pam: empty password is refused locally, the broker never hears of it");
-    let any = "login \\(accepted\\|rejected\\) user=";
+    let any = "login \\(ticket issued\\|rejected\\) user=";
     let n = a.count(any);
     let r = pamtester(w, PAM_SERVICE, E2E_USER, "", "authenticate").await?;
     refused("an empty password", r, "Authentication failure")?;

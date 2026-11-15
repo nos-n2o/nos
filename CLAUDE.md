@@ -29,7 +29,7 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `tc/` | `nos-tc` | Hand-encoded tc netlink (clsact, flower/fw, gact/skbedit, chains, per-action stats) shared by `nos-fdbd`, `nos-interfaced`, `nos-acld`; no NOS dependencies — see `tc/CLAUDE.md` |
 | `password/` | `nos-password` | argon2id password hashing/verification for local users — no NOS dependencies; used by `nos-config` (hashing) and `nos-watchdog` (login verification) |
 | `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, with `nos-watchdogd` as the certificate authority — identities are `nos://<role>/<name>` URI SANs, delivered to each daemon over its stdin and hot-rotated; also the TLS for `nos-restd`'s TCP listener and its clients (`nos_pki::rest`, a second CA); no NOS dependencies, like `nos-password` — see `pki/CLAUDE.md` |
-| `pam/` | `nos-pam` | PAM module (`pam_nos.so`): checks a password against `nos-watchdogd`'s login broker, holds the certificate as `NosSession` (#996) — `pam/CLAUDE.md` |
+| `pam/` | `nos-pam` | PAM module (`pam_nos.so`): checks a password against `nos-watchdogd`'s login broker, exports a login ticket (`LoginTicket`, #996, #992) — `pam/CLAUDE.md` |
 | `nss/` | `nos-nss` | NSS `passwd` module (`libnss_nos.so.2`): sshd resolves NOS users (#999) — `nss/CLAUDE.md` |
 | `log-client/` | `nos-log-client` | The `tracing` → `nos-logd` forwarding layer every daemon installs — depends only on `nos-proto`, like `nos-tcp-auth`/`nos-rpl` |
 | `daemon/` | `nos-daemon` | Boilerplate every daemon shares: watchdog endpoint resolution, `nos-configd` fetch/subscribe, generic one-shot IPC query, `main()` identity + tracing bootstrap — see `daemon/CLAUDE.md` |
@@ -41,13 +41,14 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `ospf/` | `nos-ospf` | OSPF daemon — one process per `OspfInstance`; real RFC 2328 Hello-protocol neighbor discovery plus DBD/LSR/LSU/LSAck adjacency formation, reaching `Full` with a real per-area LSDB, over point-to-point and broadcast links, plus real RFC 2328 §16 SPF route computation pushed to `nos-ribd` — see `ospf/CLAUDE.md` |
 | `ospf-common/` | `nos-ospf-common` | Address-family-agnostic logic for `nos-ospf`/`nos-ospfv3` — §9.4 DR/BDR election, §10.5 neighbor FSM, the generic LSA store (§13/§14), DBD exchange (§10.6-10.8), AllDRouters join/leave; no NOS dependencies — see `ospf-common/CLAUDE.md` |
 | `ospfv3/` | `nos-ospfv3` | OSPFv3 (RFC 5340, IPv6 OSPF) daemon — one process per `Ospfv3Instance`, mirroring `nos-ospfd` (adjacencies to `Full`, SPF pushed to `nos-ribd`) over IPv6 raw protocol-89 sockets; RFC 7166 auth trailers, ABR and ASBR; no stub/NSSA or RFC 5838 multi-instance yet — see `ospfv3/CLAUDE.md` |
-| `lacp/` | `nos-lacp` | LACP daemon (`nos-lacpd`) — one fixed process running a from-scratch IEEE 802.1AX LACPDU exchange over raw `AF_PACKET` sockets for every `Lacp`-mode `PortAggregate` member, pushing the active-member set to `nos-interfaced` (which owns the bond) — see `lacp/CLAUDE.md` |
+| `lacp/` | `nos-lacp` | LACP daemon (`nos-lacpd`) — one fixed process: IEEE 802.1AX LACPDUs over raw `AF_PACKET` for every `Lacp`-mode `PortAggregate` member, pushing the active set to `nos-interfaced` (owns the bond) — see `lacp/CLAUDE.md` |
 | `stp/` | `nos-stp` | Spanning tree: pure IEEE 802.1Q RSTP core plus `nos-stpd`, one fixed process with a raw `AF_PACKET` BPDU socket per port, pushing states to `nos-interfaced` — see `stp/CLAUDE.md` |
 | `lldp/` | `nos-lldp` | LLDP daemon (`nos-lldpd`), one fixed process: IEEE 802.1AB over raw `AF_PACKET` sockets on every `Interface` with `lldp transmit`/`receive`; `show lldp neighbors`; no rtnetlink — see `lldp/CLAUDE.md` |
 | `acl/` | `nos-acl` | Access lists (`nos-acld`), one fixed process: every attached ACL compiled to tc flower filters (clsact, A/B chains, `nos-tc`) — see `acl/CLAUDE.md` |
 | `bfd/` | `nos-bfd` | BFD (RFC 5880) core: packet codec, FSM, timers, authz; library only, no daemon yet — see `bfd/CLAUDE.md` |
-| `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one process per `BroadcastDomain` with a `vni`, owning its VXLAN device and bridge FDB; installs remote MACs from the EVPN routes `nos-bgpd` pushes, originates local Type-2/Type-3 (`redistribute from mac to bgp <instance>`); `show fdb <domain>` — see `fdb/CLAUDE.md` |
-| `rest/` | `nos-rest` | REST API daemon (`nos-restd`) — one per `RoutingTable` with `rest-api` pinned: mutual TLS + HTTP/2 inside the VRF, every `show` query and the config tree (as the URL tree) as HTTP+JSON, generated OpenAPI + Swagger UI — see `rest/CLAUDE.md` |
+| `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one per `BroadcastDomain` with a `vni`, owning its VXLAN device and bridge FDB; installs remote MACs from `nos-bgpd`'s EVPN routes, originates local Type-2/3; `show fdb <domain>` — see `fdb/CLAUDE.md` |
+| `rest/` | `nos-rest` | REST API daemon (`nos-restd`) — one per `RoutingTable` with `rest-api` pinned: mutual TLS + HTTP/2 inside the VRF, every `show` query and the config tree as HTTP+JSON, OpenAPI + Swagger UI — see `rest/CLAUDE.md` |
+| `ssh/` | `nos-ssh` | SSH daemon (`nos-sshd`) — VRF-bound listener handing each connection to `sshd -i`, PAM login — see `ssh/CLAUDE.md` |
 | `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
 | `watchdog/` | `nos-watchdog` | Process supervisor — starts and restarts the other component processes |
 
@@ -104,7 +105,7 @@ Mechanisms live in [`docs/architecture/`](docs/architecture/README.md) (also ben
 - A subscriber sends its request and never writes again: the server must not close a subscribed connection on request-side EOF.
 
 **Process supervision** ([page](docs/architecture/supervision.md))
-- `nos-watchdogd` supervises everything; per-object families (`nos-bgpd`, `nos-ribd`, `nos-ospfd`, `nos-fdbd`, `nos-restd`) are spawned from `Request::SubscribeDiff`; `nos-interfaced`, `nos-logd`, `nos-lacpd`, `nos-lldpd`, `nos-stpd` are single fixed processes.
+- `nos-watchdogd` supervises everything; per-object families (`nos-bgpd`, `nos-ribd`, `nos-ospfd`, `nos-fdbd`, `nos-restd`, `nos-sshd` (opt-in per table, root)) are spawned from `Request::SubscribeDiff`; `nos-interfaced`, `nos-logd`, `nos-lacpd`, `nos-lldpd`, `nos-stpd` are single fixed processes.
 - The first diff on a connection is authoritative (stop anything not in it); `Modified` is a no-op at watchdog level because daemons re-resolve their own config.
 - Crash backoff is exponential (1s to 30s); SIGINT then 10s then kill; `docker-compose.yml` keeps `stop_grace_period: 15s`.
 - Every supervised process gets its identity on stdin (`ProcessSpec::with_identity`).

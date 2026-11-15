@@ -1,35 +1,25 @@
 use std::fmt;
-use std::time::Duration;
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// What a successful `pam_sm_authenticate` leaves in the PAM handle
-/// (`set_module_data(NosSession::KEY, ..)`) for #989's hand-off: the
-/// certificate `nos-watchdogd` issued, the private key behind it (made here,
-/// never sent anywhere) and the certificate's lifetime. nonstick drops it with
-/// the handle (`pam_end`); a second `authenticate` overwrites it.
-pub struct NosSession {
+/// (`set_module_data(NosTicket::KEY, ..)`): the single-use login ticket the
+/// watchdog issued for `user`, in `NOS_LOGIN_TICKET`'s encoding. `open_session`
+/// exports it (#992); nonstick drops it (zeroized) with the handle, a second
+/// `authenticate` overwrites it.
+pub struct NosTicket {
     pub user: String,
-    pub cert_der: Vec<u8>,
-    pub key: Zeroizing<Vec<u8>>,
-    pub lifetime: Duration,
+    pub encoded: Zeroizing<String>,
 }
 
-impl NosSession {
-    /// The module-data key, a contract with #989.
-    pub const KEY: &'static str = "nos_pam_session";
+impl NosTicket {
+    /// The module-data key.
+    pub const KEY: &'static str = "nos_pam_ticket";
 }
 
-impl Drop for NosSession {
-    fn drop(&mut self) {
-        // Not secret, but free; `key` zeroizes itself.
-        self.cert_der.zeroize();
-    }
-}
-
-impl fmt::Debug for NosSession {
+impl fmt::Debug for NosTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NosSession")
+        f.debug_struct("NosTicket")
             .field("user", &self.user)
             .finish_non_exhaustive()
     }
