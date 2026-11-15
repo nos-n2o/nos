@@ -541,8 +541,7 @@ async fn resolve_source_address(
             .subinterfaces
             .into_iter()
             .find(|s| s.tag == 0)
-            .map(|s| s.addresses)
-            .unwrap_or_default()
+            .map_or_default(|s| s.addresses)
     };
     addresses
         .into_iter()

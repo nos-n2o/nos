@@ -720,8 +720,7 @@ fn evpn_info(e: &RibEntry, evpn: &EvpnState) -> Option<EvpnRouteInfo> {
         router_mac: evpn
             .remotes
             .get(&vtep)
-            .map(nos_proto::evpn_id::format_mac)
-            .unwrap_or_default(),
+            .map_or_default(nos_proto::evpn_id::format_mac),
         vni: evpn.local.as_ref().map_or(0, |l| l.vni),
     })
 }

@@ -654,13 +654,12 @@ fn resolve_switching_profile_members(
 ) -> Vec<(String, VlanTag)> {
     switching_profile
         .and_then(|name| cfg.switching_profiles.iter().find(|p| p.name == name))
-        .map(|p| {
+        .map_or_default(|p| {
             p.members
                 .iter()
                 .map(|m| (m.broadcast_domain.clone(), m.tag))
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// Builds `SubinterfaceState`s for `subs`, keyed off `base_name` (an

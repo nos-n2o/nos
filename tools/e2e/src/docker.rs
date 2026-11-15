@@ -121,8 +121,7 @@ impl Dock {
             .docker
             .list_volumes(Some(opts))
             .await
-            .map(|r| r.volumes.unwrap_or_default())
-            .unwrap_or_default()
+            .map_or_default(|r| r.volumes.unwrap_or_default())
         {
             self.volume_remove_raw(&v.name).await;
         }

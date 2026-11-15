@@ -197,12 +197,7 @@ impl<D: Driver> Engine<D> {
 
     /// Rewrites the priorities of `dev` whose content differs from `want`.
     fn apply_device(&mut self, dev: &str, ifindex: u32, want: &[Held]) {
-        let mut slots = self
-            .fs
-            .devices
-            .remove(dev)
-            .map(|d| d.slots)
-            .unwrap_or_default();
+        let mut slots = self.fs.devices.remove(dev).map_or_default(|d| d.slots);
         let len = slots.len().max(want.len());
         slots.resize(len, Held::Empty);
         let mut changed = false;

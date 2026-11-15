@@ -682,8 +682,7 @@ impl SessionManager {
             .lock()
             .await
             .as_ref()
-            .map(|(client, _)| rpki::summaries(&client.status))
-            .unwrap_or_default()
+            .map_or_default(|(client, _)| rpki::summaries(&client.status))
     }
 
     /// Every `bmp-station`'s status, for `show bgp bmp`.

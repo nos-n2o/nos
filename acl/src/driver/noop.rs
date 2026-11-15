@@ -122,8 +122,7 @@ impl Driver for NoopDriver {
         Ok(self
             .flowspec
             .get(&ifindex)
-            .map(|m| m.keys().copied().collect())
-            .unwrap_or_default())
+            .map_or_default(|m| m.keys().copied().collect()))
     }
 
     fn flowspec_counters(&mut self, ifindex: u32) -> io::Result<BTreeMap<u16, (u64, u64)>> {

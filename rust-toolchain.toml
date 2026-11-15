@@ -1,5 +1,5 @@
 # Single local pin; must equal RUST_TOOLCHAIN in .github/workflows/ci.yml
 # (`make toolchain-check` enforces both, and that `rustc` really is this).
 [toolchain]
-channel = "1.99.0"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]

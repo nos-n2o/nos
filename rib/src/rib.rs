@@ -488,8 +488,7 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> crate::bfd_client::Target {
         .find(|t| t.name == table_name)
         .and_then(|t| t.static_routing_instance.as_ref())
         .and_then(|n| cfg.static_routing_instances.iter().find(|i| &i.name == n))
-        .map(|i| i.routes.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|i| i.routes.as_slice());
     routes
         .iter()
         .filter_map(|r| {
