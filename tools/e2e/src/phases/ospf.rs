@@ -5216,9 +5216,29 @@ async fn ospf_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full, before, 90).await?;
     log("clearing both eth0 mtus");
     let before = a.count(&full);
+    let full_b = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID}");
+    let before_b = b.count(&full_b);
+    let dr = format!("ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}");
+    let backup =
+        format!("ospf interface became backup {link} dr={OSPF_ROUTER_ID_B} bdr={OSPF_ROUTER_ID}");
+    let (dr0, backup0) = (b.count(&dr), a.count(&backup));
     a.provision_flags(&fa(&["--clear-mtu"])).await?;
     b.provision_flags(&fb(&["--clear-mtu"])).await?;
-    a.wait_new(&full, before, 90).await
+    a.wait_new(&full, before, 90).await?;
+    b.wait_new(&full_b, before_b, 90).await?;
+    // The restarted bridge links must have left Waiting (DR/BDR elected)
+    // before the next phase starts.
+    b.wait_new(&dr, dr0, 90).await?;
+    a.wait_new(&backup, backup0, 90).await?;
+    let started = format!("ospf link driver started {link}");
+    for _ in 0..6 {
+        let counts = (a.count(&started), b.count(&started));
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        if counts == (a.count(&started), b.count(&started)) {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("bridge links keep restarting after the mtu was cleared")
 }
 
 /// `ospf_bridge_mtu` for OSPFv3.
@@ -5259,7 +5279,33 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full, before, 90).await?;
     log("clearing both eth0 mtus");
     let before = a.count(&full);
+    let full_b = format!("ospfv3 neighbor reached full {link} neighbor={OSPFV3_ROUTER_ID}");
+    let before_b = b.count(&full_b);
+    let dr = format!("ospfv3 interface became dr {link} dr={OSPFV3_ROUTER_ID_B}");
+    let backup = format!(
+        "ospfv3 interface became backup {link} dr={OSPFV3_ROUTER_ID_B} bdr={OSPFV3_ROUTER_ID}"
+    );
+    let (dr0, backup0) = (b.count(&dr), a.count(&backup));
     a.provision_flags(&fa(&["--clear-mtu"])).await?;
     b.provision_flags(&fb(&["--clear-mtu"])).await?;
-    a.wait_new(&full, before, 90).await
+    a.wait_new(&full, before, 90).await?;
+    b.wait_new(&full_b, before_b, 90).await?;
+    // The restarted bridge links must have left Waiting (DR/BDR elected)
+    // before the next phase starts.
+    b.wait_new(&dr, dr0, 90).await?;
+    a.wait_new(&backup, backup0, 90).await?;
+    // The bridge MTU reaches each daemon a resync or two apart, and every
+    // change restarts the link into Waiting: leave only once no link
+    // restarts for longer than the 40s wait.
+    // `ospfv3-dr` expects to bring the bridge up itself: detach OSPFv3 from
+    // the domain again and let both routers drop the links.
+    let leave = strings(&[
+        "--broadcast-domain",
+        BD,
+        "--clear-ospfv3-broadcast-domain-profile",
+    ]);
+    a.provision_flags(&with_base(A, leave.clone())).await?;
+    b.provision_flags(&with_base(B, leave)).await?;
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    Ok(())
 }
