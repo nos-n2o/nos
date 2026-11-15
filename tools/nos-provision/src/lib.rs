@@ -5546,6 +5546,7 @@ mod tests {
             "--clear-ospfv3-loopback-profile",
             "--clear-ospfv3-broadcast-domain-profile",
             "--delete-broadcast-domain-svi",
+            "--clear-ssh-server",
             "--evpn-clear",
             "--evpn-rt-import",
             "65001:1",
@@ -5714,6 +5715,7 @@ mod tests {
                     "--broadcast-domain-svi-address",
                     "10.1.0.1/24",
                     "--delete-broadcast-domain-svi",
+                    "--clear-ssh-server",
                 ],
                 "mutually exclusive",
             ),
@@ -5875,7 +5877,7 @@ mod tests {
         assert_eq!((a.key_id, a.key.as_str()), (2, "s3:cret"));
         assert!(parse_bfd_auth("nope:1:k").is_err());
         assert!(parse_bfd_auth("keyed-md5:300:k").is_err());
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -5912,7 +5914,7 @@ mod tests {
 
     #[test]
     fn sbfd_flags_become_profile_route_and_reflector_edits() {
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -5995,7 +5997,7 @@ mod tests {
 
     #[test]
     fn esi_aggregate_gets_the_stp_guard_profile() {
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -6060,7 +6062,7 @@ mod tests {
 
     #[test]
     fn bfd_echo_flags_become_profile_path_edits() {
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -6100,7 +6102,7 @@ mod tests {
 
     #[test]
     fn mstp_flags_become_path_edits_and_the_same_local_config() {
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -6185,7 +6187,7 @@ mod tests {
 
     #[test]
     fn rapid_pvst_flags_become_path_edits_and_the_same_local_config() {
-        let args = Args::try_parse_from([
+        let args = try_parse_big([
             "nos-provision",
             "--address",
             "10.0.0.1/24",
@@ -6257,6 +6259,17 @@ mod tests {
         "--peer",
         "10.0.0.2",
     ];
+
+    /// `Args::try_parse_from` on a 16 MiB stack (see `parse`).
+    fn try_parse_big<const N: usize>(argv: [&str; N]) -> Result<Args, clap::Error> {
+        let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || Args::try_parse_from(argv))
+            .unwrap()
+            .join()
+            .unwrap()
+    }
 
     fn parse(extra: &[&str]) -> Args {
         // clap's derive frames for `Args` (hundreds of flags) outgrow a test
@@ -7102,6 +7115,7 @@ mod tests {
             "--delete-subinterface",
             "--delete-switching-profile",
             "--delete-broadcast-domain-svi",
+            "--clear-ssh-server",
         ])
         .unwrap();
         for m in [
