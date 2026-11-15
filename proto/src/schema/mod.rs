@@ -36,6 +36,8 @@ pub mod ospfv3_instance;
 pub mod ospfv3_profile;
 /// Named RPL policy scripts (`PolicyDefinition`).
 pub mod policy_definition;
+/// The single adapter from schema types to `nos_rpl::Symbols` (config validation and `nos-bgpd`).
+pub mod policy_symbols;
 /// Link aggregations (`PortAggregate`): static or LACP bonds, with an EVPN Ethernet Segment identity.
 pub mod port_aggregate;
 /// Named prefix match lists (`PrefixList`) for RPL scripts.
@@ -93,6 +95,7 @@ pub use ospfv3_area::Ospfv3Area;
 pub use ospfv3_instance::Ospfv3Instance;
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
+pub use policy_symbols::PolicySymbols;
 pub use port_aggregate::{
     ConversationRange, DfAlgorithm, EsRedundancy, LacpMode, LacpPortAlgorithm, LacpRate,
     LacpVersion, PortAggregate, PortAggregateMode,
