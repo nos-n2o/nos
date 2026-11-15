@@ -818,7 +818,15 @@ mod tests {
         ]));
         with_fast_retry(&mut flags);
         let mut config = Config::default();
-        for op in build_ops(&parse(&flags).unwrap()).unwrap() {
+        // `parse` + `build_ops` overflow the 2 MiB test-thread stack in debug
+        // (a new flag tipped it, #993), so run them on a bigger one.
+        let ops = std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || build_ops(&parse(&flags).unwrap()).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        for op in ops {
             op.apply(&mut config).unwrap();
         }
         assert_eq!(
