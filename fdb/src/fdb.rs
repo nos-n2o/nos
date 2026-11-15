@@ -2,9 +2,6 @@
 //! remote ones EVPN told us about, and the kernel state each implies. The
 //! `nos-ribd` `Rib` counterpart — pure decisions here, kernel effects behind
 //! `FdbDriver`.
-//!
-//! ponytail: a MAC learned from two VTEPs (or under two RDs) is last write
-//! wins — no MAC-mobility sequence numbers, so it can flap between them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::pending;
