@@ -67,7 +67,8 @@ fn visible(role: Role) -> Visible {
         | Role::Lldpd
         | Role::Fdbd
         | Role::Stpd
-        | Role::Acld => none,
+        | Role::Acld
+        | Role::Sshd => none,
     }
 }
 
@@ -295,7 +296,8 @@ mod tests {
                 | Role::Lldpd
                 | Role::Fdbd
                 | Role::Stpd
-                | Role::Acld => vec![],
+                | Role::Acld
+                | Role::Sshd => vec![],
             };
             let got = cfg.for_role(role);
             assert_eq!(seen(&got), want, "{role:?}");

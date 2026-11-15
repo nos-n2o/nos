@@ -1,0 +1,35 @@
+[package]
+name    = "nos-ssh"
+publish = false
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-proto  = { workspace = true }
+nos-pki    = { workspace = true }
+nos-daemon = { workspace = true }
+tokio      = { workspace = true, features = ["signal", "process"] }
+socket2    = { workspace = true }
+nix        = { workspace = true, features = ["signal"] }
+libc       = { workspace = true }
+clap       = { workspace = true }
+anyhow     = { workspace = true }
+tracing    = { workspace = true }
+futures    = { workspace = true }
+aws-lc-rs  = "1"
+base64     = { workspace = true }
+
+[[bin]]
+name = "nos-sshd"
+path = "src/main.rs"
+
+[dev-dependencies]
+serde    = { workspace = true }
+tokio-util = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["test-util"] }
+nos-pki  = { workspace = true, features = ["testing"] }

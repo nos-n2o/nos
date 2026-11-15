@@ -22,3 +22,4 @@ rib/CLAUDE.md 8192
 stp/CLAUDE.md 8192
 acl/CLAUDE.md 8192
 tc/CLAUDE.md 8192
+ssh/CLAUDE.md 8192

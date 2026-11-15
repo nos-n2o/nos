@@ -2,7 +2,7 @@
 
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
-# versions in bookworm-slim breaks on every security update.
+# versions in the slim images breaks on every security update.
 FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS builder
 WORKDIR /app
 
@@ -22,10 +22,12 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
     && cargo build --release -p nos-pam -p nos-nss
 
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+# trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
+# which `sshd -T` accepts it in (#994). The builder stays on bookworm (older glibc, still runs here).
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 
 # Fixed numeric ids (the ENTRYPOINT's --child-gid names group `nos`):
 # `nos-wd` runs the watchdog (both CAs in memory); each daemon role runs as its
@@ -72,6 +74,7 @@ COPY --from=builder /app/target/release/nos-acld       /usr/local/bin/nos-acld
 COPY --from=builder /app/target/release/nos-bfdd       /usr/local/bin/nos-bfdd
 COPY --from=builder /app/target/release/nos-fdbd       /usr/local/bin/nos-fdbd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
+COPY --from=builder /app/target/release/nos-sshd       /usr/local/bin/nos-sshd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
@@ -107,6 +110,8 @@ COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-st
 # program the bridge FDB via rtnetlink (see fdb/CLAUDE.md).
 # nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
 # inside its routing table's VRF (see rest/CLAUDE.md).
+# nos-sshd has no file capabilities: it runs as root (uid 0) and drops its own
+# bounding set at startup (see ssh/CLAUDE.md).
 # nos-watchdogd runs as `nos-wd` and needs CAP_SETUID/CAP_SETGID to start every
 # child as its role's user, and CAP_CHOWN to create their state directories; the
 # children's own file capabilities above are computed at their exec, so they
@@ -146,6 +151,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g \
+        openssh-server \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/libpam_nos.so /tmp/pam_nos.so
 RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
