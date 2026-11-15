@@ -1003,15 +1003,24 @@ impl SessionManager {
                 let shown = rib.flowspec_at(k)?;
                 let (peer, route) = (shown.peer, shown.route);
                 Some(nos_proto::FlowspecRouteSummary {
-                    dataplane: (shown.rd.is_none() && rib.flowspec_selected(peer, route)).then(
-                        || {
-                            crate::acl_push_client::dataplane(
-                                &self.instance,
-                                &route.nlri.to_string(),
-                                acld,
-                            )
-                        },
-                    ),
+                    dataplane: match (&shown.table, shown.rd) {
+                        (None, None) => rib.flowspec_selected(peer, route),
+                        // A SAFI 134 row is enforced per VRF: only in a VRF view.
+                        (Some(t), Some(rd)) => rib.vpn_flow_enforced(
+                            t,
+                            peer,
+                            &(route.family, (rd, route.nlri.clone())),
+                        ),
+                        _ => false,
+                    }
+                    .then(|| {
+                        crate::acl_push_client::dataplane(
+                            &self.instance,
+                            shown.table.as_deref(),
+                            &route.nlri.to_string(),
+                            acld,
+                        )
+                    }),
                     family: route.family.to_string(),
                     rd: shown.rd.map(|rd| crate::vpn::format_rd(&rd)),
                     peer,
