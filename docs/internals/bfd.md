@@ -102,6 +102,7 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 ## Querying sessions
 
 - `BfdRequest::GetSessions { peer }` is a one-shot request answered with `BfdEvent::Sessions(Vec<BfdSessionView>)`, ordered by (table, peer); `peer: Some(ip)` filters in the daemon.
+- Demux (#619): a nonzero Your Discriminator selects the session only if the packet arrived on the session's table (`Slot.table`, the member's own table for micro-BFD) and, for single-hop, from its peer; otherwise it is dropped with `bfd packet discarded: wrong table/source`. Multihop skips the source check. Discriminators are random per session, never consecutive.
 - `BfdSessionView` carries the `SessionKey` (table, peer, optional local/interface, multihop), `state`, `diag`, both discriminators, the negotiated `tx_interval_us` and `detection_time_us`. There is no uptime or receive interval in it.
 - Single-hop sessions are keyed by (table, peer address) only: `nos-ribd` registers with `interface: None`, so `show` prints no interface; a BGP multihop session also shows its `local`.
 - Only `Role::User` (`nos-cli`) and `Role::Restd` may ask (`authz::allowed`); `cli/src/bfd_client.rs` and `rest/src/show.rs::bfd_sessions` are the two clients.
