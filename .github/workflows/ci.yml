@@ -108,6 +108,8 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
+      # nos-pam (#996) links -lpam; nothing else in the workspace does.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev
       - run: make test
       - name: Disk headroom
         if: always()
@@ -134,6 +136,7 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev
       - run: make ci-scripts-test
       - run: make coverage
       - name: Disk headroom
@@ -300,6 +303,7 @@ jobs:
       # Same entry point as local; the per-test cap comes from .config/nextest.toml.
       # `make mutants` reports survivors/timeouts (cargo-mutants exit 2/3) without
       # failing; only usage errors and a red unmutated baseline fail the job (#362).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev
       - name: Run shard ${{ matrix.shard }}/32
         run: make mutants MUTANTS_ARGS="--shard ${{ matrix.shard }}/32"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
