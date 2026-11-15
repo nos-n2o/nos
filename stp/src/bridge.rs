@@ -132,8 +132,19 @@ impl Bridge {
     /// Admin and auto edge of `port` (BDM reads both on every pass).
     pub fn set_edge(&mut self, port: usize, admin: bool, auto: bool) {
         let p = &mut self.ports[port];
+        let was = p.admin_edge;
         p.admin_edge = admin;
         p.auto_edge = auto;
+        // BDM only looks at `adminEdge` when the link is down: a live port
+        // takes the new setting at once, as a rebuild would have given it.
+        if admin != was {
+            let s = if admin {
+                bdm::State::Edge
+            } else {
+                bdm::State::NotEdge
+            };
+            bdm::enter(self, port, s);
+        }
         self.run();
     }
 

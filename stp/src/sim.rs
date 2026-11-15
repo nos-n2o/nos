@@ -527,4 +527,15 @@ mod tests {
         s.run(30);
         assert_eq!(s.bridges[0].port_state(new), PortState::Forwarding);
     }
+
+    #[test]
+    fn admin_edge_set_on_a_live_port_makes_it_edge_at_once() {
+        let mut s = started(&[4096, 32768], &[p2p(0, 1)]);
+        s.converge(60).unwrap();
+        assert!(!s.bridges[0].ports[0].oper_edge);
+        s.bridges[0].set_edge(0, true, false);
+        assert!(s.bridges[0].ports[0].oper_edge);
+        s.bridges[0].set_edge(0, false, false);
+        assert!(!s.bridges[0].ports[0].oper_edge);
+    }
 }
