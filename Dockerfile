@@ -3,7 +3,7 @@
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
 # versions in the slim images breaks on every security update.
-FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS builder
+FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
 WORKDIR /app
 
 # hadolint ignore=DL3008
@@ -26,7 +26,7 @@ RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin 
     && cargo build --release -p nos-pam -p nos-nss
 
 # trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
-# which `sshd -T` accepts it in (#994). The builder stays on bookworm (older glibc, still runs here).
+# which `sshd -T` accepts it in (#994). The builder is trixie too, so build and runtime glibc match.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 
 # Fixed numeric ids (the ENTRYPOINT's --child-gid names group `nos`):

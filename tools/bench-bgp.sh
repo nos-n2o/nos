@@ -95,7 +95,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Same split-target-dir reasoning as verify-e2e.sh: nos-provision must be
-# built against bookworm's glibc to run inside the runtime image.
+# built against trixie's glibc to run inside the runtime image.
 PROVISION_BIN="$REPO/target/docker-verify/release/nos-provision"
 WORKDIR="$REPO/target/bench-bgp"
 RESULTS="$WORKDIR/results.tsv"
@@ -216,11 +216,11 @@ since() { awk -v a="$1" -v b="$(now_ms)" 'BEGIN { printf "%.2f", (b - a) / 1000 
 # --- Images and network -----------------------------------------------------
 
 build_provision_tool() {
-  log "building nos-provision (bookworm-glibc-compatible, matching the runtime image)"
+  log "building nos-provision (trixie-glibc-compatible, matching the runtime image)"
   docker run --rm \
     -v "$REPO:$REPO:z" \
     -w "$REPO" \
-    rust:1-slim-bookworm \
+    rust:1-slim-trixie \
     cargo build --release -p nos-provision --target-dir target/docker-verify
 }
 
