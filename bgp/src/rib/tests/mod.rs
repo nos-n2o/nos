@@ -24,6 +24,7 @@ mod first_as;
 mod flowspec;
 mod flowspec_select;
 mod flowspec_validation;
+mod flowspec_vpn;
 mod gr;
 mod graceful_shutdown;
 mod next_hop;
@@ -249,6 +250,7 @@ fn evpn_reach(nlris: Vec<EvpnNlri>, as_path: Vec<u32>) -> UpdateMessage {
         nlri_path_ids: vec![],
         evpn: nlris,
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -312,6 +314,7 @@ fn v6_update(nlri: Vec<&str>) -> UpdateMessage {
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];

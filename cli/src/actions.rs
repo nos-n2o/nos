@@ -265,7 +265,7 @@ pub async fn handle_action(
         | Resolved::ShowLog { .. }
         | Resolved::ShowBgpBrief
         | Resolved::ShowBgpEvpn
-        | Resolved::ShowBgpFlowspec
+        | Resolved::ShowBgpFlowspec { .. }
         | Resolved::ShowBgpRpki
         | Resolved::ShowBgpBmp
         | Resolved::ShowBgpVpn { .. }
@@ -387,8 +387,8 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_bgp_evpn(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowBgpFlowspec => {
-            show_bgp_flowspec(socket, watchdog_socket).await;
+        Resolved::ShowBgpFlowspec { family, vrf } => {
+            show_bgp_flowspec(socket, watchdog_socket, family, vrf.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpRoutes => {
@@ -1037,7 +1037,12 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
 }
 
 /// `show bgp flowspec` — same shape as `show_bgp_evpn`.
-async fn show_bgp_flowspec(config_socket: &Path, watchdog_socket: &Path) {
+async fn show_bgp_flowspec(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    family: Option<nos_proto::AddressFamily>,
+    vrf: Option<&str>,
+) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1060,10 +1065,11 @@ async fn show_bgp_flowspec(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => {
                 let mut out = PagedOut::new(&instance.name);
-                let walked = bgp_client::for_each_flowspec_routes_page(&bgp_socket, |page| {
-                    out.page(page.is_empty(), || format::render_bgp_flowspec_lines(page));
-                })
-                .await;
+                let walked =
+                    bgp_client::for_each_flowspec_routes_page(&bgp_socket, family, vrf, |page| {
+                        out.page(page.is_empty(), || format::render_bgp_flowspec_lines(page));
+                    })
+                    .await;
                 out.finish(walked, &format::render_bgp_flowspec(&instance.name, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),

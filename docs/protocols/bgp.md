@@ -502,6 +502,14 @@ The traffic actions are decoded from the route's extended communities and shown 
 - Interference (RFC 8955 section 7.7): when a route carries several traffic-rates, the first in attribute order wins and the others are shown with `(ignored)`.
 - What the dataplane does with each action: [Filter DDoS traffic with flowspec](#filter-ddos-traffic-with-flowspec).
 
+### VPN Flowspec (SAFI 134, receive only)
+
+- Add `address-family vpnv4-flowspec` (and/or `vpnv6-flowspec`) next to `vpnv4` (`vpnv6`) on the peer-group; commit refuses it alone. It is negotiated only when both sides advertise AFI 1|2 / SAFI 134, and is accepted from any peer that negotiated it (RFC 8955 section 8), with no per-peer opt-in. `maximum-prefix vpnv4-flowspec`/`vpnv6-flowspec` caps it.
+- A rule is carried with its Route Distinguisher and Route Targets. It is imported into every VRF whose `route-targets import` matches one of them (a rule with the VRF's own Site of Origin is not); a rule matching no VRF stays in the Adj-RIB-In and shows only under `family`.
+- Each rule is validated per VRF (RFC 8955 section 6) against the VPN routes that VRF imports: `valid`, or `invalid:no-covering-unicast-route`, `invalid:originator-mismatch`, `invalid:more-specific-from-other-as`. It is re-validated when a VPN route is added, withdrawn or changes best.
+- `show bgp flowspec vrf <table>` (`GET /v1/bgp/flowspec?vrf=<table>`) lists the rules imported into one VRF with their validity there; `show bgp flowspec family vpnv4-flowspec` (`?family=`) lists every held rule with its RD. The plain `show bgp flowspec` stays the SAFI 133 rules.
+- Not yet: re-advertisement (#1085) and enforcement (#1086). The next hop is empty on the wire (RFC 8955 section 4) and ignored on receipt.
+
 To see the rules received, use `show bgp flowspec` (`GET /v1/bgp/flowspec`):
 
 ```
@@ -1316,7 +1324,7 @@ Created with `set bgp instance <i> peer <address> peer-group <g>` (or `set peer 
 |---|---|---|
 | `show bgp brief` | `GET /v1/bgp/summary` | Every peer of every instance, with state, remote AS, uptime, hold time and TCP-AO state |
 | `show bgp evpn` | `GET /v1/bgp/evpn` | EVPN routes received, per instance |
-| `show bgp flowspec` | `GET /v1/bgp/flowspec` | Flowspec rules received, per instance |
+| `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` | Flowspec rules received, per instance (SAFI 133; `family`/`vrf` for SAFI 134) |
 | `show bgp vpnv4\|vpnv6 [rd <rd>]` | `GET /v1/bgp/vpnv4\|vpnv6[?rd=<rd>]` | VPN routes received, per instance |
 | `show route <table> [<address>]` | `GET /v1/routes/{table}[/{addr}]` | Installed routes, BGP ones marked `bgp` |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` | Route refresh request to one peer |

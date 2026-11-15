@@ -207,7 +207,11 @@ pub struct FlowIndexes {
 impl BgpRib {
     /// `route`'s neighbouring AS: the leftmost AS of its path, else the AS of
     /// the peer it came from, else ours.
-    fn neighbour_as_of(&self, origin: RouteOrigin, path: &crate::as_path::AsPath) -> u32 {
+    pub(super) fn neighbour_as_of(
+        &self,
+        origin: RouteOrigin,
+        path: &crate::as_path::AsPath,
+    ) -> u32 {
         path.neighbor_as()
             .or_else(|| match origin {
                 RouteOrigin::Peer(p) => self.peer_asns.get(&p).copied(),
@@ -296,9 +300,13 @@ impl BgpRib {
         });
     }
 
-    /// The validity of one held rule, from the current unicast state.
-    fn flow_validity(&self, peer: IpAddr, k: &FlowspecKey) -> Option<FlowValidity> {
-        let r = self.flowspec_adj_rib_in.get(&peer)?.get(k)?;
+    /// The flow side of validating `r` (received from `peer`) and the peer's
+    /// validation knobs.
+    pub(super) fn flow_side(
+        &self,
+        peer: IpAddr,
+        r: &super::FlowspecRoute,
+    ) -> (Flow, nos_proto::BgpFlowspecValidation) {
         let ibgp = r.learned_via_ibgp;
         let peer_as = self.peer_asns.get(&peer).copied().filter(|a| *a != 0);
         let mode = self
@@ -315,6 +323,13 @@ impl BgpRib {
             ebgp: peer_as.filter(|_| !ibgp).map(|a| (a, path.neighbor_as())),
             local_domain: path.segments().all(|(k, _)| k.is_confed()),
         };
+        (flow, mode)
+    }
+
+    /// The validity of one held rule, from the current unicast state.
+    fn flow_validity(&self, peer: IpAddr, k: &FlowspecKey) -> Option<FlowValidity> {
+        let r = self.flowspec_adj_rib_in.get(&peer)?.get(k)?;
+        let (flow, mode) = self.flow_side(peer, r);
         let best = |net: IpNet| {
             let b = self.loc_rib.get(&net)?;
             Some(Unicast {

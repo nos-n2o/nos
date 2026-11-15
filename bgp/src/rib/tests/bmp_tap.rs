@@ -225,6 +225,7 @@ fn flow_reach(rule: FlowSpec) -> UpdateMessage {
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![rule],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc: vec![],
     }];
@@ -239,6 +240,7 @@ fn mp_unreach(afi: u16, safi: u8) -> message::MpUnreachNlri {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         vpn: vec![],
         rtc: vec![],
     }

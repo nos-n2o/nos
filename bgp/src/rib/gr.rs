@@ -220,6 +220,11 @@ impl BgpRib {
             AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec
         ) {
             self.resend_flowspec(peer, family);
+        } else if matches!(
+            family,
+            AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec
+        ) {
+            // Received only: nothing is originated or re-advertised (#1085).
         } else if crate::fsm::is_vpn(family) {
             self.resend_vpn(peer, family);
         } else if family == AddressFamily::RtConstraint {
@@ -479,6 +484,7 @@ impl BgpRib {
                 self.purge_stale_flowspec(peer, family)
             }
             AddressFamily::RtConstraint => self.purge_stale_rtc(peer),
+            AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec => 0,
             _ => self.end_refresh_in(peer, family),
         }
     }

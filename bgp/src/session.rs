@@ -977,6 +977,7 @@ impl SessionManager {
         limit: u32,
         budget: usize,
         acld: Option<&[nos_proto::FlowspecRuleStatus]>,
+        filter: &crate::rib::FlowFilter<'_>,
     ) -> (
         Vec<nos_proto::FlowspecRouteSummary>,
         Option<nos_proto::FlowspecRouteCursor>,
@@ -991,17 +992,22 @@ impl SessionManager {
                 budget,
                 now: std::time::Instant::now(),
             },
-            || rib.flowspec_keys(),
+            || rib.flowspec_keys(filter),
             |k| {
-                let (peer, route) = rib.flowspec_at(k)?;
+                let shown = rib.flowspec_at(k)?;
+                let (peer, route) = (shown.peer, shown.route);
                 Some(nos_proto::FlowspecRouteSummary {
-                    dataplane: rib.flowspec_selected(peer, route).then(|| {
-                        crate::acl_push_client::dataplane(
-                            &self.instance,
-                            &route.nlri.to_string(),
-                            acld,
-                        )
-                    }),
+                    dataplane: (shown.rd.is_none() && rib.flowspec_selected(peer, route)).then(
+                        || {
+                            crate::acl_push_client::dataplane(
+                                &self.instance,
+                                &route.nlri.to_string(),
+                                acld,
+                            )
+                        },
+                    ),
+                    family: route.family.to_string(),
+                    rd: shown.rd.map(|rd| crate::vpn::format_rd(&rd)),
                     peer,
                     nlri: route.nlri.to_string(),
                     extended_communities: route
@@ -1010,9 +1016,11 @@ impl SessionManager {
                         .iter()
                         .map(|&c| crate::flowspec::format_action(c))
                         .collect(),
-                    validity: route
-                        .validity
-                        .map_or_else(|| "unknown".to_string(), |v| v.to_string()),
+                    validity: shown.validity.unwrap_or_else(|| {
+                        route
+                            .validity
+                            .map_or_else(|| "unknown".to_string(), |v| v.to_string())
+                    }),
                     actions: crate::flowspec_action::describe(
                         &route.attributes.extended_communities,
                         &route.attributes.ipv6_extended_communities,
@@ -2018,6 +2026,7 @@ mod tests {
                 nlri_path_ids: vec![],
                 evpn: vec![],
                 flowspec: vec![],
+                flowspec_vpn: vec![],
                 rtc: vec![],
                 vpn: [1, 2]
                     .map(|n| crate::vpn::VpnNlri {
@@ -2166,6 +2175,7 @@ mod tests {
             nlri_path_ids: vec![],
             evpn: vec![],
             flowspec: vec![],
+            flowspec_vpn: vec![],
             vpn: vec![],
             rtc: Vec::new(),
         };
@@ -2226,7 +2236,14 @@ mod tests {
             let (mut snap, mut after, mut seen) = (Snapshot::default(), None, Vec::new());
             loop {
                 let (rows, next) = m
-                    .flowspec_page(&mut snap, after.as_ref(), limit, budget, None)
+                    .flowspec_page(
+                        &mut snap,
+                        after.as_ref(),
+                        limit,
+                        budget,
+                        None,
+                        &crate::rib::FlowFilter::default(),
+                    )
                     .await;
                 seen.extend(rows.into_iter().map(|r| r.nlri));
                 match next {

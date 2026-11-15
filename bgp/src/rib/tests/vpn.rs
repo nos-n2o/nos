@@ -47,6 +47,7 @@ pub(super) fn reach(next_hop: &str, as_path: Vec<u32>, vpn: Vec<VpnNlri>) -> Upd
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         rtc: vec![],
         vpn,
     }];
@@ -62,6 +63,7 @@ fn unreach(vpn: Vec<VpnNlri>) -> UpdateMessage {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: vec![],
+        flowspec_vpn: vec![],
         rtc: vec![],
         vpn,
     }];

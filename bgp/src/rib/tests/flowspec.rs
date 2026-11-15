@@ -28,6 +28,7 @@ fn reach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         nlri_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        flowspec_vpn: vec![],
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -44,6 +45,7 @@ fn unreach(afi: u16, rules: Vec<FlowSpec>) -> UpdateMessage {
         withdrawn_path_ids: vec![],
         evpn: vec![],
         flowspec: rules,
+        flowspec_vpn: vec![],
         vpn: Vec::new(),
         rtc: Vec::new(),
     }];
@@ -79,7 +81,7 @@ fn flowspec_keys_match_the_unpaged_order_and_resolve_to_their_rules() {
     let _rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), fs_afs());
     feed(&mut rib, peer, &reach(1, vec![rule(9), rule(1), rule(5)]));
     feed(&mut rib, peer, &reach(2, vec![rule6()]));
-    let keys = rib.flowspec_keys();
+    let keys = rib.flowspec_keys(&crate::rib::FlowFilter::default());
     let want: Vec<_> = rib
         .flowspec_routes()
         .into_iter()
@@ -97,8 +99,11 @@ fn flowspec_keys_match_the_unpaged_order_and_resolve_to_their_rules() {
         .collect();
     assert_eq!((got.len(), &got), (4, &want));
     for k in &keys {
-        let (p, r) = rib.flowspec_at(k).unwrap();
-        assert_eq!((p, r.nlri.to_string()), (peer, k.cursor.nlri.clone()));
+        let shown = rib.flowspec_at(k).unwrap();
+        assert_eq!(
+            (shown.peer, shown.route.nlri.to_string()),
+            (peer, k.cursor.nlri.clone())
+        );
     }
     assert!(rib
         .flowspec_at(&crate::page::Keyed::at(keys[0].cursor.clone()))

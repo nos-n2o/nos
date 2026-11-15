@@ -71,6 +71,7 @@ fn reach(afi: u16, safi: u8, next_hop: IpAddr) -> MpReachNlri {
         nlri_path_ids: Vec::new(),
         evpn: Vec::new(),
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }
@@ -84,6 +85,7 @@ fn unreach(afi: u16, safi: u8) -> MpUnreachNlri {
         withdrawn_path_ids: Vec::new(),
         evpn: Vec::new(),
         flowspec: Vec::new(),
+        flowspec_vpn: Vec::new(),
         vpn: Vec::new(),
         rtc: Vec::new(),
     }
@@ -235,6 +237,7 @@ pub fn rib_route_to_update(prefix: IpNet, id: u32, r: &RibRoute, add_path: bool)
                 nlri_path_ids: ids,
                 evpn: Vec::new(),
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],
@@ -260,6 +263,7 @@ pub fn rib_withdraw_to_update(prefix: IpNet, id: u32, add_path: bool) -> UpdateM
                 withdrawn_path_ids: ids,
                 evpn: Vec::new(),
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],

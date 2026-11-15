@@ -81,6 +81,8 @@ async fn only_people_get_the_show_queries_answered() {
                 3 => BgpRequest::GetFlowspecRoutesPage {
                     after: None,
                     limit: 10,
+                    family: None,
+                    vrf: None,
                 },
                 4 => BgpRequest::GetVpnRoutesPage {
                     family: nos_proto::AddressFamily::Vpnv4Unicast,

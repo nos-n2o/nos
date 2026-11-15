@@ -1343,8 +1343,10 @@ pub fn render_bgp_flowspec_lines(routes: &[FlowspecRouteSummary]) -> String {
         .iter()
         .map(|r| {
             let mut line = format!(
-                "  from {} {} [{}] {} actions: {}",
+                "  from {} {}{} [{}] {} actions: {}",
                 r.peer,
+                r.rd.as_ref()
+                    .map_or(String::new(), |rd| format!("rd {rd} ")),
                 r.nlri,
                 r.extended_communities.join(" "),
                 r.validity,
@@ -2573,6 +2575,8 @@ mod tests {
             validity: "invalid:no-covering-unicast-route".to_string(),
             actions: vec!["discard".to_string()],
             dataplane: None,
+            family: "ipv4-flowspec".into(),
+            rd: None,
         };
         assert_eq!(
             render_bgp_flowspec("r1", std::slice::from_ref(&route)),

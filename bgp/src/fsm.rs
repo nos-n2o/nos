@@ -60,10 +60,12 @@ fn afi_of(family: AddressFamily) -> u16 {
         AddressFamily::Ipv4Unicast
         | AddressFamily::Ipv4Flowspec
         | AddressFamily::Vpnv4Unicast
+        | AddressFamily::Vpnv4Flowspec
         | AddressFamily::RtConstraint => AFI_IPV4,
-        AddressFamily::Ipv6Unicast | AddressFamily::Ipv6Flowspec | AddressFamily::Vpnv6Unicast => {
-            AFI_IPV6
-        }
+        AddressFamily::Ipv6Unicast
+        | AddressFamily::Ipv6Flowspec
+        | AddressFamily::Vpnv6Unicast
+        | AddressFamily::Vpnv6Flowspec => AFI_IPV6,
         AddressFamily::L2vpnEvpn => message::AFI_L2VPN,
     }
 }
@@ -76,6 +78,7 @@ fn safi_of(family: AddressFamily) -> u8 {
         AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => message::SAFI_FLOWSPEC,
         AddressFamily::Vpnv4Unicast | AddressFamily::Vpnv6Unicast => message::SAFI_VPN,
         AddressFamily::RtConstraint => message::SAFI_RTC,
+        AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec => message::SAFI_FLOWSPEC_VPN,
     }
 }
 
@@ -241,6 +244,16 @@ fn negotiate_flowspec(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2]
     )
 }
 
+/// VPN Flowspec (RFC 8955 section 8, SAFI 134) per AFI, `[vpnv4, vpnv6]`.
+fn negotiate_flowspec_vpn(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
+    negotiate_safi(
+        open,
+        ctx,
+        message::SAFI_FLOWSPEC_VPN,
+        [AddressFamily::Vpnv4Flowspec, AddressFamily::Vpnv6Flowspec],
+    )
+}
+
 /// VPNv4/VPNv6 (RFC 4364/4659) per AFI, `[vpnv4, vpnv6]`.
 fn negotiate_vpn(open: &OpenMessage, ctx: &NegotiationContext) -> [bool; 2] {
     negotiate_safi(
@@ -387,6 +400,8 @@ struct RemoteInfo {
     negotiated_flowspec: [bool; 2],
     /// VPNv4/VPNv6 negotiated, `[vpnv4, vpnv6]` (`negotiate_vpn`).
     negotiated_vpn: [bool; 2],
+    /// VPN Flowspec negotiated, `[vpnv4, vpnv6]` (`negotiate_flowspec_vpn`).
+    negotiated_flowspec_vpn: [bool; 2],
     /// RFC 4684 Route Target Constraint negotiated (`negotiate_rtc`).
     negotiated_rtc: bool,
     /// RFC 7911 ADD-PATH per family, `[ipv4, ipv6]` (`negotiate_add_path`).
@@ -449,6 +464,7 @@ enum Action {
         negotiated_evpn: bool,
         negotiated_flowspec: [bool; 2],
         negotiated_vpn: [bool; 2],
+        negotiated_flowspec_vpn: [bool; 2],
         negotiated_rtc: bool,
         add_path: [AddPathDir; 2],
         four_octet_as: bool,
@@ -509,6 +525,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_evpn: remote.negotiated_evpn,
                 negotiated_flowspec: remote.negotiated_flowspec,
                 negotiated_vpn: remote.negotiated_vpn,
+                negotiated_flowspec_vpn: remote.negotiated_flowspec_vpn,
                 negotiated_rtc: remote.negotiated_rtc,
                 add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
@@ -616,6 +633,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiate_address_families(open, ctx);
     let negotiated_flowspec = negotiate_flowspec(open, ctx);
     let vpn_afs = negotiate_vpn(open, ctx);
+    let flowspec_vpn_afs = negotiate_flowspec_vpn(open, ctx);
     let negotiated_rtc = negotiate_rtc(open, ctx);
     let add_path = negotiate_add_path(open, ctx);
     let Ok(role) = negotiate_role(open, ctx) else {
@@ -631,6 +649,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_evpn,
         negotiated_flowspec,
         negotiated_vpn: vpn_afs,
+        negotiated_flowspec_vpn: flowspec_vpn_afs,
         negotiated_rtc,
         add_path,
         four_octet_as: message::four_octet_asn(open).is_some(),
@@ -834,7 +853,11 @@ async fn resend_loc_rib(
     // `resend_all`); any other SAFI keeps meaning unicast of its AFI.
     let family = if matches!(
         rr.safi,
-        message::SAFI_FLOWSPEC | message::SAFI_VPN | message::SAFI_EVPN | message::SAFI_RTC
+        message::SAFI_FLOWSPEC
+            | message::SAFI_FLOWSPEC_VPN
+            | message::SAFI_VPN
+            | message::SAFI_EVPN
+            | message::SAFI_RTC
     ) {
         gr::family_of(rr.afi, rr.safi)
     } else {
@@ -918,6 +941,8 @@ async fn send_route_refresh(
         remote.negotiated_ipv6_unicast.then_some((AFI_IPV6, 1)),
         remote.negotiated_vpn[0].then_some((AFI_IPV4, message::SAFI_VPN)),
         remote.negotiated_vpn[1].then_some((AFI_IPV6, message::SAFI_VPN)),
+        remote.negotiated_flowspec_vpn[0].then_some((AFI_IPV4, message::SAFI_FLOWSPEC_VPN)),
+        remote.negotiated_flowspec_vpn[1].then_some((AFI_IPV6, message::SAFI_FLOWSPEC_VPN)),
         remote
             .negotiated_evpn
             .then_some((message::AFI_L2VPN, message::SAFI_EVPN)),
@@ -1386,6 +1411,7 @@ async fn report_established(
         negotiated_evpn,
         negotiated_flowspec,
         negotiated_vpn,
+        negotiated_flowspec_vpn,
         negotiated_rtc,
         add_path,
         four_octet_as,
@@ -1424,6 +1450,8 @@ async fn report_established(
         (negotiated_flowspec[1], AddressFamily::Ipv6Flowspec),
         (negotiated_vpn[0], AddressFamily::Vpnv4Unicast),
         (negotiated_vpn[1], AddressFamily::Vpnv6Unicast),
+        (negotiated_flowspec_vpn[0], AddressFamily::Vpnv4Flowspec),
+        (negotiated_flowspec_vpn[1], AddressFamily::Vpnv6Flowspec),
         (*negotiated_rtc, AddressFamily::RtConstraint),
     ];
     negotiated_afs.extend(
@@ -1920,6 +1948,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     nlri_path_ids: path_ids,
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    flowspec_vpn: Vec::new(),
                     vpn: Vec::new(),
                     rtc: Vec::new(),
                 }],
@@ -1960,6 +1989,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 nlri_path_ids: Vec::new(),
                 evpn: Vec::new(),
                 flowspec: vec![f.nlri],
+                flowspec_vpn: vec![],
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],
@@ -1981,6 +2011,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn_path_ids: Vec::new(),
                     evpn: Vec::new(),
                     flowspec: vec![nlri],
+                    flowspec_vpn: vec![],
                     vpn: Vec::new(),
                     rtc: Vec::new(),
                 }],
@@ -2007,6 +2038,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     nlri_path_ids: Vec::new(),
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    flowspec_vpn: Vec::new(),
                     vpn: Vec::new(),
                     rtc: vec![key],
                 }],
@@ -2028,6 +2060,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 withdrawn_path_ids: Vec::new(),
                 evpn: Vec::new(),
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: Vec::new(),
                 rtc: vec![key],
             }],
@@ -2054,6 +2087,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     nlri_path_ids: Vec::new(),
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    flowspec_vpn: Vec::new(),
                     vpn: vec![crate::vpn::VpnNlri { labels, rd, prefix }],
                     rtc: Vec::new(),
                 }],
@@ -2075,6 +2109,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 withdrawn_path_ids: Vec::new(),
                 evpn: Vec::new(),
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: vec![crate::vpn::VpnNlri {
                     labels: Vec::new(),
                     rd,
@@ -2100,6 +2135,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn_path_ids: path_ids,
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
+                    flowspec_vpn: Vec::new(),
                     vpn: Vec::new(),
                     rtc: Vec::new(),
                 }],
@@ -2147,6 +2183,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 nlri_path_ids: Vec::new(),
                 evpn: vec![route.nlri],
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],
@@ -2167,6 +2204,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 withdrawn_path_ids: Vec::new(),
                 evpn: vec![nlri],
                 flowspec: Vec::new(),
+                flowspec_vpn: Vec::new(),
                 vpn: Vec::new(),
                 rtc: Vec::new(),
             }],
@@ -2497,6 +2535,36 @@ mod tests {
     }
 
     #[test]
+    fn vpn_flowspec_is_afi_safi_134_negotiated_per_afi() {
+        let fam = [AddressFamily::Vpnv4Flowspec, AddressFamily::Vpnv6Flowspec];
+        assert_eq!([afi_of(fam[0]), afi_of(fam[1])], [AFI_IPV4, AFI_IPV6]);
+        assert!(fam
+            .iter()
+            .all(|f| safi_of(*f) == 134 && !is_unicast(*f) && !is_vpn(*f)));
+        // OPEN advertises (AFI, 134) without Extended Next Hop.
+        let caps = build_mp_capabilities(&fam, AFI_IPV6);
+        for (afi, cap) in [(1u16, &caps[0]), (2, &caps[1])] {
+            assert_eq!(*cap, message::Capability::MultiProtocol { afi, safi: 134 });
+        }
+        let ctx = ctx_with_afs(
+            vec![
+                AddressFamily::Vpnv4Unicast,
+                AddressFamily::Vpnv4Flowspec,
+                AddressFamily::Vpnv6Flowspec,
+            ],
+            AFI_IPV4,
+        );
+        let peer = open_with_mp(&[(AFI_IPV4, 128), (AFI_IPV4, 134)]);
+        assert_eq!(negotiate_flowspec_vpn(&peer, &ctx), [true, false]);
+        let plain = open_with_mp(&[(AFI_IPV4, 128)]);
+        assert_eq!(negotiate_flowspec_vpn(&plain, &ctx), [false, false]);
+        let unconfigured = ctx_with_afs(vec![AddressFamily::Vpnv4Unicast], AFI_IPV4);
+        assert_eq!(negotiate_flowspec_vpn(&peer, &unconfigured), [false, false]);
+        assert_eq!(crate::gr::afi_safi(fam[0]), (1, 134));
+        assert_eq!(crate::gr::afi_safi(fam[1]), (2, 134));
+    }
+
+    #[test]
     fn evpn_capability_is_sent_as_afi25_safi70_without_extended_next_hop() {
         let caps = build_mp_capabilities(&[AddressFamily::L2vpnEvpn], AFI_IPV6);
         assert_eq!(
@@ -2739,6 +2807,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
@@ -2770,6 +2839,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
@@ -2804,6 +2874,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
@@ -2873,6 +2944,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,
@@ -2902,6 +2974,7 @@ mod tests {
             negotiated_evpn: false,
             negotiated_flowspec: [false; 2],
             negotiated_vpn: [false; 2],
+            negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
             add_path: [AddPathDir::default(); 2],
             role: None,

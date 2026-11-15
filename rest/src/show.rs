@@ -654,12 +654,43 @@ pub async fn bgp_evpn(
     ))
 }
 
-#[utoipa::path(get, path = "/v1/bgp/flowspec", tag = "show", summary = "One page of received Flowspec routes, per instance", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops.", params(("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpFlowspecReport), (status = 400, body = ErrorBody, description = "after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+/// The query of `GET /v1/bgp/flowspec`.
+#[derive(Deserialize)]
+pub struct FlowspecPageQuery {
+    family: Option<String>,
+    vrf: Option<String>,
+    instance: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
+#[utoipa::path(get, path = "/v1/bgp/flowspec", tag = "show", summary = "One page of received Flowspec routes, per instance", description = "Each instance's `result` is `{items, pagination}`. Without `instance`, every instance's FIRST page is returned (`pagination.next` is non-null when more exist); `after` and `limit` then need `?instance=`. Continue with `?instance=<name>&after=<pagination.next>` until it is null. `after` is an opaque cursor: pass it back verbatim. The daemon keeps a sorted key snapshot per connection, so entries added mid-walk appear on the next walk; a walk never repeats or loops. Without `family` or `vrf` only the SAFI 133 rules are returned; `family` (`ipv4-flowspec`, `ipv6-flowspec`, `vpnv4-flowspec`, `vpnv6-flowspec`) selects one family (a VPN rule carries its `rd`); `vrf` returns the SAFI 134 rules imported into that VRF table, with their validity there. A walk must keep both constant.", params(("family" = Option<String>, Query, description = "only this family: ipv4-flowspec, ipv6-flowspec, vpnv4-flowspec or vpnv6-flowspec"), ("vrf" = Option<String>, Query, description = "only the VPN Flowspec rules imported into this VRF table (routing table name)"), ("instance" = Option<String>, Query, description = "only this BGP instance; required with after or limit"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (opaque)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = BgpFlowspecReport), (status = 400, body = ErrorBody, description = "family is not a Flowspec family, after is not a cursor, or after/limit without instance"), (status = 404, body = ErrorBody, description = "no such bgp instance"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn bgp_flowspec(
     State(d): State<Daemons>,
-    Query(q): Query<BgpPageQuery>,
+    Query(q): Query<FlowspecPageQuery>,
 ) -> ApiResult<Json<BgpFlowspecReport>> {
-    let (names, limit) = bgp_page_scope(&d, &q).await?;
+    use nos_proto::AddressFamily as F;
+    let family = q
+        .family
+        .as_deref()
+        .map(|w| {
+            [
+                F::Ipv4Flowspec,
+                F::Ipv6Flowspec,
+                F::Vpnv4Flowspec,
+                F::Vpnv6Flowspec,
+            ]
+            .into_iter()
+            .find(|f| f.as_str() == w)
+            .ok_or_else(|| ApiError::BadRequest(format!("family '{w}' is not a Flowspec family")))
+        })
+        .transpose()?;
+    let page = BgpPageQuery {
+        instance: q.instance.clone(),
+        after: q.after.clone(),
+        limit: q.limit,
+    };
+    let (names, limit) = bgp_page_scope(&d, &page).await?;
     let after: Option<nos_proto::FlowspecRouteCursor> = bgp_after(q.after.as_deref())?;
     Ok(Json(
         per_instance(
@@ -669,6 +700,8 @@ pub async fn bgp_flowspec(
             |_| BgpRequest::GetFlowspecRoutesPage {
                 after: after.clone(),
                 limit,
+                family,
+                vrf: q.vrf.clone(),
             },
             |e| match e {
                 BgpEvent::FlowspecRoutesPage { routes, next } => Some(BgpFlowspecPage {

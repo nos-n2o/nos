@@ -659,6 +659,13 @@ impl BgpRib {
                 }
             }
         }
+        for u in &update.mp_unreach {
+            if let Some(family) = super::flowspec_vpn::vpn_flow_family(u.afi) {
+                for n in &u.flowspec_vpn {
+                    self.drop_vpn_flow(from, &(family, (n.rd, n.flow.clone())));
+                }
+            }
+        }
         if let Some(stale) = self.rtc_stale.get_mut(&from) {
             for n in update
                 .mp_reach
@@ -929,6 +936,15 @@ impl BgpRib {
         }
         self.learn_rtc(update, &base_route, from);
         self.learn_vpn(update, &base_route, (from, peer_as), import_policy);
+        self.learn_flowspec_vpn(
+            update,
+            &super::flowspec_vpn::VpnFlowRx {
+                from,
+                attributes: attrs,
+                learned_via_ibgp: remote_is_ibgp || from_confed,
+                router_id: remote_bgp_id,
+            },
+        );
     }
 
     /// RFC 7606 treat-as-withdraw, decided here rather than in the codec
@@ -951,6 +967,11 @@ impl BgpRib {
             self.drop_rtcs(from, &m.rtc);
             for n in &m.vpn {
                 self.drop_vpn(from, &(n.rd, n.prefix));
+            }
+            if let Some(family) = super::flowspec_vpn::vpn_flow_family(m.afi) {
+                for n in &m.flowspec_vpn {
+                    self.drop_vpn_flow(from, &(family, (n.rd, n.flow.clone())));
+                }
             }
             let Some(family) = flowspec_family(m.afi) else {
                 continue;
