@@ -259,6 +259,8 @@ pub const L3_TABLE: &str = "tenant";
 /// `vpn`: router-a's L3VPN VRF (RFC 4364 import, #579), `nos-provision`'s
 /// `--vpn-table` default.
 pub const VPN_TABLE: &str = "vrf-red";
+/// The VLAN tag of the `flowspec` subinterface `flowspec-vpn` puts in `VPN_TABLE` (#1083).
+pub const VPN_FS_TAG: u16 = 200;
 /// `vpn`'s chunked stage (#715): single-path VPNv4 routes GoBGP announces.
 /// Each weighs 2 (`VpnRoute::weight`, paths + 1), so 20 000 are 40 000 >
 /// `VPN_PUSH_CHUNK` (32 768): `vrf-red`'s `Full` crosses as two frames.

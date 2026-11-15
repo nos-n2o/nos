@@ -2738,6 +2738,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "table": {
+            "description": "The VRF the rule filters; `None` = the instance's own table.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "unsupported": {
             "description": "Why it is not installed (an unsupported match or action, the rule\ncap); `None` when installed.",
             "type": [

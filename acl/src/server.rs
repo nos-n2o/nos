@@ -107,6 +107,7 @@ mod tests {
     fn push() -> AclRequest {
         AclRequest::PushFlowspec(nos_proto::FlowspecSet {
             instance: "b1".into(),
+            table: None,
             devices: vec![],
             rules: vec![],
         })

@@ -90,9 +90,13 @@ impl Conn {
     }
 }
 
-fn snapshot(instance: &str, rules: Vec<FlowRule>) -> FlowspecSet {
+/// One set to push: the rules of `table` (`None` = the instance's own).
+type Sets = Vec<(Option<String>, Vec<FlowRule>)>;
+
+fn snapshot(instance: &str, table: Option<String>, rules: Vec<FlowRule>) -> FlowspecSet {
     FlowspecSet {
         instance: instance.to_string(),
+        table,
         devices: Vec::new(),
         rules,
     }
@@ -109,26 +113,35 @@ async fn run(
     let mut conn: Option<Conn> = None;
     // The last snapshot taken outside a deferral, and the last one
     // `nos-acld` acknowledged over `conn`.
-    let mut want: Option<Vec<FlowRule>> = None;
-    let mut sent: Option<Vec<FlowRule>> = None;
+    let mut want: Option<Sets> = None;
+    let mut sent: Sets = Vec::new();
     while !*shutdown.borrow() {
         if let Some(rules) = sessions.flowspec_push_snapshot().await {
-            want = Some(rules);
+            let mut sets = vec![(None, rules)];
+            let vrfs = sessions.vpn_flowspec_push_snapshot().await;
+            sets.extend(vrfs.into_iter().flatten().map(|(t, r)| (Some(t), r)));
+            want = Some(sets);
         }
-        if let Some(rules) = &want {
+        if let Some(sets) = &want {
             if conn.is_none() {
                 conn = Conn::connect(&watchdog_socket).await;
-                sent = None;
+                sent.clear();
                 if conn.is_some() {
-                    info!(instance = %instance, routes = rules.len(), "connected to nos-acld, pushing flowspec rules");
+                    info!(instance = %instance, routes = sets[0].1.len(), "connected to nos-acld, pushing flowspec rules");
                 }
             }
-            if let Some(c) = conn.as_mut()
-                && sent.as_ref() != Some(rules)
-            {
-                if c.push(snapshot(&instance, rules.clone())).await {
+            for set in sets {
+                let Some(c) = conn.as_mut() else { break };
+                if sent.contains(set) {
+                    continue;
+                }
+                let (table, rules) = set;
+                if c.push(snapshot(&instance, table.clone(), rules.clone()))
+                    .await
+                {
                     debug!(instance = %instance, routes = rules.len(), "flowspec push");
-                    sent = Some(rules.clone());
+                    sent.retain(|(t, _)| t != table);
+                    sent.push(set.clone());
                 } else {
                     warn!(instance = %instance, "flowspec push to nos-acld failed, reconnecting");
                     conn = None;
@@ -169,7 +182,12 @@ async fn run(
                 Some(c) => c,
                 None => Conn::connect(&watchdog_socket).await?,
             };
-            c.push(snapshot(&instance, Vec::new())).await.then_some(())
+            for (table, _) in want.iter().flatten() {
+                if !c.push(snapshot(&instance, table.clone(), Vec::new())).await {
+                    return None;
+                }
+            }
+            Some(())
         };
         if let Ok(Some(())) = tokio::time::timeout(ACK_TIMEOUT, clear).await {
             info!(instance = %instance, "flowspec rules withdrawn from nos-acld");
@@ -484,6 +502,7 @@ mod tests {
     fn dataplane_joins_on_instance_and_flow() {
         let row = |instance: &str, flow: &str, unsupported: Option<&str>| FlowspecRuleStatus {
             instance: instance.into(),
+            table: None,
             flow: flow.into(),
             actions: vec![],
             unsupported: unsupported.map(Into::into),
@@ -525,6 +544,7 @@ mod tests {
         let acld_path = tmp.path().join("acl.sock");
         let rows = vec![FlowspecRuleStatus {
             instance: "b1".into(),
+            table: None,
             flow: "f".into(),
             actions: vec![],
             unsupported: None,

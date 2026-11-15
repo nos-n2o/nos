@@ -201,6 +201,9 @@ pub struct FlowRule {
 pub struct FlowspecSet {
     /// The pushing BGP instance.
     pub instance: String,
+    /// The VRF (routing table) whose VPN flowspec rules these are; `None`
+    /// = the instance's own table.
+    pub table: Option<String>,
     /// Kernel device names to filter on.
     pub devices: Vec<String>,
     /// The rules in RFC 8955 section 5.1 order.
@@ -214,6 +217,8 @@ pub struct FlowspecSet {
 pub struct FlowspecRuleStatus {
     /// The BGP instance that pushed it.
     pub instance: String,
+    /// The VRF the rule filters; `None` = the instance's own table.
+    pub table: Option<String>,
     /// The flow as text.
     pub flow: String,
     /// Its actions as text.
@@ -273,6 +278,7 @@ mod tests {
         };
         let set = FlowspecSet {
             instance: "b1".into(),
+            table: Some("rt2".into()),
             devices: vec!["eth0".into()],
             rules: vec![FlowRule {
                 flow: "src 192.0.2.0/24 proto =6".into(),

@@ -9,6 +9,7 @@ use reqwest::Method;
 
 use nos_proto::{
     BgpPeerGroupOp, ConfigOp, InterfaceOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
+    SubinterfaceOp,
 };
 
 use crate::consts::*;
@@ -4443,6 +4444,42 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     let stated = "vpn flowspec next hop stated";
     let stated_before = a.count(stated);
 
+    log("a flowspec VLAN subinterface in the VRF: the acld set for (instance, VRF) lands on it (#1083)");
+    let vrf_dev = format!("eth0.{VPN_FS_TAG}");
+    a.edit(|c| {
+        for op in [
+            SubinterfaceOp::Ensure {
+                interface: "eth0".into(),
+                tag: VPN_FS_TAG,
+            },
+            SubinterfaceOp::SetRoutingTable {
+                interface: "eth0".into(),
+                tag: VPN_FS_TAG,
+                routing_table: VPN_TABLE.into(),
+            },
+        ] {
+            ConfigOp::Subinterface(op)
+                .apply(c)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        let sub = c
+            .interfaces
+            .iter_mut()
+            .find(|i| i.name == "eth0")
+            .and_then(|i| i.subinterfaces.iter_mut().find(|s| s.tag == VPN_FS_TAG))
+            .context("eth0 subinterface")?;
+        sub.flowspec = true;
+        Ok(())
+    })
+    .await?;
+    a.wait(&format!(
+        "created vlan sub-interface interface=eth0 sub_interface={vrf_dev}"
+    ))
+    .await?;
+    let own_table = a.count("flowspec applied interface=eth0 ");
+    let received = format!("flowspec rules received instance=r1 table={VPN_TABLE} rules=1");
+    let applied = |n: usize| format!("flowspec applied interface={vrf_dev} rules={n}");
+
     log("a VPNv4 route and a rule under the VRF's import RT: learned, imported, valid");
     gobgp_owned(w, route("add")).await?;
     a.wait(&format!(
@@ -4455,6 +4492,22 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait(&changed("valid")).await?;
+    a.wait(&received).await?;
+    a.wait(&applied(1)).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/flowspec", None, 200)
+        .await?;
+    for want in [
+        format!("\"table\":\"{VPN_TABLE}\""),
+        "dest 10.10.0.0/24".to_string(),
+        "\"unsupported\":null".to_string(),
+    ] {
+        if !body.contains(&want) {
+            bail!("GET /v1/flowspec is missing {want}: {body}");
+        }
+    }
+    a.assert_quiet("flowspec applied interface=eth0 ", own_table, 2)
+        .await?;
 
     let show = |q: &str| {
         let path = format!("/v1/bgp/flowspec{q}");
@@ -4497,7 +4550,9 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     let invalid = changed("invalid:no-covering-unicast-route");
     let base = a.count(&invalid);
     gobgp_owned(w, route("del")).await?;
+    let cleared = a.count(&applied(0));
     a.wait_new(&invalid, base, 30).await?;
+    a.wait_new(&applied(0), cleared, 30).await?;
     let body = show(&format!("?vrf={VPN_TABLE}")).await?;
     if !body.contains("invalid:no-covering-unicast-route") {
         bail!("the VRF view must show the rule invalid: {body}");
@@ -4516,7 +4571,17 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("the next hop GoBGP sends is RFC 8955's length 0");
-    a.assert_quiet(stated, stated_before, 1).await
+    a.assert_quiet(stated, stated_before, 1).await?;
+    a.edit(|c| {
+        ConfigOp::Subinterface(SubinterfaceOp::Delete {
+            interface: "eth0".into(),
+            tag: VPN_FS_TAG,
+        })
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    Ok(())
 }
 
 /// RFC 4364/4659 VPN-IPv4/VPN-IPv6 (SAFI 128), receive side (#578). GoBGP
