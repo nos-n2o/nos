@@ -278,3 +278,28 @@ fn the_vpn_flowspec_slot_of_maximum_prefix_counts_the_rules() {
         Some((AddressFamily::Vpnv4Flowspec, 2))
     );
 }
+
+/// #1083: `nos-acld` gets, per VRF, the rules valid there (once, whatever
+/// the RD or peer), and every VRF is listed so a push can clear it.
+#[test]
+fn the_acld_snapshot_holds_the_valid_rules_of_each_vrf() {
+    let mut rib = setup();
+    let tables = |rib: &BgpRib| {
+        rib.vpn_flowspec_push_snapshot()
+            .unwrap()
+            .into_iter()
+            .map(|(t, r)| (t, r.len()))
+            .collect::<Vec<_>>()
+    };
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
+    // Invalid (no covering route): nothing to enforce.
+    assert_eq!(tables(&rib), [("red".into(), 0), ("blue".into(), 0)]);
+    unicast(&mut rib, SRC, 65001, "10.10.0.0/24");
+    assert_eq!(tables(&rib), [("red".into(), 1), ("blue".into(), 0)]);
+    // The same flow from another RD and peer is one rule.
+    unicast(&mut rib, OTHER, 65002, "10.10.0.0/24");
+    feed(&mut rib, OTHER, &flow_reach(65002, vec![RT], RD2, flow()));
+    assert_eq!(tables(&rib), [("red".into(), 1), ("blue".into(), 0)]);
+    let rules = rib.vpn_flowspec_push_snapshot().unwrap();
+    assert_eq!(rules[0].1[0].flow, flow().to_string());
+}

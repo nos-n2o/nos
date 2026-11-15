@@ -33,10 +33,15 @@ pub struct Attachment {
 pub struct Plan {
     pub acls: BTreeMap<String, Arc<Compiled>>,
     pub attachments: Vec<Attachment>,
-    /// Per BGP instance, the devices its flowspec rules filter (ingress):
-    /// every `flowspec` device whose routing table the instance owns.
-    pub flowspec: BTreeMap<String, Vec<Device>>,
+    /// Per (BGP instance, VRF), the devices its flowspec rules filter
+    /// (ingress): `None` = every `flowspec` device in the instance's own
+    /// table, `Some(t)` = those in VRF `t`, a table whose `vpn` rides the
+    /// instance.
+    pub flowspec: FlowspecDevices,
 }
+
+/// `Plan::flowspec`.
+pub type FlowspecDevices = BTreeMap<(String, Option<String>), Vec<Device>>;
 
 fn attach(
     out: &mut Vec<Attachment>,
@@ -91,8 +96,8 @@ pub fn attachments(cfg: &Config) -> Vec<Attachment> {
 /// Every `flowspec` device, per BGP instance owning its routing table
 /// (#562 D-A). Placement is the commit's job
 /// (`schema::acl::valid_flowspec_placements`).
-pub fn flowspec_devices(cfg: &Config) -> BTreeMap<String, Vec<Device>> {
-    let mut out: BTreeMap<String, Vec<Device>> = BTreeMap::new();
+pub fn flowspec_devices(cfg: &Config) -> FlowspecDevices {
+    let mut out = FlowspecDevices::new();
     for p in flowspec_points(cfg) {
         let device = if p.aggregate {
             Device::Aggregate {
@@ -104,7 +109,18 @@ pub fn flowspec_devices(cfg: &Config) -> BTreeMap<String, Vec<Device>> {
         };
         for b in &cfg.bgp_instances {
             if p.table.is_some() && b.routing_table.as_deref() == p.table {
-                out.entry(b.name.clone()).or_default().push(device.clone());
+                out.entry((b.name.clone(), None))
+                    .or_default()
+                    .push(device.clone());
+            }
+        }
+        for t in &cfg.routing_tables {
+            if let Some(b) = &t.vpn.bgp_instance
+                && p.table == Some(t.name.as_str())
+            {
+                out.entry((b.clone(), Some(t.name.clone())))
+                    .or_default()
+                    .push(device.clone());
             }
         }
     }
@@ -235,7 +251,7 @@ mod tests {
     /// subinterface's for the parent); a table no instance owns gives none.
     #[test]
     fn flowspec_devices_follow_their_table_to_its_instance() {
-        use nos_proto::schema::BgpInstance;
+        use nos_proto::schema::{BgpInstance, RoutingTable, RoutingTableVpn};
         let in_table = |tag, rt: &str, flowspec| Subinterface {
             tag,
             routing_table: Some(rt.into()),
@@ -265,7 +281,7 @@ mod tests {
         assert_eq!(
             got,
             BTreeMap::from([(
-                "b1".to_string(),
+                ("b1".to_string(), None),
                 vec![
                     Device::Kernel("eth0".into()),
                     Device::Aggregate {
@@ -275,6 +291,25 @@ mod tests {
                 ]
             )])
         );
+        // A VRF whose vpn rides b1 gets its own key; another instance's VRF
+        // gives none.
+        let vrf = |name: &str, b: &str| RoutingTable {
+            name: name.into(),
+            vpn: RoutingTableVpn {
+                bgp_instance: Some(b.into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut cfg2 = cfg.clone();
+        cfg2.routing_tables = vec![vrf("rt2", "b1"), vrf("rt3", "other")];
+        cfg2.interfaces[0].subinterfaces[1].routing_table = Some("rt2".into());
+        let got2 = flowspec_devices(&cfg2);
+        assert_eq!(
+            got2[&("b1".to_string(), Some("rt2".to_string()))],
+            [Device::Kernel("eth0.9".into())]
+        );
+        assert_eq!(got2.len(), 2);
         assert_eq!(Compiler::default().plan(&cfg).flowspec, got);
     }
 

@@ -57,6 +57,7 @@ impl Watch {
         {
             out.push(FlowspecSet {
                 instance: old,
+                table: None,
                 devices: Vec::new(),
                 rules: Vec::new(),
             });

@@ -54,6 +54,7 @@ fn unsupported() -> FlowRule {
 fn set(instance: &str, devices: &[&str], rules: Vec<FlowRule>) -> FlowspecSet {
     FlowspecSet {
         instance: instance.into(),
+        table: None,
         devices: devices.iter().map(|d| (*d).to_string()).collect(),
         rules,
     }
@@ -231,7 +232,7 @@ fn the_plan_attaches_an_instance_to_its_flowspec_devices() {
     );
     let mut plan = Plan::default();
     plan.flowspec.insert(
-        "b1".into(),
+        ("b1".into(), None),
         vec![
             Device::Kernel("eth0".into()),
             Device::Aggregate {
@@ -245,11 +246,40 @@ fn the_plan_attaches_an_instance_to_its_flowspec_devices() {
         ],
     );
     plan.flowspec
-        .insert("b2".into(), vec![Device::Kernel("eth0".into())]);
+        .insert(("b2".into(), None), vec![Device::Kernel("eth0".into())]);
     e.sync(&plan, &table);
     assert_eq!(take(&mut e), [put(6, 10, 0), put(4, 10, 0)]);
     assert_eq!(e.show_flowspec()[0].unsupported, None);
     // The flag goes: the rules come off.
     e.sync(&Plan::default(), &table);
     assert_eq!(take(&mut e), [clear(6, 10), clear(4, 10)]);
+}
+
+/// #1083: the instance's own table and a VRF of it side by side; each set
+/// has its own devices, shares a device's band, and clears alone.
+#[test]
+fn an_instances_table_and_vrf_sets_are_independent() {
+    let mut e = ready();
+    let vrf = |devices: &[&str], rules| FlowspecSet {
+        table: Some("rt2".into()),
+        ..set("b1", devices, rules)
+    };
+    e.push_flowspec(set("b1", &["eth0"], vec![rule(6)]));
+    e.push_flowspec(vrf(&["eth1"], vec![rule(17)]));
+    take(&mut e);
+    // Same device: the band is shared, `None` first.
+    e.push_flowspec(vrf(&["eth0"], vec![rule(17)]));
+    let c = take(&mut e);
+    assert!(c.contains(&put(4, 11, 0)), "{c:?}");
+    assert!(c.contains(&clear(5, 10)), "{c:?}");
+    let rows = e.show_flowspec();
+    let got: Vec<_> = rows
+        .iter()
+        .map(|r| (r.table.as_deref(), &*r.flow))
+        .collect();
+    assert_eq!(got, [(None, "proto =6"), (Some("rt2"), "proto =17")]);
+    // Clearing the VRF set leaves the table's rule alone.
+    e.push_flowspec(vrf(&[], vec![]));
+    assert_eq!(take(&mut e), [clear(4, 11)]);
+    assert_eq!(e.show_flowspec().len(), 1);
 }

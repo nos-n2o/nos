@@ -81,9 +81,9 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 
 ## Flowspec rules (`nos-acld`, #561)
 
-`nos-acld` also installs BGP Flow Specification rules on ingress, beside the ACL. A rule reaches it as a `FlowRule` (`nos_proto::acl`, a data-only mirror of `nos-bgp`'s decoded NLRI and actions), in a per-instance snapshot `FlowspecSet { instance, devices, rules }`.
+`nos-acld` also installs BGP Flow Specification rules on ingress, beside the ACL. A rule reaches it as a `FlowRule` (`nos_proto::acl`, a data-only mirror of `nos-bgp`'s decoded NLRI and actions), in a per-instance snapshot `FlowspecSet { instance, table, devices, rules }` (`table`: `None` = the instance's own table, `Some(vrf)` = the VPN flowspec rules valid in that VRF, #1083).
 
-- Layout (decision A, settled by the #563 spike): directly in chain 0, one priority per rule in the band 10..99 (`flowspec::PRIO_FIRST..=PRIO_LAST`), in snapshot order. Per device the instances stack in name order. A `goto chain` entry is not used, because a miss inside its target would end classification and skip the ACL at 100.
+- Layout (decision A, settled by the #563 spike): directly in chain 0, one priority per rule in the band 10..99 (`flowspec::PRIO_FIRST..=PRIO_LAST`), in snapshot order. Per device the sets stack in (instance, table) order, `None` first; every set on a device shares the one band. A `goto chain` entry is not used, because a miss inside its target would end classification and skip the ACL at 100.
 - One rule = one family = one priority. Its filters (the alternatives a numeric expression or a type-4 port expands to) share the priority and the actions. Each filter's first action carries the rule index as cookie, so a dump counts each filter once.
 - Caps: 90 rules per device (the band; the rest are `unsupported: rule cap`), 64 filters per rule.
 - Lowering (`acl/src/flowspec.rs`, pure): prefixes (IPv6 offset 0 only), protocol, ports (`!=`/`<`/`>` expanded to ranges; ports imply TCP or UDP), ICMP type/code, TCP flags when expressible as flags/mask, DSCP (`ip_tos`), fragment `IsF`/`FF` (flower's `is_fragment`/`firstfrag`). Refused, never approximated: packet length, flow label (no flower key on 7.2), fragment `DF`/`LF`, IPv6 prefix offset, redirects (sent as `FlowRuleAction::Unsupported`), an expression that matches nothing.
@@ -91,7 +91,7 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 - Verdict: the RFC 8955 T bit set means later rules also apply: `Verdict::Unspec`. Clear (the default): `goto chain 999` (`flowspec::EXIT_CHAIN`), whose one filter jumps to the live ACL chain, so a rate-limited or marked packet still meets the ACL. `Driver::switch` keeps that filter in step with the ACL entry; without an ACL the chain is empty and the packet passes.
 - Update: per priority whose content changed, delete it (by `ip` then `ipv6`: the kernel refuses a delete with the wrong protocol) and add the new filters. Not atomic across priorities; unchanged rules keep their counters.
 - Start: the first link snapshot also dumps each device's band; what a previous run left is rewritten or cleared by the next pass. Clean stop clears every band priority.
-- Log lines: `flowspec rules received instance= rules= installable= devices=`, `flowspec applied interface= rules=`, `flowspec rule unsupported instance= flow= reason=` (once per instance, flow and reason), `flowspec pending interface= reason="absent"`.
+- Log lines: `flowspec rules received instance= [table=] rules= installable= devices=`, `flowspec applied interface= rules=`, `flowspec rule unsupported instance= [table=] flow= reason=` (once per set, flow and reason; `table=` appears only for a VRF set), `flowspec pending interface= reason="absent"`.
 - Read back: `GET /v1/flowspec` and the end of `show acl` list every rule with `unsupported` (the reason, `not attached` when no device holds it, or empty when installed) and packets/bytes summed over its devices. `nos-bgpd` reads the same rows for `show bgp flowspec`'s `dataplane`.
 
 ### Feed rules by hand (test hook)
@@ -107,4 +107,4 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
    "actions": [{"RateBytes": 0.0}]}]}
 ```
 
-- Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562) with `devices` empty: `nos-acld` adds, per instance, the devices of its own plan (`plan::flowspec_devices`: every `flowspec` interface, subinterface or port aggregate whose routing table that instance owns, an aggregate resolved through its bond like an ACL). A config change re-attaches; a rule no device holds shows `unsupported: not attached`.
+- Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562) with `devices` empty: `nos-acld` adds, per (instance, table), the devices of its own plan (`plan::flowspec_devices`: every `flowspec` interface, subinterface or port aggregate whose routing table that instance owns for `table: None`, or the VRF `t` whose `vpn.bgp-instance` is that instance for `Some(t)`; an aggregate resolved through its bond like an ACL). `nos-bgpd` sends the own-table set plus one set per VRF, holding the VPN flowspec rules valid in it (one copy per flow). A config change re-attaches; a rule no device holds shows `unsupported: not attached`.

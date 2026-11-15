@@ -872,6 +872,13 @@ impl SessionManager {
         self.bgp_rib.lock().await.flowspec_push_snapshot()
     }
 
+    /// The VPN flowspec rules valid in each VRF of this instance (#1083).
+    pub async fn vpn_flowspec_push_snapshot(
+        &self,
+    ) -> Option<Vec<(String, Vec<nos_proto::FlowRule>)>> {
+        self.bgp_rib.lock().await.vpn_flowspec_push_snapshot()
+    }
+
     /// This instance's owning routing table name and current best-path
     /// snapshot, for `rib_push_client`.
     pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {

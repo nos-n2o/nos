@@ -11,7 +11,10 @@ use tracing::{error, info, warn};
 use super::{resolve, Engine};
 use crate::driver::Driver;
 use crate::flowspec::{lower, Lowered, PRIO_FIRST, RULE_CAP};
-use crate::plan::Device as PlanDevice;
+use crate::plan::FlowspecDevices;
+
+/// One snapshot's owner: (BGP instance, VRF), `None` = its own table.
+type Key = (String, Option<String>);
 
 const CAPPED: &str = "rule cap";
 /// A rule no device holds: no `flowspec` device in the instance's table,
@@ -33,8 +36,8 @@ enum Held {
     /// Found at start (a previous run's) or left by a refused install:
     /// rewritten by the next pass.
     Unknown,
-    /// `(instance, rule index, rule)`.
-    Rule(String, usize, Arc<Lowered>),
+    /// `(owner, rule index, rule)`.
+    Rule(Key, usize, Arc<Lowered>),
 }
 
 #[derive(Debug)]
@@ -46,24 +49,25 @@ struct Device {
 
 #[derive(Debug, Default)]
 pub(super) struct State {
-    sets: BTreeMap<String, Set>,
+    sets: BTreeMap<Key, Set>,
     devices: BTreeMap<String, Device>,
-    /// `(instance, flow, reason)` already logged as unsupported.
-    logged: BTreeSet<(String, String, String)>,
-    /// Rules left out on some device by the cap: `(instance, index)`.
-    capped: BTreeSet<(String, usize)>,
+    /// `(owner, flow, reason)` already logged as unsupported.
+    logged: BTreeSet<(Key, String, String)>,
+    /// Rules left out on some device by the cap: `(owner, index)`.
+    capped: BTreeSet<(Key, usize)>,
     /// Devices named but absent, logged once.
     pending: BTreeSet<String>,
-    /// Per instance, the `flowspec` devices of the last plan (#562), added
-    /// to the devices its snapshot names.
-    pub(super) attached: BTreeMap<String, Vec<PlanDevice>>,
+    /// Per owner, the `flowspec` devices of the last plan (#562, #1083),
+    /// added to the devices its snapshot names.
+    pub(super) attached: FlowspecDevices,
 }
 
 impl State {
-    fn log_unsupported(&mut self, instance: &str, flow: &str, reason: &str) {
-        let key = (instance.to_string(), flow.to_string(), reason.to_string());
+    fn log_unsupported(&mut self, owner: &Key, flow: &str, reason: &str) {
+        let key = (owner.clone(), flow.to_string(), reason.to_string());
         if self.logged.insert(key) {
-            warn!(instance = %instance, flow = %flow, reason = %reason, "flowspec rule unsupported");
+            let table = owner.1.as_ref().map(tracing::field::display);
+            warn!(instance = %owner.0, table, flow = %flow, reason = %reason, "flowspec rule unsupported");
         }
     }
 }
@@ -77,31 +81,34 @@ impl<D: Driver> Engine<D> {
     pub fn push_flowspec(&mut self, set: FlowspecSet) {
         let FlowspecSet {
             instance,
+            table,
             devices,
             rules,
         } = set;
+        let owner: Key = (instance, table);
         let flows: BTreeSet<&str> = rules.iter().map(|r| r.flow.as_str()).collect();
         // A rule logs once while it stays in its instance's snapshots.
         self.fs
             .logged
-            .retain(|(i, f, _)| *i != instance || flows.contains(f.as_str()));
+            .retain(|(o, f, _)| *o != owner || flows.contains(f.as_str()));
         let lowered: Vec<_> = rules.iter().map(|r| lower(r).map(Arc::new)).collect();
         for (r, l) in rules.iter().zip(&lowered) {
             if let Err(why) = l {
-                self.fs.log_unsupported(&instance, &r.flow, why);
+                self.fs.log_unsupported(&owner, &r.flow, why);
             }
         }
         let installable = lowered.iter().filter(|l| l.is_ok()).count();
-        info!(instance = %instance, rules = rules.len(), installable, devices = devices.len(), "flowspec rules received");
+        let vrf = owner.1.as_ref().map(tracing::field::display);
+        info!(instance = %owner.0, table = vrf, rules = rules.len(), installable, devices = devices.len(), "flowspec rules received");
         if rules.is_empty() && devices.is_empty() {
-            self.fs.sets.remove(&instance);
+            self.fs.sets.remove(&owner);
         } else {
             let set = Set {
                 devices,
                 rules,
                 lowered,
             };
-            self.fs.sets.insert(instance, set);
+            self.fs.sets.insert(owner, set);
         }
         self.apply_flowspec();
     }
@@ -141,8 +148,8 @@ impl<D: Driver> Engine<D> {
         let mut desired: BTreeMap<String, (u32, Vec<Held>)> = BTreeMap::new();
         let mut capped = BTreeSet::new();
         let mut pending = BTreeSet::new();
-        for (instance, set) in &self.fs.sets {
-            let attached = self.fs.attached.get(instance).into_iter().flatten();
+        for (owner, set) in &self.fs.sets {
+            let attached = self.fs.attached.get(owner).into_iter().flatten();
             let named: BTreeSet<Result<String, String>> = set
                 .devices
                 .iter()
@@ -162,9 +169,9 @@ impl<D: Driver> Engine<D> {
                 for (i, l) in set.lowered.iter().enumerate() {
                     let Ok(l) = l else { continue };
                     if want.len() == RULE_CAP {
-                        capped.insert((instance.clone(), i));
+                        capped.insert((owner.clone(), i));
                     } else {
-                        want.push(Held::Rule(instance.clone(), i, l.clone()));
+                        want.push(Held::Rule(owner.clone(), i, l.clone()));
                     }
                 }
             }
@@ -173,9 +180,9 @@ impl<D: Driver> Engine<D> {
             info!(interface = %dev, reason = "absent", "flowspec pending");
         }
         self.fs.pending = pending;
-        for (instance, i) in &capped {
-            let flow = self.fs.sets[instance].rules[*i].flow.clone();
-            self.fs.log_unsupported(instance, &flow, CAPPED);
+        for (owner, i) in &capped {
+            let flow = self.fs.sets[owner].rules[*i].flow.clone();
+            self.fs.log_unsupported(owner, &flow, CAPPED);
         }
         self.fs.capped = capped;
         for (dev, d) in &self.fs.devices {
@@ -233,7 +240,7 @@ impl<D: Driver> Engine<D> {
     /// Every rule of every instance, with its state and counters summed over
     /// the devices it is installed on. A device whose dump fails is skipped.
     pub fn show_flowspec(&mut self) -> Vec<FlowspecRuleStatus> {
-        let mut sums: BTreeMap<(&str, usize), (u64, u64)> = BTreeMap::new();
+        let mut sums: BTreeMap<(&Key, usize), (u64, u64)> = BTreeMap::new();
         for (dev, d) in &self.fs.devices {
             let counts = match self.driver.flowspec_counters(d.ifindex) {
                 Ok(c) => c,
@@ -243,42 +250,38 @@ impl<D: Driver> Engine<D> {
                 }
             };
             for (i, slot) in d.slots.iter().enumerate() {
-                if let (Held::Rule(instance, r, _), Some((p, b))) = (slot, counts.get(&prio(i))) {
-                    let s = sums.entry((instance.as_str(), *r)).or_default();
+                if let (Held::Rule(owner, r, _), Some((p, b))) = (slot, counts.get(&prio(i))) {
+                    let s = sums.entry((owner, *r)).or_default();
                     s.0 = s.0.saturating_add(*p);
                     s.1 = s.1.saturating_add(*b);
                 }
             }
         }
-        let held: BTreeSet<(&str, usize)> = self
+        let held: BTreeSet<(&Key, usize)> = self
             .fs
             .devices
             .values()
             .flat_map(|d| &d.slots)
             .filter_map(|s| match s {
-                Held::Rule(instance, r, _) => Some((instance.as_str(), *r)),
+                Held::Rule(owner, r, _) => Some((owner, *r)),
                 _ => None,
             })
             .collect();
         let mut out = Vec::new();
-        for (instance, set) in &self.fs.sets {
+        for (owner, set) in &self.fs.sets {
             for (i, (rule, l)) in set.rules.iter().zip(&set.lowered).enumerate() {
                 let unsupported = match l {
                     Err(why) => Some(why.clone()),
-                    Ok(_) if self.fs.capped.contains(&(instance.clone(), i)) => {
+                    Ok(_) if self.fs.capped.contains(&(owner.clone(), i)) => {
                         Some(CAPPED.to_string())
                     }
-                    Ok(_) if !held.contains(&(instance.as_str(), i)) => {
-                        Some(NOT_ATTACHED.to_string())
-                    }
+                    Ok(_) if !held.contains(&(owner, i)) => Some(NOT_ATTACHED.to_string()),
                     Ok(_) => None,
                 };
-                let (packets, bytes) = sums
-                    .get(&(instance.as_str(), i))
-                    .copied()
-                    .unwrap_or_default();
+                let (packets, bytes) = sums.get(&(owner, i)).copied().unwrap_or_default();
                 out.push(FlowspecRuleStatus {
-                    instance: instance.clone(),
+                    instance: owner.0.clone(),
+                    table: owner.1.clone(),
                     flow: rule.flow.clone(),
                     actions: rule.actions.iter().map(ToString::to_string).collect(),
                     unsupported,

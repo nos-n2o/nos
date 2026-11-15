@@ -241,6 +241,56 @@ impl BgpRib {
         }
     }
 
+    /// The VPN flow rules valid in each VRF, as `nos-acld` takes them
+    /// (#1083): per table, one copy per rule (the same flow under two RDs or
+    /// peers is one rule), IPv4 first, RFC 8955 section 5.1 order. `None`
+    /// while deferring. A table with no rule is listed empty, so the push
+    /// clears it.
+    // ponytail: no selection between copies (#1085): the first valid one by
+    // (peer, family, RD) stands in for it.
+    pub fn vpn_flowspec_push_snapshot(&self) -> Option<Vec<(String, Vec<nos_proto::FlowRule>)>> {
+        if self.deferring() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for table in self.vpn_vrfs.tables() {
+            let mut held: Vec<(&IpAddr, &VpnFlowKey, &FlowspecRoute)> = self
+                .vpn_flow_adj_rib_in
+                .iter()
+                .flat_map(|(p, t)| t.iter().map(move |(k, r)| (p, k, r)))
+                .filter(|(p, k, _)| {
+                    self.vpn_flow_validity
+                        .get(&(**p, (*k).clone()))
+                        .and_then(|m| m.get(table))
+                        == Some(&FlowValidity::Valid)
+                })
+                .collect();
+            held.sort_by(|a, b| {
+                (a.0, a.1 .0.to_string(), &a.1 .1 .0).cmp(&(b.0, b.1 .0.to_string(), &b.1 .1 .0))
+            });
+            let mut seen = std::collections::HashSet::new();
+            let mut rules: Vec<&FlowspecRoute> = held
+                .into_iter()
+                .filter(|(_, k, _)| seen.insert((k.0, (k.1).1.clone())))
+                .map(|(_, _, r)| r)
+                .collect();
+            let v6 = |r: &FlowspecRoute| r.family == AddressFamily::Vpnv6Flowspec;
+            rules.sort_by(|a, b| {
+                v6(a)
+                    .cmp(&v6(b))
+                    .then_with(|| crate::flowspec::cmp_precedence(&a.nlri, &b.nlri))
+            });
+            out.push((
+                table.to_string(),
+                rules
+                    .into_iter()
+                    .map(crate::acl_push_client::flow_rule)
+                    .collect(),
+            ));
+        }
+        Some(out)
+    }
+
     /// The VRF set changed: every rule may import elsewhere.
     pub(super) fn revalidate_all_vpn_flows(&mut self) {
         let all: Vec<(IpAddr, VpnFlowKey)> = self

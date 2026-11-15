@@ -466,9 +466,14 @@ pub fn render_flowspec_rules(rules: &[nos_proto::FlowspecRuleStatus]) -> String 
             .unsupported
             .as_deref()
             .map_or("installed".to_string(), |why| format!("unsupported: {why}"));
+        let vrf = r
+            .table
+            .as_ref()
+            .map_or(String::new(), |t| format!(" vrf {t}"));
         out.push(format!(
-            "  {} {}: {} -> {}, packets {}, bytes {}",
+            "  {}{} {}: {} -> {}, packets {}, bytes {}",
             r.instance,
+            vrf,
             r.flow,
             state,
             r.actions.join(", "),
@@ -2950,6 +2955,7 @@ mod tests {
     fn render_flowspec_rules_installed_and_unsupported() {
         let rule = |flow: &str, unsupported: Option<&str>, packets| nos_proto::FlowspecRuleStatus {
             instance: "b1".into(),
+            table: (flow == "vrf").then(|| "rt2".into()),
             flow: flow.into(),
             actions: vec!["rate 0 bytes/s".into()],
             unsupported: unsupported.map(Into::into),
@@ -2960,10 +2966,12 @@ mod tests {
             render_flowspec_rules(&[
                 rule("proto =6", None, 3),
                 rule("len =64", Some("packet length: no flower key"), 0),
+                rule("vrf", None, 1),
             ]),
             "flowspec rules:\n  \
              b1 proto =6: installed -> rate 0 bytes/s, packets 3, bytes 30\n  \
-             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0"
+             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0\n  \
+             b1 vrf rt2 vrf: installed -> rate 0 bytes/s, packets 1, bytes 10"
         );
     }
 

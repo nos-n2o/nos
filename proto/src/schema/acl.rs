@@ -436,7 +436,8 @@ const FLOWSPEC_TWICE: &str = "flowspec is set on both the device and its untagge
 
 /// `flowspec` placement (#562): the `acl in` rules (no loopback, aggregate
 /// member or switching-profile port; not on both a parent and its untagged
-/// subinterface), plus a routing table that a BGP instance uses.
+/// subinterface), plus a routing table that a BGP instance uses or a VRF
+/// whose `vpn` names one.
 pub(crate) fn valid_flowspec_placements(_acls: &[Acl], ctx: &Config) -> garde::Result {
     let refuse = |name: &str, why: &str| Err(garde::Error::new(format!("{name}: {why}")));
     let any = |own: bool, subs: &[super::Subinterface]| own || subs.iter().any(|s| s.flowspec);
@@ -484,14 +485,20 @@ pub(crate) fn valid_flowspec_placements(_acls: &[Acl], ctx: &Config) -> garde::R
                 "flowspec needs a routing table (on the untagged subinterface for the device itself)",
             );
         };
-        if !ctx
-            .bgp_instances
+        // An instance's own table, or a VRF whose `vpn` rides one (#1083).
+        let vrf = ctx
+            .routing_tables
             .iter()
-            .any(|b| b.routing_table.as_deref() == Some(table))
+            .any(|t| t.name == table && t.vpn.bgp_instance.is_some());
+        if !vrf
+            && !ctx
+                .bgp_instances
+                .iter()
+                .any(|b| b.routing_table.as_deref() == Some(table))
         {
             return refuse(
                 &p.device(),
-                &format!("flowspec needs a bgp instance in routing table {table}"),
+                &format!("flowspec needs a bgp instance in routing table {table}, or a vpn VRF"),
             );
         }
     }
@@ -880,6 +887,17 @@ mod tests {
             err.contains("eth0.100: flowspec needs a bgp instance in routing table rt2"),
             "{err}"
         );
+        // ... unless rt2 is a VPN VRF (#1083).
+        flowspec(|c| {
+            c.interfaces[0].subinterfaces[1].flowspec = true;
+            c.routing_tables[1].vpn = crate::schema::RoutingTableVpn {
+                rd: Some("65000:2".into()),
+                route_targets_export: vec!["65000:2".into()],
+                bgp_instance: Some("b1".into()),
+                ..Default::default()
+            };
+        })
+        .unwrap();
         let err = flowspec(|c| c.port_aggregates[0].flowspec = true).unwrap_err();
         assert!(
             err.contains("bond0: flowspec needs a routing table"),
