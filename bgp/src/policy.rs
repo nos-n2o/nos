@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nos_proto::schema::{AsPathList, CommunityAlias, CommunityGroup, PolicyDefinition, PrefixList};
+use nos_proto::schema::{
+    AsPathList, CommunityAlias, CommunityGroup, PolicyDefinition, PolicySymbols, PrefixList,
+};
 use nos_rpl::CompiledPolicy;
 use tracing::error;
 
@@ -45,97 +47,11 @@ impl PolicyCache {
         prefix_lists: &[PrefixList],
         as_path_lists: &[AsPathList],
     ) {
-        // Owned, pre-resolved buffers backing the `nos_rpl::Symbols` view
-        // below — `Symbols` only borrows, so something has to own the
-        // resolved alias/group member data for the duration of the
-        // `compile` calls. Group members that name an existing alias are
-        // resolved to that alias's parts; groups are flat, so a member is
-        // never itself another group.
-        let alias_parts: Vec<(&str, Vec<i64>)> = aliases
-            .iter()
-            .filter_map(|a| {
-                nos_rpl::parse_colon_literal(&a.value).map(|parts| (a.name.as_str(), parts))
-            })
-            .collect();
-        let alias_refs: Vec<(&str, &[i64])> = alias_parts
-            .iter()
-            .map(|(n, p)| (*n, p.as_slice()))
-            .collect();
-
-        let resolve_member = |m: &str| -> Option<Vec<i64>> {
-            aliases
-                .iter()
-                .find(|a| a.name == m)
-                .and_then(|a| nos_rpl::parse_colon_literal(&a.value))
-                .or_else(|| nos_rpl::parse_colon_literal(m))
-        };
-        let group_parts: Vec<(&str, Vec<Vec<i64>>)> = groups
-            .iter()
-            .map(|g| {
-                (
-                    g.name.as_str(),
-                    g.members.iter().filter_map(|m| resolve_member(m)).collect(),
-                )
-            })
-            .collect();
-        let group_member_slices: Vec<Vec<&[i64]>> = group_parts
-            .iter()
-            .map(|(_, members)| members.iter().map(Vec::as_slice).collect())
-            .collect();
-        let group_refs: Vec<(&str, &[&[i64]])> = group_parts
-            .iter()
-            .zip(&group_member_slices)
-            .map(|((name, _), slices)| (*name, slices.as_slice()))
-            .collect();
-
-        let prefix_list_entries: Vec<(&str, Vec<nos_rpl::PrefixListEntry>)> = prefix_lists
-            .iter()
-            .map(|pl| {
-                let entries = pl
-                    .entries
-                    .iter()
-                    .map(|e| nos_rpl::PrefixListEntry {
-                        cidr: e.cidr,
-                        range: e.range,
-                    })
-                    .collect();
-                (pl.name.as_str(), entries)
-            })
-            .collect();
-        let prefix_list_refs: Vec<(&str, &[nos_rpl::PrefixListEntry])> = prefix_list_entries
-            .iter()
-            .map(|(n, e)| (*n, e.as_slice()))
-            .collect();
-
-        let as_path_list_patterns: Vec<(&str, Vec<&str>)> = as_path_lists
-            .iter()
-            .map(|l| {
-                (
-                    l.name.as_str(),
-                    l.patterns.iter().map(String::as_str).collect(),
-                )
-            })
-            .collect();
-        let as_path_list_refs: Vec<(&str, &[&str])> = as_path_list_patterns
-            .iter()
-            .map(|(n, p)| (*n, p.as_slice()))
-            .collect();
-
-        let policy_refs: Vec<(&str, &str)> = policies
-            .iter()
-            .map(|p| (p.name.as_str(), p.source.as_str()))
-            .collect();
-        let symbols = nos_rpl::Symbols {
-            aliases: &alias_refs,
-            groups: &group_refs,
-            prefix_lists: &prefix_list_refs,
-            as_path_lists: &as_path_list_refs,
-            policies: &policy_refs,
-        };
+        let symbols = PolicySymbols::new(policies, aliases, groups, prefix_lists, as_path_lists);
 
         let mut next = HashMap::with_capacity(policies.len());
         for policy in policies {
-            match nos_rpl::compile(&policy.source, &symbols) {
+            match symbols.compile(&policy.source) {
                 Ok(compiled) => {
                     next.insert(policy.name.clone(), Arc::new(compiled));
                 }

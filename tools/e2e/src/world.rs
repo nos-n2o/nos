@@ -193,9 +193,17 @@ impl World {
                 self.dock.network_disconnect(net, router).await;
             }
         }
+        for iface in ["eth1", "eth2"] {
+            self.ensure_veth(iface).await?;
+        }
+        Ok(())
+    }
+
+    /// One veth pair `iface` between router-a and router-b, unless it exists.
+    pub async fn ensure_veth(&self, iface: &str) -> anyhow::Result<()> {
         let pid_a = self.dock.pid("router-a").await?.to_string();
         let pid_b = self.dock.pid("router-b").await?.to_string();
-        for iface in ["eth1", "eth2"] {
+        {
             let exists = self
                 .dock
                 .ip(
@@ -207,7 +215,7 @@ impl World {
                 .await
                 .is_ok();
             if exists {
-                continue;
+                return Ok(());
             }
             log(format!(
                 "creating veth pair {iface} between router-a and router-b"
@@ -225,6 +233,19 @@ impl World {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Delete the veth pair `iface` (best effort).
+    pub async fn unlink_veth(&self, iface: &str) {
+        let _ = self
+            .dock
+            .ip(
+                NETNS_HELPER_IMAGE,
+                Some("router-a"),
+                false,
+                &["link", "del", iface],
+            )
+            .await;
     }
 
     /// `ip link set <iface> up|down` inside `router`'s network namespace (the

@@ -180,14 +180,14 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 
 - One fixed process, supervised like `nos-lldpd`; `--listen-socket` serves the status query (below).
 - Ports: a physical `Interface` or a `PortAggregate` (the bond, never a member) with a `switching_profile`; loopbacks, VXLAN and L3-only interfaces are not ports. Modes `rstp`, `mstp` and `rapid-pvst` run; `disabled` leaves the daemon idle.
-- Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. A changed plan rebuilds the bridge (the protocol restarts, sockets of ports that stay are kept).
+- Task layout, all in `stp/src/daemon.rs`: one actor owns the bridge core and every BPDU socket; a reader task per port, the link table, plan changes and a 1 s tick are events to it. `Engine::apply_plan` applies a changed plan in place when it can (bridge priority, timers, per-port cost, priority, edge, protections, ports added or removed; logs `spanning tree plan updated in place`): no port leaves its state and no number changes. A removed port keeps a disabled, hidden slot until the next rebuild. Anything structural (mode, `force-version`, MSTP, Rapid-PVST+) returns `Rebuild`: the bridge is rebuilt, the protocol restarts and sockets of ports that stay are kept (logs `spanning tree plan applied`). In-place MSTI and PVST tree edits are not done.
 - The BPDU socket (`L2Socket::open_bpdu`) is `ETH_P_ALL` with a classic BPF for the group MAC plus LLC `42 42 03`. A protocol-bound socket runs after tc ingress and the bridge `rx_handler`, where the trap from #326 drops the frame; the tap runs before. It sees its own outgoing frames, so the source MAC is filtered.
 - Inputs to the core per port:
   - `portEnabled`: socket open and the `SubscribeLinks` table shows carrier (no table or an unobserved one counts as up).
   - Cost: the profile `cost`, else `20 000 000 / speed` from `/sys/class/net/<dev>/speed`; unknown speed falls back to 1 Gb/s with a `warn!`.
   - `operPointToPoint`: profile `link-type`, else full duplex (unknown counts as full). Re-read on every carrier change.
   - Edge: `edge-port admin` is admin edge, `auto` (the default) is the core's own BPDU-absence detection, `disabled` neither.
-- Bridge identifier: configured priority, extension 0, MAC derived from hostname + machine-id (locally administered); port number is the index in the name-sorted port list plus one.
+- Bridge identifier: configured priority, extension 0, MAC derived from hostname + machine-id (locally administered); port number comes from an in-memory allocator in the daemon: a port keeps its number while it stays in the plan (also across a rebuild), a new port takes the lowest free number, and numbers may differ after a daemon restart. The number is on the wire (Port Identifier), so renumbering would make peers reselect.
 - Output: the state of a tree on a port becomes one `SetStpPortStates` assignment per domain of that tree in the port's switching profile (`Discarding` is `Blocking`; in `rstp` every domain is the CIST's); `FlushFdb` becomes one `FlushFdb` per domain of the tree. The push is fire-and-forget; the cache is resent on every reconnect.
 - Logs (the e2e anchors; `Debug` renders roles and states capitalised):
 
@@ -220,7 +220,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 | `pvst port migrated to STP` / `pvst port migrated to RSTP` | `domain`, `port` |
 | `pvid inconsistent` | `domain`, `port`, `expected`, `got`; `pvid consistent` with `domain`, `port`, `reason` (`bpdu`, `silence`) |
 
-- Limits: `clear spanning-tree detected-protocols` and `clear spanning-tree err-disabled` act on `rstp`/`mstp` only; a bond's sockets use the config name like the other modes. A changed plan rebuilds every tree.
+- Limits: `clear spanning-tree detected-protocols` and `clear spanning-tree err-disabled` act on `rstp`/`mstp` only; a bond's sockets use the config name like the other modes. A changed plan rebuilds every tree (no in-place update for `rapid-pvst`).
 - Tests: `stp/src/sstp.rs` (layout, round trips, rejects), `stp/src/pvst.rs` (two bridges, two trees blocking different links; PVID block; per-tree fallback; native rule), `ports.rs` (tree plans) and the `stp-pvst` e2e phase.
 
 ## Status query (#328)
