@@ -590,8 +590,7 @@ fn plan_df(
                 up,
                 ad_pes: ads
                     .get(&p.esi)
-                    .map(|a| a.pes.iter().copied().collect())
-                    .unwrap_or_default(),
+                    .map_or_default(|a| a.pes.iter().copied().collect()),
                 single_active: p.single_active,
                 algorithm,
                 ac_df,
@@ -721,8 +720,7 @@ fn refresh_ads(g: &mut Inner) -> Vec<Esi> {
     let new = g
         .ready
         .as_ref()
-        .map(|r| ad_index(r, &g.received))
-        .unwrap_or_default();
+        .map_or_default(|r| ad_index(r, &g.received));
     let stale = new
         .keys()
         .chain(g.ads.keys())
@@ -772,8 +770,7 @@ impl Fdb {
             routes: g
                 .ready
                 .as_ref()
-                .map(|r| local_routes(r, &g.local, &g.local_neigh, &g.es_down))
-                .unwrap_or_default(),
+                .map_or_default(|r| local_routes(r, &g.local, &g.local_neigh, &g.es_down)),
         };
         self.target.send_if_modified(|t| {
             let changed = *t != target;
@@ -880,8 +877,7 @@ impl Fdb {
         let mut plan = g
             .ready
             .as_ref()
-            .map(|r| plan_df(r, &g.received, &g.ads, &g.es_down))
-            .unwrap_or_default();
+            .map_or_default(|r| plan_df(r, &g.received, &g.ads, &g.es_down));
         let now = Instant::now();
         for s in &mut plan {
             if !s.up {
@@ -1198,7 +1194,7 @@ impl Fdb {
             for esi in &stale {
                 info!(
                     domain = %self.domain, esi = %format_esi(esi),
-                    pes = %g.ads.get(esi).map(|a| a.pes.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+                    pes = %g.ads.get(esi).map_or_default(|a| a.pes.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")),
                     "segment per-es a-d changed"
                 );
             }
@@ -1252,8 +1248,7 @@ impl Fdb {
             let new: BTreeSet<Mac> = g
                 .received
                 .get(k)
-                .map(|r| desired(ready, r, &g.ads, &g.local, pins))
-                .unwrap_or_default()
+                .map_or_default(|r| desired(ready, r, &g.ads, &g.local, pins))
                 .into_iter()
                 .filter_map(|i| match i {
                     Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => Some(mac),
@@ -1364,8 +1359,7 @@ impl Fdb {
         let mut want = g
             .received
             .get(key)
-            .map(|r| desired(ready, r, &g.ads, &g.local, pins))
-            .unwrap_or_default();
+            .map_or_default(|r| desired(ready, r, &g.ads, &g.local, pins));
         if let Some(adm) = &g.admitted {
             want.retain(|i| match i {
                 Installed::Mac { mac, .. } | Installed::MacGroup { mac, .. } => adm.contains(mac),

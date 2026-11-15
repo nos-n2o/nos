@@ -457,8 +457,7 @@ fn held_ids(rib: &BgpRib, peer: IpAddr, p: &str) -> Vec<u32> {
         .adj_rib_in
         .get(&peer)
         .and_then(|t| t.get(&prefix(p)))
-        .map(|paths| paths.iter().map(|(id, _)| *id).collect())
-        .unwrap_or_default();
+        .map_or_default(|paths| paths.iter().map(|(id, _)| *id).collect());
     ids.sort_unstable();
     ids
 }

@@ -123,8 +123,7 @@ fn filter(msg: &[u8], out: &mut Vec<FilterStats>) -> io::Result<()> {
     for (_, act) in attrs(table)? {
         let a = attrs(act)?;
         let action = find(&a, TCA_ACT_KIND)
-            .map(|k| String::from_utf8_lossy(k).trim_end_matches('\0').to_owned())
-            .unwrap_or_default();
+            .map_or_default(|k| String::from_utf8_lossy(k).trim_end_matches('\0').to_owned());
         let (packets, bytes) = find(&a, TCA_ACT_STATS).map_or(Ok((0, 0)), stats)?;
         out.push(FilterStats {
             chain,

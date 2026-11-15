@@ -110,8 +110,7 @@ pub fn labels_of(attrs: &[RouteAttribute]) -> Vec<u32> {
             }),
             _ => None,
         })
-        .map(|l| l.iter().map(|l| l.label).collect())
-        .unwrap_or_default()
+        .map_or_default(|l| l.iter().map(|l| l.label).collect())
 }
 
 /// The `RTA_ENCAP_TYPE` + `RTA_ENCAP` pushing `labels`, for one

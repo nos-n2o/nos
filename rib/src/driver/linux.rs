@@ -487,7 +487,7 @@ impl LinuxRibDriver {
             .and_then(link_mac)
             .ok_or_else(|| missing(format!("{br_name}'s address")))?;
 
-        let old = prev.map(|p| p.remotes.clone()).unwrap_or_default();
+        let old = prev.map_or_default(|p| p.remotes.clone());
         for (vtep, mac) in &old {
             if remotes.get(vtep) != Some(mac) {
                 self.neigh(remote_neigh_msg(br, *vtep, *mac), true).await?;
@@ -854,8 +854,7 @@ impl LinuxRibDriver {
                     let tunnel = new.as_ref().is_some_and(|e| e.backup_tunnel);
                     let new: Slots = new
                         .as_ref()
-                        .map(|e| slots(*prefix, e).into_iter().collect())
-                        .unwrap_or_default();
+                        .map_or_default(|e| slots(*prefix, e).into_iter().collect());
                     (*prefix, old, new, source, tunnel)
                 })
                 .collect()

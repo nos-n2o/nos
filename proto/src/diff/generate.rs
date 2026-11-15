@@ -660,10 +660,7 @@ mod tests {
             ..Default::default()
         };
         let order = |d: &ConfigDiff| -> Vec<FieldDiff> {
-            d.bgp_instances
-                .first()
-                .map(|i| i.fields.clone())
-                .unwrap_or_default()
+            d.bgp_instances.first().map_or_default(|i| i.fields.clone())
         };
         let none = [] as [FieldDiff; 0];
         let ab = cfg(&["a", "b"]);

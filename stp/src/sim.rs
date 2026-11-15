@@ -138,8 +138,7 @@ impl Sim {
             .iter()
             .find(|l| l.ends.contains(&(from, port)))
             .filter(|l| l.up)
-            .map(|l| l.ends.clone())
-            .unwrap_or_default();
+            .map_or_default(|l| l.ends.clone());
         for (j, q) in ends.into_iter().filter(|&e| e != (from, port)) {
             self.bridges[j].receive(q, *bpdu);
         }

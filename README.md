@@ -76,7 +76,7 @@ See [`docs/cli.md`](docs/cli.md) for the full command reference.
 
 ## Build natively
 
-- Install Rust through `rustup`: it picks the pinned toolchain (1.99.0) from `rust-toolchain.toml`.
+- Install Rust through `rustup`: it picks the pinned toolchain (1.100.0) from `rust-toolchain.toml`.
 - `cargo build --workspace` builds every daemon and the `nos` shell; `make check` runs build + fmt + clippy + test.
 - A host with a different `rustc` and no rustup runs `make check` inside the `nos-ci` image instead (`make ci-image`); details in [`docs/architecture/development.md`](docs/architecture/development.md).
 - Running the daemons for real needs Linux capabilities and kernel modules (`make e2e-preflight` checks them); the e2e harness needs Docker and the built image.

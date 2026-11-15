@@ -228,7 +228,7 @@ fn plan_list<E: Serialize + DeserializeOwned>(
         let i = own.ok_or_else(|| PathError::NotFound(path[..=k].join("/")))?;
         let mut doc = wrap(serde_json::to_value(&items[i])?);
         apply_value(&mut doc, path, value, pos)?;
-        let v = doc.pointer_mut(ptr).map(Value::take).unwrap_or_default();
+        let v = doc.pointer_mut(ptr).map_or_default(Value::take);
         return Ok(ListEdit::Replace(i, serde_json::from_value(v)?));
     }
     let Some(value) = value else {

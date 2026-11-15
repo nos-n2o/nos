@@ -19,7 +19,7 @@ env:
   # "Rust toolchain"); `clippy-canary` warns when the newest stable would break.
   # Every job runs the Makefile target, so a local `make <target>` is the same command
   # on the same toolchain (natively, or in the nos-ci image on a host without it).
-  RUST_TOOLCHAIN: "1.99.0"
+  RUST_TOOLCHAIN: "1.100.0"
   # The dated nightly Miri runs on (`make miri`); `miri-canary` tries the newest one.
   MIRI_TOOLCHAIN: "nightly-2026-10-03"
 

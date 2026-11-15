@@ -264,11 +264,7 @@ impl Daemon {
             .flat_map(|p| p.ports.iter().map(|_| PortRt::default()))
             .collect();
         // A rebuilt bridge must not silently recover err-disabled ports.
-        let mut carried = self
-            .engine
-            .as_ref()
-            .map(Engine::err_disabled)
-            .unwrap_or_default();
+        let mut carried = self.engine.as_ref().map_or_default(Engine::err_disabled);
         let first = self.engine.is_none() && self.pvst.is_none();
         // A fresh start asks `nos-interfaced` which ports it still holds down
         // (#697): they stay down with the full recovery timer; unreachable,

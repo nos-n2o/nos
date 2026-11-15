@@ -169,8 +169,7 @@ impl EvpnState {
         self.winners = self
             .local
             .as_ref()
-            .map(|l3| winners(&self.received, l3))
-            .unwrap_or_default();
+            .map_or_default(|l3| winners(&self.received, l3));
         self.by_vtep = group_by_vtep(&self.winners);
         self.remotes = remotes_of(&self.by_vtep);
         self.winners
