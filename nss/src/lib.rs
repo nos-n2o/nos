@@ -121,9 +121,11 @@ mod tests {
     fn a_tiny_buffer_is_erange() {
         let f = file();
         let r = by_name(f.path().to_str().unwrap(), "alice");
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only, zeroed C struct
         let mut out: libnss::passwd::CPasswd = unsafe { std::mem::zeroed() };
         let mut buf = [0 as libc::c_char; 4];
         let mut errno = 0;
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only, buffers outlive the call
         let st = unsafe { r.to_c(&raw mut out, buf.as_mut_ptr(), buf.len(), &raw mut errno) };
         assert_eq!(
             (st, errno),
