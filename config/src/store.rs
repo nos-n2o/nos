@@ -717,6 +717,37 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Stores `seed` as the admin key `ssh-host-key` unless one exists (see
+    /// `Request::SetSshHostKey`), broadcasting it like a commit.
+    pub async fn set_ssh_host_key(&self, seed: String) -> Result<(), ConfigError> {
+        // 32 bytes of base64: 44 characters, one `=` of padding.
+        let well_formed = seed.len() == 44
+            && seed.ends_with('=')
+            && seed[..43]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
+        if !well_formed {
+            return Err(ConfigError::SshHostKeyRefused);
+        }
+        let mut running = self.0.running.write().await;
+        if running.key(nos_proto::SSH_HOST_KEY_LABEL).is_some() {
+            return Err(ConfigError::SshHostKeyRefused);
+        }
+        let mut config = Arc::clone(&running);
+        Arc::make_mut(&mut config)
+            .admin
+            .keys
+            .push(nos_proto::AdminKey {
+                label: nos_proto::SSH_HOST_KEY_LABEL.into(),
+                secret: seed,
+            });
+        let prev = std::mem::replace(&mut *running, Arc::clone(&config));
+        info!("ssh host key generated");
+        self.broadcast(config, prev);
+        drop(running);
+        Ok(())
+    }
+
     /// Computes the structural difference between the running config and a
     /// named transaction's in-progress config. Runs no validation — matches
     /// `get_transaction`'s behavior, so an invalid in-progress config can
@@ -2019,6 +2050,44 @@ mod tests {
             store.get_transaction("t3").await.unwrap().config.users[0].password,
             hash
         );
+    }
+
+    #[tokio::test]
+    async fn ssh_host_key_is_set_once_and_seen_only_by_sshd() {
+        let store = ConfigStore::new(Config::default(), None);
+        let seed = "A".repeat(43) + "=";
+        for bad in ["", "short=", &"A".repeat(44), &("!".repeat(43) + "=")] {
+            assert!(store.set_ssh_host_key(bad.into()).await.is_err(), "{bad}");
+        }
+        let mut rx = store.0.tx.subscribe();
+        store.set_ssh_host_key(seed.clone()).await.unwrap();
+        assert!(rx.try_recv().is_ok(), "broadcast like a commit");
+        let second = "B".repeat(43) + "=";
+        assert!(store.set_ssh_host_key(second).await.is_err());
+        let running = store.running_snapshot().await;
+        assert_eq!(running.key("ssh-host-key"), Some(seed.as_str()));
+        assert!(running
+            .for_role(nos_proto::Role::Sshd)
+            .key("ssh-host-key")
+            .is_some());
+        assert!(running
+            .for_role(nos_proto::Role::Bgpd)
+            .key("ssh-host-key")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn sshd_hears_about_its_key_on_an_admin_diff_subscription() {
+        let store = ConfigStore::new(Config::default(), None);
+        let (out, mut rx) = mpsc::channel(4);
+        let (_initial, _task) = store
+            .subscribe_diff(Role::Sshd, vec![DiffScope::Admin], out)
+            .await;
+        store.set_ssh_host_key("A".repeat(43) + "=").await.unwrap();
+        let Some(Event::Diff(d)) = rx.recv().await else {
+            panic!("no diff")
+        };
+        assert!(!d.is_empty());
     }
 
     #[tokio::test]

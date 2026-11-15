@@ -164,6 +164,15 @@ pub enum Request {
         /// As on `SetTransactionPath`.
         position: Option<crate::config_path::ListPosition>,
     },
+    /// `nos-sshd`-only set-if-absent (#1104): stores `seed` (base64 of a
+    /// 32-byte ed25519 seed) as the admin key `ssh-host-key` in the running
+    /// config, broadcast like a commit. Refused with `Event::Error` if the
+    /// label already exists (the caller re-reads and adopts that key), so
+    /// racing per-table daemons agree on one key. Replies `Event::Committed`.
+    SetSshHostKey {
+        /// Base64 of the 32-byte seed.
+        seed: String,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.

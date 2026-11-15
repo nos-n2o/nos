@@ -6,8 +6,8 @@ A VRF-bound TCP listener that hands each accepted connection to a stock OpenSSH 
 
 - Runs as **uid 0** (`role_uid(Sshd) = Some(0)`; the supervisor's setuid to 0 is #995). `sshd` needs root to authenticate and `setuid` to the user.
 - `caps::restrict()` runs **first** in `main`, before stdin or any socket: `PR_CAPBSET_DROP` for everything outside `KEEP` (SETUID, SETGID, SYS_CHROOT, CHOWN, NET_RAW, NET_BIND_SERVICE, AUDIT_WRITE, KILL), then `capset` on its own sets. The bounding drop alone only limits what an `execve` gains; the running process would keep the full root set. Failure is fatal. Not held (unprivileged dev run) is tolerated. The file is excluded from coverage (raw `prctl`/`capset`).
-- No `CAP_DAC_OVERRIDE`/`CAP_FOWNER`, so root obeys DAC. `/run/nos` and `/var/lib/nos` belong to `nos-wd` and are not writable by it: the rendered config goes to `/run/nos-sshd/<table>/sshd_config` (root tmpfs), the host key to `/var/lib/nos/sshd/` (the watchdog's `ensure_state_dirs` creates it for uid 0). No `setcap` on the binary.
-- `Role::Sshd` sees no secrets (`redact::visible` none arm) and may only `GetVrfName` on `nos-ribd` (not `GetTableId`). It adds no `Request` and no `nos-configd` allow-list entry (`Get`/`SubscribeDiff` are open to every role).
+- No `CAP_DAC_OVERRIDE`/`CAP_FOWNER`, so root obeys DAC. `/run/nos` and `/var/lib/nos` belong to `nos-wd` and are not writable by it: the rendered config goes to `/run/nos-sshd/<table>/sshd_config` (root tmpfs), and the host key next to it (rendered from the keystore). No `setcap` on the binary.
+- `Role::Sshd` sees exactly one secret, the admin key `ssh-host-key` (`redact::visible`), may send `Request::SetSshHostKey` (`config/src/authz.rs`, set-if-absent) and may only `GetVrfName` on `nos-ribd` (not `GetTableId`).
 
 ## Layout
 
@@ -15,7 +15,7 @@ A VRF-bound TCP listener that hands each accepted connection to a stock OpenSSH 
 - `conn.rs`: accept loop. Caps checked **before** spawning: 64 total, 8 per source address (`MaxStartups` means nothing under `-i`, these are the brake). Child: `sshd -i -e -f <cfg>`, `env_clear()` + `PATH` only, stdin/stdout = the socket (made blocking again), **stderr = a pipe** forwarded line by line to `info!` (sshd's auth log reaches `nos-logd`). Stop: SIGTERM, SIGKILL after 5s. The single `tokio::process::Command` use carries the `disallowed_types` allow with its reason.
 - `sshd_config.rs`: pure `render`; password via PAM only (`UsePAM yes`, `KbdInteractiveAuthentication yes`, no pubkey, no root, no forwarding). `extra_directives()` is appended last for #989/#987.
 - **PAM service name:** `PAMServiceName nos-sshd` in the rendered config selects `/etc/pam.d/nos-sshd` (#998). It needs the OpenSSH of the runtime image: `debian:trixie-slim` (10.0p2; bookworm's 9.2 rejects the option), distro `openssh-server`, `--sshd-bin /usr/sbin/sshd`.
-- `hostkey.rs`: ed25519 OpenSSH key hand-encoded from `aws-lc-rs` (the `ssh-key` crate pulls `rsa` and its RUSTSEC advisory into `Cargo.lock`; `ssh-keygen -y` accepts the output), 0600 in a 0700 dir; temp file + `hard_link` so concurrent tables' daemons never replace each other's key.
+- `hostkey.rs`: `Keeper` converges `<run>/<table>/ssh_host_ed25519_key` to the keystore's `ssh-host-key` on `Admin` diffs (absent: generate and `SetSshHostKey`, then re-read, so a lost race adopts the winner; unreadable config or a bad seed keeps the file). The seed's ed25519 OpenSSH key is hand-encoded from `aws-lc-rs` (the `ssh-key` crate pulls `rsa` and its RUSTSEC advisory; `ssh-keygen -y` accepts the output); atomic 0600 write; only the `SHA256:` fingerprint is logged.
 - `main.rs` creates `/run/sshd` (privsep chroot, absent in the image).
 
 ## Rules
@@ -25,4 +25,4 @@ A VRF-bound TCP listener that hands each accepted connection to a stock OpenSSH 
 
 ## Manual smoke test
 
-Run the image as root with a seeded router that has `ssh-server` set, start `nos-sshd --table rt1` by hand: `ss -l` shows the listener inside the VRF only; `/proc/<pid>/status` `CapEff`/`CapBnd` equal the `KEEP` mask `00000000200424e1`; SIGINT ends children. The e2e phase is #1002.
+Run the image as root with a seeded router that has `ssh-server` set, start `nos-sshd --table rt1` by hand: `ss -l` shows the listener inside the VRF only; `/proc/<pid>/status` `CapEff`/`CapBnd` equal the `KEEP` mask `00000000200424e1`; SIGINT ends children. The host-key e2e phase is `ssh-hostkey`.

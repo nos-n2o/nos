@@ -20,6 +20,7 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 ## Secrets and the admin keystore (#383, #507)
 
 - `Config.admin` is a keystore of `label -> secret`; sections that need a key reference the label (BGP MD5/TCP-AO and RPKI cache auth do since #508; OSPFv2/OSPFv3 simple and crypto keys, incl. virtual links, since #509; BFD profile auth since #510). `nos-bgpd`, `nos-ospfd`, `nos-ospfv3d` and `nos-bfdd` resolve their labels themselves, subscribed to `DiffScope::Admin`. It is the one place daemons read a secret from, via `Config::key`.
+- Reserved label `ssh-host-key` (#1104): base64 of `nos-sshd`'s ed25519 seed. `nos-sshd` generates it on first start through `Request::SetSshHostKey` (`Sshd` only, set-if-absent, broadcast like a commit), so the per-table daemons agree on one key; only `Role::Sshd` and people see it, and it is masked like any admin key. Regenerate: delete the label and commit.
 - Masking happens at the presentation edges only, never in the stored `Config` (daemons read the real value over IPC):
   - **Logs:** `ConfigStore::apply_op` logs `ConfigOp::kind()`, not `?op`; `AdminKey`, `Admin`, `AdminOp` and `UserOp` also have a `Debug` that prints `<hidden>`.
   - **REST:** `Config::redacted()` backs `GET /v1/config` and every transaction response.

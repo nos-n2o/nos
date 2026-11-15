@@ -8,5 +8,6 @@
 - Runs as root with a reduced capability set (SETUID, SETGID, SYS_CHROOT, CHOWN, NET_RAW, NET_BIND_SERVICE, AUDIT_WRITE, KILL).
 - Limits: 64 connections, 8 per source address (`MaxStartups` does not apply with `-i`); `LoginGraceTime 30`, `MaxAuthTries 3` per connection.
 - sshd's own log (auth accepted/failed) is forwarded to `nos-logd` line by line.
-- Files: `/run/nos-sshd/<table>/sshd_config` (rendered at start), `/var/lib/nos/sshd/ssh_host_ed25519_key` (persistent, shared by every table).
-- Spawning by the watchdog and the e2e phase are separate issues (#995, #1002).
+- Files: `/run/nos-sshd/<table>/sshd_config` (rendered at start), `/run/nos-sshd/<table>/ssh_host_ed25519_key` (tmpfs, 0600, rendered from the keystore).
+- Host key (#1104): the admin-keystore secret `ssh-host-key` (base64 ed25519 seed) in `nos-configd`, saved with the config. The first `nos-sshd` to start generates it (`SetSshHostKey`, set-if-absent); the others adopt it. The log line `host key fingerprint=SHA256:...` is the only trace of it. To regenerate: `delete admin key ssh-host-key`, commit; each daemon rewrites its file and new connections use the new key. Nothing is stored under `/var/lib`.
+- Spawning by the watchdog is #995; the host-key e2e phase is `ssh-hostkey`, the login phase #1002.
