@@ -34,3 +34,7 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 - Every commit logs `config commit audit transaction=<tx> actor=<user>` at info; open and apply log the actor at debug.
 - `nos-restd` logs `rest request user=<user> method=<m> path=<p>` for every authenticated request.
 - Not enforced: any user may commit or discard another's transaction (every user is an administrator); this is an audit trail only. `DiscardTransaction`, `SetTransactionPath` and `Save` carry no actor.
+
+## PAM (#987)
+
+- `pam_nos.so` (crate `nos-pam`) lets sshd check a password against `nos-watchdogd` with the same anonymous `Login` request as `nos`. See [pam.md](pam.md).

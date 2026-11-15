@@ -8,6 +8,7 @@ How NOS is built internally. Operators: see [docs/README.md](../README.md). The 
 - [linux-drivers.md](linux-drivers.md): `Driver` traits, VRFs, bridges, connected routes, the LACP push
 - [ipc-security.md](ipc-security.md): mutual post-quantum TLS, identities, rotation, revocation, allow-lists
 - [auth.md](auth.md): users, login flows, BGP session authentication
+- [pam.md](pam.md): `pam_nos.so`, the PAM module that checks logins against `nos-watchdogd`
 - [rpl.md](rpl.md): `nos-rpl` compiler/VM internals
 - [logging.md](logging.md): `nos-log-client` and `nos-logd`
 - [benchmark.md](benchmark.md): `tools/bench-bgp.sh`
