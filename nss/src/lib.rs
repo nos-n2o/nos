@@ -19,7 +19,7 @@ struct NosPasswd;
     reason = "libnss_passwd_hooks! expands to extern \"C\" NSS entry points"
 )]
 mod export {
-    use super::*;
+    use super::{libnss_passwd_hooks, NosPasswd};
     libnss_passwd_hooks!(nos, NosPasswd);
 }
 
@@ -115,7 +115,7 @@ mod tests {
         assert!(matches!(r, Response::Unavail));
     }
 
-    /// A buffer too small for the entry: libnss reports `ERANGE` via TryAgain.
+    /// A buffer too small for the entry: libnss reports `ERANGE` via `TryAgain`.
     #[test]
     #[allow(unsafe_code, reason = "calls the C-buffer conversion libnss exposes")]
     fn a_tiny_buffer_is_erange() {
@@ -124,7 +124,7 @@ mod tests {
         let mut out: libnss::passwd::CPasswd = unsafe { std::mem::zeroed() };
         let mut buf = [0 as libc::c_char; 4];
         let mut errno = 0;
-        let st = unsafe { r.to_c(&mut out, buf.as_mut_ptr(), buf.len(), &mut errno) };
+        let st = unsafe { r.to_c(&raw mut out, buf.as_mut_ptr(), buf.len(), &raw mut errno) };
         assert_eq!(
             (st, errno),
             (libnss::interop::NssStatus::TryAgain, libc::ERANGE)

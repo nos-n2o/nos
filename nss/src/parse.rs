@@ -75,6 +75,6 @@ mod tests {
         assert_eq!(by_uid(F, 20000).unwrap().name, "alice");
         assert_eq!(by_uid(F, 20000).unwrap().shell, "/usr/bin/nos");
         assert!(by_name(F, "carol").is_none() && by_uid(F, 1).is_none());
-        assert!(entries("").is_empty());
+        assert_eq!(entries("").len(), 0);
     }
 }

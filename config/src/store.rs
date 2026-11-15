@@ -857,7 +857,10 @@ mod tests {
             (vec![set("alice", "pw")], true),
             (vec![set("alice", "other")], false),
         ] {
-            store.open_transaction("t", TransactionBase::Current).await.unwrap();
+            store
+                .open_transaction("t", TransactionBase::Current)
+                .await
+                .unwrap();
             for op in ops {
                 store.apply_op("t", op).await.unwrap();
             }

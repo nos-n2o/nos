@@ -25,8 +25,7 @@ const HOME: &str = "/nonexistent";
 pub fn safe_name(n: &str) -> bool {
     let mut c = n.chars();
     n.len() <= 32
-        && c.next()
-            .is_some_and(|f| f.is_ascii_lowercase() || f == '_')
+        && c.next().is_some_and(|f| f.is_ascii_lowercase() || f == '_')
         && c.all(|f| f.is_ascii_lowercase() || f.is_ascii_digit() || f == '_' || f == '-')
 }
 
@@ -95,7 +94,17 @@ impl UidMap {
     }
 
     fn persist(&self) -> std::io::Result<()> {
-        let text: String = self.uids.iter().map(|(n, u)| format!("{n}:{u}\n")).collect();
+        let text = self
+            .uids
+            .iter()
+            .map(|(n, u)| {
+                format!(
+                    "{n}:{u}
+"
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
         write_atomic(&self.path, &text, 0o600)
     }
 }
@@ -110,19 +119,19 @@ pub fn render(users: &[User], map: &mut UidMap) -> (String, bool) {
             warn!(user = ?u.name, "no ssh account: name is not a valid unix user name");
             continue;
         }
-        match map.allocate(&u.name) {
-            (Some(uid), g) => {
-                grew |= g;
-                rows.push((uid, u.name.as_str()));
-            }
-            (None, _) => error!(user = %u.name, "no ssh account: the uid range is exhausted"),
+        if let (Some(uid), g) = map.allocate(&u.name) {
+            grew |= g;
+            rows.push((uid, u.name.as_str()));
+        } else {
+            error!(user = %u.name, "no ssh account: the uid range is exhausted");
         }
     }
     rows.sort_unstable();
     let text = rows
         .iter()
         .map(|(uid, n)| format!("{n}:{uid}:{uid}:{HOME}:{SHELL}\n"))
-        .collect();
+        .collect::<Vec<_>>()
+        .concat();
     (text, grew)
 }
 
@@ -171,7 +180,10 @@ impl UserDb {
     /// Persists any new uid first, then the passwd file, so a crash never exposes an
     /// unpersisted uid. Failures are logged, never returned: a stale entry is harmless.
     pub fn sync(&self, users: &[User]) {
-        let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        let mut map = self
+            .map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (text, grew) = render(users, &mut map);
         if grew && let Err(e) = map.persist() {
             error!(error = %e, "persisting the uid map failed, nss passwd file not updated");
@@ -247,16 +259,34 @@ mod tests {
     fn a_corrupt_or_out_of_range_map_refuses_to_write() {
         let t = tempfile::tempdir().unwrap();
         let ids = t.path().join("ids");
-        for bad in ["garbage\n", "alice:5\n", "alice:20000\nbob:20000\n", "A:20000\n", "a:20000\na:20001\n"] {
+        for bad in [
+            "garbage\n",
+            "alice:5\n",
+            "alice:20000\nbob:20000\n",
+            "A:20000\n",
+            "a:20000\na:20001\n",
+        ] {
             std::fs::write(&ids, bad).unwrap();
-            assert!(UserDb::open(t.path().join("passwd"), &ids).is_none(), "{bad}");
+            assert!(
+                UserDb::open(t.path().join("passwd"), &ids).is_none(),
+                "{bad}"
+            );
         }
         assert!(!t.path().join("passwd").exists());
     }
 
     #[test]
     fn unsafe_names_get_no_entry() {
-        for n in ["a:b", "Alice", "café", "", &"a".repeat(33), "a\nb", "1a", "-a"] {
+        for n in [
+            "a:b",
+            "Alice",
+            "café",
+            "",
+            &"a".repeat(33),
+            "a\nb",
+            "1a",
+            "-a",
+        ] {
             assert!(!safe_name(n), "{n:?}");
         }
         for n in ["alice", "_x", "a-b_9", &"a".repeat(32)] {
@@ -264,7 +294,10 @@ mod tests {
         }
         let t = tempfile::tempdir().unwrap();
         db(t.path(), UID_MIN, UID_MAX).sync(&users(&["a:b", "Alice", "ok"]));
-        assert_eq!(passwd(t.path()), "ok:20000:20000:/nonexistent:/usr/bin/nos\n");
+        assert_eq!(
+            passwd(t.path()),
+            "ok:20000:20000:/nonexistent:/usr/bin/nos\n"
+        );
     }
 
     #[test]
