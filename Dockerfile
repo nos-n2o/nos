@@ -145,6 +145,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nano \
     && rm -rf /var/lib/apt/lists/*
 
+# Host keys are not baked in (every container would share them): nos-sshd owns its one
+# persisted key (#994/#995). /run/sshd is the privsep dir.
 # The PAM module sshd loads (#987, docs/architecture/pam.md): root-owned 0644, no file
 # capabilities (it runs inside sshd). The multiarch dir differs per platform
 # (x86_64-linux-gnu, aarch64-linux-gnu), so it is taken from where libpam sits.
@@ -152,7 +154,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpam0g \
         openssh-server \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_* \
+    && mkdir -p /run/sshd && chmod 0755 /run/sshd
 COPY --from=builder /app/target/release/libpam_nos.so /tmp/pam_nos.so
 RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
     && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
