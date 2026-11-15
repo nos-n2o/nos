@@ -2,7 +2,7 @@
 //! `pamtester` (lab image only) against the real watchdog login broker, so the
 //! `PamModule` adapters that `cargo test -p nos-pam` cannot reach are proven too.
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 
 use crate::consts::*;
 use crate::router::log;
