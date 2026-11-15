@@ -52,7 +52,7 @@ fn refuse_command(args: &Args) -> Option<&'static str> {
 
 /// The PAM login ticket (`NOS_LOGIN_TICKET`), if sshd's session carries one.
 // ponytail: the variable stays in this process's environment (removing it needs
-// `unsafe`); `nos` spawns no child but the `$EDITOR` one, which #1000 removes.
+// `unsafe`); `nos` spawns no child (the built-in editor, #1000, runs in-process).
 fn login_ticket() -> Option<zeroize::Zeroizing<Vec<u8>>> {
     login::parse_ticket(std::env::var_os(nos_proto::LOGIN_TICKET_ENV))
 }

@@ -231,6 +231,24 @@ lab-1(doc3)> discard
 transaction 'doc3' discarded
 ```
 
+## Editing a policy source
+
+`edit source`, inside a policy-definition, opens its RPL source in the built-in editor in every session (ssh login shell included). `$EDITOR`/`$VISUAL` are not used.
+
+- On save, the source is compiled against the transaction and applied only if it compiles; otherwise it is discarded.
+- The editor reads and writes only its in-memory buffer: no file, shell or command line, so `:!sh` is just text. It needs a terminal; without one it prints an error and applies nothing (use `set source line <n> <text>`).
+- Pasted control characters are stripped; the buffer is capped at 64 KiB.
+
+| Key | Action |
+|-----|--------|
+| Arrows, Home, End, PgUp, PgDn, Ctrl-Home, Ctrl-End | move |
+| Enter | new line (keeps the indent) |
+| Tab | four spaces |
+| Backspace, Delete | erase |
+| Ctrl-K | delete the line |
+| Ctrl-S or Ctrl-X | save and apply |
+| Ctrl-Q | cancel (press twice when there are unsaved changes) |
+
 ## Leaving the shell, and coming back
 
 `exit`, `quit` and `end` all do the same thing:

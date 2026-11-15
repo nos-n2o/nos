@@ -24,8 +24,7 @@ reedline   = { workspace = true }
 time       = { workspace = true }
 nos-rpl    = { workspace = true }
 rpassword  = { workspace = true }
-tempfile   = { workspace = true }
-shlex      = { workspace = true }
+crossterm  = { workspace = true }
 zeroize    = { workspace = true }
 
 [[bin]]
@@ -35,3 +34,4 @@ path = "src/main.rs"
 [dev-dependencies]
 nos-pki  = { workspace = true, features = ["testing"] }
 serde    = { workspace = true }
+tempfile = { workspace = true }
