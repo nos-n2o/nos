@@ -4,7 +4,7 @@
 //! to stdout/stderr, as before.
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal as _, Write as _};
+use std::io::{self, IsTerminal as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -1587,73 +1587,15 @@ async fn apply_policy_source(mode: Mode, socket: &Path, name: String, source: St
     .await
 }
 
-/// Creates the scratch file `edit_in_external_editor` hands the editor —
-/// factored out so its security property (unpredictable name, `O_EXCL`
-/// creation, mode `0600`, since `/tmp` is shared between users — see #100)
-/// is directly unit-testable without spawning a real editor.
-pub fn new_policy_tempfile() -> std::io::Result<tempfile::NamedTempFile> {
-    tempfile::Builder::new()
-        .prefix("nos-policy-")
-        .suffix(".rpl")
-        .tempfile()
-}
-
-/// Opens `$EDITOR` (else `$VISUAL`, else `vim`; a value may carry arguments) on a temp file pre-filled with `source`
-/// — see root `CLAUDE.md`'s "nos-cli editing UX". `None` means no editor
-/// could be spawned at all (already reported to stderr); the caller should
-/// point the user at `show source`/`set source line <n> <text>` instead.
-/// The editor argv: the first of `$EDITOR`, `$VISUAL` that is non-blank
-/// (else `vim`), split into shell-style words without invoking a shell.
-fn editor_command(editor: Option<String>, visual: Option<String>) -> Result<Vec<String>, String> {
-    let pick = [("EDITOR", editor), ("VISUAL", visual)]
-        .into_iter()
-        .find_map(|(n, v)| v.filter(|v| !v.trim().is_empty()).map(|v| (n, v)));
-    let Some((name, value)) = pick else {
-        return Ok(vec!["vim".to_string()]);
-    };
-    match shlex::split(&value) {
-        Some(w) if !w.is_empty() => Ok(w),
-        _ => Err(format!("${name} ({value:?}) is not a valid command line")),
-    }
-}
-
-#[allow(
-    clippy::disallowed_types,
-    reason = "the one CLI exception (#228): launching the user's $EDITOR"
-)]
-fn edit_in_external_editor(source: &str) -> Option<String> {
-    let words = match editor_command(std::env::var("EDITOR").ok(), std::env::var("VISUAL").ok()) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("error: {e}; edit discarded");
-            return None;
-        }
-    };
-    let editor = words.join(" ");
-    let Ok(mut file) = new_policy_tempfile() else {
-        eprintln!("error: could not create a temp file for editing");
-        return None;
-    };
-    if file.write_all(source.as_bytes()).is_err() {
-        eprintln!("error: could not create a temp file for editing");
-        return None;
-    }
-    let path = file.path();
-    // `file` (a `NamedTempFile`) is deleted on drop, on every return path
-    // below — no manual `remove_file` needed.
-    match std::process::Command::new(&words[0])
-        .args(&words[1..])
-        .arg(path)
-        .status()
-    {
-        Ok(status) if status.success() => std::fs::read_to_string(path).ok(),
-        Ok(_) => {
-            eprintln!("editor '{editor}' exited with an error; edit discarded");
-            None
-        }
+/// Edits `source` in the built-in editor (`crate::editor`; see root
+/// `CLAUDE.md`'s "nos-cli editing UX"). `None` means cancelled or the editor
+/// could not run (reported to stderr); the caller applies nothing.
+fn edit_source_text(source: &str) -> Option<String> {
+    match crate::editor::edit(source) {
+        Ok(edited) => edited,
         Err(e) => {
             eprintln!(
-                "error: could not run editor '{editor}' ({e}) — use 'show source' and 'set source line <n> <text>' instead"
+                "error: {e}; edit discarded; use 'show source' and 'set source line <n> <text>'"
             );
             None
         }
@@ -1781,7 +1723,7 @@ async fn edit_policy_source(mode: Mode, socket: &Path, name: String) -> Mode {
     let Some(current) = fetch_policy_source(socket, &transaction, &name).await else {
         return mode;
     };
-    let Some(edited) = edit_in_external_editor(&current) else {
+    let Some(edited) = edit_source_text(&current) else {
         return mode;
     };
     match compile_against_transaction(socket, &transaction, &edited).await {
@@ -1916,30 +1858,7 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
 }
 
 #[cfg(test)]
-mod tempfile_tests {
-    #[test]
-    fn editor_command_picks_and_splits() {
-        let s = |v: &str| Some(v.to_string());
-        let w = |v: &[&str]| Ok(v.iter().map(ToString::to_string).collect::<Vec<_>>());
-        assert_eq!(super::editor_command(s("a"), s("b")), w(&["a"]));
-        assert_eq!(super::editor_command(s("  "), s("b")), w(&["b"]));
-        assert_eq!(super::editor_command(None, None), w(&["vim"]));
-        assert_eq!(
-            super::editor_command(s("emacsclient -t"), None),
-            w(&["emacsclient", "-t"])
-        );
-        assert_eq!(
-            super::editor_command(s("\"my editor\" --f 'a b'"), None),
-            w(&["my editor", "--f", "a b"])
-        );
-        let e = super::editor_command(s("a \"b"), None).unwrap_err();
-        assert!(e.contains("$EDITOR"), "{e}");
-        let e = super::editor_command(None, s("'x")).unwrap_err();
-        assert!(e.contains("$VISUAL"), "{e}");
-    }
-
-    use super::new_policy_tempfile;
-
+mod tests {
     #[test]
     fn version_line_names_version_and_revision() {
         let l = super::version_line();
@@ -1948,38 +1867,5 @@ mod tempfile_tests {
             l.contains(nos_proto::version::VERSION) && l.ends_with(')'),
             "{l}"
         );
-    }
-
-    /// The security property #100 fixed: an unpredictable name (not a
-    /// pid-based `/tmp/nos-policy-<pid>.rpl`) created with mode 0600, so a
-    /// symlink or a pre-created file at a guessed path can't be used to
-    /// hijack the edit.
-    #[test]
-    fn new_policy_tempfile_is_unpredictable_and_owner_only() {
-        let a = new_policy_tempfile().expect("create temp file a");
-        let b = new_policy_tempfile().expect("create temp file b");
-        assert_ne!(
-            a.path(),
-            b.path(),
-            "two calls must not reuse the same predictable path"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for f in [&a, &b] {
-                let mode = f
-                    .as_file()
-                    .metadata()
-                    .expect("stat temp file")
-                    .permissions()
-                    .mode();
-                assert_eq!(
-                    mode & 0o777,
-                    0o600,
-                    "temp file must be created owner-read/write only"
-                );
-            }
-        }
     }
 }

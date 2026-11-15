@@ -28,7 +28,7 @@ To bump:
 The release `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since release builds don't use `-D warnings`.
 
 **Image hardening (#405)**:
-- Both base images are pinned by manifest-list digest (tag kept beside it); `.github/dependabot.yml` (docker ecosystem, weekly) bumps them. apt packages stay unpinned (DL3008 ignored): pinned versions break on every bookworm security update.
+- Both base images are pinned by manifest-list digest (tag kept beside it); `.github/dependabot.yml` (docker ecosystem, weekly) bumps them. apt packages stay unpinned (DL3008 ignored): pinned versions break on every Debian security update.
 - File capabilities are `=ep` (the inheritable bit is dead weight for a non-root exec).
 - `watchdog` and `cli` run with `read_only: true` and a `/tmp` tmpfs; state lives in the `/run/nos` and `/var/lib/nos` volumes. `nos-e2e` mirrors this in `Dock::start` (it does not use compose).
 

@@ -2,7 +2,8 @@
 //! `pamtester` (lab image only) against the real watchdog login broker, so the
 //! `PamModule` adapters that `cargo test -p nos-pam` cannot reach are proven too.
 
-use anyhow::bail;
+use anyhow::{bail, Context};
+use reqwest::Method;
 
 use crate::consts::*;
 use crate::router::log;
@@ -108,5 +109,81 @@ pub async fn pam(w: &mut World) -> anyhow::Result<()> {
         (code, out),
         "cannot retrieve authentication info",
     )?;
-    a.assert_quiet(any, n, 2).await
+    a.assert_quiet(any, n, 2).await?;
+
+    nss(w).await
+}
+
+/// `nos-configd` mirrors the user names into `/run/nos-users/passwd` (#999): a created user
+/// resolves through `getent` (uid 20000..=59999, shell `/usr/bin/nos`) and authenticates, the
+/// file holds no hash, a deleted one disappears, and a re-created one gets the same uid back.
+async fn nss(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let tx = format!("/v1/transactions/{NSS_TX}");
+    let user = format!("{tx}/user/{NSS_USER}");
+    let body = format!(r#"{{"name":"{NSS_USER}","password":"{NSS_PASSWORD}"}}"#);
+    let getent = || async {
+        w.dock
+            .exec("router-a", &["getent", "passwd", NSS_USER])
+            .await
+    };
+    let edit = |method: Method, status: u16| {
+        let (tx, user, body) = (&tx, &user, &body);
+        async move {
+            a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+                .await?;
+            let b = (method == Method::PUT).then_some(body.as_str());
+            a.rest_expect(method, user, b, status).await?;
+            a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+                .await
+        }
+    };
+    let uid_of = |line: &str| -> anyhow::Result<u32> {
+        let f: Vec<&str> = line.trim().split(':').collect();
+        if f.len() != 7 || f[0] != NSS_USER || f[6] != "/usr/bin/nos" {
+            bail!("unexpected passwd entry: {line:?}");
+        }
+        let uid: u32 = f[2].parse()?;
+        if !(20_000..=59_999).contains(&uid) || f[3] != f[2] {
+            bail!("uid/gid out of the NSS range: {line:?}");
+        }
+        Ok(uid)
+    };
+
+    log("pam: a created user resolves through getent and authenticates");
+    edit(Method::PUT, 200).await?;
+    let (code, out) = getent().await?;
+    if code != 0 {
+        bail!("getent passwd {NSS_USER} failed ({code}): {out}");
+    }
+    let uid = uid_of(&out)?;
+    let (code, out) = pamtester(w, PAM_SERVICE, NSS_USER, NSS_PASSWORD, "authenticate").await?;
+    if code != 0 {
+        bail!("the new user must authenticate, got exit {code}: {out}");
+    }
+    let (_, file) = w
+        .dock
+        .exec("router-a", &["cat", "/run/nos-users/passwd"])
+        .await?;
+    if file.contains("argon2") || file.contains(NSS_PASSWORD) {
+        bail!("/run/nos-users/passwd leaks a credential: {file}");
+    }
+
+    log("pam: a deleted user disappears");
+    edit(Method::DELETE, 204).await?;
+    if getent().await?.0 == 0 {
+        bail!("getent still resolves the deleted user");
+    }
+    let r = pamtester(w, PAM_SERVICE, NSS_USER, NSS_PASSWORD, "authenticate").await?;
+    refused("a deleted user", r, "Authentication failure")?;
+
+    log("pam: a re-created user keeps its uid");
+    edit(Method::PUT, 200).await?;
+    let (code, out) = getent().await?;
+    if code != 0 || uid_of(&out).context("re-created user")? != uid {
+        bail!("re-created user must get uid {uid} back, got ({code}): {out}");
+    }
+    // leave the lab as found
+    edit(Method::DELETE, 204).await?;
+    Ok(())
 }

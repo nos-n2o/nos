@@ -308,11 +308,15 @@ impl Dock {
                 // instead of just its own container.
                 memory: Some(2 << 30),
                 memory_swap: Some(2 << 30),
-                // Mirrors docker-compose.yml: read-only rootfs, writable /tmp;
+                // Mirrors docker-compose.yml: read-only rootfs, writable /tmp and
+                // /run/nos-users (the NSS passwd file nos-configd writes, #999);
                 // no `no-new-privileges` (it ignores file capabilities, the
                 // watchdog's cap_setuid/cap_setgid/cap_chown included).
                 readonly_rootfs: Some(true),
-                tmpfs: Some(HashMap::from([("/tmp".to_string(), String::new())])),
+                tmpfs: Some(HashMap::from([
+                    ("/tmp".to_string(), String::new()),
+                    ("/run/nos-users".to_string(), String::new()),
+                ])),
                 network_mode: Some(network.to_string()),
                 ..Default::default()
             }),

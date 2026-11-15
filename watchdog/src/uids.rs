@@ -60,6 +60,17 @@ pub fn ensure_state_dirs(base: &Path, owner: (u32, u32), gid: u32) -> anyhow::Re
     Ok(())
 }
 
+/// The directory `nos-configd` writes the NSS passwd file into (#999): `0755`, owned by
+/// the configd role so it can write and everyone (sshd, `getent`) can read. The watchdog
+/// never writes the file. Needs `CAP_CHOWN`.
+pub fn ensure_users_dir(dir: &Path, owner: (u32, u32), gid: u32) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    chown(dir, Some(owner.0), Some(owner.1)).with_context(|| format!("chown {}", dir.display()))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+    let configd = role_uid(Role::Configd).expect("configd has a uid");
+    chown(dir, Some(configd), Some(gid)).with_context(|| format!("chown {}", dir.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +124,22 @@ mod tests {
         } else {
             let e = format!("{:#}", r.unwrap_err());
             assert!(e.contains("configd"), "{e}");
+        }
+    }
+
+    #[test]
+    fn users_dir_belongs_to_configd() {
+        let t = tempfile::tempdir().unwrap();
+        let me = std::fs::metadata(t.path()).unwrap();
+        let dir = t.path().join("nos-users");
+        let r = ensure_users_dir(&dir, (me.uid(), me.gid()), me.gid());
+        if me.uid() == 0 {
+            r.unwrap();
+            ensure_users_dir(&dir, (me.uid(), me.gid()), me.gid()).unwrap();
+            let m = std::fs::metadata(&dir).unwrap();
+            assert_eq!((m.mode() & 0o7777, m.uid()), (0o755, 10001));
+        } else {
+            assert!(format!("{:#}", r.unwrap_err()).contains("nos-users"));
         }
     }
 }

@@ -17,12 +17,12 @@ pub fn extra_directives() -> &'static str {
 /// Password-only (PAM does the check against `nos-watchdogd`); no forwarding,
 /// no tunnels, no environment from the user.
 ///
-/// No `PAMServiceName`: bookworm's OpenSSH 9.2 lacks it. OpenSSH names its PAM
-/// service after its own `argv[0]` basename, so `--sshd-bin` points at a
-/// symlink called `nos-sshd` and `/etc/pam.d/nos-sshd` (#998) is the stack.
+/// `PAMServiceName nos-sshd` selects `/etc/pam.d/nos-sshd` (#998) instead of the
+/// distro's `sshd` service file; needs OpenSSH >= the trixie 10.0p2 the image ships.
 pub fn render(s: &Settings) -> String {
     let mut out = format!(
         "UsePAM yes\n\
+         PAMServiceName nos-sshd\n\
          PasswordAuthentication no\n\
          KbdInteractiveAuthentication yes\n\
          PubkeyAuthentication no\n\
@@ -72,6 +72,7 @@ mod tests {
         let t = text();
         for line in [
             "UsePAM yes",
+            "PAMServiceName nos-sshd",
             "PasswordAuthentication no",
             "KbdInteractiveAuthentication yes",
             "PubkeyAuthentication no",
@@ -84,7 +85,6 @@ mod tests {
         ] {
             assert!(t.lines().any(|l| l == line), "missing {line}");
         }
-        assert!(!t.contains("PAMServiceName"));
         assert!(!t.contains("PubkeyAuthentication yes"));
         assert!(!t.contains("Forwarding yes"));
         assert!(t.ends_with(extra_directives()));

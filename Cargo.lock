@@ -1499,6 +1499,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libnss"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e401ab1018ee75ca809cd81852c635f1f453d796fdd5398c14fbb5f322855eab"
+dependencies = [
+ "lazy_static",
+ "libc",
+ "paste",
+]
+
+[[package]]
 name = "libpam-sys"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1851,6 +1862,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "futures",
  "ipnet",
  "nos-daemon",
@@ -1861,7 +1873,6 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
- "shlex",
  "tempfile",
  "thiserror",
  "time",
@@ -2080,6 +2091,15 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nos-nss"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "libnss",
+ "tempfile",
 ]
 
 [[package]]
@@ -2535,6 +2555,12 @@ dependencies = [
  "rand_core 0.6.4",
  "subtle",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"

@@ -36,10 +36,12 @@ services:
     # own 10s default would SIGKILL the whole container first.
     stop_grace_period: 15s
     # Read-only rootfs: writes go to the volumes below (/run/nos, /var/lib/nos)
-    # and /tmp (tmpfs, 1777). Mirrored in tools/e2e/src/docker.rs.
+    # and /tmp, /run/nos-users (tmpfs; the NSS passwd file nos-configd writes,
+    # #999, chowned at start by the watchdog). Mirrored in tools/e2e/src/docker.rs.
     read_only: true
     tmpfs:
       - /tmp
+      - /run/nos-users
     # Do NOT set `security_opt: [no-new-privileges:true]`: the kernel then
     # ignores file capabilities on exec, so every setcap binary (ribd,
     # interfaced, bgpd, ...) loses its capabilities, nos-watchdogd's

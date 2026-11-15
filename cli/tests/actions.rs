@@ -2,10 +2,6 @@
 //! fake daemons over real TLS sockets (#131): a stateful fake `nos-configd`,
 //! a fake broker, and one canned fake per queried daemon.
 
-#![allow(
-    unsafe_code,
-    reason = "edition 2024: set_var is unsafe; tests set EDITOR/PATH on purpose"
-)]
 #![allow(clippy::excessive_nesting, clippy::match_wildcard_for_single_variants)]
 
 mod common;
@@ -339,9 +335,6 @@ async fn every_show_command_runs_against_its_daemon() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configuration_session_edits_commits_and_leaves() {
-    // SAFETY: test-only env mutation; these tests run in one serial test body.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only env mutation, serial test body
-    unsafe { std::env::set_var("EDITOR", "true") };
     let lab = lab();
     let (mode, _) = run(
         &lab,

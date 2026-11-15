@@ -2,7 +2,7 @@
 
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
-# versions in bookworm-slim breaks on every security update.
+# versions in the slim images breaks on every security update.
 FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS builder
 WORKDIR /app
 
@@ -23,9 +23,11 @@ ARG CARGO_FEATURES=
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
 RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
-    && cargo build --release -p nos-pam
+    && cargo build --release -p nos-pam -p nos-nss
 
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+# trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
+# which `sshd -T` accepts it in (#994). The builder stays on bookworm (older glibc, still runs here).
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS runtime
 
 # Fixed numeric ids (the ENTRYPOINT's --child-gid names group `nos`):
 # `nos-wd` runs the watchdog (both CAs in memory); each daemon role runs as its
@@ -156,9 +158,17 @@ RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
     && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
     && rm /tmp/pam_nos.so
 COPY pam/nos-sshd.pam /etc/pam.d/nos-sshd
-# bookworm's OpenSSH has no `PAMServiceName`: sshd names its PAM service after its argv[0]
-# basename, so `nos-sshd` runs it through this symlink (#994, ssh/CLAUDE.md).
-RUN mkdir -p /usr/libexec/nos-sshd && ln -s /usr/sbin/sshd /usr/libexec/nos-sshd/nos-sshd
+
+# The NSS module that makes NOS users resolvable (#999): glibc reads
+# /run/nos-users/passwd, which nos-configd writes (docs/architecture/pam.md).
+# `nos` is appended to the `passwd` database only, after `files`, and
+# /run/nos-users is created at start by nos-wd (a tmpfs in compose/nos-e2e).
+COPY --from=builder /app/target/release/libnss_nos.so /tmp/libnss_nos.so
+RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")" \
+    && install -m 0644 -o root -g root /tmp/libnss_nos.so "$d/libnss_nos.so.2" \
+    && rm /tmp/libnss_nos.so \
+    && sed -i 's/^passwd:.*/passwd:         files nos/' /etc/nsswitch.conf \
+    && mkdir -p /run/nos-users && chown nos-configd:nos /run/nos-users && chmod 0755 /run/nos-users
 
 # The `cli` compose service and `nos-e2e`'s execs run as `nos` (group `nos`
 # reaches the 0660 sockets).

@@ -27,9 +27,10 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `l2-socket/` | `nos-l2-socket` | Raw `AF_PACKET` L2 socket for `nos-lacp`/`nos-lldp`, plus `L2Unicast` for `nos-bfd` Echo — `unsafe` `sockaddr_ll`/BPF FFI, no NOS dependencies |
 | `bfd-socket/` | `nos-bfd-socket` | `nos-bfd`'s raw-libc UDP FFI (cmsg, `setsockopt`); no NOS dependencies |
 | `tc/` | `nos-tc` | Hand-encoded tc netlink (clsact, flower/fw, gact/skbedit, chains, per-action stats) shared by `nos-fdbd`, `nos-interfaced`, `nos-acld`; no NOS dependencies — see `tc/CLAUDE.md` |
-| `password/` | `nos-password` | argon2id password hashing/verification (`hash`/`verify`/`verify_or_dummy`) for local users — no NOS dependencies, like `nos-tcp-auth`; used by `nos-config` (hashing on the way in) and `nos-watchdog` (login verification, for `nos` and REST clients alike) |
+| `password/` | `nos-password` | argon2id password hashing/verification for local users — no NOS dependencies; used by `nos-config` (hashing) and `nos-watchdog` (login verification) |
 | `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, with `nos-watchdogd` as the certificate authority — identities are `nos://<role>/<name>` URI SANs, delivered to each daemon over its stdin and hot-rotated; also the TLS for `nos-restd`'s TCP listener and its clients (`nos_pki::rest`, a second CA); no NOS dependencies, like `nos-password` — see `pki/CLAUDE.md` |
-| `pam/` | `nos-pam` | PAM module (`pam_nos.so`, cdylib): checks a password against `nos-watchdogd`'s login broker over mutual TLS and holds the issued certificate as `NosSession` (#996, #987) — see `pam/CLAUDE.md` |
+| `pam/` | `nos-pam` | PAM module (`pam_nos.so`): checks a password against `nos-watchdogd`'s login broker, holds the certificate as `NosSession` (#996) — `pam/CLAUDE.md` |
+| `nss/` | `nos-nss` | NSS `passwd` module (`libnss_nos.so.2`): sshd resolves NOS users (#999) — `nss/CLAUDE.md` |
 | `log-client/` | `nos-log-client` | The `tracing` → `nos-logd` forwarding layer every daemon installs — depends only on `nos-proto`, like `nos-tcp-auth`/`nos-rpl` |
 | `daemon/` | `nos-daemon` | Boilerplate every daemon shares: watchdog endpoint resolution, `nos-configd` fetch/subscribe, generic one-shot IPC query, `main()` identity + tracing bootstrap — see `daemon/CLAUDE.md` |
 | `config/` | `nos-config` | Configuration store and IPC server |
@@ -140,7 +141,7 @@ make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excl
 
 - `make claude-md-size` (part of `make check`) keeps every `CLAUDE.md` under its ceiling in `tools/ci/claude-md-budget.txt`; move detail to `docs/` instead of raising it. Targets: root 20 KB, crates 8 KB, bgp/ospf 12 KB (#252).
 
-**No external commands (#228).** Production code never shells out: use a crate (`rtnetlink`, `bollard`) or FFI. `clippy.toml` bans `std::process::Command`/`tokio::process::Command`, so `make clippy` fails on it. Exceptions carry `#[allow(clippy::disallowed_types, reason = "…")]`: the watchdog supervisor, `nos`'s `$EDITOR` launch, and tests that run built binaries or an independent oracle. `tools/e2e` needs none (it drives docker via `bollard`). A new exception needs its reason justified in the PR.
+**No external commands (#228).** Production code never shells out: use a crate (`rtnetlink`, `bollard`) or FFI. `clippy.toml` bans `std::process::Command`/`tokio::process::Command`, so `make clippy` fails on it. Exceptions carry `#[allow(clippy::disallowed_types, reason = "…")]`: the watchdog supervisor and tests that run built binaries or an independent oracle. `tools/e2e` needs none (it drives docker via `bollard`). A new exception needs its reason justified in the PR.
 
 `COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs`, `bfd/src/socket.rs`: a mock would only test the mock; `nos-e2e` is their real test.
 

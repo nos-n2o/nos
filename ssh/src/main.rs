@@ -32,10 +32,8 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
-    /// The OpenSSH server run once per connection. Its file name selects the
-    /// PAM service (`/etc/pam.d/<name>`), so the image makes it a symlink to
-    /// `/usr/sbin/sshd` called `nos-sshd`.
-    #[arg(long, default_value = "/usr/libexec/nos-sshd/nos-sshd")]
+    /// The OpenSSH server binary run once per connection.
+    #[arg(long, default_value = "/usr/sbin/sshd")]
     sshd_bin: PathBuf,
 
     /// Root-owned tmpfs directory for the rendered `sshd_config`.
@@ -167,7 +165,7 @@ mod tests {
         Args::command().debug_assert();
         let a = Args::try_parse_from(["nos-sshd", "--table", "rt1"]).unwrap();
         assert_eq!(a.table, "rt1");
-        assert_eq!(a.sshd_bin, PathBuf::from("/usr/libexec/nos-sshd/nos-sshd"));
+        assert_eq!(a.sshd_bin, PathBuf::from("/usr/sbin/sshd"));
         assert_eq!(a.run_dir, PathBuf::from("/run/nos-sshd"));
         assert_eq!(a.host_key_dir, PathBuf::from("/var/lib/nos/sshd"));
         assert_eq!(a.max_connections, 64);

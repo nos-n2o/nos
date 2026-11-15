@@ -6,6 +6,7 @@ pub mod client;
 pub mod command;
 pub mod completer;
 pub mod config_grammar;
+pub mod editor;
 pub mod fdb_client;
 pub mod format;
 pub mod help_menu;
