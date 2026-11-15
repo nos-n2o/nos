@@ -8,6 +8,7 @@ WORKDIR /app
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpam0g-dev \
         make \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -21,7 +22,8 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
+    && cargo build --release -p nos-pam
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
@@ -138,7 +140,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nano \
     && rm -rf /var/lib/apt/lists/*
 
+# The PAM module sshd loads (#987, docs/architecture/pam.md): root-owned 0644, no file
+# capabilities (it runs inside sshd). The multiarch dir differs per platform
+# (x86_64-linux-gnu, aarch64-linux-gnu), so it is taken from where libpam sits.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpam0g \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/libpam_nos.so /tmp/pam_nos.so
+RUN d="$(dirname "$(readlink -f /usr/lib/*-linux-gnu/libpam.so.0)")/security" \
+    && install -D -m 0644 -o root -g root /tmp/pam_nos.so "$d/pam_nos.so" \
+    && rm /tmp/pam_nos.so
+COPY pam/nos-sshd.pam /etc/pam.d/nos-sshd
+
 # The `cli` compose service and `nos-e2e`'s execs run as `nos` (group `nos`
 # reaches the 0660 sockets).
+USER nos-wd
+ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]
+
+# The lab image (`make docker-build`, nos-e2e): the runtime plus `pamtester`, which
+# drives the PAM stack without sshd (`nos-e2e`'s `pam` phase). A production build uses
+# `--target runtime`.
+FROM runtime AS lab
+USER root
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pamtester \
+    && rm -rf /var/lib/apt/lists/*
 USER nos-wd
 ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]

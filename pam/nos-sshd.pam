@@ -1,0 +1,3 @@
+# PAM stack for sshd (#987): every login is checked by nos-watchdogd, no local fallback.
+auth    required pam_nos.so
+account required pam_nos.so

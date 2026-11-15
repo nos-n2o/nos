@@ -8,6 +8,11 @@ use crate::lab::Addr;
 /// in as (`POST /v1/login`) to get the client certificate its REST calls use.
 pub const E2E_USER: &str = "e2e";
 pub const E2E_PASSWORD: &str = "e2e-password";
+/// The `pam` phase: the service file the image ships (`pam/nos-sshd.pam`), a wrong
+/// password and a user that does not exist (no NSS is needed: `pamtester` names the user).
+pub const PAM_SERVICE: &str = "nos-sshd";
+pub const PAM_WRONG_PASSWORD: &str = "not-the-password";
+pub const PAM_UNKNOWN_USER: &str = "nobody-here";
 /// The `rest` phase's throwaway user for password-change checks.
 pub const REST_USER: &str = "rest-user";
 /// Where `nos-watchdogd` publishes the CA REST client certificates chain to —
