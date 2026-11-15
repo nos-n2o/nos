@@ -481,10 +481,10 @@ Done in #1084 (receive side) and #1085 (selection and propagation, below). The a
 
 ### VPN Flowspec enforcement (#1086)
 
-- `vpn_flows_of(table)` (`rib/flowspec_vpn.rs`): the copies of `vpn_flow_loc` valid in `table`, one per (family, rule), the lowest RD winning (`best_import`'s tie-break), IPv4 first in RFC 8955 section 5.1 order. `vpn_flowspec_push_snapshot` lowers it per table (every VRF listed, empty when no rule; `None` while deferring); `vpn_flow_enforced` is the same set as a predicate for `show`.
+- `vpn_flows_of(table)` (`rib/flowspec_vpn.rs`): per (RD, rule) the `best_path` among the peers' copies valid in `table` (#1111; `vpn_flow_loc` is the advertisement winner only, per-VRF advertisement is Add-Path, #1124), then one per (family, rule), the lowest RD winning (`best_import`'s tie-break), IPv4 first in RFC 8955 section 5.1 order. `vpn_flowspec_push_snapshot` lowers it per table (every VRF listed, empty when no rule; `None` while deferring); `vpn_flow_enforced` is the same set as a predicate for `show`.
 - `acl_push_client` keeps `sent` per table: only changed tables are pushed (one `PushFlowspec` + `Ack` each), a reconnect clears `sent`, a table that left the `VrfSet` is pushed once empty then forgotten, and shutdown clears every table that was sent.
 - `FlowShown.table` carries the `vrf` filter into the row; `dataplane()` joins `nos-acld`'s rows on (instance, table, flow), so two VRFs with one flow never show each other's status.
-- ponytail: `vpn_flow_loc` is chosen among copies valid in *some* VRF, so a copy only one VRF finds valid can lose to another valid elsewhere; a per-VRF selection if that shows.
+- ponytail: `vpn_flows_of` is computed on read, O(copies of each held rule) per table per snapshot; a cache per table if `tools/bench-bgp.sh` shows it.
 
 ### Policy hooks on VPN routes (#582)
 

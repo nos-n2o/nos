@@ -836,7 +836,9 @@ pub struct BgpRib {
     /// SAFI 134 revalidations so far (what the tests count).
     vpn_flow_visits: u64,
     /// Per SAFI 134 rule, the selected copy and the peer it came from
-    /// (`select_vpn_flow`).
+    /// (`select_vpn_flow`): the advertisement (Loc-RIB) winner, not the
+    /// enforced set, which is chosen per VRF (`vpn_flows_of`). Per-VRF
+    /// advertisement needs Add-Path for SAFI 134 (#1124).
     vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, FlowspecRoute)>,
     /// What each peer was last sent per SAFI 134 rule (`sync_vpn_flow_to`).
     vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,

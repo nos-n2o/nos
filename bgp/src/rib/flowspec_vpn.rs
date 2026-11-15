@@ -264,22 +264,31 @@ impl BgpRib {
             .is_some_and(|m| m.values().any(|v| *v == FlowValidity::Valid))
     }
 
-    /// Re-decides rule `k`'s best path among the valid, imported copies every
-    /// peer holds (no IGP step: there is no next hop) and, when it changed,
-    /// propagates it.
-    pub(super) fn select_vpn_flow(&mut self, k: &VpnFlowKey) {
+    /// The peer whose copy of `k` is best among the copies `keep` accepts
+    /// (standard `best_path`, no IGP step: there is no next hop).
+    fn best_vpn_flow_peer(&self, k: &VpnFlowKey, keep: impl Fn(IpAddr) -> bool) -> Option<IpAddr> {
         let candidates: Vec<Candidate> = self
             .vpn_flow_adj_rib_in
             .iter()
             .filter_map(|(p, t)| {
-                let r = t.get(k).filter(|_| self.vpn_flow_usable(*p, k))?;
+                let r = t.get(k).filter(|_| keep(*p))?;
                 Some((flow_rib_route(*p, r, self.confed_peers.contains(p)), 0))
             })
             .collect();
-        let new = best_path(&candidates, &HashMap::new()).and_then(|b| match b.origin {
-            RouteOrigin::Peer(p) => Some((p, self.vpn_flow_adj_rib_in.get(&p)?.get(k)?.clone())),
+        match best_path(&candidates, &HashMap::new())?.origin {
+            RouteOrigin::Peer(p) => Some(p),
             RouteOrigin::Local => None,
-        });
+        }
+    }
+
+    /// Re-decides rule `k`'s best path among the valid, imported copies every
+    /// peer holds and, when it changed, propagates it. This is the
+    /// advertisement (Loc-RIB) winner only; enforcement is per VRF
+    /// (`vpn_flows_of`).
+    pub(super) fn select_vpn_flow(&mut self, k: &VpnFlowKey) {
+        let new = self
+            .best_vpn_flow_peer(k, |p| self.vpn_flow_usable(p, k))
+            .and_then(|p| Some((p, self.vpn_flow_adj_rib_in.get(&p)?.get(k)?.clone())));
         if self.vpn_flow_loc.get(k) == new.as_ref() {
             return;
         }
@@ -403,29 +412,37 @@ impl BgpRib {
         }
     }
 
-    /// The copy of each VPN flow rule that `table` enforces (#1086, owner
-    /// D7): among the selected copies (`vpn_flow_loc`, one per (RD, rule))
-    /// valid in `table`, the one with the lowest RD per (family, rule),
-    /// matching `best_import`'s tie-break. IPv4 first, RFC 8955 section 5.1
-    /// order.
-    // ponytail: `vpn_flow_loc` is chosen among copies valid in *some* VRF, so
-    // a copy that only `table` finds valid can lose to one valid elsewhere;
-    // a per-VRF selection if that ever shows.
+    /// The copy of each VPN flow rule that `table` enforces (#1086, #1111,
+    /// owner D7): per (RD, rule), the best path among the peers' copies valid
+    /// in `table`, then the lowest RD per (family, rule), matching
+    /// `best_import`'s tie-break. IPv4 first, RFC 8955 section 5.1 order.
+    // ponytail: computed on read, O(copies of each held rule) per table per
+    // snapshot; a cache per table if `tools/bench-bgp.sh` shows it.
     fn vpn_flows_of(&self, table: &str) -> Vec<(&VpnFlowKey, IpAddr, &FlowspecRoute)> {
         let mut best: HashMap<(AddressFamily, &FlowSpec), (&VpnFlowKey, IpAddr, &FlowspecRoute)> =
             HashMap::new();
-        for (k, (peer, r)) in &self.vpn_flow_loc {
-            let valid = self
-                .vpn_flow_validity
-                .get(&(*peer, k.clone()))
-                .and_then(|m| m.get(table))
-                == Some(&FlowValidity::Valid);
-            if !valid {
+        let keys: std::collections::HashSet<&VpnFlowKey> = self
+            .vpn_flow_adj_rib_in
+            .values()
+            .flatten()
+            .map(|(k, _)| k)
+            .collect();
+        for k in keys {
+            let valid_here = |p: IpAddr| {
+                self.vpn_flow_validity
+                    .get(&(p, k.clone()))
+                    .and_then(|m| m.get(table))
+                    == Some(&FlowValidity::Valid)
+            };
+            let Some(peer) = self.best_vpn_flow_peer(k, valid_here) else {
                 continue;
-            }
-            let slot = best.entry((k.0, &(k.1).1)).or_insert((k, *peer, r));
+            };
+            let Some(r) = self.vpn_flow_adj_rib_in.get(&peer).and_then(|t| t.get(k)) else {
+                continue;
+            };
+            let slot = best.entry((k.0, &(k.1).1)).or_insert((k, peer, r));
             if (k.1).0 < ((slot.0).1).0 {
-                *slot = (k, *peer, r);
+                *slot = (k, peer, r);
             }
         }
         let mut out: Vec<_> = best.into_values().collect();
