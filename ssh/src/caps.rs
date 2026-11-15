@@ -76,11 +76,13 @@ const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 pub fn restrict() -> io::Result<()> {
     for cap in to_drop(last_cap()?, &KEEP) {
         // SAFETY: PR_CAPBSET_READ/DROP take one integer argument and touch no memory.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc prctl FFI, see SAFETY
         let held = unsafe { libc::prctl(libc::PR_CAPBSET_READ, libc::c_ulong::from(cap), 0, 0, 0) };
         if held == 0 {
             continue; // already absent from the bounding set
         }
         // SAFETY: as above.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc prctl FFI, see SAFETY
         if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, libc::c_ulong::from(cap), 0, 0, 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -92,6 +94,7 @@ pub fn restrict() -> io::Result<()> {
     let mut data = [Data::default(); 2];
     // SAFETY: `header` and `data` are valid, correctly sized (`data` is two
     // structs for version 3) and live across both calls.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc capget FFI, see SAFETY
     unsafe {
         if libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr()) != 0 {
             return Err(io::Error::last_os_error());
@@ -105,6 +108,7 @@ pub fn restrict() -> io::Result<()> {
         d.inheritable &= d.permitted;
     }
     // SAFETY: as above.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- libc capset FFI, see SAFETY
     unsafe {
         if libc::syscall(libc::SYS_capset, &raw mut header, data.as_ptr()) != 0 {
             return Err(io::Error::last_os_error());

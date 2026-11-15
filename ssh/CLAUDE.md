@@ -15,7 +15,7 @@ A VRF-bound TCP listener that hands each accepted connection to a stock OpenSSH 
 - `conn.rs`: accept loop. Caps checked **before** spawning: 64 total, 8 per source address (`MaxStartups` means nothing under `-i`, these are the brake). Child: `sshd -i -e -f <cfg>`, `env_clear()` + `PATH` only, stdin/stdout = the socket (made blocking again), **stderr = a pipe** forwarded line by line to `info!` (sshd's auth log reaches `nos-logd`). Stop: SIGTERM, SIGKILL after 5s. The single `tokio::process::Command` use carries the `disallowed_types` allow with its reason.
 - `sshd_config.rs`: pure `render`; password via PAM only (`UsePAM yes`, `KbdInteractiveAuthentication yes`, no pubkey, no root, no forwarding). `extra_directives()` is appended last for #989/#987.
 - **PAM service name:** bookworm's OpenSSH has no `PAMServiceName`; sshd names the service after its `argv[0]` basename, so the image symlinks `/usr/libexec/nos-sshd/nos-sshd` -> `/usr/sbin/sshd` (`--sshd-bin`) and `/etc/pam.d/nos-sshd` (#998) applies. Verified in a bookworm container.
-- `hostkey.rs`: ed25519 OpenSSH key, 0600 in a 0700 dir; temp file + `hard_link` so concurrent tables' daemons never replace each other's key.
+- `hostkey.rs`: ed25519 OpenSSH key hand-encoded from `aws-lc-rs` (the `ssh-key` crate pulls `rsa` and its RUSTSEC advisory into `Cargo.lock`; `ssh-keygen -y` accepts the output), 0600 in a 0700 dir; temp file + `hard_link` so concurrent tables' daemons never replace each other's key.
 - `main.rs` creates `/run/sshd` (privsep chroot, absent in the image).
 
 ## Rules

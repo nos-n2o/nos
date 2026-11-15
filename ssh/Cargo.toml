@@ -20,7 +20,8 @@ clap       = { workspace = true }
 anyhow     = { workspace = true }
 tracing    = { workspace = true }
 futures    = { workspace = true }
-ssh-key    = { version = "0.6", default-features = false, features = ["ed25519", "rand_core", "getrandom", "std"] }
+aws-lc-rs  = "1"
+base64     = { workspace = true }
 
 [[bin]]
 name = "nos-sshd"
