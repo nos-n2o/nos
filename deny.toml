@@ -6,6 +6,7 @@ version = 2
 # atomic-polyfill: unmaintained, reached only via postcard 1 -> heapless 0.7; no postcard release drops it.
 ignore = [
     { id = "RUSTSEC-2023-0089", reason = "transitive via postcard 1 -> heapless 0.7; nothing NOS controls" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is a proc-macro used by libnss (nos-nss, #999) only at build time; no runtime code, nothing NOS controls" },
 ]
 unmaintained = "all"
 
