@@ -1456,6 +1456,21 @@ pub struct Args {
     /// `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_remote_lfa: Option<bool>,
+    /// SPF throttle initial delay, ms, for that instance (requires --ospf-instance).
+    #[arg(long)]
+    pub ospf_spf_initial_ms: Option<u32>,
+    /// SPF throttle short delay, ms, for that instance.
+    #[arg(long)]
+    pub ospf_spf_short_ms: Option<u32>,
+    /// SPF throttle long delay, ms, for that instance.
+    #[arg(long)]
+    pub ospf_spf_long_ms: Option<u32>,
+    /// SPF throttle holddown, ms, for that instance.
+    #[arg(long)]
+    pub ospf_spf_holddown_ms: Option<u32>,
+    /// SPF throttle time-to-learn, ms, for that instance.
+    #[arg(long)]
+    pub ospf_spf_time_to_learn_ms: Option<u32>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -4047,6 +4062,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     grace_period: (grace_period != 0).then_some(grace_period),
                 },
             ));
+        }
+        let throttle = nos_proto::SpfThrottle {
+            initial_ms: args.ospf_spf_initial_ms,
+            short_ms: args.ospf_spf_short_ms,
+            long_ms: args.ospf_spf_long_ms,
+            holddown_ms: args.ospf_spf_holddown_ms,
+            time_to_learn_ms: args.ospf_spf_time_to_learn_ms,
+        };
+        if throttle != nos_proto::SpfThrottle::default() {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetSpfThrottle {
+                name: name.clone(),
+                throttle,
+            }));
         }
         if let Some(enabled) = args.ospf_remote_lfa {
             ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetRemoteLfa {

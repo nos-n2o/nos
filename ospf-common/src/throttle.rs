@@ -70,6 +70,11 @@ impl SpfThrottle {
         }
     }
 
+    /// Swaps the timers (a config change); the machine's state carries over.
+    pub fn set_timers(&mut self, timers: Timers) {
+        self.timers = timers;
+    }
+
     /// Registers a change at `now` and returns how long to wait before
     /// running SPF, plus the state that delay was chosen in.
     pub fn on_change(&mut self, now: Instant) -> (Duration, State) {

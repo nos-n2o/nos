@@ -118,6 +118,7 @@ mod tests {
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
+            spf_throttle: crate::schema::SpfThrottle::default(),
         }
     }
 

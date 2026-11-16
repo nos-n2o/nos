@@ -6001,6 +6001,23 @@ pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&reorig_pat, before, 60).await?;
     b.wait_new("ospf spf scheduled delay_ms=50 state=\"quiet\"", quiet0, 30)
         .await?;
+
+    // #1171: a configured initial delay replaces the default, no restart.
+    let mut cfg = with_base(B, ospf(OSPF_ROUTER_ID_B));
+    cfg.extend(strings(&["--ospf-spf-initial-ms", "200"]));
+    b.provision_flags(&cfg).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    let q200 = b.count("ospf spf scheduled delay_ms=200 state=\"quiet\"");
+    let before = a.count(&reorig_pat);
+    let mut flags = base.clone();
+    flags.extend(strings(&["--redistribute-metric", "20"]));
+    a.provision_flags(&flags).await?;
+    a.wait_new(&reorig_pat, before, 60).await?;
+    b.wait_new("ospf spf scheduled delay_ms=200 state=\"quiet\"", q200, 30)
+        .await?;
+    let mut cfg = with_base(B, ospf(OSPF_ROUTER_ID_B));
+    cfg.extend(strings(&["--ospf-spf-initial-ms", "50"]));
+    b.provision_flags(&cfg).await?;
     a.provision(&["--clear-redistribute-to-ospf"]).await?;
     Ok(())
 }

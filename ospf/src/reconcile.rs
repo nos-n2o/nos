@@ -498,6 +498,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
     links.set_remote_lfa(own.remote_lfa);
+    links.set_spf_timers(spf_timers(&own.spf_throttle));
     links.set_max_metric(
         own.max_metric_on_startup,
         own.max_metric_on_shutdown,
@@ -1621,5 +1622,36 @@ mod tests {
             signature(&t, &watched),
             [("a".to_string(), Gate::Down("admin-down"))]
         );
+    }
+}
+
+/// The configured RFC 8405 timers; unset fields keep `Timers::default()`.
+fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
+    use std::time::Duration;
+    let d = nos_ospf_common::throttle::Timers::default();
+    let ms = |v: Option<u32>, dflt: Duration| v.map_or(dflt, |v| Duration::from_millis(v.into()));
+    nos_ospf_common::throttle::Timers {
+        initial: ms(t.initial_ms, d.initial),
+        short: ms(t.short_ms, d.short),
+        long: ms(t.long_ms, d.long),
+        holddown: ms(t.holddown_ms, d.holddown),
+        time_to_learn: ms(t.time_to_learn_ms, d.time_to_learn),
+    }
+}
+
+#[cfg(test)]
+mod spf_timer_tests {
+    use super::spf_timers;
+    use std::time::Duration;
+
+    #[test]
+    fn unset_keeps_defaults_and_set_overrides() {
+        let t = spf_timers(&nos_proto::SpfThrottle {
+            initial_ms: Some(200),
+            ..Default::default()
+        });
+        assert_eq!(t.initial, Duration::from_millis(200));
+        assert_eq!(t.short, Duration::from_millis(200));
+        assert_eq!(t.long, Duration::from_millis(5000));
     }
 }
