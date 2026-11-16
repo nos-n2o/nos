@@ -2274,8 +2274,14 @@ async fn kernel_wait(r: &Router, link: &str, blocked: bool, secs: u64) -> anyhow
 /// root of MSTI 2; the other router's `eth1` is expensive in the tree it is
 /// not the root of, so MSTI 1 blocks router-b's `eth1` and MSTI 2 router-a's.
 async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
+    mstp_provision_with(r, revision, &[]).await
+}
+
+/// [`mstp_provision`] plus `extra` flags, applied after the base (so a repeated
+/// `--stp-mst-instance` or cost overrides it).
+async fn mstp_provision_with(r: &Router, revision: u16, extra: &[&str]) -> anyhow::Result<()> {
     let a = r.name() == "router-a";
-    let args = strings(&[
+    let mut args = strings(&[
         "--link-interface",
         "eth1",
         "--switching-profile",
@@ -2303,6 +2309,7 @@ async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
         "--stp-profile-mst-cost",
         if a { "2:100000" } else { "1:100000" },
     ]);
+    args.extend(strings(extra));
     r.provision(&args).await
 }
 
@@ -2316,6 +2323,8 @@ async fn mstp_provision(r: &Router, revision: u16) -> anyhow::Result<()> {
 pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     const MATCH: &str = "mst region match port=eth1";
     const BOUNDARY: &str = "mst boundary port port=eth1 reason=revision";
+    const IN_PLACE: &str = "spanning tree plan updated in place";
+    const REBUILT: &str = "spanning tree plan applied";
     const APPLY_FAILED: &str = "failed to apply interface configuration.*Network is down";
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
@@ -2435,10 +2444,15 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     for (r, base) in routers.iter().zip(boundary) {
         r.wait_new(BOUNDARY, base, 40).await?;
     }
-    for r in routers {
+    // router-b hears router-a's BPDUs on both ports. router-a only learns of
+    // the split where router-b still transmits: its alternate port is silent,
+    // and since the revision edit is applied in place (#1123) no restart makes
+    // it send, so only `eth1` is required there.
+    for (r, only_eth1) in [(a, true), (b, false)] {
         for id in [1, 2] {
             mst_wait(r, id, 40, |i| {
-                !i.ports.is_empty() && i.ports.iter().all(|p| p.boundary)
+                let mut ports = i.ports.iter().filter(|p| !only_eth1 || p.name == "eth1");
+                ports.clone().count() > 0 && ports.all(|p| p.boundary)
             })
             .await?;
         }
@@ -2460,6 +2474,105 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     mst_wait(a, 2, 90, blocked("eth1")).await?;
     kernel_wait(b, "eth1.10", true, 30).await?;
     kernel_wait(a, "eth1.20", true, 30).await?;
+
+    // #1123: edits of router-b's MSTP plan are applied in place, instance by
+    // instance; its CIST ports and MSTI 1's states and designated ports stay.
+    let view = |i: &nos_proto::StpInstance| -> Vec<(String, String, String)> {
+        i.ports
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    format!("{:?}", p.state),
+                    p.designated_port.clone(),
+                )
+            })
+            .collect()
+    };
+    let snapshot = || -> Vec<Option<String>> {
+        ["eth1.10", "eth2.10", "eth1.20", "eth2.20"]
+            .map(|l| kernel_port_state(b, l))
+            .to_vec()
+    };
+    let cist = |s: &nos_proto::StpSummary| -> Vec<(String, String, String)> {
+        s.ports
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    format!("{:?}", p.state),
+                    p.designated_port.clone(),
+                )
+            })
+            .collect()
+    };
+    let before = (
+        cist(&stp_summary(b).await?),
+        view(&mst_wait(b, 1, 30, |i| !i.ports.is_empty()).await?),
+        snapshot(),
+    );
+    let rebuilt = b.count(REBUILT);
+
+    log("router-b: MSTI 2 priority and MSTI 1 eth1 cost, applied in place");
+    let in_place = b.count(IN_PLACE);
+    let edits = [
+        "--stp-mst-instance",
+        "2:8192",
+        "--stp-profile-mst-cost",
+        "1:150000",
+    ];
+    mstp_provision_with(b, 1, &edits).await?;
+    b.wait_new(IN_PLACE, in_place, 20).await?;
+    // 8192 is `2000` in a bridge id.
+    mst_wait(b, 2, 30, |i| i.bridge_id.starts_with("2000.")).await?;
+    mst_wait(b, 1, 30, |i| {
+        i.ports
+            .iter()
+            .any(|p| p.name == "eth1" && p.cost == 150_000)
+    })
+    .await?;
+
+    log("router-b: a third instance, applied in place");
+    let in_place = b.count(IN_PLACE);
+    let mut with_3 = edits.to_vec();
+    with_3.extend(["--stp-mst-instance", "3:8192"]);
+    mstp_provision_with(b, 1, &with_3).await?;
+    b.wait_new(IN_PLACE, in_place, 20).await?;
+    let t3 = mst_wait(b, 3, 60, |i| {
+        !i.ports.is_empty() && i.ports.iter().all(|p| p.state == StpState::Forwarding)
+    })
+    .await?;
+    if t3.root_id != t3.bridge_id {
+        bail!("router-b should root its own MSTI 3: {t3:?}");
+    }
+
+    log("router-b: the third instance removed again, applied in place");
+    let in_place = b.count(IN_PLACE);
+    let mut without_3 = edits.to_vec();
+    without_3.extend(["--stp-delete-mst-instance", "3"]);
+    mstp_provision_with(b, 1, &without_3).await?;
+    b.wait_new(IN_PLACE, in_place, 20).await?;
+    let ids: Vec<u16> = mst_config(b)
+        .await?
+        .instances
+        .iter()
+        .map(|i| i.id)
+        .collect();
+    if ids != [0, 1, 2] {
+        bail!("router-b should be back to the CIST and MSTIs 1 and 2: {ids:?}");
+    }
+
+    b.assert_quiet(REBUILT, rebuilt, 5).await?;
+    let after = (
+        cist(&stp_summary(b).await?),
+        view(&mst_wait(b, 1, 30, |i| !i.ports.is_empty()).await?),
+        snapshot(),
+    );
+    if before != after {
+        bail!("router-b's CIST or MSTI 1 moved: {before:?} -> {after:?}");
+    }
+    // Back to the base plan (also in place).
+    mstp_provision(b, 1).await?;
 
     for r in routers {
         for iface in ["eth1", "eth2"] {

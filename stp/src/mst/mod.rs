@@ -155,7 +155,111 @@ fn record(b: &Bridge, port: usize, max_hops: u8) -> Option<MstiMsg> {
     })
 }
 
+impl Msti {
+    fn new(
+        id: u16,
+        priority: u16,
+        max_hops: u8,
+        mac: [u8; 6],
+        timers: Timers,
+        ports: &[PortParams],
+        port_cfg: &[Vec<PortMst>],
+    ) -> Result<Self, IdError> {
+        let ps: Vec<PortParams> = ports
+            .iter()
+            .zip(port_cfg)
+            .map(|(p, cfg)| msti_port(p, cfg, id))
+            .collect::<Result<_, IdError>>()?;
+        let t = Timers {
+            max_age: max_hops,
+            ..timers
+        };
+        Ok(Msti {
+            id,
+            bridge: Bridge::new(BridgeId::new(priority, id, mac)?, t, &ps),
+        })
+    }
+}
+
+/// `p` as MSTI `id` sees it: its own priority and cost, else the CIST's.
+fn msti_port(p: &PortParams, cfg: &[PortMst], id: u16) -> Result<PortParams, IdError> {
+    let m = cfg.iter().find(|m| m.id == id);
+    Ok(PortParams {
+        id: PortId::new(m.map_or(p.id.priority(), |m| m.priority), p.id.number())?,
+        path_cost: m.and_then(|m| m.cost).unwrap_or(p.path_cost),
+        ..*p
+    })
+}
+
 impl Mst {
+    /// Bring the running instances to `new` without restarting any (#1123).
+    /// `ports[i]`/`port_cfg[i]` describe slot `i` (CIST priority and live path
+    /// cost); `cist` is the already updated CIST bridge. The caller has
+    /// validated every id, so an `Err` cannot leave a half-applied state.
+    pub fn apply_plan(
+        &mut self,
+        new: &MstPlan,
+        mac: [u8; 6],
+        timers: Timers,
+        cist: &Bridge,
+        ports: &[PortParams],
+        port_cfg: Vec<Vec<PortMst>>,
+    ) -> Result<(), IdError> {
+        let t = Timers {
+            max_age: new.max_hops,
+            ..timers
+        };
+        let old_slots = self.edge.len();
+        let mut old = std::mem::take(&mut self.instances);
+        let mut instances = Vec::new();
+        for &(id, priority) in new.instances.iter().take(MST_MAX_MSTIS) {
+            let Some(k) = old.iter().position(|m| m.id == id) else {
+                // A new instance starts from the CIST's live link state.
+                let mut m = Msti::new(id, priority, new.max_hops, mac, timers, ports, &port_cfg)?;
+                for (i, p) in cist.ports.iter().enumerate() {
+                    m.bridge.set_oper_point_to_point(i, p.oper_point_to_point);
+                }
+                instances.push(m);
+                continue;
+            };
+            let mut m = old.swap_remove(k);
+            let b = &mut m.bridge;
+            if b.id.priority() != priority {
+                b.set_bridge_id(BridgeId::new(priority, id, mac)?);
+            }
+            if b.timers != t {
+                b.set_timers(t);
+            }
+            for (i, (p, cfg)) in ports.iter().zip(&port_cfg).enumerate() {
+                let q = msti_port(p, cfg, id)?;
+                if i >= old_slots {
+                    b.add_port(q);
+                    b.set_oper_point_to_point(i, cist.ports[i].oper_point_to_point);
+                    continue;
+                }
+                if b.ports[i].port_id != q.id {
+                    b.set_port_priority(i, q.id);
+                }
+                if b.ports[i].path_cost != q.path_cost {
+                    b.set_path_cost(i, q.path_cost);
+                }
+            }
+            instances.push(m);
+        }
+        // Instances left in `old` are dropped; their kernel state stays.
+        instances.sort_by_key(|m| m.id);
+        self.instances = instances;
+        if new.config_id() != self.id {
+            // The next peer BPDU re-classifies every port.
+            self.edge.fill(Edge::Unknown);
+            self.id = new.config_id();
+        }
+        self.edge.resize(ports.len(), Edge::Unknown);
+        self.plan = new.clone();
+        self.port_cfg = port_cfg;
+        Ok(())
+    }
+
     /// `ports[i]` and `port_cfg[i]` describe the same port; `timers` are the
     /// CIST's (an MSTI's `max_age` is replaced by `MaxHops`).
     pub fn new(
@@ -167,26 +271,15 @@ impl Mst {
     ) -> Result<Self, IdError> {
         let mut instances = Vec::new();
         for &(id, priority) in plan.instances.iter().take(MST_MAX_MSTIS) {
-            let ps: Vec<PortParams> = ports
-                .iter()
-                .zip(&port_cfg)
-                .map(|(p, cfg)| {
-                    let m = cfg.iter().find(|m| m.id == id);
-                    Ok(PortParams {
-                        id: PortId::new(m.map_or(p.id.priority(), |m| m.priority), p.id.number())?,
-                        path_cost: m.and_then(|m| m.cost).unwrap_or(p.path_cost),
-                        ..*p
-                    })
-                })
-                .collect::<Result<_, IdError>>()?;
-            let t = Timers {
-                max_age: plan.max_hops,
-                ..timers
-            };
-            instances.push(Msti {
+            instances.push(Msti::new(
                 id,
-                bridge: Bridge::new(BridgeId::new(priority, id, mac)?, t, &ps),
-            });
+                priority,
+                plan.max_hops,
+                mac,
+                timers,
+                ports,
+                &port_cfg,
+            )?);
         }
         Ok(Mst {
             plan: plan.clone(),

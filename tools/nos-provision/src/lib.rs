@@ -1196,6 +1196,10 @@ pub struct Args {
     #[arg(long)]
     pub stp_mst_instance: Vec<String>,
 
+    /// Deletes `spanning-tree mst-instance <ID>` (#1123). Repeatable.
+    #[arg(long)]
+    pub stp_delete_mst_instance: Vec<String>,
+
     /// `broadcast-domain <BD> stp-instance <ID>` as `BD:ID`. Repeatable.
     #[arg(long)]
     pub stp_domain_instance: Vec<String>,
@@ -2289,6 +2293,9 @@ fn mst_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             Some(prio.to_string()),
         ));
     }
+    for id in &args.stp_delete_mst_instance {
+        v.push((st(&["mst-instance", id]), None));
+    }
     for (bd, id) in args
         .stp_domain_instance
         .iter()
@@ -2368,6 +2375,13 @@ fn apply_mst(args: &Args, config: &mut nos_proto::Config) {
                 .mst_instances
                 .push(nos_proto::schema::MstInstance { id, priority }),
         }
+    }
+    for id in args
+        .stp_delete_mst_instance
+        .iter()
+        .filter_map(|i| i.parse::<u16>().ok())
+    {
+        st.mst_instances.retain(|m| m.id != id);
     }
     for (bd, id) in args
         .stp_domain_instance

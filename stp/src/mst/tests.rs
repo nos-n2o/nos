@@ -324,3 +324,136 @@ fn remaining_hops_become_message_age() {
     assert_eq!((p.port.priority(), p.port.number()), (0x90, 3));
     assert_eq!(p.root_path_cost, 40);
 }
+
+// In-place edits (#1123).
+
+impl Net {
+    fn apply(&mut self, side: usize, p: &Plan) {
+        let o = self.e[side].apply_plan(p).expect("applied in place");
+        let mut outs = [Vec::new(), Vec::new()];
+        outs[side] = o;
+        self.pump(outs);
+    }
+
+    /// `(port, state)` of the CIST, to prove it was left alone.
+    fn cist(&self, side: usize) -> Vec<(String, StpState)> {
+        self.e[side]
+            .summary()
+            .ports
+            .iter()
+            .map(|p| (p.name.clone(), p.state))
+            .collect()
+    }
+
+    fn numbers(&self, side: usize, id: u16) -> Vec<String> {
+        self.tree(side, id)
+            .ports
+            .iter()
+            .map(|p| p.designated_port.clone())
+            .collect()
+    }
+}
+
+fn b_plan(mst: MstPlan, costs: [Vec<PortMst>; 2]) -> Plan {
+    plan(32768, mst, costs)
+}
+
+#[test]
+fn an_instance_priority_and_a_port_cost_change_in_place() {
+    let mut n = two_trees();
+    n.run(60);
+    let (cist, nums, tree1) = (n.cist(1), n.numbers(1, 1), n.tree(1, 1));
+    assert_eq!(tree1.ports[0].cost, 100_000);
+    // MSTI 2 loses B's root claim; MSTI 1's eth1 cost on B drops to default.
+    n.apply(1, &b_plan(mst_plan(1, 32768, 61440), [vec![], vec![]]));
+    n.run(30);
+    assert_eq!(n.cist(1), cist, "the CIST is untouched");
+    assert_eq!(n.numbers(1, 1), nums, "port numbers are stable");
+    assert!(n.tree(1, 2).bridge_id.starts_with("f000"));
+    assert_ne!(n.tree(1, 2).root_id, n.tree(1, 2).bridge_id);
+    assert_eq!(n.tree(1, 1).ports[0].cost, 2_000);
+}
+
+#[test]
+fn an_instance_is_added_and_removed_in_place() {
+    let mut n = two_trees();
+    n.run(60);
+    let cist = n.cist(1);
+    let mut m = mst_plan(1, 32768, 4096);
+    m.instances.push((3, 8192));
+    n.apply(1, &b_plan(m, [expensive(1), vec![]]));
+    n.run(60);
+    let t3 = n.tree(1, 3);
+    assert_eq!(t3.root_id, t3.bridge_id, "alone in its own instance");
+    assert!(t3.ports.iter().all(|p| p.state == StpState::Forwarding));
+    assert_eq!(n.cist(1), cist);
+    // Removed again: the instance is gone, the others stay as they were.
+    n.apply(1, &b_plan(mst_plan(1, 32768, 4096), [expensive(1), vec![]]));
+    assert_eq!(n.e[1].summary().mst.unwrap().instances.len(), 3);
+    assert_eq!(n.state(1, "eth1", "d1"), Blocking);
+    assert_eq!(n.state(1, "eth2", "d1"), Forwarding);
+    assert_eq!(n.cist(1), cist);
+}
+
+#[test]
+fn a_revision_change_in_place_resets_the_edges_and_leaves_the_cist() {
+    let mut n = two_trees();
+    n.run(60);
+    let cist = n.cist(1);
+    n.apply(1, &b_plan(mst_plan(2, 32768, 4096), [expensive(1), vec![]]));
+    assert!(n.tree(1, 1).ports.iter().all(|p| !p.boundary), "Unknown");
+    assert_eq!(n.cist(1), cist);
+    n.run(60);
+    assert!(n.tree(1, 1).ports.iter().all(|p| p.boundary));
+    // And back: the region re-forms without a restart.
+    n.apply(1, &b_plan(mst_plan(1, 32768, 4096), [expensive(1), vec![]]));
+    n.run(60);
+    assert!(n.tree(1, 1).ports.iter().all(|p| !p.boundary));
+    assert_eq!(n.state(1, "eth1", "d1"), Blocking);
+}
+
+#[test]
+fn a_domain_moving_between_instances_is_pushed_again() {
+    let mut n = two_trees();
+    n.run(60);
+    assert_eq!(n.state(1, "eth1", "d2"), Forwarding);
+    // d2 joins MSTI 1 on both bridges (a new digest, the same region).
+    let remap = |prio1, prio2| {
+        let domains = vec![("d1".into(), 10, 1), ("d2".into(), 20, 1)];
+        MstPlan {
+            digest: digest::digest(&vidmap::table(&domains)),
+            domains,
+            ..mst_plan(1, prio1, prio2)
+        }
+    };
+    n.apply(0, &plan(4096, remap(4096, 32768), [expensive(2), vec![]]));
+    n.apply(1, &b_plan(remap(32768, 4096), [expensive(1), vec![]]));
+    n.run(60);
+    assert_eq!(n.state(1, "eth1", "d2"), Blocking, "d2 follows MSTI 1");
+    assert_eq!(n.state(1, "eth2", "d2"), Forwarding);
+}
+
+#[test]
+fn a_port_added_and_removed_reaches_every_instance() {
+    let mut n = two_trees();
+    n.run(60);
+    let mut p = b_plan(mst_plan(1, 32768, 4096), [expensive(1), vec![]]);
+    p.ports.push(port("eth3", vec![]));
+    n.apply(1, &p);
+    for id in [1, 2] {
+        assert_eq!(n.tree(1, id).ports.len(), 3, "msti {id}");
+    }
+    assert_eq!(n.tree(1, 1).ports[2].name, "eth3");
+    p.ports.pop();
+    n.apply(1, &p);
+    assert_eq!(n.tree(1, 1).ports.len(), 2);
+    assert_eq!(n.state(1, "eth2", "d1"), Forwarding);
+}
+
+#[test]
+fn switching_mstp_on_or_off_still_asks_for_a_rebuild() {
+    let mut n = two_trees();
+    let mut off = b_plan(mst_plan(1, 32768, 4096), [vec![], vec![]]);
+    off.mst = None;
+    assert_eq!(n.e[1].apply_plan(&off), Err(crate::engine::Rebuild));
+}
