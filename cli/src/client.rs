@@ -184,19 +184,48 @@ pub async fn commit_transaction(
     socket_path: &Path,
     name: &str,
 ) -> Result<(Vec<String>, bool), ClientError> {
-    let (mut reader, mut writer) = connect(socket_path).await?;
-    writer
-        .send(Request::CommitTransaction {
+    commit_confirmed(socket_path, name, None).await
+}
+
+/// `commit_transaction`; `Some(secs)` arms an automatic rollback (#1144).
+pub async fn commit_confirmed(
+    socket_path: &Path,
+    name: &str,
+    confirm_timeout: Option<u32>,
+) -> Result<(Vec<String>, bool), ClientError> {
+    committed_reply(
+        socket_path,
+        Request::CommitTransaction {
             actor: None,
             name: name.to_string(),
             if_match: None,
-        })
-        .await?;
+            confirm_timeout,
+        },
+    )
+    .await
+}
+
+/// `Request::ConfirmCommit` (#1144).
+pub async fn confirm_commit(socket_path: &Path) -> Result<(Vec<String>, bool), ClientError> {
+    committed_reply(socket_path, Request::ConfirmCommit { actor: None }).await
+}
+
+/// `Request::CancelCommit` (#1144).
+pub async fn cancel_commit(socket_path: &Path) -> Result<(Vec<String>, bool), ClientError> {
+    committed_reply(socket_path, Request::CancelCommit { actor: None }).await
+}
+
+async fn committed_reply(
+    socket_path: &Path,
+    req: Request,
+) -> Result<(Vec<String>, bool), ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(req).await?;
     match reader.next().await {
         Some(Ok(Event::Committed { warnings, unsaved })) => Ok((warnings, unsaved)),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
         Some(Ok(_)) => Err(ClientError::Daemon(
-            "unexpected event in reply to CommitTransaction".to_string(),
+            "unexpected event in reply to a commit request".to_string(),
         )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),

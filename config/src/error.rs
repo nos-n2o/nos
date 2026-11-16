@@ -31,6 +31,13 @@ pub enum ConfigError {
     HistoryOutOfRange { index: u32, have: usize },
     #[error("config history is not available on this daemon (no --config-file, or its directory is not writable)")]
     HistoryUnavailable,
+    /// `nos-restd` keys on the `confirm:` prefix (409).
+    #[error("confirm: a confirmed commit is pending; confirm it (commit as an admin) or cancel it first")]
+    ConfirmPending,
+    #[error("confirm: no confirmed commit is pending")]
+    NoPendingConfirm,
+    #[error("validation failed: confirm-timeout must be 30 to 86400 seconds")]
+    BadConfirmTimeout,
     /// The caller's `User.role` does not allow the request; `nos-restd` keys on the prefix (403).
     #[error("forbidden: {0}")]
     Forbidden(String),

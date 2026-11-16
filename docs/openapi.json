@@ -7968,6 +7968,68 @@
         ]
       }
     },
+    "/v1/commit/cancel": {
+      "post": {
+        "operationId": "commit_cancel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no confirmed commit is pending"
+          }
+        },
+        "summary": "Cancel a pending confirmed commit",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/commit/confirm": {
+      "post": {
+        "operationId": "commit_confirm",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no confirmed commit is pending"
+          }
+        },
+        "summary": "Confirm a pending confirmed commit",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/config": {
       "get": {
         "operationId": "config",
@@ -51543,6 +51605,17 @@
                 "null"
               ]
             }
+          },
+          {
+            "description": "confirmed commit (RFC 6241 8.4): roll back after this many seconds (30 to 86400) unless confirmed with `POST /v1/commit/confirm` or a plain commit by an admin",
+            "in": "query",
+            "name": "confirm-timeout",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -51565,6 +51638,16 @@
               }
             },
             "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a confirmed commit is already pending"
           },
           "412": {
             "content": {

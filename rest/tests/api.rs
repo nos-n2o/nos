@@ -495,6 +495,80 @@ async fn history_and_rollback() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
+/// #1144: `confirm-timeout` bounds and parsing, 409 while pending or when
+/// nothing is pending, confirm keeps, cancel rolls back.
+#[tokio::test]
+async fn confirmed_commit_over_rest() {
+    let f = fixture_with(vec![], Some("config.yaml")).await;
+    let app = &f.app;
+    let edit = |tx: &'static str, host: &'static str| async move {
+        send(
+            app,
+            Method::POST,
+            &format!("/v1/transactions/{tx}?base=current"),
+            None,
+        )
+        .await;
+        send(
+            app,
+            Method::PUT,
+            &format!("/v1/transactions/{tx}/hostname"),
+            Some(json!(host)),
+        )
+        .await;
+    };
+    edit("c", "confirm-host").await;
+    for bad in ["5", "86401", "abc"] {
+        let uri = format!("/v1/transactions/c/commit?confirm-timeout={bad}");
+        let (s, _) = send(app, Method::POST, &uri, None).await;
+        let want = if bad == "abc" {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
+        assert_eq!(s, want, "{bad}");
+    }
+    let (s, _) = send(app, Method::POST, "/v1/commit/confirm", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "nothing pending");
+    let (s, _) = send(app, Method::POST, "/v1/commit/cancel", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "nothing pending");
+
+    let uri = "/v1/transactions/c/commit?x=1&confirm-timeout=60";
+    let (s, _) = send(app, Method::POST, uri, None).await;
+    assert_eq!(s, StatusCode::OK);
+    edit("d", "other-host").await;
+    let (s, _) = send(
+        app,
+        Method::POST,
+        "/v1/transactions/d/commit?confirm-timeout=60",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "second confirmed commit");
+    let (s, v) = send(app, Method::POST, "/v1/commit/confirm", None).await;
+    assert_eq!(
+        (s, v["committed"].clone()),
+        (StatusCode::OK, json!("confirm"))
+    );
+    let (_, cfg) = send(app, Method::GET, "/v1/config", None).await;
+    assert_eq!(cfg["hostname"], json!("confirm-host"));
+
+    send(
+        app,
+        Method::POST,
+        "/v1/transactions/d/commit?confirm-timeout=60",
+        None,
+    )
+    .await;
+    let (s, v) = send(app, Method::POST, "/v1/commit/cancel", None).await;
+    assert_eq!(
+        (s, v["committed"].clone()),
+        (StatusCode::OK, json!("cancel"))
+    );
+    let (_, cfg) = send(app, Method::GET, "/v1/config", None).await;
+    assert_eq!(cfg["hostname"], json!("confirm-host"), "cancel undid it");
+}
+
 #[tokio::test]
 async fn history_without_a_config_file_is_a_bad_gateway() {
     let f = fixture(vec![]).await;

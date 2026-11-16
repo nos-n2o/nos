@@ -181,7 +181,17 @@ fn parse_header(text: &str) -> Option<Meta> {
         match f.split_once('=')? {
             ("time", v) => time = v.parse().ok(),
             ("actor", v) => actor = v.to_string(),
-            ("kind", "rollback") => kind = "rollback",
+            ("kind", v) => {
+                kind = [
+                    "rollback",
+                    "commit-confirmed",
+                    "auto-rollback",
+                    "cancel-rollback",
+                ]
+                .into_iter()
+                .find(|k| *k == v)
+                .unwrap_or("commit");
+            }
             _ => {}
         }
     }

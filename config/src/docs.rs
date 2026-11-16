@@ -43,7 +43,11 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Validates the transaction's in-progress config; if valid, atomically replaces \
              the running config with it, broadcasts the change to every subscribed client, \
              and deletes the transaction. If validation fails, the transaction is left open, \
-             unchanged, so it can be fixed and retried.",
+             unchanged, so it can be fixed and retried. `commit confirmed [minutes]` \
+             (30 seconds to 24 hours, default 10 minutes) applies it but rolls it back \
+             automatically, as a new commit, unless a `commit` or `commit confirm` by an \
+             administrator follows in time; while one is pending, no other change can be \
+             committed.",
         ),
         Topic::DiscardTransaction => (
             "Delete a named transaction without touching the running config.",
@@ -2130,6 +2134,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              no user is refused), broadcast to every daemon, and recorded as a new history \
              entry, so a rollback can itself be rolled back. `rollback 0` does nothing. The \
              result is not saved to disk until `save`.",
+        ),
+        Topic::ConfirmCommit => (
+            "Confirm a pending `commit confirmed`.",
+            "Keeps the configuration a `commit confirmed` applied: disarms its automatic \
+             rollback. A plain `commit` by an administrator confirms it too. Only an \
+             administrator may confirm. A pending confirmation is not kept over a restart \
+             of the config daemon: it starts from the saved configuration.",
+        ),
+        Topic::CancelCommit => (
+            "Roll a pending `commit confirmed` back now.",
+            "Restores the configuration as it was before the pending `commit confirmed`, \
+             as a normal commit recorded in the history, without waiting for the timeout.",
         ),
     };
     CommandDoc {

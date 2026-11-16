@@ -332,6 +332,7 @@ async fn commit_transaction_returns_ok_on_success() {
             actor: None,
             name: "demo".to_string(),
             if_match: None,
+            confirm_timeout: None,
         },
         Event::Committed {
             warnings: vec![],
@@ -359,6 +360,7 @@ async fn commit_transaction_returns_daemon_error() {
             actor: None,
             name: "demo".to_string(),
             if_match: None,
+            confirm_timeout: None,
         },
         Event::Error("validation failed".to_string()),
     ));
@@ -367,6 +369,49 @@ async fn commit_transaction_returns_daemon_error() {
     assert!(matches!(err, ClientError::Daemon(_)));
 
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn confirmed_commit_requests_round_trip() {
+    use nos_cli::client::{cancel_commit, commit_confirmed, confirm_commit};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
+    let done = || Event::Committed {
+        warnings: vec![],
+        unsaved: false,
+    };
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::CommitTransaction {
+            actor: None,
+            name: "demo".to_string(),
+            if_match: None,
+            confirm_timeout: Some(60),
+        },
+        done(),
+    ));
+    assert_eq!(
+        commit_confirmed(&path, "demo", Some(60)).await.unwrap(),
+        (vec![], false)
+    );
+    server.await.unwrap();
+
+    for (req, call) in [
+        (Request::ConfirmCommit { actor: None }, 0),
+        (Request::CancelCommit { actor: None }, 1),
+    ] {
+        let _ = std::fs::remove_file(&path);
+        let listener = shared().identity("configd", "").listen(&path).unwrap();
+        let server = tokio::spawn(serve_once(listener, req, done()));
+        let r = if call == 0 {
+            confirm_commit(&path).await
+        } else {
+            cancel_commit(&path).await
+        };
+        assert_eq!(r.unwrap(), (vec![], false));
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

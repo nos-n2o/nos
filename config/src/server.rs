@@ -182,18 +182,19 @@ async fn dispatch_unmasked(
             name,
             if_match,
             actor,
+            confirm_timeout,
         } => match store
-            .commit_as(
+            .commit_confirmable(
                 &name,
                 if_match,
                 restrict.as_deref(),
-                "commit",
                 &effective_actor(caller, actor.clone()),
+                confirm_timeout,
             )
             .await
         {
             Ok(warnings) => {
-                info!(transaction = ?name, actor = ?effective_actor(caller, actor), "config commit audit");
+                info!(transaction = ?name, actor = ?effective_actor(caller, actor), confirm_timeout = ?confirm_timeout, "config commit audit");
                 for w in &warnings {
                     warn!(transaction = ?name, warning = %w, "commit warning");
                 }
@@ -214,6 +215,29 @@ async fn dispatch_unmasked(
                     debug!(transaction = %name, error = %e, "discard transaction failed");
                     Event::Error(e.to_string())
                 }
+            }
+        }
+        Request::ConfirmCommit { actor } => match store.confirm_commit().await {
+            Ok(committer) => {
+                info!(committer = ?committer, confirmer = ?effective_actor(caller, actor), "config confirm audit");
+                Event::Committed {
+                    warnings: Vec::new(),
+                    unsaved: store.unsaved(),
+                }
+            }
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::CancelCommit { actor } => {
+            let who = effective_actor(caller, actor);
+            match store.cancel_commit(&who).await {
+                Ok((committer, warnings)) => {
+                    info!(committer = ?committer, canceller = ?who, "config cancel audit");
+                    Event::Committed {
+                        warnings,
+                        unsaved: store.unsaved(),
+                    }
+                }
+                Err(e) => Event::Error(e.to_string()),
             }
         }
         Request::ListHistory => history_reply(store).await,
@@ -331,6 +355,8 @@ fn body_actor(req: &Request) -> Option<String> {
         | Request::CommitTransaction { actor, .. }
         | Request::SetTransactionPath { actor, .. }
         | Request::EditTransactionPath { actor, .. }
+        | Request::ConfirmCommit { actor }
+        | Request::CancelCommit { actor }
         | Request::Rollback { actor, .. } => actor.clone(),
         _ => None,
     }

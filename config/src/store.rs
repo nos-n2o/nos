@@ -239,6 +239,23 @@ struct Inner {
     user_db: Option<UserDb>,
     /// Replaced running configs on disk (#1141); `None` without a config path.
     history: Option<Arc<History>>,
+    /// The armed confirmed commit, if any (#1144); held across a whole commit
+    /// so arming and refusing cannot race. Lock order: before `transactions`.
+    pending: Mutex<Option<Pending>>,
+}
+
+/// `confirm-timeout` bounds in seconds (RFC 6241 8.4 has no bounds; these keep a typo sane).
+pub const CONFIRM_MIN_SECS: u32 = 30;
+pub const CONFIRM_MAX_SECS: u32 = 86_400;
+
+/// A confirmed commit waiting for its confirmation. Not persisted: after a
+/// restart the saved config loads, the safe state (#1144).
+struct Pending {
+    /// Running before the confirmed commit: what expiry restores.
+    prev: Arc<Config>,
+    /// `seq` right after the commit; the timer acts only if it still matches.
+    generation: u64,
+    committer: String,
 }
 
 /// A cheap, cloneable handle to the daemon's config state: the running
@@ -286,6 +303,7 @@ impl ConfigStore {
         let (tx, _) = broadcast::channel(cap);
         let history = config_path.as_deref().and_then(History::open).map(Arc::new);
         Self(Arc::new(Inner {
+            pending: Mutex::new(None),
             history,
             running: RwLock::new(Arc::new(initial)),
             transactions: Mutex::new(HashMap::new()),
@@ -773,16 +791,31 @@ impl ConfigStore {
     /// Restores the config `index` commits back through the normal commit
     /// path (a transaction holding it: validation, `NoUsersLeft`, warnings,
     /// one broadcast), which records its own history entry. `0` is a no-op.
+    /// Refused while a confirmed commit is pending (#1144).
     pub async fn rollback(&self, index: u32, actor: &str) -> Result<Vec<String>, ConfigError> {
         if index == 0 {
             return Ok(Vec::new());
+        }
+        let pending = self.0.pending.lock().await;
+        if pending.is_some() {
+            return Err(ConfigError::ConfirmPending);
         }
         let h = self.history_handle()?;
         let config = tokio::task::spawn_blocking(move || h.get(index))
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))??;
+        self.revert(config, "rollback", actor).await
+    }
+
+    /// Commits `config` as the new running config under a throwaway transaction.
+    async fn revert(
+        &self,
+        config: Arc<Config>,
+        kind: &'static str,
+        actor: &str,
+    ) -> Result<Vec<String>, ConfigError> {
         let name = format!(
-            "rollback-{}",
+            "{kind}-{}",
             self.0.seq.load(std::sync::atomic::Ordering::SeqCst)
         );
         let txn = Transaction {
@@ -793,11 +826,92 @@ impl ConfigStore {
             last_used: Instant::now(),
         };
         self.0.transactions.lock().await.insert(name.clone(), txn);
-        let res = self.commit_as(&name, None, None, "rollback", actor).await;
+        let res = self.commit_inner(&name, None, None, kind, actor).await;
         if res.is_err() {
             self.0.transactions.lock().await.remove(&name);
         }
-        res
+        res.map(|(w, _)| w)
+    }
+
+    /// `commit_as` plus the confirmed-commit rules (#1144). While one is
+    /// pending a plain commit by an admin confirms it; a confirmed commit or
+    /// a non-admin (`own_password_only`) commit is refused. `confirm`: arm a
+    /// rollback after that many seconds.
+    pub(crate) async fn commit_confirmable(
+        &self,
+        name: &str,
+        if_match: Option<Vec<u64>>,
+        own_password_only: Option<&str>,
+        actor: &str,
+        confirm: Option<u32>,
+    ) -> Result<Vec<String>, ConfigError> {
+        if let Some(s) = confirm
+            && !(CONFIRM_MIN_SECS..=CONFIRM_MAX_SECS).contains(&s)
+        {
+            return Err(ConfigError::BadConfirmTimeout);
+        }
+        let mut pending = self.0.pending.lock().await;
+        if pending.is_some() && (confirm.is_some() || own_password_only.is_some()) {
+            return Err(ConfigError::ConfirmPending);
+        }
+        let kind = if confirm.is_some() {
+            "commit-confirmed"
+        } else {
+            "commit"
+        };
+        let (warnings, prev) = self
+            .commit_inner(name, if_match, own_password_only, kind, actor)
+            .await?;
+        if let Some(old) = pending.take() {
+            info!(committer = ?old.committer, confirmer = ?actor, "confirmed commit confirmed by a plain commit");
+        }
+        if let Some(secs) = confirm {
+            let generation = self.0.seq.load(std::sync::atomic::Ordering::SeqCst);
+            *pending = Some(Pending {
+                prev,
+                generation,
+                committer: actor.to_string(),
+            });
+            let store = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(u64::from(secs))).await;
+                store.expire(generation).await;
+            });
+        }
+        Ok(warnings)
+    }
+
+    /// The timer's rollback, unless the commit was confirmed or cancelled meanwhile.
+    async fn expire(&self, generation: u64) {
+        let mut pending = self.0.pending.lock().await;
+        if pending.as_ref().is_none_or(|p| p.generation != generation) {
+            return;
+        }
+        let Some(p) = pending.take() else { return };
+        warn!(committer = ?p.committer, "confirmed commit not confirmed in time, rolling back");
+        if let Err(e) = self.revert(p.prev, "auto-rollback", &p.committer).await {
+            warn!(error = %e, "automatic rollback failed");
+        }
+    }
+
+    /// Disarms the pending confirmed commit; returns its committer.
+    pub async fn confirm_commit(&self) -> Result<String, ConfigError> {
+        let p = self
+            .0
+            .pending
+            .lock()
+            .await
+            .take()
+            .ok_or(ConfigError::NoPendingConfirm)?;
+        Ok(p.committer)
+    }
+
+    /// Rolls the pending confirmed commit back now; returns its committer and the warnings.
+    pub async fn cancel_commit(&self, actor: &str) -> Result<(String, Vec<String>), ConfigError> {
+        let mut pending = self.0.pending.lock().await;
+        let p = pending.take().ok_or(ConfigError::NoPendingConfirm)?;
+        let warnings = self.revert(p.prev, "cancel-rollback", actor).await?;
+        Ok((p.committer, warnings))
     }
 
     pub(crate) async fn commit_as(
@@ -808,6 +922,19 @@ impl ConfigStore {
         kind: &'static str,
         actor: &str,
     ) -> Result<Vec<String>, ConfigError> {
+        self.commit_inner(name, if_match, own_password_only, kind, actor)
+            .await
+            .map(|(w, _)| w)
+    }
+
+    async fn commit_inner(
+        &self,
+        name: &str,
+        if_match: Option<Vec<u64>>,
+        own_password_only: Option<&str>,
+        kind: &'static str,
+        actor: &str,
+    ) -> Result<(Vec<String>, Arc<Config>), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
@@ -883,7 +1010,7 @@ impl ConfigStore {
         {
             db.sync(&config.users);
         }
-        self.broadcast(config, prev);
+        self.broadcast(config, Arc::clone(&prev));
         drop(running);
         #[cfg(feature = "dhat-heap")]
         if DHAT_PROFILING.load(std::sync::atomic::Ordering::Relaxed) {
@@ -894,7 +1021,7 @@ impl ConfigStore {
                 "heap after commit"
             );
         }
-        Ok(warnings)
+        Ok((warnings, prev))
     }
 
     /// Swaps `user`'s password hash `old` for `new` in the running config
@@ -2978,6 +3105,87 @@ mod tests {
             .unwrap();
         store.apply_op(tx, op).await.unwrap();
         store.commit_transaction(tx, None).await.unwrap();
+    }
+
+    /// #1144: expiry rolls back (as a history entry), a confirm keeps, a
+    /// second confirmed or non-admin commit is refused, cancel rolls back now.
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_commit_expires_confirms_and_cancels() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(Config::default(), Some(dir.path().join("c.yaml")));
+        commit_password(&store, "t0", "alice", "pw").await;
+        let count = |s: &ConfigStore| {
+            let s = s.clone();
+            async move { s.running_snapshot().await.bgp_instances.len() }
+        };
+        let confirmed = |name: &'static str, secs: Option<u32>| {
+            let store = store.clone();
+            async move {
+                store
+                    .open_transaction(name, TransactionBase::Current)
+                    .await
+                    .unwrap();
+                store.apply_op(name, ensure_op(name)).await.unwrap();
+                store.apply_op(name, set_asn_op(name, 65000)).await.unwrap();
+                store
+                    .commit_confirmable(name, None, None, "alice", secs)
+                    .await
+            }
+        };
+        assert!(matches!(
+            confirmed("bad", Some(5)).await,
+            Err(ConfigError::BadConfirmTimeout)
+        ));
+        confirmed("a", Some(60)).await.unwrap();
+        assert_eq!(count(&store).await, 1);
+        assert!(matches!(
+            confirmed("b", Some(60)).await,
+            Err(ConfigError::ConfirmPending)
+        ));
+        assert!(matches!(
+            store.rollback(1, "x").await,
+            Err(ConfigError::ConfirmPending)
+        ));
+        assert!(matches!(
+            store
+                .commit_confirmable("b", None, Some("bob"), "bob", None)
+                .await,
+            Err(ConfigError::ConfirmPending)
+        ));
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert_eq!(count(&store).await, 0, "expiry rolled back");
+        let h = store.history().await.unwrap();
+        assert_eq!(
+            (h[0].kind.as_str(), h[0].actor.as_str()),
+            ("auto-rollback", "alice")
+        );
+        assert!(matches!(
+            store.confirm_commit().await,
+            Err(ConfigError::NoPendingConfirm)
+        ));
+
+        // Confirmed by a plain commit: the timer then does nothing.
+        confirmed("c", Some(60)).await.unwrap();
+        store
+            .commit_confirmable("b", None, None, "carol", None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(count(&store).await, 2);
+
+        // Confirmed explicitly.
+        confirmed("d", Some(60)).await.unwrap();
+        assert_eq!(store.confirm_commit().await.unwrap(), "alice");
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(count(&store).await, 3);
+
+        // Cancelled.
+        confirmed("e", Some(60)).await.unwrap();
+        let (who, _) = store.cancel_commit("bob").await.unwrap();
+        assert_eq!(who, "alice");
+        assert_eq!(count(&store).await, 3);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(count(&store).await, 3, "cancelled timer is inert");
     }
 
     /// #1141: rollback restores a deleted section, is itself a history entry,

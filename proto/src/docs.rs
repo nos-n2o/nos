@@ -637,6 +637,10 @@ topics! {
     ShowHistory,
     /// `Request::Rollback`
     Rollback,
+    /// `Request::ConfirmCommit`
+    ConfirmCommit,
+    /// `Request::CancelCommit`
+    CancelCommit,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

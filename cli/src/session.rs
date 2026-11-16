@@ -218,6 +218,11 @@ pub enum Resolved {
     /// the transaction's config at the current position.
     ConfigEdit(String),
     Commit,
+    CommitConfirmed {
+        minutes: Option<u32>,
+    },
+    ConfirmCommit,
+    CancelCommit,
     Discard,
     /// `diff` — fetch and render the transaction's diff against running.
     Diff,
@@ -255,6 +260,8 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
         Command::ShowHistory => Resolved::ShowHistory,
+        Command::ConfirmCommit => Resolved::ConfirmCommit,
+        Command::CancelCommit => Resolved::CancelCommit,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
@@ -364,6 +371,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Top => Ok(Resolved::NavigateTop),
         Command::Up => Ok(Resolved::Navigate(path.up())),
         Command::Commit => Ok(Resolved::Commit),
+        Command::CommitConfirmed { minutes } => Ok(Resolved::CommitConfirmed { minutes }),
         Command::Rollback { n } => Ok(Resolved::Rollback { n }),
         Command::Discard => Ok(Resolved::Discard),
         Command::Diff => Ok(Resolved::Diff),
@@ -373,6 +381,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowConfig
         | Command::ShowConfigAdmin
         | Command::ShowHistory
+        | Command::ConfirmCommit
+        | Command::CancelCommit
         | Command::ShowRoute { .. }
         | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }

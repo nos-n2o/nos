@@ -401,6 +401,46 @@ async fn configuration_session_edits_commits_and_leaves() {
     .await;
     assert_eq!(mode, Mode::Operational, "commit returns to operational");
 
+    // Confirmed commits (#1144): arm, refuse a second, confirm, cancel.
+    let (mode, _) = run(
+        &lab,
+        Mode::Operational,
+        &[
+            "configure c1",
+            "edit bgp instance b1",
+            "set asn 65002",
+            "top",
+            "commit confirmed 1",
+        ],
+        leave_open,
+    )
+    .await;
+    assert_eq!(mode, Mode::Operational);
+    let (mode, _) = run(
+        &lab,
+        Mode::Operational,
+        &[
+            "configure c2",
+            "edit bgp instance b1",
+            "set asn 65003",
+            "top",
+            "commit confirmed",
+            "commit confirm",
+            "commit cancel",
+            "commit confirmed 1",
+        ],
+        leave_open,
+    )
+    .await;
+    assert_eq!(mode, Mode::Operational, "the last one was accepted");
+    let (_, _) = run(
+        &lab,
+        Mode::Operational,
+        &["configure c3", "commit cancel", "commit confirm"],
+        leave_open,
+    )
+    .await;
+
     // A refused commit leaves the transaction open.
     let (mode, _) = run(
         &lab,

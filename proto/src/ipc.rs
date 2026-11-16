@@ -65,6 +65,19 @@ pub enum Request {
         if_match: Option<Vec<u64>>,
         /// As on `OpenTransaction`.
         actor: Option<String>,
+        /// Confirmed commit (RFC 6241 8.4, #1144): `Some(secs)` (30..=86400)
+        /// rolls the commit back unless confirmed within `secs`.
+        confirm_timeout: Option<u32>,
+    },
+    /// Confirms a pending confirmed commit (#1144): disarms its rollback timer.
+    ConfirmCommit {
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
+    },
+    /// Rolls a pending confirmed commit back now (#1144).
+    CancelCommit {
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
     },
     /// Deletes a named transaction without touching the running config.
     /// `if_match` as on `CommitTransaction`.

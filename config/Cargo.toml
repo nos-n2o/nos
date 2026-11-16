@@ -42,4 +42,5 @@ path = "src/main.rs"
 [dev-dependencies]
 nos-pki  = { workspace = true, features = ["testing"] }
 insta    = { workspace = true }
+tokio    = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }

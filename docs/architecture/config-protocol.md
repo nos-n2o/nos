@@ -60,6 +60,13 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - Independent of `save` and `.bak`; startup never loads from it. Listing parses the files (unparsable or no-longer-valid ones are skipped), so indexes are 1-based over valid entries, newest first.
 - `rollback N` puts entry `N` into a `Blank`-based transaction and runs the normal commit path (`commit_as`: validation, `NoUsersLeft`, warnings, one broadcast, its own entry with kind `rollback`). An unknown index is `no history entry` (404 over REST).
 
+### Confirmed commit (#1144)
+
+- `CommitTransaction.confirm_timeout` (30..=86400 s), `Request::ConfirmCommit`/`CancelCommit`; admin-only in `authz::permitted`.
+- `ConfigStore.pending` (tokio mutex, held across the whole `commit_confirmable`): previous `Arc<Config>`, `seq` generation, committer. A timer task rolls back through `revert` (kind `auto-rollback`) unless the generation changed; cancel uses kind `cancel-rollback`; the armed commit is kind `commit-confirmed`.
+- Pending refuses a second confirmed commit, `rollback` and non-admin commits (`confirm:` prefix, 409); an admin plain commit confirms it. Not persisted. Open `upgrade_password_hash`/`set_ssh_host_key` changes made while pending are undone by an expiry (ponytail).
+- The confirmer is in the audit log only, not the history file.
+
 ### Framing limit
 
 - `IpcCodec` frames are a 4-byte LE length plus a postcard payload of at most `nos_proto::codec::MAX_FRAME` (16 MiB).
