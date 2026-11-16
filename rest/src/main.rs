@@ -87,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let daemons = Daemons::new(args.watchdog_socket, config_socket);
+    let daemons = Daemons::new(args.watchdog_socket, config_socket.clone());
+    tokio::spawn(nos_rest::login::follow_policy(
+        daemons.login_gate(),
+        config_socket,
+    ));
     let listener = Listener {
         table: args.table,
         router: api::router(daemons.clone()),

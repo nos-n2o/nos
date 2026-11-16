@@ -88,8 +88,60 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&format!("login accepted user=\"{E2E_USER}\""), accepted, 15)
         .await?;
 
+    login_policy(w).await?;
     revoke_user(w).await?;
     revoke_restarted_daemon(w).await
+}
+
+/// #1148: `login-policy max-failures 2` is applied live by `nos-restd` and
+/// `nos-watchdogd` (both log it), two bad logins then lock a user out (429,
+/// `login lockout started`), and restoring the defaults is applied too.
+async fn login_policy(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let set = |max: u8, window: u32| {
+        move |c: &mut nos_proto::Config| {
+            c.login_policy.max_failures = max;
+            c.login_policy.lockout_window_secs = window;
+            Ok(())
+        }
+    };
+    log("login-policy max-failures 2 is applied live by nos-restd and nos-watchdogd");
+    let (rest, broker) = (
+        a.count("login policy applied max_failures=2 window_secs=30"),
+        a.count("broker login policy applied max_failures=2"),
+    );
+    a.edit(set(2, 30)).await?;
+    a.wait_new(
+        "login policy applied max_failures=2 window_secs=30",
+        rest,
+        30,
+    )
+    .await?;
+    a.wait_new("broker login policy applied max_failures=2", broker, 30)
+        .await?;
+
+    log("two failed logins lock the user out");
+    let locked = a.count("login lockout started user=\"lockme\"");
+    for _ in 0..2 {
+        if a.rest.login("lockme", "wrong").await?.err() != Some(401) {
+            bail!("a bad login must be answered 401");
+        }
+    }
+    if a.rest.login("lockme", "wrong").await?.err() != Some(429) {
+        bail!("the third login after max-failures 2 must be answered 429");
+    }
+    a.wait_new("login lockout started user=\"lockme\"", locked, 10)
+        .await?;
+
+    log("restoring the default policy");
+    let rest = a.count("login policy applied max_failures=5 window_secs=60");
+    a.edit(set(5, 60)).await?;
+    a.wait_new(
+        "login policy applied max_failures=5 window_secs=60",
+        rest,
+        30,
+    )
+    .await
 }
 
 /// The watchdog (the CA) runs on its own uid and every role on its own

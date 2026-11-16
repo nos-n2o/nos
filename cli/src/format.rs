@@ -1814,6 +1814,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         lldp,
         users,
         logging,
+        login_policy,
         bfd_profiles,
         sbfd_reflector,
         spanning_tree,
@@ -1829,6 +1830,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     for field in lldp
         .iter()
         .chain(logging)
+        .chain(login_policy)
         .chain(sbfd_reflector)
         .chain(spanning_tree)
         .chain(admin)

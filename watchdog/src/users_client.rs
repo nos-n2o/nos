@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, PeerId, Stream};
-use nos_proto::{DiffScope, Event, IpcCodec, Request, Role, User};
+use nos_proto::{Config, DiffScope, Event, IpcCodec, Request, Role, User};
 use tokio::io::{split, ReadHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -43,6 +43,11 @@ pub async fn subscribe_diff(
 /// against. The hashes never leave the watchdog: a client only ever sends a
 /// password and gets back a certificate.
 pub async fn fetch_users(identity: &Identity, socket_path: &Path) -> io::Result<Vec<User>> {
+    Ok(fetch_config(identity, socket_path).await?.users)
+}
+
+/// The running config, fetched once.
+pub async fn fetch_config(identity: &Identity, socket_path: &Path) -> io::Result<Config> {
     let fetch = async {
         let stream = identity.connect(socket_path, &configd()).await?;
         let (r, w) = split(stream);
@@ -50,7 +55,7 @@ pub async fn fetch_users(identity: &Identity, socket_path: &Path) -> io::Result<
         let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
         writer.send(Request::Get).await?;
         match reader.next().await {
-            Some(Ok(Event::Config(config))) => Ok(config.users),
+            Some(Ok(Event::Config(config))) => Ok(config),
             Some(Ok(other)) => Err(io::Error::other(format!(
                 "unexpected reply to Get: {other:?}"
             ))),
@@ -61,6 +66,41 @@ pub async fn fetch_users(identity: &Identity, socket_path: &Path) -> io::Result<
     tokio::time::timeout(FETCH_TIMEOUT, fetch)
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "nos-configd did not answer"))?
+}
+
+/// Keeps `max_failures` on the running `login_policy` (#1148), forever: applied
+/// at start and after each commit touching it. Until `nos-configd` is
+/// reachable (it starts after the watchdog) the defaults stand, as they do
+/// when the connection drops.
+pub async fn follow_login_policy(
+    identity: Identity,
+    socket_path: std::path::PathBuf,
+    max_failures: std::sync::Arc<std::sync::atomic::AtomicU8>,
+) {
+    let mut warned = false;
+    loop {
+        match subscribe_diff(&identity, &socket_path, vec![DiffScope::LoginPolicy]).await {
+            Ok(mut events) => {
+                warned = false;
+                while events.next().await.is_some_and(|e| e.is_ok()) {
+                    if let Ok(cfg) = fetch_config(&identity, &socket_path).await {
+                        let p = cfg.login_policy;
+                        max_failures.store(p.max_failures, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(
+                            max_failures = p.max_failures,
+                            "broker login policy applied"
+                        );
+                    }
+                }
+            }
+            Err(e) if !warned => {
+                warned = true;
+                tracing::info!(error = %e, "nos-configd not reachable, using the default login policy");
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Asks `nos-configd` to swap `user`'s hash `old` for `new` (see
