@@ -246,6 +246,17 @@ pub enum OspfProfileOp {
         /// Name of the OSPF profile this op targets.
         name: String,
     },
+    /// Toggles RFC 5613 Link-Local Signaling.
+    SetLls {
+        /// Name of the OSPF instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
 }
 
 impl OspfProfileOp {
@@ -264,6 +275,7 @@ impl OspfProfileOp {
             | OspfProfileOp::ClearPriority { .. }
             | OspfProfileOp::SetMtu { .. } => self.apply_part1(config),
             OspfProfileOp::SetMtuIgnore { .. }
+            | OspfProfileOp::SetLls { .. }
             | OspfProfileOp::SetPassive { .. }
             | OspfProfileOp::ClearMtu { .. }
             | OspfProfileOp::SetExtendedSequenceNumbers { .. }
@@ -297,6 +309,7 @@ impl OspfProfileOp {
                         priority: None,
                         mtu: None,
                         mtu_ignore: false,
+                        lls: false,
                         passive: false,
                         network_type: None,
                         auth: None,
@@ -416,6 +429,15 @@ impl OspfProfileOp {
                 enabled,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.mtu_ignore = *enabled;
+                Ok(())
+            }
+            OspfProfileOp::SetLls {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.lls = *enabled;
                 Ok(())
             }
             OspfProfileOp::SetPassive {
@@ -630,6 +652,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            lls: false,
             passive: false,
             network_type: None,
             auth: None,
@@ -661,6 +684,26 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.ospf_instances[0].areas[0].profiles.len(), 1);
         assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].name, "p1");
+    }
+
+    #[test]
+    fn set_lls_toggles_the_flag_and_rejects_an_unknown_profile() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        let op = |name: &str, enabled| OspfProfileOp::SetLls {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: name.to_string(),
+            enabled,
+        };
+        assert!(!cfg.ospf_instances[0].areas[0].profiles[0].lls);
+        for enabled in [true, false] {
+            op("p1", enabled).apply(&mut cfg).unwrap();
+            assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].lls, enabled);
+        }
+        assert!(op("nope", true).apply(&mut cfg).is_err());
     }
 
     #[test]

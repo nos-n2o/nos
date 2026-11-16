@@ -497,3 +497,53 @@ async fn broadcast_subnet_is_a_stub_until_full_with_the_dr() {
     assert!(seen.contains(&vec![LINK_TYPE_STUB_NETWORK]), "{seen:?}");
     assert_eq!(seen.last().unwrap(), &vec![LINK_TYPE_TRANSIT_NETWORK]);
 }
+
+/// Both ends' first neighbor summary after 60s, with per-side LLS and auth.
+async fn pair_lls(
+    (a_lls, a_auth): (bool, LinkAuthConfig),
+    (b_lls, b_auth): (bool, LinkAuthConfig),
+) -> [NeighborSummary; 2] {
+    let wire = Arc::new(wire::Wire::default());
+    let (a, b) = (router(&wire), router(&wire));
+    let mut la = wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint);
+    (la.lls, la.auth) = (a_lls, a_auth);
+    let mut lb = wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint);
+    (lb.lls, lb.auth) = (b_lls, b_auth);
+    a.reconcile(vec![la], HashMap::new(), id(1)).await;
+    b.reconcile(vec![lb], HashMap::new(), id(2)).await;
+    settle(60).await;
+    [
+        a.neighbor_summaries().await.remove(0),
+        b.neighbor_summaries().await.remove(0),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn lls_is_exchanged_under_every_classic_auth_and_ignored_otherwise() {
+    let none = || LinkAuthConfig::None;
+    let simple = || LinkAuthConfig::Simple {
+        password: b"pw".to_vec(),
+    };
+    for auth in [none, simple, || crypto(b"k", false)] {
+        let [a, b] = pair_lls((true, auth()), (true, auth())).await;
+        for s in [a, b] {
+            assert_eq!(s.state, OspfNeighborState::Full);
+            assert_eq!(
+                s.lls,
+                Some(nos_proto::LlsSummary {
+                    eof: 0,
+                    lr: false,
+                    rs: false
+                })
+            );
+        }
+    }
+    // One side off: it records nothing, and the other receives no block.
+    let [a, b] = pair_lls((true, crypto(b"k", false)), (false, crypto(b"k", false))).await;
+    assert_eq!((a.state, a.lls), (OspfNeighborState::Full, None));
+    assert_eq!((b.state, b.lls), (OspfNeighborState::Full, None));
+    // RFC 7474: LLS is never sent or recorded, the adjacency still forms.
+    let [a, b] = pair_lls((true, crypto(b"k", true)), (true, crypto(b"k", true))).await;
+    assert_eq!((a.state, a.lls), (OspfNeighborState::Full, None));
+    assert_eq!((b.state, b.lls), (OspfNeighborState::Full, None));
+}

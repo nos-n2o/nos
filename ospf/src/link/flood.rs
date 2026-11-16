@@ -4,8 +4,8 @@
 use super::rx::split_lsack;
 use super::rx::{execute_actions, next_crypto_seq, split_lsr, split_lsu};
 use super::{
-    bfd, exchange, info, lsa, neighbor, packet, warn, Dest, Duration, Instant, InterfaceState,
-    Ipv4Addr, LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
+    bfd, exchange, info, lsa, neighbor, warn, Dest, Duration, Instant, InterfaceState, Ipv4Addr,
+    LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
 };
 
 /// RFC 2328 §13.3 step 5 / §13.5: where this link's flooded LSUs and delayed
@@ -145,7 +145,9 @@ pub(super) fn retransmit_pending(
             let auth = cfg
                 .auth
                 .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_dbd(dbd, &auth)) {
+            if let Err(e) =
+                socket.send_unicast(info.address, &super::rx::encode_dbd_for(cfg, dbd, &auth))
+            {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
             }
         }

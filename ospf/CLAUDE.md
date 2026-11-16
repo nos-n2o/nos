@@ -42,7 +42,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 - `packet.rs` stays stateless; the anti-replay sequence is `link.rs`'s (`NeighborInfo.last_crypto_seq`, per packet type, checked once at the single decode site). A replay is dropped, never fatal (AuType 2: lower only, D.4.3; RFC 7474: lower or equal); failures log `ospf packet authentication failed` (asserted by `nos-e2e ospf-auth`).
 - `checksum` excludes the 8-byte Authentication field; Crypto skips it. A key or auth change restarts the link like any `LinkConfig` change. `OspfCryptoKey.key_id` is `u16` (shared with OSPFv3's SA ID); classic AuType 2 needs <= 255 (`valid_profile_timers`).
-- RFC 7474 (AuType 3): the boot count (`boot::BootCounter`) is taken on every link (re)start, not just process start. RFC 5613 LLS is not built.
+- RFC 7474 (AuType 3): the boot count (`boot::BootCounter`) is taken on every link (re)start, not just process start.
 
 ## SPF and routes
 

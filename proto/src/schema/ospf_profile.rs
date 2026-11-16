@@ -181,6 +181,10 @@ pub(crate) fn valid_auth(auth: Option<&OspfAuth>, cfg: &Config) -> garde::Result
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-profile on/off knobs"
+)]
 pub struct OspfProfile {
     #[garde(
         length(min = 1, max = 64),
@@ -239,6 +243,16 @@ pub struct OspfProfile {
     #[serde(default)]
     #[cli(topic = OspfProfileMtuIgnore, words = "mtu-ignore enable", alias = "mtu-ignore")]
     pub mtu_ignore: bool,
+
+    /// RFC 5613 Link-Local Signaling: send the LLS block (EOF TLV, plus the
+    /// CA-TLV under classic cryptographic auth) on Hello and DBD, and record
+    /// the peer's. Off by default; a peer without LLS ignores the block.
+    /// Ignored (with a warning) under RFC 7474 extended sequence numbers: the
+    /// extended-crypto CA-TLV is unsupported.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfileLls, words = "lls enable", alias = "lls")]
+    pub lls: bool,
 
     /// `None` resolves per attach point: a `Subinterface`/loopback
     /// `Interface` attach point defaults to `PointToPoint`, a
@@ -371,6 +385,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            lls: false,
             passive: false,
             network_type: None,
             auth: None,
@@ -546,6 +561,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            lls: false,
             passive: false,
             network_type: None,
             auth: None,

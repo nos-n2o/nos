@@ -1127,6 +1127,87 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// RFC 5613 Link-Local Signaling (requires `ospf`, runs before `ospf-auth` so
+/// the profile starts without authentication): `lls` on both routers exchanges
+/// the EOF TLV under Null, Simple and classic Crypto auth (a bad CA-TLV would
+/// log no "received" line); one side off is ignored by the peer and records
+/// nothing; under RFC 7474 it is ignored with a warning and the adjacency
+/// still forms. Restores `lls` off and no authentication at the end.
+pub async fn ospf_lls(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let got = |peer: &str| format!("ospf lls received link=eth0.0 neighbor={peer} eof=0");
+    let (from_b, from_a) = (got(OSPF_ROUTER_ID_B), got(OSPF_ROUTER_ID));
+    let flags = |rid: &str, lls: bool, extra: &[&str]| {
+        let mut f = ospf(rid);
+        f.extend(strings(&["--ospf-lls", &lls.to_string()]));
+        f.extend(strings(extra));
+        f
+    };
+    // Reprovisions both ends (a link restart each) and waits for Full again.
+    let apply = |a_lls: bool, b_lls: bool, extra: Vec<&'static str>| {
+        let (fa, fb) = (
+            flags(OSPF_ROUTER_ID, a_lls, &extra),
+            flags(OSPF_ROUTER_ID_B, b_lls, &extra),
+        );
+        async move {
+            let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+            a.provision_flags(&with_base(A, fa)).await?;
+            b.provision_flags(&with_base(B, fb)).await?;
+            a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await
+        }
+    };
+
+    let crypto = vec!["--ospf-crypto-key", "1:hmac-sha256:lls-secret"];
+    for (label, extra) in [
+        ("null", vec![]),
+        ("simple", vec!["--ospf-simple-password", "lls-pw"]),
+        ("crypto", crypto.clone()),
+    ] {
+        log(format!("lls on both routers, {label} authentication"));
+        let (ca, cb) = (a.count(&from_b), b.count(&from_a));
+        apply(true, true, extra.clone()).await?;
+        a.wait_new(&from_b, ca, 90).await?;
+        b.wait_new(&from_a, cb, 90).await?;
+
+        log(format!("lls on router-a only, {label} authentication"));
+        let (ca, cb) = (a.count("ospf lls received"), b.count("ospf lls received"));
+        apply(true, false, extra.clone()).await?;
+        a.assert_quiet("ospf lls received", ca, 15).await?;
+        b.assert_quiet("ospf lls received", cb, 15).await?;
+    }
+
+    log("lls with rfc 7474 extended sequence numbers: ignored with a warning");
+    let (ca, cb) = (a.count("ospf lls received"), b.count("ospf lls received"));
+    let mut ext = crypto;
+    ext.extend(["--ospf-extended-seq", "true"]);
+    apply(true, true, ext).await?;
+    a.wait("ospf lls enabled but ignored with rfc 7474").await?;
+    b.wait("ospf lls enabled but ignored with rfc 7474").await?;
+    a.assert_quiet("ospf lls received", ca, 15).await?;
+    b.assert_quiet("ospf lls received", cb, 15).await?;
+
+    log("restoring lls off and no authentication on both routers");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    for r in [a, b] {
+        r.edit(|c| {
+            for p in c
+                .ospf_instances
+                .iter_mut()
+                .flat_map(|i| i.areas.iter_mut())
+                .flat_map(|ar| ar.profiles.iter_mut())
+            {
+                p.lls = false;
+                p.auth = None;
+                p.extended_sequence_numbers = false;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    both_full_p2p(a, b).await
+}
+
 /// RFC 2328 §10.6 Interface MTU check (requires `ospf`, runs after
 /// `ospf-auth`): an OSPF MTU of 1400 on router-a alone makes it reject
 /// router-b's 1500-byte DBDs and stay out of Full; `mtu-ignore` lets the

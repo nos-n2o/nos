@@ -481,6 +481,7 @@ mod tests {
                         priority: None,
                         mtu: None,
                         mtu_ignore: false,
+                        lls: false,
                         passive: false,
                         network_type: None,
                         auth: None,

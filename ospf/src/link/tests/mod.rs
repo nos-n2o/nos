@@ -33,6 +33,7 @@ fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
         priority: 1,
         mtu: 1500,
         mtu_ignore: false,
+        lls: false,
         ifindex: 0,
         auth: LinkAuthConfig::None,
         stub: false,
@@ -44,6 +45,7 @@ fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
 
 fn neighbor_info(state: NeighborState, address: Ipv4Addr) -> NeighborInfo {
     NeighborInfo {
+        lls: None,
         state,
         priority: 1,
         declared_dr: Ipv4Addr::UNSPECIFIED,

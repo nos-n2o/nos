@@ -295,6 +295,8 @@ topics! {
     OspfProfileMtu,
     /// `OspfProfile.mtu_ignore` (also `OSPFv3`'s)
     OspfProfileMtuIgnore,
+    /// `OspfProfile.lls`
+    OspfProfileLls,
     /// `OspfProfile.passive`
     OspfProfilePassive,
     /// `OspfProfile.network_type` (also `OSPFv3`'s)

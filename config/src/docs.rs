@@ -1283,6 +1283,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              dropped, which leaves the neighbor stuck in ExStart. With mtu-ignore set the \
              check is skipped and the adjacency forms regardless.",
         ),
+        Topic::OspfProfileLls => (
+            "Enable or disable RFC 5613 Link-Local Signaling.",
+            "Sets lls on a profile. When on, Hello and Database Description packets carry the \
+             RFC 5613 LLS block (an Extended Options and Flags TLV, plus a Cryptographic \
+             Authentication TLV under cryptographic authentication) and the L-bit; a peer \
+             without LLS ignores the block. The peer's LLS data is recorded and shown by show \
+             ospf neighbor. Has no effect with extended-sequence-numbers (RFC 7474).",
+        ),
         Topic::OspfProfilePassive => (
             "Enable or disable passive mode on an OSPF profile.",
             "Sets passive on a profile. An attach point using a passive profile advertises its \
