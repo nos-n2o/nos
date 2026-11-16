@@ -34,7 +34,19 @@ pub struct CommitResult {
     committed: String,
     /// Non-blocking advice about the committed config; `[]` when none.
     warnings: Vec<String>,
+    /// The running config is not saved to disk yet (`POST /v1/config/save`).
+    unsaved: bool,
 }
+
+/// `GET /v1/config/status` body.
+#[derive(serde::Serialize, ToSchema)]
+pub struct ConfigStatus {
+    /// A commit, password rehash or ssh host-key set is not on disk (#1139).
+    unsaved: bool,
+}
+
+/// Response header on commit carrying the same flag as `CommitResult.unsaved`.
+const UNSAVED_HEADER: &str = "x-nos-unsaved";
 
 /// `(transaction name, config path segments)` from the request URI.
 fn split(uri: &Uri) -> ApiResult<(String, Vec<String>)> {
@@ -420,7 +432,7 @@ pub async fn commit(
     Extension(PeerUser(actor, _)): Extension<PeerUser>,
     uri: Uri,
     headers: HeaderMap,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<impl IntoResponse> {
     let (name, _) = split(&uri)?;
     let (if_match, sent) = if_match(&headers)?;
     match missing_tx(
@@ -432,10 +444,26 @@ pub async fn commit(
         .await,
         sent,
     )? {
-        Event::Committed { warnings } => Ok(Json(json!(CommitResult {
-            committed: name,
-            warnings
-        }))),
+        Event::Committed { warnings, unsaved } => Ok((
+            [(
+                HeaderName::from_static(UNSAVED_HEADER),
+                HeaderValue::from_static(if unsaved { "true" } else { "false" }),
+            )],
+            Json(json!(CommitResult {
+                committed: name,
+                warnings,
+                unsaved
+            })),
+        )),
+        other => Err(unexpected("nos-configd", &other)),
+    }
+}
+
+/// `GET /v1/config/status` — whether the running config is saved.
+#[utoipa::path(get, path = "/v1/config/status", tag = "transactions", summary = "Is the running config saved?", responses((status = 200, body = ConfigStatus)))]
+pub async fn status(State(d): State<Daemons>) -> ApiResult<Json<ConfigStatus>> {
+    match d.config(Request::SaveStatus).await? {
+        Event::SaveStatus { unsaved } => Ok(Json(ConfigStatus { unsaved })),
         other => Err(unexpected("nos-configd", &other)),
     }
 }
@@ -502,10 +530,14 @@ mod tests {
             serde_json::to_value(CommitResult {
                 committed: "t".into(),
                 warnings,
+                unsaved: false,
             })
             .unwrap()
         };
-        assert_eq!(r(vec![]), json!({"committed": "t", "warnings": []}));
+        assert_eq!(
+            r(vec![]),
+            json!({"committed": "t", "warnings": [], "unsaved": false})
+        );
         assert_eq!(r(vec!["w".into()])["warnings"], json!(["w"]));
     }
 

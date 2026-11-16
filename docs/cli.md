@@ -105,7 +105,7 @@ Step by step:
 2. `set` and `edit` change the transaction only. The router is not affected yet.
 3. `show this` and `diff` let you check the result before it goes live.
 4. `commit` validates the transaction and makes it the running config. The prompt now shows the new hostname, and the route is live straight away.
-5. `save` writes the running config to disk so it survives a restart. A commit does not do this.
+5. `save` writes the running config to disk so it survives a restart. A commit does not do this: it prints `committed (not saved)`, and the prompt shows a `*` after the hostname (`edge-1*>`) until you `save`. The `*` also appears for changes the system makes itself (a password hash upgrade, the generated ssh host key) and for commits made over REST.
 
 ## How configuration commands are built
 

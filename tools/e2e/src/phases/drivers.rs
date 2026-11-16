@@ -3110,7 +3110,13 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     expect_body(
         &a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
             .await?,
-        &format!("\"committed\":\"{REST_TX}\""),
+        &format!("\"committed\":\"{REST_TX}\",\"unsaved\":true"),
+    )?;
+    // A commit is live but unsaved (#1139); a save clears it.
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/config/status", None, 200)
+            .await?,
+        "\"unsaved\":true",
     )?;
     let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
     if !running.contains("\"rest-pl\"") || !running.contains("\"hostname\":\"rest-host\"") {
@@ -3134,6 +3140,11 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         (0, saved) if saved.contains("rest-pl") && saved.contains("rest-host") => {}
         (code, saved) => bail!("router-a: {saved_path} after save (exit {code}):\n{saved}"),
     }
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/config/status", None, 200)
+            .await?,
+        "\"unsaved\":false",
+    )?;
     log("router-a: POST /v1/config/save wrote the running config to disk");
 
     // Undo it the same way, exercising DELETE on a subsection and on the tx.

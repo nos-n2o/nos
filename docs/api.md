@@ -220,6 +220,7 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 204
 ```
 
+- `GET /v1/config/status` returns `{"unsaved": true|false}`: true while any change to the running config (a commit, a password hash upgrade, the generated ssh host key) is not on disk. A commit reply carries the same flag as `unsaved` and as the `X-NOS-Unsaved` header.
 - Saving writes the whole running config, including commits made from the shell or by other clients.
 - A failed write (no config file configured, or a disk error) returns `502` with a problem document naming the cause.
 

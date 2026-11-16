@@ -22,6 +22,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::ListOspfv3Instances
         | Request::GetRestApi { .. } => role == Role::Restd,
         Request::Save
+        | Request::SaveStatus
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
         | Request::GetTransaction { .. }

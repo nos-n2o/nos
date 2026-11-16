@@ -173,6 +173,8 @@ pub enum Request {
         /// Base64 of the 32-byte seed.
         seed: String,
     },
+    /// Is the running config unsaved (#1139)? Replies `Event::SaveStatus`.
+    SaveStatus,
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -196,6 +198,13 @@ pub enum Event {
     Committed {
         /// Non-blocking advice about the committed config.
         warnings: Vec<String>,
+        /// The running config now differs from the saved one (#1139).
+        unsaved: bool,
+    },
+    /// Reply to `SaveStatus`: running differs from what `Save` last wrote (#1139).
+    SaveStatus {
+        /// True when a commit, rehash or host-key set is not on disk.
+        unsaved: bool,
     },
     /// A named transaction was successfully discarded, in reply to
     /// `DiscardTransaction`.

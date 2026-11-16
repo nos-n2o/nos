@@ -201,6 +201,10 @@ struct Inner {
     tx: broadcast::Sender<Arc<CommitUpdate>>,
     /// Count of broadcasts; only bumped under the `running` write guard (#631).
     seq: std::sync::atomic::AtomicU64,
+    /// `seq` as of the last successful save: `seq != saved_seq` means the
+    /// running config (a commit, a password rehash, the ssh host key) is not
+    /// on disk (#1139).
+    saved_seq: std::sync::atomic::AtomicU64,
     /// Held across registering and `tx.subscribe()`, and across reading it
     /// and `tx.send()`, so a commit's `pending` classes are exactly those of
     /// the receivers that get it.
@@ -259,6 +263,7 @@ impl ConfigStore {
             transactions: Mutex::new(HashMap::new()),
             tx,
             seq: std::sync::atomic::AtomicU64::new(0),
+            saved_seq: std::sync::atomic::AtomicU64::new(0),
             diff_subscribers: std::sync::Mutex::default(),
             config_path,
             idle_ttl: TX_IDLE_TTL,
@@ -400,8 +405,21 @@ impl ConfigStore {
             .config_path
             .as_ref()
             .ok_or(ConfigError::PersistenceNotConfigured)?;
+        // Read before the snapshot: a commit racing the write stays unsaved.
+        let seq = self.0.seq.load(std::sync::atomic::Ordering::SeqCst);
         let cfg = self.running_snapshot().await;
-        crate::persistence::save_to_disk(&cfg, path)
+        crate::persistence::save_to_disk(&cfg, path)?;
+        self.0
+            .saved_seq
+            .store(seq, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Whether the running config differs from what was last saved (or
+    /// loaded at startup); every change to running counts (#1139).
+    pub fn unsaved(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.0.seq.load(SeqCst) != self.0.saved_seq.load(SeqCst)
     }
 
     /// Opens a named transaction: creates it from `base` if it doesn't
@@ -1555,6 +1573,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::TransactionNotFound(n) if n == "missing"));
+    }
+
+    #[tokio::test]
+    async fn unsaved_tracks_every_running_change_until_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(Config::default(), Some(dir.path().join("c.yaml")));
+        assert!(!store.unsaved());
+        commit_password(&store, "t1", "alice", "one").await;
+        assert!(store.unsaved());
+        store.save_to_disk().await.unwrap();
+        assert!(!store.unsaved());
+        let old = store.running_snapshot().await.users[0].password.clone();
+        store
+            .upgrade_password_hash("alice", &old, nos_password::hash("one"))
+            .await
+            .unwrap();
+        assert!(store.unsaved(), "rehash counts");
+        store.save_to_disk().await.unwrap();
+        store.set_ssh_host_key("A".repeat(43) + "=").await.unwrap();
+        assert!(store.unsaved(), "host key counts");
+        store.save_to_disk().await.unwrap();
+        assert!(!store.unsaved());
+        // A failed save leaves it unsaved.
+        let bad = ConfigStore::new(Config::default(), None);
+        commit_password(&bad, "t1", "alice", "one").await;
+        assert!(bad.save_to_disk().await.is_err());
+        assert!(bad.unsaved());
     }
 
     #[tokio::test]

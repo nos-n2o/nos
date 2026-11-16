@@ -104,6 +104,9 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         Request::ListOspfv3Instances => Event::InstanceNames(store.ospfv3_instance_names().await),
         Request::GetRestApi { table } => Event::RestApi(store.rest_api(&table).await),
         Request::UserExists { name } => Event::UserExists(store.user_exists(&name).await),
+        Request::SaveStatus => Event::SaveStatus {
+            unsaved: store.unsaved(),
+        },
         Request::Save => match store.save_to_disk().await {
             Ok(()) => Event::Saved,
             Err(e) => {
@@ -148,7 +151,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
                 for w in &warnings {
                     warn!(transaction = ?name, warning = %w, "commit warning");
                 }
-                Event::Committed { warnings }
+                Event::Committed {
+                    warnings,
+                    unsaved: store.unsaved(),
+                }
             }
             Err(e) => {
                 warn!(transaction = %name, error = %e, "commit failed");
@@ -214,7 +220,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         }
         Request::UpgradePasswordHash { user, old, new } => {
             match store.upgrade_password_hash(&user, &old, new).await {
-                Ok(()) => Event::Committed { warnings: vec![] },
+                Ok(()) => Event::Committed {
+                    warnings: vec![],
+                    unsaved: store.unsaved(),
+                },
                 Err(e) => {
                     debug!(user = ?user, error = %e, "password hash upgrade refused");
                     Event::Error(e.to_string())
@@ -222,7 +231,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             }
         }
         Request::SetSshHostKey { seed } => match store.set_ssh_host_key(seed).await {
-            Ok(()) => Event::Committed { warnings: vec![] },
+            Ok(()) => Event::Committed {
+                warnings: vec![],
+                unsaved: store.unsaved(),
+            },
             Err(e) => {
                 debug!(error = %e, "ssh host key refused");
                 Event::Error(e.to_string())
