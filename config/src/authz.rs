@@ -25,6 +25,8 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::SaveStatus
         | Request::ListHistory
         | Request::Rollback { .. }
+        | Request::ConfirmCommit { .. }
+        | Request::CancelCommit { .. }
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
         | Request::GetTransaction { .. }
@@ -61,7 +63,6 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::GetTransaction { .. }
         | Request::DiffTransaction { .. }
         | Request::DiscardTransaction { .. }
-        | Request::CommitTransaction { .. }
         | Request::UserExists { .. }
         | Request::ListBgpInstances
         | Request::ListOspfInstances
@@ -69,7 +70,14 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::GetRestApi { .. }
         | Request::UpgradePasswordHash { .. }
         | Request::SetSshHostKey { .. } => true,
-        Request::Save { .. } | Request::Rollback { .. } => false,
+        // A non-admin may commit, but not arm a rollback timer.
+        Request::CommitTransaction {
+            confirm_timeout, ..
+        } => confirm_timeout.is_none(),
+        Request::Save { .. }
+        | Request::Rollback { .. }
+        | Request::ConfirmCommit { .. }
+        | Request::CancelCommit { .. } => false,
         Request::ApplyOp { op, .. } => {
             matches!(op, ConfigOp::User(UserOp::SetPassword { name, .. }) if name == actor)
         }
@@ -218,5 +226,31 @@ mod tests {
             assert!(!permitted(r, "u", &back));
         }
         assert!(permitted(UserRole::Admin, "u", &back));
+    }
+
+    /// #1144: only an admin may arm, confirm or cancel a confirmed commit.
+    #[test]
+    fn confirmed_commit_is_admin_only() {
+        let commit = |t| Request::CommitTransaction {
+            name: "t".into(),
+            if_match: None,
+            actor: None,
+            confirm_timeout: t,
+        };
+        let confirm = Request::ConfirmCommit { actor: None };
+        let cancel = Request::CancelCommit { actor: None };
+        for r in [UserRole::Operator, UserRole::ReadOnly] {
+            assert!(permitted(r, "u", &commit(None)));
+            assert!(!permitted(r, "u", &commit(Some(60))));
+            assert!(!permitted(r, "u", &confirm));
+            assert!(!permitted(r, "u", &cancel));
+        }
+        assert!(permitted(UserRole::Admin, "u", &commit(Some(60))));
+        assert!(permitted(UserRole::Admin, "u", &confirm));
+        for role in Role::ALL {
+            let may = matches!(role, Role::User | Role::Restd);
+            assert_eq!(allowed(role, &confirm), may);
+            assert_eq!(allowed(role, &cancel), may);
+        }
     }
 }

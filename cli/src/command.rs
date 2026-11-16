@@ -179,6 +179,14 @@ pub enum Command {
     Up,
     Top,
     Commit,
+    /// `commit confirmed [<minutes>]` (#1144).
+    CommitConfirmed {
+        minutes: Option<u32>,
+    },
+    /// `commit confirm`
+    ConfirmCommit,
+    /// `commit cancel`
+    CancelCommit,
     /// `discard` | `abort`
     Discard,
     /// `diff` — only meaningful in configuration mode.

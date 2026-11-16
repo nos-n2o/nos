@@ -3358,6 +3358,82 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         bail!("the second rollback 1 did not undo the first");
     }
     log("router-a: GET /v1/history and POST /v1/rollback/N re-apply and undo a commit");
+    // Confirmed commit (#1144): unconfirmed it rolls back on its own, a
+    // second one is refused (409), a confirmed one stays. 30s is the minimum.
+    for (host, confirm) in [("expire-host", false), ("keep-host", true)] {
+        a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+            .await?;
+        a.rest_expect(
+            Method::PUT,
+            &format!("{tx}/hostname"),
+            Some(&format!("\"{host}\"")),
+            200,
+        )
+        .await?;
+        a.rest_expect(
+            Method::POST,
+            &format!("{tx}/commit?confirm-timeout=30"),
+            None,
+            200,
+        )
+        .await?;
+        let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+        if !running.contains(host) {
+            bail!("{host}: confirmed commit not applied: {running}");
+        }
+        a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+            .await?;
+        a.rest_expect(
+            Method::POST,
+            &format!("{tx}/commit?confirm-timeout=30"),
+            None,
+            409,
+        )
+        .await?;
+        a.rest_expect(Method::DELETE, &tx, None, 204).await?;
+        if confirm {
+            a.rest_expect(Method::POST, "/v1/commit/confirm", None, 200)
+                .await?;
+            a.rest_expect(Method::POST, "/v1/commit/confirm", None, 409)
+                .await?;
+            tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+            let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+            if !running.contains(host) {
+                bail!("a confirmed commit was rolled back anyway: {running}");
+            }
+        } else {
+            a.wait("confirmed commit not confirmed in time, rolling back")
+                .await?;
+            let mut back = false;
+            for _ in 0..40 {
+                let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+                if !running.contains(host) {
+                    back = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            if !back {
+                bail!("the unconfirmed commit was not rolled back");
+            }
+            expect_body(
+                &a.rest_expect(Method::GET, "/v1/history", None, 200).await?,
+                "\"kind\":\"auto-rollback\"",
+            )?;
+        }
+    }
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(
+        Method::PUT,
+        &format!("{tx}/hostname"),
+        Some(&format!("\"{orig_hostname}\"")),
+        200,
+    )
+    .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    log("router-a: commit?confirm-timeout rolls back unconfirmed, 409 on a second, /v1/commit/confirm keeps");
     a.rest_expect(Method::POST, &format!("{tx}?base=blank"), None, 201)
         .await?;
     a.rest_expect(Method::DELETE, &tx, None, 204).await?;

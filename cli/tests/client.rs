@@ -332,6 +332,7 @@ async fn commit_transaction_returns_ok_on_success() {
             actor: None,
             name: "demo".to_string(),
             if_match: None,
+            confirm_timeout: None,
         },
         Event::Committed {
             warnings: vec![],
@@ -359,6 +360,7 @@ async fn commit_transaction_returns_daemon_error() {
             actor: None,
             name: "demo".to_string(),
             if_match: None,
+            confirm_timeout: None,
         },
         Event::Error("validation failed".to_string()),
     ));

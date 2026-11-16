@@ -211,6 +211,8 @@ In the transaction, `show this` shows your current object or the whole transacti
 
 To undo commits, `show configuration history` lists the last 20 running configs a commit replaced (newest first: index, UTC time, `commit` or `rollback`, user) and `rollback <n>` (configuration mode) restores the config as it was `n` commits ago (admin role only). `rollback 1` undoes the latest commit; `rollback 0` does nothing; an `n` beyond the list is an error. A rollback is a normal commit: validated (one that would leave no user is refused), applied by every daemon, and a new history entry, so it can be rolled back too. It is not saved until `save`.
 
+`commit confirmed [<minutes>]` (default 10, 30 seconds to 24 hours) commits and rolls the change back by itself unless an administrator runs `commit` (which also commits any new edits) or `commit confirm` in time; `commit cancel` rolls it back now. Use it for changes that may lock you out (`rest-api`, ACLs, interfaces). Only one can be pending; other commits and `rollback` are refused meanwhile. A pending one does not survive a `nos-configd` restart (the saved config loads).
+
 Back in operational mode, `save` writes the running config to `/var/lib/nos/configd/config.yaml` so it survives a restart.
 
 A failed commit leaves everything as it was, so you can fix the problem and commit again:
@@ -371,6 +373,7 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `show configuration history` | `Request::ListHistory`; prints index, UTC time, kind and user of the commits kept on disk (works in any mode) |
 | `rollback <n>` | `Request::Rollback { index: n }`; restores the config `n` commits back as a normal commit (configuration mode) |
+| `commit confirmed [<minutes>]`, `commit confirm`, `commit cancel` | `CommitTransaction { confirm_timeout }`, `ConfirmCommit`, `CancelCommit` (#1144) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |
 | `configure <name> [from blank\|current]` | Enters configuration mode on a named transaction — creates it if new (default base: `current`), resumes it unchanged if it already exists |
 | `edit bgp instance <name>` | Creates the instance in the transaction if missing, then navigates into it |

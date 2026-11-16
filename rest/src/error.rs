@@ -46,10 +46,12 @@ impl ApiError {
             || msg.starts_with("config path: no such config path")
         {
             ApiError::NotFound(msg)
-        } else if msg.starts_with(&format!(
-            "config path: {}",
-            nos_proto::config_path::AMBIGUOUS_KEY_PREFIX
-        )) {
+        } else if msg.starts_with("confirm:")
+            || msg.starts_with(&format!(
+                "config path: {}",
+                nos_proto::config_path::AMBIGUOUS_KEY_PREFIX
+            ))
+        {
             ApiError::Conflict(msg)
         } else if msg.starts_with("validation failed") {
             ApiError::Unprocessable(msg)

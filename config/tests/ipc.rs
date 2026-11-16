@@ -747,6 +747,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
             actor: None,
             name: "t1".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -804,6 +805,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
             actor: None,
             name: "t1".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -870,6 +872,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             actor: None,
             name: "t1".to_string(),
             if_match: Some(vec![0]),
+            confirm_timeout: None,
         },
     ] {
         writer.send(req).await.unwrap();
@@ -1038,6 +1041,7 @@ async fn commit_missing_transaction_over_ipc_returns_error() {
             actor: None,
             name: "missing".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -1154,6 +1158,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
             actor: None,
             name: "demo".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -1226,6 +1231,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
             actor: None,
             name: "t1".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -1298,6 +1304,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
             actor: None,
             name: "t1".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -1368,6 +1375,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
             actor: None,
             name: "t1".to_string(),
             if_match: None,
+            confirm_timeout: None,
         })
         .await
         .unwrap();
@@ -1933,6 +1941,7 @@ async fn commit_rebases_over_ipc_and_conflicts_are_reported() {
         actor: None,
         name: n.to_string(),
         if_match: None,
+        confirm_timeout: None,
     };
     for n in ["a", "b", "c"] {
         writer.send(open(n)).await.unwrap();
@@ -2134,6 +2143,7 @@ async fn roles_gate_what_a_person_may_do_over_ipc() {
         name: "t".into(),
         if_match: None,
         actor: None,
+        confirm_timeout: None,
     };
     w.send(commit).await.unwrap();
     assert!(is_forbidden(&next_event(&mut r).await), "mixed commit");
@@ -2155,6 +2165,7 @@ async fn roles_gate_what_a_person_may_do_over_ipc() {
         name: "t".into(),
         if_match: None,
         actor: None,
+        confirm_timeout: None,
     })
     .await
     .unwrap();

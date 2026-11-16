@@ -209,7 +209,26 @@ pub async fn handle_action(
             explicit_base,
         } => Outcome::Continue(open_transaction(socket, name, base, explicit_base).await),
         Resolved::ConfigEdit(line) => Outcome::Continue(config_edit(mode, socket, &line).await),
-        Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
+        Resolved::Commit => Outcome::Continue(commit(mode, socket, None).await),
+        Resolved::CommitConfirmed { minutes } => {
+            // 10 minutes is RFC 6241's default.
+            let secs = minutes.unwrap_or(10).saturating_mul(60);
+            Outcome::Continue(commit(mode, socket, Some(secs)).await)
+        }
+        Resolved::ConfirmCommit => {
+            match client::confirm_commit(socket).await {
+                Ok(_) => println!("commit confirmed"),
+                Err(e) => eprintln!("error: {e}"),
+            }
+            Outcome::Continue(mode)
+        }
+        Resolved::CancelCommit => {
+            match client::cancel_commit(socket).await {
+                Ok(_) => println!("pending commit rolled back"),
+                Err(e) => eprintln!("error: {e}"),
+            }
+            Outcome::Continue(mode)
+        }
         Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
         Resolved::EditPolicySource { name } => {
             Outcome::Continue(edit_policy_source(mode, socket, name).await)
@@ -1846,11 +1865,17 @@ fn print_committed(transaction: &str, warnings: &[String], unsaved: bool) {
     }
 }
 
-async fn commit(mode: Mode, socket: &Path) -> Mode {
+async fn commit(mode: Mode, socket: &Path, confirm_secs: Option<u32>) -> Mode {
     let transaction = current_transaction(&mode);
-    match client::commit_transaction(socket, &transaction).await {
+    match client::commit_confirmed(socket, &transaction, confirm_secs).await {
         Ok((warnings, unsaved)) => {
             print_committed(&transaction, &warnings, unsaved);
+            if let Some(s) = confirm_secs {
+                println!(
+                    "rolls back in {} min unless confirmed: `commit` or `commit confirm` (admin)",
+                    s / 60
+                );
+            }
             Mode::Operational
         }
         Err(e) => {

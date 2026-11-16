@@ -364,6 +364,30 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::Commit
     ),
     cmd!(
+        ["commit" "confirmed"],
+        Doc::FromConfig(Topic::CommitTransaction),
+        Configuration,
+        Command::CommitConfirmed { minutes: None }
+    ),
+    cmd!(
+        ["commit" "confirmed" (n: Number)],
+        Doc::FromConfig(Topic::CommitTransaction),
+        Configuration,
+        |n| Command::CommitConfirmed { minutes: Some(n.parse().ok()?) }
+    ),
+    cmd!(
+        ["commit" "confirm"],
+        Doc::FromConfig(Topic::ConfirmCommit),
+        Configuration,
+        Command::ConfirmCommit
+    ),
+    cmd!(
+        ["commit" "cancel"],
+        Doc::FromConfig(Topic::CancelCommit),
+        Configuration,
+        Command::CancelCommit
+    ),
+    cmd!(
         ["discard"],
         Doc::FromConfig(Topic::DiscardTransaction),
         Configuration,

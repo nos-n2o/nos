@@ -41,6 +41,54 @@ pub struct CommitResult {
     unsaved: bool,
 }
 
+/// The `confirm-timeout` query parameter, in seconds.
+fn confirm_timeout(uri: &Uri) -> Result<Option<u32>, ApiError> {
+    let Some(v) = uri.query().and_then(|q| {
+        q.split('&')
+            .find_map(|kv| kv.strip_prefix("confirm-timeout="))
+    }) else {
+        return Ok(None);
+    };
+    v.parse().map(Some).map_err(|_| {
+        ApiError::BadRequest(format!("confirm-timeout: '{v}' is not a number of seconds"))
+    })
+}
+
+/// `POST /v1/commit/confirm` — keep the config a confirmed commit applied.
+#[utoipa::path(post, path = "/v1/commit/confirm", tag = "transactions", summary = "Confirm a pending confirmed commit", responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "no confirmed commit is pending")))]
+pub async fn commit_confirm(
+    State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+) -> ApiResult<impl IntoResponse> {
+    committed(d.config(Request::ConfirmCommit { actor }).await?, "confirm")
+}
+
+/// `POST /v1/commit/cancel` — roll a pending confirmed commit back now.
+#[utoipa::path(post, path = "/v1/commit/cancel", tag = "transactions", summary = "Cancel a pending confirmed commit", responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "no confirmed commit is pending")))]
+pub async fn commit_cancel(
+    State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+) -> ApiResult<impl IntoResponse> {
+    committed(d.config(Request::CancelCommit { actor }).await?, "cancel")
+}
+
+fn committed(ev: Event, what: &str) -> ApiResult<impl IntoResponse> {
+    match ev {
+        Event::Committed { warnings, unsaved } => Ok((
+            [(
+                HeaderName::from_static(UNSAVED_HEADER),
+                HeaderValue::from_static(if unsaved { "true" } else { "false" }),
+            )],
+            Json(json!(CommitResult {
+                committed: what.to_string(),
+                warnings,
+                unsaved
+            })),
+        )),
+        other => Err(unexpected("nos-configd", &other)),
+    }
+}
+
 /// `GET /v1/config/status` body.
 #[derive(serde::Serialize, ToSchema)]
 pub struct ConfigStatus {
@@ -518,7 +566,7 @@ pub async fn diff(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<ConfigDi
 
 /// `POST /v1/transactions/<tx>/commit` — validate and promote to running.
 /// On a validation error (or a failed `If-Match`) the transaction stays open.
-#[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), responses((status = 200, body = CommitResult), (status = 422, body = ErrorBody, description = "validation failed, or the commit would remove every user or carry an invalid syslog trust-anchor; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
+#[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist"), ("confirm-timeout" = Option<u32>, Query, description = "confirmed commit (RFC 6241 8.4): roll back after this many seconds (30 to 86400) unless confirmed with `POST /v1/commit/confirm` or a plain commit by an admin")), responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "a confirmed commit is already pending"), (status = 422, body = ErrorBody, description = "validation failed, or the commit would remove every user or carry an invalid syslog trust-anchor; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
 pub async fn commit(
     State(d): State<Daemons>,
     Extension(PeerUser(actor, _)): Extension<PeerUser>,
@@ -527,11 +575,13 @@ pub async fn commit(
 ) -> ApiResult<impl IntoResponse> {
     let (name, _) = split(&uri)?;
     let (if_match, sent) = if_match(&headers)?;
+    let confirm_timeout = confirm_timeout(&uri)?;
     match missing_tx(
         d.config(Request::CommitTransaction {
             actor,
             name: name.clone(),
             if_match,
+            confirm_timeout,
         })
         .await,
         sent,

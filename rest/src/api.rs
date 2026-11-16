@@ -102,6 +102,8 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(tx::status))
         .routes(routes!(tx::history))
         .routes(routes!(tx::rollback))
+        .routes(routes!(tx::commit_confirm))
+        .routes(routes!(tx::commit_cancel))
         .routes(routes!(tx::open, tx::get, tx::put, tx::patch, tx::delete))
         .split_for_parts()
 }

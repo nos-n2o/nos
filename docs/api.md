@@ -226,9 +226,16 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 
 ## Commit history and rollback
 
-- `GET /v1/history` lists the configs recent commits replaced, newest first: `[{"index":1,"time":<unix seconds>,"actor":"<user>","kind":"commit"|"rollback"}]`. `nos-configd` keeps the last 20 on disk next to its config file (`config.yaml.history/`, mode 0700, files 0600) and they survive a restart; without a config file it keeps none and answers `502`.
+- `GET /v1/history` lists the configs recent commits replaced, newest first: `[{"index":1,"time":<unix seconds>,"actor":"<user>","kind":"commit"|"rollback"|"commit-confirmed"|"auto-rollback"|"cancel-rollback"}]`. `nos-configd` keeps the last 20 on disk next to its config file (`config.yaml.history/`, mode 0700, files 0600) and they survive a restart; without a config file it keeps none and answers `502`.
 - `POST /v1/rollback/{n}` restores the config as it was `n` commits ago (`1` undoes the latest commit) and replies like a commit (`{"committed":"rollback 1","warnings":[],"unsaved":true}`). Admin role only (`403` otherwise; listing is open to every role). It is a normal commit: `422` if the old config no longer validates or would leave no user or admin, `404` if `n` is beyond the history, `n = 0` does nothing. The rollback is itself a history entry.
 - Neither is a save: `POST /v1/config/save` still persists the result.
+
+## Confirmed commit (#1144)
+
+- `POST /v1/transactions/{tx}/commit?confirm-timeout=<seconds>` (30 to 86400) commits, then rolls the config back by itself (a new history entry of kind `auto-rollback`, actor = the committer) unless it is confirmed in time. Admin role only.
+- Confirm with `POST /v1/commit/confirm` or by any plain commit from an admin; `POST /v1/commit/cancel` rolls back at once. Both are admin only and `409` when nothing is pending.
+- While one is pending a second confirmed commit, a rollback, or a non-admin commit is `409`; other admins' plain commits confirm it. `422` if the timeout is out of range.
+- Not persisted: after a `nos-configd` restart the saved config is loaded and nothing is pending. The audit lines `config commit audit`, `config confirm audit` (`committer`, `confirmer`) and `config cancel audit` name both users.
 
 ## The config tree as URLs
 
