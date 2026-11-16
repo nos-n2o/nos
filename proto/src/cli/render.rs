@@ -589,7 +589,7 @@ mod tests {
             v["lldp"]["tx_interval_secs"] = json!(10);
             v["lldp"]["management_addresses"] = json!(["10.0.0.1"]);
             v["community_aliases"] = json!([{"name":"a1","value":"65000:1"}]);
-            v["users"] = json!([{"name":"admin","password":"$argon2id$x"}]);
+            v["users"] = json!([{"name":"admin","password":"$argon2id$x","role":"Admin"}]);
         });
         assert_eq!(
             indent(&render_root(&c)),

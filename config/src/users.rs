@@ -62,6 +62,7 @@ pub fn seed_default_user(config: &mut Config) {
         config.users.push(User {
             name: DEFAULT_USER.to_string(),
             password: DEFAULT_PASSWORD.to_string(),
+            ..Default::default()
         });
     }
 }
@@ -74,6 +75,7 @@ mod tests {
         User {
             name: name.to_string(),
             password: pw.to_string(),
+            ..Default::default()
         }
     }
 

@@ -516,7 +516,7 @@ async fn save_persists_running_config_to_disk() {
         Event::SaveStatus { unsaved: true }
     ));
     let (mut reader, mut writer) = connect(&sock_path).await;
-    writer.send(Request::Save).await.unwrap();
+    writer.send(Request::Save { actor: None }).await.unwrap();
 
     let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Saved));
@@ -543,7 +543,7 @@ async fn save_without_configured_path_returns_error() {
         .unwrap();
 
     let (mut reader, mut writer) = connect(&sock_path).await;
-    writer.send(Request::Save).await.unwrap();
+    writer.send(Request::Save { actor: None }).await.unwrap();
 
     let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Error(_)));
@@ -848,6 +848,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             value: Some("\"h1\"".to_string()),
             if_match: Some(vec![0]),
             position: None,
+            actor: None,
         })
         .await
         .unwrap();
@@ -863,6 +864,7 @@ async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transactio
             value: Some("\"h2\"".to_string()),
             if_match: Some(vec![0]),
             position: None,
+            actor: None,
         },
         Request::CommitTransaction {
             actor: None,
@@ -915,6 +917,7 @@ async fn edit_transaction_path_over_ipc_replies_with_the_subsection_only() {
         value,
         if_match,
         position: None,
+        actor: None,
     };
     let body = serde_json::to_value(instance("r1", 65000)).unwrap();
 
@@ -989,6 +992,7 @@ async fn positioned_set_over_ipc_reorders_and_shows_in_the_diff() {
             value: Some(serde_json::to_string(&group("b")).unwrap()),
             if_match: None,
             position: Some(nos_proto::config_path::ListPosition::First),
+            actor: None,
         })
         .await
         .unwrap();
@@ -1576,6 +1580,7 @@ fn config_with_secrets() -> Config {
     c.users = vec![nos_proto::User {
         name: "u".into(),
         password: "SECRET-hash".into(),
+        ..Default::default()
     }];
     let mut i = instance("default", 65000);
     i.peer_groups = vec![nos_proto::BgpPeerGroup {
@@ -1696,6 +1701,7 @@ async fn user_exists_round_trips_for_restd_only() {
         users: vec![nos_proto::User {
             name: "alice".into(),
             password: "pw".into(),
+            ..Default::default()
         }],
         ..Config::default()
     };
@@ -1959,4 +1965,148 @@ async fn commit_rebases_over_ipc_and_conflicts_are_reported() {
         Event::Error(m) => assert!(m.starts_with("precondition failed"), "{m}"),
         other => panic!("expected Error, got {other:?}"),
     }
+}
+
+fn person(name: &str, role: nos_proto::UserRole) -> nos_proto::User {
+    nos_proto::User {
+        name: name.into(),
+        password: "$argon2id$secret".into(),
+        role,
+    }
+}
+
+fn edit_path(name: &str, path: &[&str], value: &str) -> Request {
+    Request::EditTransactionPath {
+        name: name.into(),
+        path: path.iter().map(|s| (*s).to_string()).collect(),
+        value: Some(value.into()),
+        if_match: None,
+        position: None,
+        actor: None,
+    }
+}
+
+fn open_t() -> Request {
+    Request::OpenTransaction {
+        name: "t".into(),
+        base: TransactionBase::Current,
+        actor: None,
+    }
+}
+
+fn is_forbidden(e: &Event) -> bool {
+    matches!(e, Event::Error(m) if m.starts_with("forbidden"))
+}
+
+/// #1147: a non-admin person reads masked, cannot edit or save, may change
+/// only its own password; an admin keeps everything.
+#[tokio::test]
+async fn roles_gate_what_a_person_may_do_over_ipc() {
+    use nos_proto::UserRole::{Admin, Operator, ReadOnly};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let cfg = Config {
+        users: vec![
+            person("root", Admin),
+            person("op", Operator),
+            person("ro", ReadOnly),
+        ],
+        ..Config::default()
+    };
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+
+    for who in ["ro", "op"] {
+        let (mut r, mut w) = connect_as(&path, "user", who).await;
+        w.send(Request::Get).await.unwrap();
+        let Event::Config(c) = next_event(&mut r).await else {
+            panic!("config expected");
+        };
+        assert!(c.users.iter().all(|u| u.password == "<hidden>"), "{who}");
+        // Refused, and the connection stays usable.
+        w.send(Request::Save { actor: None }).await.unwrap();
+        assert!(is_forbidden(&next_event(&mut r).await), "{who} save");
+        w.send(open_t()).await.unwrap();
+        assert!(matches!(next_event(&mut r).await, Event::Transaction(_)));
+        w.send(edit_path("t", &["hostname"], "\"x\""))
+            .await
+            .unwrap();
+        assert!(is_forbidden(&next_event(&mut r).await), "{who} edit");
+        let apply = Request::ApplyOp {
+            name: "t".into(),
+            op: ConfigOp::User(nos_proto::UserOp::Delete {
+                name: "root".into(),
+            }),
+            actor: None,
+        };
+        w.send(apply).await.unwrap();
+        assert!(is_forbidden(&next_event(&mut r).await), "{who} apply");
+        w.send(Request::DiscardTransaction {
+            name: "t".into(),
+            if_match: None,
+        })
+        .await
+        .unwrap();
+        assert!(matches!(next_event(&mut r).await, Event::Discarded));
+    }
+
+    // Own password: allowed through commit, role untouched.
+    let (mut r, mut w) = connect_as(&path, "user", "ro").await;
+    w.send(open_t()).await.unwrap();
+    next_event(&mut r).await;
+    w.send(edit_path("t", &["users", "ro", "password"], "\"newpw\""))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut r).await,
+        Event::TransactionEdit { .. }
+    ));
+    // An admin slips another edit into the shared transaction: refused at commit.
+    let (mut ar, mut aw) = connect_as(&path, "user", "root").await;
+    aw.send(edit_path("t", &["hostname"], "\"evil\""))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut ar).await,
+        Event::TransactionEdit { .. }
+    ));
+    let commit = Request::CommitTransaction {
+        name: "t".into(),
+        if_match: None,
+        actor: None,
+    };
+    w.send(commit).await.unwrap();
+    assert!(is_forbidden(&next_event(&mut r).await), "mixed commit");
+    aw.send(Request::DiscardTransaction {
+        name: "t".into(),
+        if_match: None,
+    })
+    .await
+    .unwrap();
+    next_event(&mut ar).await;
+
+    w.send(open_t()).await.unwrap();
+    next_event(&mut r).await;
+    w.send(edit_path("t", &["users", "ro", "password"], "\"newpw\""))
+        .await
+        .unwrap();
+    next_event(&mut r).await;
+    w.send(Request::CommitTransaction {
+        name: "t".into(),
+        if_match: None,
+        actor: None,
+    })
+    .await
+    .unwrap();
+    assert!(matches!(next_event(&mut r).await, Event::Committed { .. }));
+    assert_eq!(store.user_role("ro").await, ReadOnly);
+
+    // The admin still edits and saves status.
+    aw.send(Request::SaveStatus).await.unwrap();
+    assert!(matches!(
+        next_event(&mut ar).await,
+        Event::SaveStatus { .. }
+    ));
 }

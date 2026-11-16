@@ -114,7 +114,7 @@ pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
 pub use stp_port_profile::{EdgePort, LinkType, StpPortMstInstance, StpPortProfile};
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
-pub use user::{User, PASSWORD_HASH_PREFIX};
+pub use user::{User, UserRole, PASSWORD_HASH_PREFIX};
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};

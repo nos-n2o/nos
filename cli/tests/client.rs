@@ -143,7 +143,11 @@ async fn save_returns_ok_on_success() {
     let path = tmp.path().join("config.sock");
     let listener = shared().identity("configd", "").listen(&path).unwrap();
 
-    let server = tokio::spawn(serve_once(listener, Request::Save, Event::Saved));
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Save { actor: None },
+        Event::Saved,
+    ));
 
     save_running_config(&path).await.unwrap();
 
@@ -158,7 +162,7 @@ async fn save_returns_daemon_error() {
 
     let server = tokio::spawn(serve_once(
         listener,
-        Request::Save,
+        Request::Save { actor: None },
         Event::Error("disk full".to_string()),
     ));
 

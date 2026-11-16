@@ -93,6 +93,14 @@ impl Config {
             .map(|k| k.secret.as_str())
     }
 
+    /// [`Config::redacted`] as a `Config` again (secrets read `<hidden>`):
+    /// what `nos-configd` hands a non-admin shell user (#1147).
+    #[must_use]
+    pub fn masked(&self) -> Config {
+        serde_json::from_value(self.redacted())
+            .unwrap_or_else(|_| self.for_role(crate::broker::Role::Configd))
+    }
+
     /// The config as JSON with every `#[cli(secret)]` field replaced by the
     /// mask text, for anything that leaves the daemons (REST, logs). Walks
     /// `cli::root()` like `show config`, so a new secret field is covered by
@@ -319,6 +327,7 @@ mod tests {
         c.users.push(crate::schema::User {
             name: "u".into(),
             password: "$argon2id$x".into(),
+            ..Default::default()
         });
         let mut v = serde_json::to_value(&c).unwrap();
         let mut pg = serde_json::to_value(crate::schema::BgpPeerGroup::default()).unwrap();
@@ -368,6 +377,7 @@ mod tests {
         c.users.push(crate::schema::User {
             name: "u".into(),
             password: "$argon2id$x".into(),
+            ..Default::default()
         });
         let r = c.redacted();
         assert_eq!(r["admin"]["keys"][0]["secret"], HIDDEN);

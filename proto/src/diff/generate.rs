@@ -851,6 +851,7 @@ mod tests {
             10 => c.users.push(User {
                 name: format!("u{}", r.below(3)),
                 password: format!("p{}", r.below(3)),
+                ..Default::default()
             }),
             11 if !c.users.is_empty() => {
                 let i = pick(r, c.users.len());
@@ -939,6 +940,7 @@ mod tests {
             users: vec![User {
                 name: "u".into(),
                 password: pw.into(),
+                ..Default::default()
             }],
             ..Default::default()
         };
