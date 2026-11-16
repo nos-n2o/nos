@@ -1,6 +1,7 @@
 //! `nos-sshd`'s host key as a config secret (#1104): generated at first start, kept in the
 //! admin keystore under `ssh-host-key`, stable across a daemon restart, hidden from REST and
-//! logs, regenerated when the label is deleted.
+//! logs, regenerated when the label is deleted, same after Save + a full container restart.
+//! Also the VRF-only `ssh` phase (#1002).
 
 use anyhow::{bail, Context};
 use nos_proto::SSH_HOST_KEY_LABEL;
@@ -18,7 +19,8 @@ fn fingerprint(a: &crate::router::Router) -> anyhow::Result<String> {
     Ok(line[line.find("SHA256:").context("no SHA256")?..].to_string())
 }
 
-/// Needs `up`; leaves `ssh-server` cleared again (the key stays in the keystore).
+/// Needs `up`; leaves `ssh-server` cleared again (the key stays in the keystore). Restarts
+/// router-a, so BGP is re-established before it returns.
 pub async fn ssh_hostkey(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
 
@@ -58,6 +60,32 @@ pub async fn ssh_hostkey(w: &mut World) -> anyhow::Result<()> {
         bail!("host key changed across a restart: {f1} -> {now}");
     }
 
+    log("ssh-hostkey: Save + a full container restart keeps the key");
+    a.rest_expect(Method::POST, "/v1/config/save", None, 204)
+        .await?;
+    w.restart(crate::router::A).await?;
+    // A fresh log follower; `nos-logd`'s buffer may or may not have survived, so the log alone
+    // cannot say the line is new: the listener must be back as well (a new `nos-sshd`).
+    let a = w.a()?;
+    a.wait_new(FP, 0, 90).await?;
+    let mut up = false;
+    for _ in 0..60 {
+        let (_, t4) = w.dock.exec("router-a", &["cat", "/proc/net/tcp"]).await?;
+        if listeners(&t4).iter().any(|(_, p)| *p == SSH_PORT) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if !up {
+        bail!("nos-sshd did not listen again after the container restart");
+    }
+    let now = fingerprint(a)?;
+    if now != f1 {
+        bail!("host key changed across a container restart: {f1} -> {now}");
+    }
+    a.established().await?;
+
     log("ssh-hostkey: deleting the label regenerates it");
     let before = a.count(FP);
     a.edit(|cfg| {
@@ -72,6 +100,7 @@ pub async fn ssh_hostkey(w: &mut World) -> anyhow::Result<()> {
     }
 
     a.provision(&strings(&["--clear-ssh-server"])).await?;
+    a.established().await?;
     Ok(())
 }
 
@@ -233,6 +262,9 @@ pub async fn ssh_login_shell(w: &mut World) -> anyhow::Result<()> {
     {
         bail!("a deleted user must not log in over SSH");
     }
+    log("ssh-login-shell: the already-open shell fails its next command");
+    sh.send("show config").await?;
+    sh.expect("CertificateRevoked", 30).await?;
     drop(sh);
     drop(ssh);
 
@@ -249,5 +281,103 @@ pub async fn ssh_login_shell(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("login rejected", rejected, 15).await?;
 
     a.provision(&strings(&["--clear-ssh-server"])).await?;
+    Ok(())
+}
+
+/// `/proc/net/tcp{,6}` LISTEN (state 0A) local addresses, as `(hex addr, port)`.
+fn listeners(proc_net: &str) -> Vec<(String, u16)> {
+    proc_net
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (addr, port) = f.get(1)?.split_once(':')?;
+            (f.get(3) == Some(&"0A"))
+                .then_some((addr.to_string(), u16::from_str_radix(port, 16).ok()?))
+        })
+        .collect()
+}
+
+/// `/proc/net/tcp`'s little-endian hex for a dotted quad.
+fn hex_v4(ip: &str) -> String {
+    let o: Vec<u8> = ip.split('.').map(|p| p.parse().unwrap()).collect();
+    format!("{:02X}{:02X}{:02X}{:02X}", o[3], o[2], o[1], o[0])
+}
+
+/// `nos-sshd` is bound to the VRF's address only (#988): a LISTEN socket on `IP_A:2222` and none
+/// on the wildcard, unreachable from the default VRF, one login works, and clearing the
+/// config removes listener and process. Needs `up`; leaves `ssh-server` cleared.
+pub async fn ssh(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let ip = IP_A.s();
+
+    a.provision(&[
+        "--ssh-server-address",
+        ip,
+        "--ssh-server-port",
+        &SSH_PORT.to_string(),
+    ])
+    .await?;
+    a.wait("ssh listening").await?;
+
+    log("ssh: listening on the VRF address only");
+    let (_, t4) = w.dock.exec("router-a", &["cat", "/proc/net/tcp"]).await?;
+    let (_, t6) = w.dock.exec("router-a", &["cat", "/proc/net/tcp6"]).await?;
+    let (v4, v6) = (listeners(&t4), listeners(&t6));
+    if !v4.contains(&(hex_v4(ip), SSH_PORT)) {
+        bail!("no LISTEN socket on {ip}:{SSH_PORT}: {v4:?}");
+    }
+    let wild = v4.iter().any(|(h, p)| *p == SSH_PORT && h == "00000000")
+        || v6
+            .iter()
+            .any(|(h, p)| *p == SSH_PORT && h.bytes().all(|b| b == b'0'));
+    if wild {
+        bail!("{SSH_PORT} listens on a wildcard address: {v4:?} {v6:?}");
+    }
+
+    log("ssh: not reachable from the default VRF");
+    let probe = format!("exec 3<>/dev/tcp/{ip}/{SSH_PORT}");
+    let (code, out) = w.dock.exec("router-a", &["bash", "-c", &probe]).await?;
+    if code == 0 {
+        bail!("the default VRF reached the ssh listener on {ip}:{SSH_PORT}");
+    }
+    log(format!(
+        "ssh: default-VRF connect refused ({code}): {}",
+        out.trim()
+    ));
+
+    log("ssh: a login through the VRF works");
+    Ssh::password(ip, SSH_PORT, E2E_USER, E2E_PASSWORD)
+        .await?
+        .context("the seeded user must log in over SSH")?;
+
+    log("ssh: clearing the config removes the listener and the process");
+    a.provision(&strings(&["--clear-ssh-server"])).await?;
+    let mut gone = false;
+    for _ in 0..30 {
+        let (_, o) = w.dock.exec("router-a", &["cat", "/proc/net/tcp"]).await?;
+        let (_, c) = w
+            .dock
+            .exec_root(
+                "router-a",
+                &["sh", "-c", "cat /proc/[0-9]*/comm 2>/dev/null"],
+            )
+            .await?;
+        if !listeners(&o).iter().any(|(_, p)| *p == SSH_PORT) && !c.lines().any(|l| l == "nos-sshd")
+        {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if !gone {
+        bail!("nos-sshd or its listener survived --clear-ssh-server");
+    }
+    if Ssh::password(ip, SSH_PORT, E2E_USER, E2E_PASSWORD)
+        .await
+        .is_ok()
+    {
+        bail!("an SSH connect succeeded after --clear-ssh-server");
+    }
+    a.established().await?;
     Ok(())
 }

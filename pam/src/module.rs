@@ -67,6 +67,16 @@ fn outcome(r: &PamResult<NosTicket>) -> &'static str {
     }
 }
 
+/// The one audit line `authenticate` logs: never the password, the ticket or an error source.
+pub fn audit_line(user: &OsStr, service: &OsStr, outcome: &str) -> String {
+    format!(
+        "user={} service={} outcome={}",
+        user.to_string_lossy(),
+        service.to_string_lossy(),
+        outcome
+    )
+}
+
 impl<T: ModuleClient> PamModule<T> for NosPam {
     fn authenticate(handle: &mut T, args: Vec<&CStr>, _flags: AuthnFlags) -> PamResult<()> {
         guard(|| {
@@ -85,13 +95,7 @@ impl<T: ModuleClient> PamModule<T> for NosPam {
             let service = handle.items().service()?.unwrap_or_default();
             let result = authenticate_user(&opts, &user, password, LOGIN_TIMEOUT);
             // Never the password, the broker's text or an error source.
-            nonstick::info!(
-                handle,
-                "user={} service={} outcome={}",
-                user.to_string_lossy(),
-                service.to_string_lossy(),
-                outcome(&result)
-            );
+            nonstick::info!(handle, "{}", audit_line(&user, &service, outcome(&result)));
             let ticket = result?;
             // sshd runs authenticate + acct_mgmt in a forked child (keyboard-interactive) and
             // copies that child's `pam_getenvlist()` to the session; open_session runs in the
