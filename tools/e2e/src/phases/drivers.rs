@@ -2444,10 +2444,15 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     for (r, base) in routers.iter().zip(boundary) {
         r.wait_new(BOUNDARY, base, 40).await?;
     }
-    for r in routers {
+    // router-b hears router-a's BPDUs on both ports. router-a only learns of
+    // the split where router-b still transmits: its alternate port is silent,
+    // and since the revision edit is applied in place (#1123) no restart makes
+    // it send, so only `eth1` is required there.
+    for (r, only_eth1) in [(a, true), (b, false)] {
         for id in [1, 2] {
             mst_wait(r, id, 40, |i| {
-                !i.ports.is_empty() && i.ports.iter().all(|p| p.boundary)
+                let mut ports = i.ports.iter().filter(|p| !only_eth1 || p.name == "eth1");
+                ports.clone().count() > 0 && ports.all(|p| p.boundary)
             })
             .await?;
         }
