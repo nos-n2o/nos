@@ -2970,6 +2970,8 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         with_base(A, f)
     };
+    let trimmed = "ospf dbd summary trimmed removed=";
+    let (trim_a, trim_b) = (a.count(trimmed), w.b()?.count(trimmed));
     let (before, rejects) = (a.count(&full(OSPFV3_ROUTER_ID_B)), a.count(reject));
     log("setting mtu 1400 on router-a's profile only");
     a.provision_flags(&with(&["--ospfv3-profile-mtu", "1400"]))
@@ -2983,6 +2985,13 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
     a.provision_flags(&with(&["--ospfv3-mtu-ignore", "true"]))
         .await?;
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+    // #1140 (RFC 5243, shared code): the re-formed adjacency met populated
+    // LSDBs, so one side trimmed its summary.
+    if a.wait_new(trimmed, trim_a, 5).await.is_err()
+        && w.b()?.wait_new(trimmed, trim_b, 5).await.is_err()
+    {
+        bail!("no ospfv3 dbd summary was ever trimmed (RFC 5243)");
+    }
 
     log("clearing the mtu override and mtu-ignore");
     let before = a.count(&full(OSPFV3_ROUTER_ID_B));
