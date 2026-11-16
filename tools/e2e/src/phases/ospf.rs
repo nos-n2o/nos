@@ -1433,6 +1433,8 @@ pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {
     .await
 }
 
+const MTU_REJECT: &str = "ospf dbd rejected.*local_mtu=1400 neighbor_mtu=1500";
+
 /// RFC 2328 §10.8 DBD pagination, forced by `--dbd-max-headers=1`. router-a
 /// also redistributes a static route (two distinct LSAs before the exchange
 /// starts), since a single-LSA summary fits in one chunk even at 1.
@@ -1453,7 +1455,31 @@ pub async fn ospf_dbd_pagination(w: &mut World) -> anyhow::Result<()> {
         .await?;
     paginated(a, b).await?;
     both_full_p2p(a, b).await?;
-    dbd_faults_survived(a, b, "ospf").await
+    dbd_faults_survived(a, b, "ospf").await?;
+    // #1140 (RFC 5243): an adjacency re-forming against LSDBs both sides
+    // already hold must trim its summary and still reach Full. A 1400 MTU on
+    // router-a only drops it out of Full (as in `ospf-mtu-mismatch`);
+    // `mtu-ignore` then lets it re-form.
+    let trimmed = "ospf dbd summary trimmed removed=";
+    let (base_a, base_b) = (a.count(trimmed), b.count(trimmed));
+    let (full, rejects) = (a.count(&full_p2p(OSPF_ROUTER_ID_B)), a.count(MTU_REJECT));
+    let with = |extra: &[&str]| {
+        let mut f = asbr(ospf(OSPF_ROUTER_ID));
+        f.extend(strings(extra));
+        with_base(A, f)
+    };
+    a.provision_flags(&with(&["--ospf-profile-mtu", "1400"]))
+        .await?;
+    a.wait_new(MTU_REJECT, rejects, 60).await?;
+    a.provision_flags(&with(&["--ospf-mtu-ignore", "true"]))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full, 60).await?;
+    if a.wait_new(trimmed, base_a, 5).await.is_err()
+        && b.wait_new(trimmed, base_b, 5).await.is_err()
+    {
+        bail!("no dbd summary was ever trimmed (RFC 5243)");
+    }
+    Ok(())
 }
 
 /// #607: the injected DBD loss/duplicate fired and still cost no restart.
@@ -2944,6 +2970,8 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         with_base(A, f)
     };
+    let trimmed = "ospf dbd summary trimmed removed=";
+    let (trim_a, trim_b) = (a.count(trimmed), w.b()?.count(trimmed));
     let (before, rejects) = (a.count(&full(OSPFV3_ROUTER_ID_B)), a.count(reject));
     log("setting mtu 1400 on router-a's profile only");
     a.provision_flags(&with(&["--ospfv3-profile-mtu", "1400"]))
@@ -2957,6 +2985,13 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
     a.provision_flags(&with(&["--ospfv3-mtu-ignore", "true"]))
         .await?;
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+    // #1140 (RFC 5243, shared code): the re-formed adjacency met populated
+    // LSDBs, so one side trimmed its summary.
+    if a.wait_new(trimmed, trim_a, 5).await.is_err()
+        && w.b()?.wait_new(trimmed, trim_b, 5).await.is_err()
+    {
+        bail!("no ospfv3 dbd summary was ever trimmed (RFC 5243)");
+    }
 
     log("clearing the mtu override and mtu-ignore");
     let before = a.count(&full(OSPFV3_ROUTER_ID_B));

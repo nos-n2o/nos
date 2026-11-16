@@ -584,6 +584,105 @@ fn master_paginates_own_summary_across_multiple_rounds() {
     );
 }
 
+/// A master in `Exchange` (seq 5) with `summary` pending receives the
+/// slave's reply listing `theirs`, then `max_headers` bounds our next poll.
+fn master_reply_listing(
+    summary: Vec<H>,
+    theirs: Vec<H>,
+    more: bool,
+    max_headers: usize,
+) -> (AdjacencyData, Vec<Action>) {
+    let mut adj = AdjacencyData {
+        is_master: true,
+        dd_sequence_number: 5,
+        summary_remaining: VecDeque::from(summary),
+        ..Default::default()
+    };
+    let mut reply = negotiation_dbd(router_id("9.9.9.10"), 5);
+    (reply.init, reply.more, reply.master) = (false, more, false);
+    reply.lsa_headers = theirs;
+    let actions = on_dbd_received(
+        &mut adj,
+        NeighborState::Exchange,
+        router_id("9.9.9.9"),
+        router_id("9.9.9.10"),
+        &reply,
+        &[],
+        max_headers,
+        1500,
+    );
+    (adj, actions)
+}
+
+#[test]
+fn rfc5243_trims_equal_and_newer_neighbor_headers_only() {
+    let (a, b, c, d) = (
+        header("1.1.1.1", 1),
+        header("2.2.2.2", 1),
+        header("3.3.3.3", 1),
+        header("4.4.4.4", 1),
+    );
+    let theirs = vec![
+        a,                    // equal: removed
+        header("2.2.2.2", 2), // newer: removed
+        header("3.3.3.3", 0), // older: kept
+        header("9.9.9.1", 1), // not in our summary: irrelevant
+    ];
+    let (adj, actions) = master_reply_listing(vec![a, b, c, d], theirs, true, 10);
+    assert_eq!(adj.summary_remaining, VecDeque::new());
+    let Action::SendDbd(poll) = &actions[0] else {
+        panic!("expected a poll")
+    };
+    assert_eq!(poll.lsa_headers, vec![c, d]);
+    assert!(!poll.more);
+}
+
+#[test]
+fn rfc5243_emptied_summary_still_terminates() {
+    let a = header("1.1.1.1", 1);
+    let (mut adj, actions) = master_reply_listing(vec![a], vec![a], false, 10);
+    // The master still owes the slave a final empty M=0 poll.
+    let Action::SendDbd(poll) = &actions[0] else {
+        panic!("expected a final poll")
+    };
+    assert!(poll.lsa_headers.is_empty() && !poll.more && poll.master);
+    // The slave's answer to it ends the exchange.
+    let mut reply = negotiation_dbd(router_id("9.9.9.10"), adj.dd_sequence_number);
+    (reply.init, reply.more, reply.master) = (false, false, false);
+    let actions = on_dbd_received(
+        &mut adj,
+        NeighborState::Exchange,
+        router_id("9.9.9.9"),
+        router_id("9.9.9.10"),
+        &reply,
+        &[],
+        10,
+        1500,
+    );
+    assert_eq!(
+        actions,
+        vec![Action::NeighborEvent(Event::ExchangeDone {
+            more_to_load: true
+        })]
+    );
+}
+
+#[test]
+fn rfc5243_trim_respects_pagination_budget() {
+    let (a, b, c) = (
+        header("1.1.1.1", 1),
+        header("2.2.2.2", 1),
+        header("3.3.3.3", 1),
+    );
+    let (adj, actions) = master_reply_listing(vec![a, b, c], vec![a], true, 1);
+    assert_eq!(adj.summary_remaining, VecDeque::from(vec![c]));
+    let Action::SendDbd(poll) = &actions[0] else {
+        panic!("expected a poll")
+    };
+    assert_eq!(poll.lsa_headers, vec![b]);
+    assert!(poll.more);
+}
+
 #[test]
 fn slave_paginates_own_summary_across_multiple_rounds() {
     // Symmetric to `master_paginates_own_summary_across_multiple_rounds`,
