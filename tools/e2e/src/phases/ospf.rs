@@ -4571,6 +4571,29 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// RFC 2328 §16.1 ECMP over OSPFv3 (#1135, requires `ospfv3-dr`): router-b is
+/// reachable from router-a over both the p2p `eth0.0` and the shared bridge at
+/// the same cost, so its loopback is one `RTA_MULTIPATH` route (`next_hops=2`).
+pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let prefix = OSPFV3_ECMP_LOOPBACK_ADDRESS;
+    let added = format!("added route prefix={prefix}.*next_hops=2.*source=Some(Ospf)");
+    let a0 = a.count(&added);
+    b.provision(&[
+        "--ospfv3-loopback-address",
+        prefix,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&added, a0, 60).await?;
+
+    let removed = format!("removed route prefix={prefix}");
+    let r0 = a.count(&removed);
+    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    a.wait_new(&removed, r0, 60).await
+}
+
 /// RFC 6987 stub router over OSPFv3 on router-c (requires `ospfv3-dr`: router-c
 /// on the shared bridge). Router-a and router-b are first split to one OSPFv3
 /// link, the bridge: their `eth0.0` goes into a passive profile, so router-b's

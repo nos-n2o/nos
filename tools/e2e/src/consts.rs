@@ -551,6 +551,8 @@ pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 /// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
+/// router-b's loopback for `ospfv3-spf-ecmp` (#1135).
+pub const OSPFV3_ECMP_LOOPBACK_ADDRESS: &str = "2001:db8:9::1/128";
 /// `ospfv3-vlan-nexthop-move` (#618): router-b's loopback, and the two VLAN
 /// subinterfaces of `eth1` (a veth) that carry OSPFv3 between the routers
 /// (`/64` per VLAN; the IPv4 address is incidental, `--address` is required).
