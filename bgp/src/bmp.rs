@@ -171,8 +171,8 @@ pub struct PeerUpInfo {
     pub recv_open: Bytes,
     /// When the session came up.
     pub time: Duration,
-    /// AFIs for which received NLRI carry ADD-PATH identifiers.
-    pub add_path_afis: HashSet<u16>,
+    /// (AFI, SAFI) pairs for which received NLRI carry ADD-PATH identifiers.
+    pub add_path_afis: HashSet<(u16, u8)>,
 }
 
 /// The current time as a BMP timestamp source.
@@ -596,7 +596,7 @@ impl Hub {
     /// lock, only while [`Hub::post_enabled`].
     pub fn route_post(&self, peer: IpAddr, prefix: IpNet, id: u32, route: Option<&RibRoute>) {
         self.emit(peer, true, |info| {
-            let add_path = info.add_path_afis.contains(&monitor::afi_of(prefix));
+            let add_path = info.add_path_afis.contains(&(monitor::afi_of(prefix), 1));
             match route {
                 Some(r) => monitor::rib_route_to_update(prefix, id, r, add_path),
                 None => monitor::rib_withdraw_to_update(prefix, id, add_path),

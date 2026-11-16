@@ -108,7 +108,7 @@ impl BgpRib {
         peer: IpAddr,
         post: bool,
         keys: &[BmpKey],
-        add_path: &HashSet<u16>,
+        add_path: &HashSet<(u16, u8)>,
     ) -> Vec<UpdateMessage> {
         let mut out = Vec::new();
         for key in keys {
@@ -119,7 +119,7 @@ impl BgpRib {
                     } else {
                         self.retained.tables.get(&peer)
                     };
-                    let ap = add_path.contains(&monitor::afi_of(*p));
+                    let ap = add_path.contains(&(monitor::afi_of(*p), 1));
                     for (id, r) in table.and_then(|t| t.get(p)).into_iter().flatten() {
                         out.push(monitor::rib_route_to_update(*p, *id, r, ap));
                     }

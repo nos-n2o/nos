@@ -618,7 +618,8 @@ pub enum OutboundUpdate {
     WithdrawRtc(RtcKey),
     /// A selected VPN Flowspec rule under its RD (see `flowspec_vpn`).
     AnnounceVpnFlowspec(crate::vpn::Rd, AdvertisedFlowspec),
-    WithdrawVpnFlowspec(VpnFlowKey),
+    /// The second field is the RFC 7911 path id (`None` until #1127).
+    WithdrawVpnFlowspec(VpnFlowKey, Option<u32>),
 }
 
 /// A route rewritten for advertisement toward one specific peer.

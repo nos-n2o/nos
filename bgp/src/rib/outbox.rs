@@ -95,7 +95,7 @@ impl Backlog {
             OutboundUpdate::AnnounceVpnFlowspec(rd, adv) => {
                 self.vpn_flows.insert((adv.family, (rd, adv.nlri)));
             }
-            OutboundUpdate::WithdrawVpnFlowspec(k) => {
+            OutboundUpdate::WithdrawVpnFlowspec(k, _) => {
                 self.vpn_flows.insert(k);
             }
             OutboundUpdate::AnnounceVpn(adv) => {

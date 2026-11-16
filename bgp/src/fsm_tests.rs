@@ -161,7 +161,7 @@ fn remote(enhanced: bool, route_refresh: bool) -> RemoteInfo {
         negotiated_vpn: [false; 2],
         negotiated_flowspec_vpn: [false; 2],
         negotiated_rtc: false,
-        add_path: [AddPathDir::default(); 2],
+        add_path: [AddPathDir::default(); 4],
         four_octet_as: true,
         extended_message: false,
         enhanced_refresh: enhanced,
@@ -540,7 +540,10 @@ fn vpn_flowspec_encodes_as_safi_134_under_its_rd_with_no_next_hop() {
     assert_eq!(u.attributes.unwrap().local_pref, Some(150));
 
     let u = expect_update(outbound_update_to_message(
-        OutboundUpdate::WithdrawVpnFlowspec((AddressFamily::Vpnv4Flowspec, (rd, rule.clone()))),
+        OutboundUpdate::WithdrawVpnFlowspec(
+            (AddressFamily::Vpnv4Flowspec, (rd, rule.clone())),
+            None,
+        ),
     ));
     assert!(u.attributes.is_none() && u.mp_reach.is_empty());
     let mp = &u.mp_unreach[0];
