@@ -49,6 +49,9 @@ pub struct PathEdit {
 struct Transaction {
     /// Shared with running after `open(Current)` until the first edit.
     config: Arc<Config>,
+    /// Running as it was at `open(Current)` (the same `Arc`, no copy): the
+    /// merge base at commit (#1034). `None` for `Blank`, which commits wholesale.
+    base: Option<Arc<Config>>,
     dirty: bool,
     /// See `TransactionSnapshot::generation`.
     generation: u64,
@@ -472,12 +475,16 @@ impl ConfigStore {
         if txs.len() >= MAX_TRANSACTIONS {
             return Err(ConfigError::TooManyTransactions(MAX_TRANSACTIONS));
         }
-        let config = match base {
-            TransactionBase::Blank => Arc::new(Config::default()),
-            TransactionBase::Current => self.running_snapshot().await,
+        let (config, merge_base) = match base {
+            TransactionBase::Blank => (Arc::new(Config::default()), None),
+            TransactionBase::Current => {
+                let running = self.running_snapshot().await;
+                (Arc::clone(&running), Some(running))
+            }
         };
         let txn = Transaction {
             config,
+            base: merge_base,
             dirty: false,
             generation: 0,
             last_used: Instant::now(),
@@ -688,22 +695,52 @@ impl ConfigStore {
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(if_match.as_deref())?;
-        // Pass the config itself as the validation context (cross-reference checks).
-        validate_config(&txn.config)?;
+        // Fast path: nothing committed since open, so validate before taking
+        // the write guard. Otherwise merge under it (#1034).
+        let fast = match &txn.base {
+            Some(b) => Arc::ptr_eq(b, &*self.0.running.read().await),
+            None => true,
+        };
+        if fast {
+            // Pass the config itself as the validation context (cross-reference checks).
+            validate_config(&txn.config)?;
+        }
         // Held through the swap and broadcast: the check must not go stale (#631).
         let mut running = self.0.running.write().await;
-        if txn.config.users.is_empty() && !running.users.is_empty() {
+        let mut merged = None;
+        if let Some(b) = txn.base.as_ref().filter(|b| !Arc::ptr_eq(b, &running)) {
+            let m = nos_proto::merge_configs(b, &txn.config, &running).map_err(|c| {
+                ConfigError::StaleBase {
+                    paths: c.iter().map(ToString::to_string).collect(),
+                }
+            })?;
+            validate_config(&m).map_err(|e| ConfigError::MergedInvalid(Box::new(e)))?;
+            merged = Some(Arc::new(m));
+        }
+        let users_empty = merged
+            .as_ref()
+            .map_or(txn.config.users.is_empty(), |m| m.users.is_empty());
+        if users_empty && !running.users.is_empty() {
             return Err(ConfigError::NoUsersLeft);
         }
-        let mut config = txs
+        let removed = txs
             .remove(name)
             .map(|t| t.config)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         drop(txs);
+        let was_merged = merged.is_some();
+        let mut config = merged.unwrap_or(removed);
         // Unshared once the transaction is gone (no copy), unless it was never
         // edited since `open(Current)`; the same Arc then becomes running.
         sync_routing_table_refs(Arc::make_mut(&mut config));
-        let warnings = crate::warnings::commit_warnings(&config);
+        let mut warnings = crate::warnings::commit_warnings(&config);
+        if was_merged {
+            info!(transaction = %name, "merged with concurrent commits");
+            warnings.push(
+                "merged with changes committed by other transactions since this one was opened"
+                    .to_string(),
+            );
+        }
 
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         info!(transaction = %name, "config committed");
@@ -739,6 +776,8 @@ impl ConfigStore {
         if !nos_password::is_hash(&new) {
             return Err(ConfigError::HashUpgradeRefused);
         }
+        // `transactions` first (lock order): open transactions follow the swap.
+        let mut txs = self.0.transactions.lock().await;
         let mut running = self.0.running.write().await;
         let Some(i) = running
             .users
@@ -750,6 +789,32 @@ impl ConfigStore {
         // Copies once: `prev` must stay intact for the diff subscribers.
         let mut config = Arc::clone(&running);
         Arc::make_mut(&mut config).users[i].password = new;
+        let new = config.users[i].password.clone();
+        // Keep base == running for this user, or the merge sees a conflict.
+        for t in txs.values_mut() {
+            let Some(base) = t.base.as_mut() else {
+                continue;
+            };
+            // Base is exactly running (maybe untouched config too): share the new Arc.
+            let same_cfg = Arc::ptr_eq(&t.config, base);
+            if Arc::ptr_eq(base, &running) {
+                *base = Arc::clone(&config);
+                if same_cfg {
+                    t.config = Arc::clone(&config);
+                    continue;
+                }
+            }
+            for c in [Some(base), Some(&mut t.config)].into_iter().flatten() {
+                if let Some(u) = c
+                    .users
+                    .iter()
+                    .position(|u| u.name == user && u.password == old)
+                {
+                    Arc::make_mut(c).users[u].password.clone_from(&new);
+                }
+            }
+        }
+        drop(txs);
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         info!(user = ?user, "password hash upgraded");
         self.broadcast(config, prev);
@@ -1695,6 +1760,205 @@ mod tests {
         );
     }
 
+    fn store_with_r1() -> ConfigStore {
+        ConfigStore::new(
+            Config {
+                bgp_instances: vec![instance("r1", 65000)],
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    async fn open_current(store: &ConfigStore, names: &[&str]) {
+        for n in names {
+            store
+                .open_transaction(n, TransactionBase::Current)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// #1034: the lost update. b adds r2 and commits; a, opened earlier,
+    /// changes r1 only and keeps r2 on commit, with exactly two broadcasts.
+    #[tokio::test]
+    async fn commit_rebases_onto_concurrent_commit() {
+        let store = store_with_r1();
+        let mut rx = store.0.tx.subscribe();
+        open_current(&store, &["a", "b"]).await;
+        store.apply_op("b", ensure_op("r2")).await.unwrap();
+        store.apply_op("b", set_asn_op("r2", 65002)).await.unwrap();
+        assert_eq!(store.commit_transaction("b", None).await.unwrap().len(), 0);
+        store.apply_op("a", set_asn_op("r1", 65001)).await.unwrap();
+        let warnings = store.commit_transaction("a", None).await.unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("merged with changes")),
+            "{warnings:?}"
+        );
+        let running = store.running_snapshot().await;
+        let asns: Vec<_> = running
+            .bgp_instances
+            .iter()
+            .map(|i| (i.name.as_str(), i.asn))
+            .collect();
+        assert_eq!(asns, [("r1", 65001), ("r2", 65002)]);
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        assert_eq!(first.config.bgp_instances.len(), 2);
+        assert_eq!(second.config.bgp_instances[0].asn, 65001);
+        assert!(rx.try_recv().is_err());
+        assert!(store.unsaved());
+    }
+
+    #[tokio::test]
+    async fn commit_conflict_is_stale_base_and_keeps_the_transaction() {
+        let store = store_with_r1();
+        open_current(&store, &["a", "b"]).await;
+        store.apply_op("b", set_asn_op("r1", 65001)).await.unwrap();
+        store.commit_transaction("b", None).await.unwrap();
+        store.apply_op("a", set_asn_op("r1", 65002)).await.unwrap();
+        let err = store.commit_transaction("a", None).await.unwrap_err();
+        assert!(matches!(err, ConfigError::StaleBase { .. }), "{err}");
+        assert!(err.to_string().starts_with("precondition failed"), "{err}");
+        assert_eq!(store.running_snapshot().await.bgp_instances[0].asn, 65001);
+        // Intact; resolved by re-applying on a fresh transaction.
+        assert!(store.get_transaction("a").await.is_ok());
+        store.discard_transaction("a", None).await.unwrap();
+        open_current(&store, &["a"]).await;
+        store.apply_op("a", set_asn_op("r1", 65002)).await.unwrap();
+        store.commit_transaction("a", None).await.unwrap();
+        assert_eq!(store.running_snapshot().await.bgp_instances[0].asn, 65002);
+    }
+
+    #[tokio::test]
+    async fn commit_remove_vs_modify_conflicts() {
+        let store = store_with_r1();
+        open_current(&store, &["a", "b"]).await;
+        store
+            .set_transaction_path("b", &segs("bgp-instance/r1"), None, None, None)
+            .await
+            .unwrap();
+        store.commit_transaction("b", None).await.unwrap();
+        store.apply_op("a", set_asn_op("r1", 65002)).await.unwrap();
+        assert!(matches!(
+            store.commit_transaction("a", None).await,
+            Err(ConfigError::StaleBase { .. })
+        ));
+        assert_eq!(store.running_snapshot().await.bgp_instances.len(), 0);
+    }
+
+    /// a binds a table to r1 while b removes r1: no textual conflict, but the
+    /// merge result dangles, so it is refused (422) and a stays open.
+    #[tokio::test]
+    async fn commit_merged_invalid_is_refused_and_keeps_the_transaction() {
+        let store = store_with_r1();
+        open_current(&store, &["a", "b"]).await;
+        store
+            .set_transaction_path("b", &segs("bgp-instance/r1"), None, None, None)
+            .await
+            .unwrap();
+        store.commit_transaction("b", None).await.unwrap();
+        store
+            .apply_op("a", ensure_routing_table_op("rt1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("a", set_routing_table_bgp_instance_op("rt1", "r1"))
+            .await
+            .unwrap();
+        let err = store.commit_transaction("a", None).await.unwrap_err();
+        assert!(matches!(err, ConfigError::MergedInvalid(_)), "{err}");
+        assert!(
+            err.to_string()
+                .starts_with("validation failed: after merging concurrent changes"),
+            "{err}"
+        );
+        assert!(store.get_transaction("a").await.is_ok());
+        assert_eq!(store.running_snapshot().await.routing_tables.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn blank_transaction_commits_wholesale_after_an_intervening_commit() {
+        let store = store_with_r1();
+        store
+            .open_transaction("w", TransactionBase::Blank)
+            .await
+            .unwrap();
+        store.apply_op("w", ensure_op("only")).await.unwrap();
+        store
+            .apply_op("w", set_asn_op("only", 65009))
+            .await
+            .unwrap();
+        open_current(&store, &["b"]).await;
+        store.apply_op("b", set_asn_op("r1", 65001)).await.unwrap();
+        store.commit_transaction("b", None).await.unwrap();
+        let warnings = store.commit_transaction("w", None).await.unwrap();
+        assert_eq!(warnings.len(), 0);
+        let running = store.running_snapshot().await;
+        assert_eq!(running.bgp_instances.len(), 1);
+        assert_eq!(running.bgp_instances[0].name, "only");
+    }
+
+    #[tokio::test]
+    async fn unchanged_running_commits_without_the_merge_warning() {
+        let store = store_with_r1();
+        open_current(&store, &["a"]).await;
+        store.apply_op("a", set_asn_op("r1", 65001)).await.unwrap();
+        assert_eq!(store.commit_transaction("a", None).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_users_left_is_checked_on_the_merged_config() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "seed", "root", "pw").await;
+        open_current(&store, &["a", "b"]).await;
+        store.apply_op("b", ensure_op("r1")).await.unwrap();
+        store.apply_op("b", set_asn_op("r1", 1)).await.unwrap();
+        store.commit_transaction("b", None).await.unwrap();
+        store
+            .set_transaction_path("a", &segs("user/root"), None, None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.commit_transaction("a", None).await,
+            Err(ConfigError::NoUsersLeft)
+        ));
+        assert_eq!(store.running_snapshot().await.users.len(), 1);
+    }
+
+    /// A hash upgrade between open and commit is neither a conflict nor lost,
+    /// whether the transaction left the user alone or re-set the same password.
+    #[tokio::test]
+    async fn hash_upgrade_between_open_and_commit_neither_conflicts_nor_is_lost() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "seed", "root", "pw").await;
+        open_current(&store, &["untouched", "reset"]).await;
+        store
+            .apply_op("reset", set_password_op("root", "pw"))
+            .await
+            .unwrap();
+        store.apply_op("untouched", ensure_op("r1")).await.unwrap();
+        store
+            .apply_op("untouched", set_asn_op("r1", 1))
+            .await
+            .unwrap();
+        store.apply_op("reset", ensure_op("r2")).await.unwrap();
+        store.apply_op("reset", set_asn_op("r2", 2)).await.unwrap();
+        let old = store.running_snapshot().await.users[0].password.clone();
+        let new = nos_password::hash("pw");
+        assert_ne!(old, new);
+        store
+            .upgrade_password_hash("root", &old, new.clone())
+            .await
+            .unwrap();
+        store.commit_transaction("untouched", None).await.unwrap();
+        assert_eq!(store.running_snapshot().await.users[0].password, new);
+        store.commit_transaction("reset", None).await.unwrap();
+        let running = store.running_snapshot().await;
+        assert_eq!(running.users[0].password, new);
+        assert_eq!(running.bgp_instances.len(), 2);
+    }
+
     #[tokio::test]
     async fn commit_missing_transaction_returns_error() {
         let store = ConfigStore::new(Config::default(), None);
@@ -1883,6 +2147,7 @@ mod tests {
             "t1".to_string(),
             Transaction {
                 config: Arc::new(bad_config),
+                base: None,
                 dirty: true,
                 generation: 0,
                 last_used: Instant::now(),

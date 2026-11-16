@@ -1895,3 +1895,68 @@ async fn prompt_subscriber_is_never_disconnected() {
         assert!(matches!(next_event(&mut reader).await, Event::Diff(_)));
     }
 }
+
+/// #1034: a commit rebases onto what other transactions committed since it
+/// opened (merge warning); a same-key change is `precondition failed`.
+#[tokio::test]
+async fn commit_rebases_over_ipc_and_conflicts_are_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(
+        Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        },
+        None,
+    );
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
+        .unwrap();
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    let open = |n: &str| Request::OpenTransaction {
+        actor: None,
+        name: n.to_string(),
+        base: TransactionBase::Current,
+    };
+    let op = |n: &str, op| Request::ApplyOp {
+        actor: None,
+        name: n.to_string(),
+        op,
+    };
+    let commit = |n: &str| Request::CommitTransaction {
+        actor: None,
+        name: n.to_string(),
+        if_match: None,
+    };
+    for n in ["a", "b", "c"] {
+        writer.send(open(n)).await.unwrap();
+        next_event(&mut reader).await;
+    }
+    for r in [op("b", ensure_op("r2")), op("b", set_asn_op("r2", 65002))] {
+        writer.send(r).await.unwrap();
+        next_event(&mut reader).await;
+    }
+    writer.send(commit("b")).await.unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Committed { warnings, .. } if warnings.is_empty()
+    ));
+    writer.send(op("a", set_asn_op("r1", 65001))).await.unwrap();
+    next_event(&mut reader).await;
+    writer.send(commit("a")).await.unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Committed { warnings, .. } if warnings.iter().any(|w| w.contains("merged with changes"))
+    ));
+    let running = store.running_snapshot().await;
+    assert_eq!(running.bgp_instances.len(), 2);
+    assert_eq!(running.bgp_instances[0].asn, 65001);
+    // c changed r1's asn too, and a committed it first: same key.
+    writer.send(op("c", set_asn_op("r1", 65003))).await.unwrap();
+    next_event(&mut reader).await;
+    writer.send(commit("c")).await.unwrap();
+    match next_event(&mut reader).await {
+        Event::Error(m) => assert!(m.starts_with("precondition failed"), "{m}"),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
