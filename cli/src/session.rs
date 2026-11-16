@@ -205,6 +205,10 @@ pub enum Resolved {
         interface: String,
     },
     SaveRunningConfig,
+    ShowHistory,
+    Rollback {
+        n: u32,
+    },
     OpenTransaction {
         name: String,
         base: TransactionBase,
@@ -250,6 +254,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
+        Command::ShowHistory => Resolved::ShowHistory,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
@@ -359,6 +364,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Top => Ok(Resolved::NavigateTop),
         Command::Up => Ok(Resolved::Navigate(path.up())),
         Command::Commit => Ok(Resolved::Commit),
+        Command::Rollback { n } => Ok(Resolved::Rollback { n }),
         Command::Discard => Ok(Resolved::Discard),
         Command::Diff => Ok(Resolved::Diff),
         Command::Configure { .. }
@@ -366,6 +372,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::Help
         | Command::ShowConfig
         | Command::ShowConfigAdmin
+        | Command::ShowHistory
         | Command::ShowRoute { .. }
         | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }

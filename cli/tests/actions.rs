@@ -38,6 +38,17 @@ fn fake_configd(path: &Path) {
         vec![match req {
             Request::Get | Request::Subscribe => Event::Config(running.clone()),
             Request::Save { .. } => Event::Saved,
+            Request::ListHistory => Event::History(vec![nos_proto::HistoryEntry {
+                index: 1,
+                time: 1_700_000_000,
+                actor: "alice".into(),
+                kind: "commit".into(),
+            }]),
+            Request::Rollback { index: 99, .. } => Event::Error("no history entry 99".into()),
+            Request::Rollback { .. } => Event::Committed {
+                warnings: vec!["w".into()],
+                unsaved: true,
+            },
             Request::OpenTransaction { name, .. } | Request::GetTransaction { name } => {
                 Event::Transaction(snapshot(&name, &cfg))
             }
@@ -299,6 +310,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "clear bgp nope 192.0.2.2 soft-in",
             "clear bgp b1 192.0.2.2",
             "save",
+            "show configuration history",
             "not a command",
         ],
         leave_open,
@@ -380,6 +392,8 @@ async fn configuration_session_edits_commits_and_leaves() {
             "delete source line 9",
             "top",
             "set not-a-field 1",
+            "rollback 1",
+            "rollback 99",
             "commit",
         ],
         leave_open,

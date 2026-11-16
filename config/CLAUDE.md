@@ -20,7 +20,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 |------|------|------|
 | `ConfigStore` | `store.rs` | `Clone` handle over `running: RwLock<Arc<Config>>` + `transactions: Mutex<HashMap<String, Transaction>>` (`Arc<Config>` each, #773) + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
 | `CommitUpdate` | `store.rs` | Internal — one commit: `config` (running's `Arc`) + `prev` until each live diff class has its diff (#773) |
-| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft`, `TransactionNotFound`, `PreconditionFailed`/`StaleBase` (stale `if_match` / same-key merge conflict, 412), `MergedInvalid` (422), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, … |
+| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft`, `TransactionNotFound`, `PreconditionFailed`/`StaleBase` (stale `if_match` / same-key merge conflict, 412), `MergedInvalid` (422), `Op`, `Io`, … |
 | `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
 | `authz::allowed()` | `authz.rs` | Pure per-request allow-list: reads for every daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm. A refused request gets `Event::Error("permission denied")` and the connection is closed |
 | `authz::permitted()` | `authz.rs` | After `allowed`, by `User.role` (per request, fail closed; #1147, `docs/architecture/auth.md`). No wildcard arm |
@@ -28,13 +28,14 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 | `docs::command_doc()` | `docs.rs` | The CLI help text for every `nos_proto::Topic` (`Request::Describe`), one exhaustive `match` arm per topic (config-tree node or field, sugar word, non-edit request), written for the shell's user. The schema's `///` doc comments are the REST API's text, deliberately separate (#109) |
 | `nss_users` | `nss_users.rs` | `UserDb`: user names to `/run/nos-users/passwd`, stable uids (#999) |
 | `persistence::{save_to_disk, load_or_default}` | `persistence.rs` | Serialize/atomically write (0600), and load-with-fallback (warns when the file is group/other readable), the config file |
+| `history::History` | `history.rs` | `<config>.history/`: last 20 replaced configs; `rollback N` is a commit (#1141) |
 | `secrets::{restore_masked, unmask_op}` | `secrets.rs` | A `<hidden>` sent back by a client (GET-then-PUT) keeps the stored admin secret / user hash; refused when nothing earlier exists (#507). `apply_op` logs `op.kind()`, never the op |
 
 ## IPC server
 
 `server::start()` binds a `UnixListener` and spawns an accept loop, each connection sharing a cloned `ConfigStore`. Per-connection:
 - `Request::Get` → send `Event::Config(current_running)` once.
-- `Request::Subscribe` → `store.subscribe_config(role, sub_tx)`: the current config for the role, plus a forwarder task bridging the commit broadcast → `mpsc::Sender<Event>` (`Event::Config(config.for_role(role))` per commit). The select loop drains the `mpsc::Receiver` to the client.
+- `Request::Subscribe` → `store.subscribe_config(role, sub_tx)`: the current config for the role, plus a forwarder task bridging the commit broadcast → `mpsc::Sender<Event>` (`Event::Config(config.for_role(role))` per commit).
 - `Request::SubscribeDiff { scopes }` → `store.subscribe_diff(role, scopes, sub_tx)`: the initial diff, then `CommitUpdate::diff_for(role)` per commit (one `Arc<ConfigDiff>` per visibility class, #751; `diff_configs_for_role`, no projection clone, #778), scoped, skipped when empty. Forwarders live in `store.rs` (tests need no PKI).
 - `Request::Unsubscribe` → abort the active forwarder task.
 - `UserExists`, `List*Instances`, `GetRestApi`: `Restd`-only (#755, #759).
@@ -48,11 +49,11 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 ## Socket path convention
 
-By convention the socket is `/run/nos/config.sock`; tests use a tempdir.
+The socket is `/run/nos/config.sock`; tests use a tempdir.
 
 ## Config file convention
 
-By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a primary that is unreadable, unparseable or fails `validate_config` falls back to `.bak` (must validate; primary rewritten), then to a blank config with the seeded admin; never fails. See `docs/architecture/config-protocol.md`.
+The persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a primary that is unreadable, unparseable or fails `validate_config` falls back to `.bak` (must validate; primary rewritten), then to a blank config with the seeded admin; never fails.
 
 ## ConfigStore rules
 

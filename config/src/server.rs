@@ -183,7 +183,13 @@ async fn dispatch_unmasked(
             if_match,
             actor,
         } => match store
-            .commit_transaction_as(&name, if_match, restrict.as_deref())
+            .commit_as(
+                &name,
+                if_match,
+                restrict.as_deref(),
+                "commit",
+                &effective_actor(caller, actor.clone()),
+            )
             .await
         {
             Ok(warnings) => {
@@ -209,6 +215,10 @@ async fn dispatch_unmasked(
                     Event::Error(e.to_string())
                 }
             }
+        }
+        Request::ListHistory => history_reply(store).await,
+        Request::Rollback { index, actor } => {
+            rollback_reply(store, index, effective_actor(caller, actor)).await
         }
         Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
         Request::DiffTransaction { name } => match store.diff_transaction(&name).await {
@@ -286,6 +296,32 @@ async fn dispatch_unmasked(
     })
 }
 
+async fn history_reply(store: &ConfigStore) -> Event {
+    match store.history().await {
+        Ok(h) => Event::History(h),
+        Err(e) => Event::Error(e.to_string()),
+    }
+}
+
+async fn rollback_reply(store: &ConfigStore, index: u32, who: String) -> Event {
+    match store.rollback(index, &who).await {
+        Ok(warnings) => {
+            info!(index, actor = ?who, "config rollback audit");
+            for w in &warnings {
+                warn!(warning = %w, "rollback warning");
+            }
+            Event::Committed {
+                warnings,
+                unsaved: store.unsaved(),
+            }
+        }
+        Err(e) => {
+            warn!(index, error = %e, "rollback failed");
+            Event::Error(e.to_string())
+        }
+    }
+}
+
 /// The `actor` a request body names (what `Restd` vouches for).
 fn body_actor(req: &Request) -> Option<String> {
     match req {
@@ -294,7 +330,8 @@ fn body_actor(req: &Request) -> Option<String> {
         | Request::ApplyOp { actor, .. }
         | Request::CommitTransaction { actor, .. }
         | Request::SetTransactionPath { actor, .. }
-        | Request::EditTransactionPath { actor, .. } => actor.clone(),
+        | Request::EditTransactionPath { actor, .. }
+        | Request::Rollback { actor, .. } => actor.clone(),
         _ => None,
     }
 }

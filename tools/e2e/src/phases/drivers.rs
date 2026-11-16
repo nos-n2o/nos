@@ -3323,6 +3323,41 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     {
         bail!("rest-pl still present after DELETE + commit");
     }
+    // Commit history (#1141): `rollback 1` re-applies the config the undo
+    // replaced, as a normal commit; rolling back again undoes that.
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/history", None, 200).await?,
+        "\"index\":1",
+    )?;
+    let audit = "config rollback audit index=1";
+    let before = a.count(audit);
+    expect_body(
+        &a.rest_expect(Method::POST, "/v1/rollback/1", None, 200)
+            .await?,
+        "\"committed\":\"rollback 1\"",
+    )?;
+    a.wait_new(audit, before, 30).await?;
+    let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+    if !running.contains("\"rest-pl\"") || !running.contains("\"hostname\":\"rest-host\"") {
+        bail!("rollback 1 did not re-apply the rest-pl config: {running}");
+    }
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/history", None, 200).await?,
+        "\"kind\":\"rollback\"",
+    )?;
+    a.rest_expect(Method::POST, "/v1/rollback/0", None, 200)
+        .await?;
+    a.rest_expect(Method::POST, "/v1/rollback/99", None, 404)
+        .await?;
+    a.rest_expect(Method::POST, "/v1/rollback/1", None, 200)
+        .await?;
+    if a.rest_expect(Method::GET, "/v1/config", None, 200)
+        .await?
+        .contains("rest-pl")
+    {
+        bail!("the second rollback 1 did not undo the first");
+    }
+    log("router-a: GET /v1/history and POST /v1/rollback/N re-apply and undo a commit");
     a.rest_expect(Method::POST, &format!("{tx}?base=blank"), None, 201)
         .await?;
     a.rest_expect(Method::DELETE, &tx, None, 204).await?;
