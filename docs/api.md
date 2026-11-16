@@ -224,6 +224,12 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 - Saving writes the whole running config, including commits made from the shell or by other clients.
 - A failed write (no config file configured, or a disk error) returns `502` with a problem document naming the cause.
 
+## Commit history and rollback
+
+- `GET /v1/history` lists the configs recent commits replaced, newest first: `[{"index":1,"time":<unix seconds>,"actor":"<user>","kind":"commit"|"rollback"}]`. `nos-configd` keeps the last 20 on disk next to its config file (`config.yaml.history/`, mode 0700, files 0600) and they survive a restart; without a config file it keeps none and answers `502`.
+- `POST /v1/rollback/{n}` restores the config as it was `n` commits ago (`1` undoes the latest commit) and replies like a commit (`{"committed":"rollback 1","warnings":[],"unsaved":true}`). It is a normal commit: `422` if the old config no longer validates or would leave no user, `404` if `n` is beyond the history, `n = 0` does nothing. The rollback is itself a history entry.
+- Neither is a save: `POST /v1/config/save` still persists the result.
+
 ## The config tree as URLs
 
 Every part of the configuration has a URL under `/v1/transactions/{tx}/`, built from the same names the shell uses:

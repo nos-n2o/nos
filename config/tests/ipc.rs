@@ -1960,3 +1960,61 @@ async fn commit_rebases_over_ipc_and_conflicts_are_reported() {
         other => panic!("expected Error, got {other:?}"),
     }
 }
+
+/// #1141: list the history and roll back over the wire; a daemon is refused.
+#[tokio::test]
+async fn history_and_rollback_over_ipc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+    let store = ConfigStore::new(Config::default(), Some(tmp.path().join("config.yaml")));
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
+    store.apply_op("t1", ensure_op("default")).await.unwrap();
+    store
+        .apply_op("t1", set_asn_op("default", 65000))
+        .await
+        .unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer.send(Request::ListHistory).await.unwrap();
+    let Event::History(h) = next_event(&mut reader).await else {
+        panic!("expected History");
+    };
+    assert_eq!(h.len(), 1);
+    assert_eq!((h[0].index, h[0].kind.as_str()), (1, "commit"));
+
+    writer
+        .send(Request::Rollback {
+            index: 1,
+            actor: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Committed { .. }
+    ));
+    assert_eq!(store.running_snapshot().await.bgp_instances.len(), 0);
+
+    writer
+        .send(Request::Rollback {
+            index: 50,
+            actor: None,
+        })
+        .await
+        .unwrap();
+    let Event::Error(e) = next_event(&mut reader).await else {
+        panic!("expected Error");
+    };
+    assert!(e.starts_with("no history entry"), "{e}");
+
+    let (mut reader, mut writer) = connect_as(&sock_path, "bgpd", "default").await;
+    writer.send(Request::ListHistory).await.unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::Error(m) if m == "permission denied"));
+}

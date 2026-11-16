@@ -195,6 +195,14 @@ pub async fn handle_action(
             save_running_config(socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowHistory => {
+            show_history(socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::Rollback { n } => {
+            rollback(socket, n).await;
+            Outcome::Continue(mode)
+        }
         Resolved::OpenTransaction {
             name,
             base,
@@ -1451,6 +1459,41 @@ async fn diff(mode: &Mode, socket: &Path) {
     match client::diff_transaction(socket, &transaction).await {
         Ok(d) if d.is_empty() => println!("no changes"),
         Ok(d) => println!("{}", format::render_diff(&d, use_color())),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn show_history(socket: &Path) {
+    match client::list_history(socket).await {
+        Ok(h) if h.is_empty() => println!("no history yet"),
+        Ok(h) => {
+            println!(
+                "{:>5}  {:<20}  {:<10}  actor",
+                "index", "replaced (UTC)", "kind"
+            );
+            for e in h {
+                println!(
+                    "{:>5}  {:<20}  {:<10}  {}",
+                    e.index,
+                    format::utc(e.time),
+                    e.kind,
+                    e.actor
+                );
+            }
+        }
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn rollback(socket: &Path, n: u32) {
+    match client::rollback(socket, n).await {
+        Ok((warnings, unsaved)) => {
+            let note = if unsaved { " (not saved)" } else { "" };
+            println!("rolled back {n} commit(s){note}");
+            for w in warnings {
+                eprintln!("warning: {w}");
+            }
+        }
         Err(e) => eprintln!("error: {e}"),
     }
 }

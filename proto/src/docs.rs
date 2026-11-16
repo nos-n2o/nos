@@ -619,6 +619,10 @@ topics! {
     BgpInstanceBmpStationStatisticsInterval,
     /// `BmpStation.monitor_out`
     BgpInstanceBmpStationMonitorOut,
+    /// `Request::ListHistory`
+    ShowHistory,
+    /// `Request::Rollback`
+    Rollback,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

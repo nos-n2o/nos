@@ -175,6 +175,18 @@ pub enum Request {
     },
     /// Is the running config unsaved (#1139)? Replies `Event::SaveStatus`.
     SaveStatus,
+    /// The commit history (#1141), newest first. Replies `Event::History`.
+    ListHistory,
+    /// Restores the running config as it was before the last `index` commits
+    /// (`1` = undo the latest commit; `0` does nothing), as a normal commit:
+    /// validated, broadcast, itself a new history entry. Replies
+    /// `Event::Committed`; an `index` beyond the history is an `Event::Error`.
+    Rollback {
+        /// How many commits to go back.
+        index: u32,
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -233,6 +245,23 @@ pub enum Event {
         /// remove.
         value: Option<String>,
     },
+    /// Reply to `ListHistory`: newest first.
+    History(Vec<HistoryEntry>),
+}
+
+/// One kept running config (#1141). `index` is what `Rollback` takes: `1` is
+/// the config replaced by the latest commit.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    /// Argument to `Rollback`.
+    pub index: u32,
+    /// Seconds since the Unix epoch of the commit that replaced this config.
+    pub time: u64,
+    /// Who made that commit (empty when unknown).
+    pub actor: String,
+    /// `commit` or `rollback`: what made that commit.
+    pub kind: String,
 }
 
 /// What a newly opened transaction's in-progress config should start from.

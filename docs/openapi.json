@@ -2847,6 +2847,38 @@
         ],
         "type": "object"
       },
+      "HistoryEntry": {
+        "description": "One kept running config (#1141). `index` is what `Rollback` takes: `1` is\nthe config replaced by the latest commit.",
+        "properties": {
+          "actor": {
+            "description": "Who made that commit (empty when unknown).",
+            "type": "string"
+          },
+          "index": {
+            "description": "Argument to `Rollback`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "`commit` or `rollback`: what made that commit.",
+            "type": "string"
+          },
+          "time": {
+            "description": "Seconds since the Unix epoch of the commit that replaced this config.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "time",
+          "actor",
+          "kind"
+        ],
+        "type": "object"
+      },
       "Interface": {
         "description": "A named network interface. For a loopback interface (see\n`LOOPBACK_PREFIX`), `addresses`/`routing_table` carry its (flat) L3\nconfig directly, exactly as before this type gained subinterfaces — a\nloopback has no VLAN/dot1q concept, so there's nothing for per-tag\naddressing to buy it. For every other (physical) interface, `addresses`\nmust be empty and `routing_table` must be unset: all of its L3 config\nlives under `subinterfaces` instead, tag 0 for the untagged/native case\n(what used to be these same flat fields) — see `valid_addressing_split`.\n\n`switching_profile`, if set, names a `SwitchingProfile` trunking this\ninterface into one or more `BroadcastDomain`s — unchanged, still a\nphysical-interface-level field regardless of `subinterfaces`. A tag\nclaimed by an L2 `switching_profile` member and a tag claimed by an L3\n`Subinterface` are mutually exclusive on the same interface: Linux only\nallows one master device per link (physical or per-tag sub-link), and an\nL2 member wants that link's master to be the domain's bridge while an L3\nsubinterface wants it to be a VRF. See\n`valid_subinterface_and_switching_profile_tags`, wired one level up on\n`Config.interfaces` (`valid_interfaces`) since it needs to see sibling\nfields — the same reason `RoutingTable`'s redistribute rule is wired on\n`Config.routing_tables`.",
         "properties": {
@@ -8010,6 +8042,40 @@
         ]
       }
     },
+    "/v1/history": {
+      "get": {
+        "operationId": "history",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/HistoryEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-configd keeps no history (no config file)"
+          }
+        },
+        "summary": "Commit history (what `rollback` can restore)",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/interfaces": {
       "get": {
         "operationId": "interfaces",
@@ -8670,6 +8736,60 @@
         "summary": "Renew the client certificate",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/v1/rollback/{n}": {
+      "post": {
+        "operationId": "rollback",
+        "parameters": [
+          {
+            "description": "how many commits to go back; 0 does nothing",
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "n is beyond the kept history"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the old config no longer validates, or would remove every user"
+          }
+        },
+        "summary": "Roll back the last n commits",
+        "tags": [
+          "transactions"
         ]
       }
     },

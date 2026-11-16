@@ -23,6 +23,8 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::GetRestApi { .. } => role == Role::Restd,
         Request::Save
         | Request::SaveStatus
+        | Request::ListHistory
+        | Request::Rollback { .. }
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
         | Request::GetTransaction { .. }
@@ -75,6 +77,16 @@ mod tests {
             assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
             let ssh = Request::SetSshHostKey { seed: "s".into() };
             assert_eq!(allowed(role, &ssh), role == Role::Sshd, "{role:?} ssh key");
+            assert_eq!(
+                allowed(role, &Request::ListHistory),
+                may_edit,
+                "{role:?} history"
+            );
+            let back = Request::Rollback {
+                index: 1,
+                actor: None,
+            };
+            assert_eq!(allowed(role, &back), may_edit, "{role:?} rollback");
             let probe = Request::UserExists { name: "u".into() };
             assert_eq!(allowed(role, &probe), role == Role::Restd, "{role:?} probe");
             for r in [

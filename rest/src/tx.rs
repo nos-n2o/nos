@@ -16,7 +16,8 @@ use axum::Extension;
 use axum::Json;
 use nos_proto::config_path::{self, ListPosition};
 use nos_proto::{
-    redact_at, Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot,
+    redact_at, Config, ConfigDiff, Event, HistoryEntry, Request, TransactionBase,
+    TransactionSnapshot,
 };
 use percent_encoding::percent_decode_str;
 use serde::Deserialize;
@@ -548,6 +549,41 @@ pub async fn save(State(d): State<Daemons>) -> ApiResult<StatusCode> {
         // error), not the client's: `from_config` would make it a 400.
         Err(ApiError::BadRequest(m)) => Err(ApiError::BadGateway(m)),
         Err(e) => Err(e),
+    }
+}
+
+/// `GET /v1/history` — the configs recent commits replaced, newest first.
+#[utoipa::path(get, path = "/v1/history", tag = "transactions", summary = "Commit history (what `rollback` can restore)", responses((status = 200, body = Vec<HistoryEntry>), (status = 502, body = ErrorBody, description = "nos-configd keeps no history (no config file)")))]
+pub async fn history(State(d): State<Daemons>) -> ApiResult<Json<Vec<HistoryEntry>>> {
+    match d.config(Request::ListHistory).await {
+        Ok(Event::History(h)) => Ok(Json(h)),
+        Ok(other) => Err(unexpected("nos-configd", &other)),
+        Err(ApiError::BadRequest(m)) => Err(ApiError::BadGateway(m)),
+        Err(e) => Err(e),
+    }
+}
+
+/// `POST /v1/rollback/<n>` — restore the running config as it was `n` commits
+/// ago, as a normal commit (validated, broadcast, a new history entry).
+#[utoipa::path(post, path = "/v1/rollback/{n}", tag = "transactions", summary = "Roll back the last n commits", params(("n" = u32, Path, description = "how many commits to go back; 0 does nothing")), responses((status = 200, body = CommitResult), (status = 404, body = ErrorBody, description = "n is beyond the kept history"), (status = 422, body = ErrorBody, description = "the old config no longer validates, or would remove every user")))]
+pub async fn rollback(
+    State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    axum::extract::Path(n): axum::extract::Path<u32>,
+) -> ApiResult<impl IntoResponse> {
+    match d.config(Request::Rollback { index: n, actor }).await? {
+        Event::Committed { warnings, unsaved } => Ok((
+            [(
+                HeaderName::from_static(UNSAVED_HEADER),
+                HeaderValue::from_static(if unsaved { "true" } else { "false" }),
+            )],
+            Json(json!(CommitResult {
+                committed: format!("rollback {n}"),
+                warnings,
+                unsaved
+            })),
+        )),
+        other => Err(unexpected("nos-configd", &other)),
     }
 }
 

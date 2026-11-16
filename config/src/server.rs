@@ -96,6 +96,10 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
 /// Handles every `Request` variant except `Subscribe`/`Unsubscribe`, which
 /// the caller manages itself since they control the connection's forwarder
 /// task rather than producing a single reply `Event`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat one-arm-per-request dispatch; splitting it only hides the table"
+)]
 async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) -> Option<Event> {
     Some(match req {
         Request::Get => Event::Config(store.running_snapshot().await.for_role(caller.role)),
@@ -145,7 +149,15 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             name,
             if_match,
             actor,
-        } => match store.commit_transaction(&name, if_match).await {
+        } => match store
+            .commit_as(
+                &name,
+                if_match,
+                "commit",
+                &effective_actor(caller, actor.clone()),
+            )
+            .await
+        {
             Ok(warnings) => {
                 info!(transaction = ?name, actor = ?effective_actor(caller, actor), "config commit audit");
                 for w in &warnings {
@@ -169,6 +181,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
                     Event::Error(e.to_string())
                 }
             }
+        }
+        Request::ListHistory => history_reply(store).await,
+        Request::Rollback { index, actor } => {
+            rollback_reply(store, index, effective_actor(caller, actor)).await
         }
         Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
         Request::DiffTransaction { name } => match store.diff_transaction(&name).await {
@@ -242,6 +258,32 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
+}
+
+async fn history_reply(store: &ConfigStore) -> Event {
+    match store.history().await {
+        Ok(h) => Event::History(h),
+        Err(e) => Event::Error(e.to_string()),
+    }
+}
+
+async fn rollback_reply(store: &ConfigStore, index: u32, who: String) -> Event {
+    match store.rollback(index, &who).await {
+        Ok(warnings) => {
+            info!(index, actor = ?who, "config rollback audit");
+            for w in &warnings {
+                warn!(warning = %w, "rollback warning");
+            }
+            Event::Committed {
+                warnings,
+                unsaved: store.unsaved(),
+            }
+        }
+        Err(e) => {
+            warn!(index, error = %e, "rollback failed");
+            Event::Error(e.to_string())
+        }
+    }
 }
 
 /// Who a transaction request is attributed to. A `User` is its certificate

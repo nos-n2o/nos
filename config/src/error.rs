@@ -22,6 +22,11 @@ pub enum ConfigError {
     SshHostKeyRefused,
     #[error("validation failed: {0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
     MaskedSecret(String),
+    /// `nos-restd` keys on the `no history entry` prefix (404).
+    #[error("no history entry {index}: {have} kept")]
+    HistoryOutOfRange { index: u32, have: usize },
+    #[error("config history is not available on this daemon (no --config-file, or its directory is not writable)")]
+    HistoryUnavailable,
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
     /// An `if_match` precondition (RFC 9110 §13.1.1) named a generation the

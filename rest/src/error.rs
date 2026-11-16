@@ -38,6 +38,7 @@ impl ApiError {
     /// `nos-config`'s `ConfigError` messages.
     pub fn from_config(msg: String) -> Self {
         if msg.starts_with("no transaction named")
+            || msg.starts_with("no history entry")
             || msg.starts_with("config path: no such config path")
         {
             ApiError::NotFound(msg)

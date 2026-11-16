@@ -139,6 +139,12 @@ pub enum Command {
         interface: String,
     },
     Save,
+    /// `show configuration history`
+    ShowHistory,
+    /// `rollback <n>` — configuration mode.
+    Rollback {
+        n: u32,
+    },
     Help,
     /// `exit` | `quit` | `end`
     Exit,
