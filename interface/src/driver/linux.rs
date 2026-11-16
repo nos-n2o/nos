@@ -169,6 +169,16 @@ struct StpMemory {
     trapped: HashSet<u32>,
     /// Ports this driver wrote a non-forwarding state to.
     held: HashSet<u32>,
+    /// `(ifindex, kernel state)` pairs already logged as "bridge port state
+    /// set", so a resync that finds the port already there logs once only.
+    logged: HashSet<(u32, u8)>,
+}
+
+impl StpMemory {
+    /// True the first time `(index, kernel)` is seen.
+    fn first_log(&mut self, index: u32, kernel: u8) -> bool {
+        self.logged.insert((index, kernel))
+    }
 }
 
 impl<T> Lookup<T> {
@@ -370,6 +380,12 @@ impl LinuxInterfaceDriver {
         let index = link.header.index;
         let kernel = kernel_state(want);
         if observed_port_state(link) == Some(kernel) {
+            // The kernel already opened the port in that state (a sub-link born
+            // forwarding on a parent with carrier): log it once so the state
+            // stays observable (#1194, #932).
+            if !failsafe && self.stp.lock().unwrap().first_log(index, kernel) {
+                info!(interface = %name, state = ?want, "bridge port state set");
+            }
             return Ok(());
         }
         match self
@@ -389,6 +405,7 @@ impl LinuxInterfaceDriver {
             } else {
                 mem.held.insert(index);
             }
+            mem.first_log(index, kernel);
         }
         if failsafe {
             info!(interface = %name, "bridge port enslaved blocking");
@@ -1520,6 +1537,15 @@ mod tests {
         assert_eq!(kernel_state(StpPortState::Blocking), BR_STATE_DISABLED);
         assert_eq!(kernel_state(StpPortState::Learning), BR_STATE_LEARNING);
         assert_eq!(kernel_state(StpPortState::Forwarding), BR_STATE_FORWARDING);
+    }
+
+    #[test]
+    fn an_already_applied_state_is_logged_once_per_port_and_state() {
+        let mut mem = StpMemory::default();
+        assert!(mem.first_log(7, BR_STATE_FORWARDING));
+        assert!(!mem.first_log(7, BR_STATE_FORWARDING));
+        assert!(mem.first_log(7, BR_STATE_DISABLED));
+        assert!(mem.first_log(8, BR_STATE_FORWARDING));
     }
 
     #[test]
