@@ -4351,21 +4351,18 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
-/// RFC 6987 stub router over OSPFv3 on router-c (requires `ospfv3-lfa`'s lab:
-/// `ospfv3-dr`'s bridge with router-c on it). Router-c is router-a's
-/// loop-free alternate to router-b's loopback; while it advertises
-/// MaxLinkMetric, RFC 5286 §3.5 forbids it as one, so router-a drops the
-/// backup and keeps the primary. Administrative first, then on-shutdown and
-/// on-startup across one SIGINT restart (`nos-ospfv3d` flushes nothing on
-/// stop, so the hold is the whole shutdown delay).
+/// RFC 6987 stub router over OSPFv3 on router-c (requires `ospfv3-dr`: router-c
+/// on the shared bridge). Router-a's loop-free alternate for router-b's
+/// loopback is router-b's second link, never router-c, so the lab cannot show
+/// the RFC 5286 §3.5 exclusion (a unit test in `spf.rs` does); this phase
+/// proves the origination instead: each reason re-originates router-c's
+/// Router-LSA (a fresh instance installs on router-a) and logs its change.
+/// Administrative first, then on-shutdown and on-startup across one SIGINT
+/// restart (`nos-ospfv3d` flushes nothing on stop, so the hold is the whole
+/// shutdown delay).
 #[allow(clippy::too_many_lines)]
 pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
-    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
-    let lo = OSPFV3_LFA_LOOPBACK_ADDRESS;
-    let primary = format!("added route prefix={lo}.*source=Some(Ospf) backup=false");
-    let backup_added = format!("added route prefix={lo}.*source=Some(Ospf) backup=true");
-    let backup_removed = format!("removed route prefix={lo}.*backup=true");
-    let primary_removed = format!("removed route prefix={lo}.*backup=false");
+    let (a, c) = (w.a()?, w.c()?);
     let c_flags = |extra: &[&str]| {
         let mut flags = strings(&[
             "--ospfv3-instance",
@@ -4379,58 +4376,52 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     let changed = |active: bool, reason: &str| {
         format!("ospfv3 stub router max-metric changed active={active} reason=\"{reason}\"")
     };
+    // Router-c's own Router-LSA (legacy or E-Router) newly installed on a.
+    let installed = format!(
+        "ospfv3 lsa installed link=.* neighbor={OSPFV3_ROUTER_ID_C} lsa_type=\\(8193\\|40993\\) link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID_C}"
+    );
 
-    let (p0, b0) = (a.count(&primary), a.count(&backup_added));
-    b.provision(&[
-        "--ospfv3-loopback-address",
-        lo,
-        "--ospfv3-loopback-profile",
-        OSPFV3_PROFILE,
-    ])
-    .await?;
-    a.wait_new(&primary, p0, 60).await?;
-    a.wait_new(&backup_added, b0, 60).await?;
-    let primary_removed0 = a.count(&primary_removed);
-
-    log("router-c: max-metric router-lsa administrative; router-a must drop its lfa via c");
-    let (r0, on0) = (
-        a.count(&backup_removed),
+    log("router-c: max-metric router-lsa administrative; router-a must install a new Router-LSA");
+    let (on0, i0) = (
         c.count(&changed(true, "administrative")),
+        a.count(&installed),
     );
     c.provision(&c_flags(&["--ospfv3-max-metric-administrative", "true"]))
         .await?;
     c.wait_new(&changed(true, "administrative"), on0, 30)
         .await?;
-    a.wait_new(&backup_removed, r0, 60).await?;
+    a.wait_new(&installed, i0, 30).await?;
 
-    log("router-c: administrative off; router-a must re-add the lfa");
-    let (b0, off0) = (a.count(&backup_added), c.count(&changed(false, "cleared")));
+    log("router-c: administrative off; a new Router-LSA again");
+    let (off0, i0) = (c.count(&changed(false, "cleared")), a.count(&installed));
     c.provision(&c_flags(&["--ospfv3-max-metric-administrative", "false"]))
         .await?;
     c.wait_new(&changed(false, "cleared"), off0, 30).await?;
-    a.wait_new(&backup_added, b0, 60).await?;
+    a.wait_new(&installed, i0, 30).await?;
 
-    // On-shutdown + on-startup across one stop (no grace period on router-c).
-    // On-startup is armed only by a fresh start; 60s outlasts the respawn.
-    let resolved = "ospfv3 instance config resolved.*max_metric_on_startup=Some(60) max_metric_on_shutdown=Some(3)";
+    // On-shutdown + on-startup across one stop, with graceful restart off on
+    // router-c. On-startup is armed only by a fresh start; 20s outlasts the
+    // respawn and the new adjacency.
+    let resolved = "ospfv3 instance config resolved.*max_metric_on_startup=Some(20) max_metric_on_shutdown=Some(3)";
     let (res0, armed0) = (c.count(resolved), c.count(&changed(true, "on-startup")));
     c.provision(&c_flags(&[
         "--ospfv3-max-metric-on-shutdown",
         "3",
         "--ospfv3-max-metric-on-startup",
-        "60",
+        "20",
     ]))
     .await?;
     c.wait_new(resolved, res0, 30).await?;
+    // On-startup must not arm on a running process.
     c.assert_quiet(&changed(true, "on-startup"), armed0, 6)
         .await?;
 
     let full_c = format!(
         "ospfv3 neighbor reached full link=broadcast-domain:{BD} neighbor={OSPFV3_ROUTER_ID_C}"
     );
-    let (sd0, r0, st0, full0, exp0) = (
+    let (sd0, i0, st0, full0, exp0) = (
         c.count(&changed(true, "on-shutdown")),
-        a.count(&backup_removed),
+        a.count(&installed),
         c.count(&changed(true, "on-startup")),
         a.count(&full_c),
         c.count(&changed(false, "expired")),
@@ -4440,30 +4431,21 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
         .signal_process("router-c", "nos-ospfv3d", "-INT")
         .await?;
     c.wait_new(&changed(true, "on-shutdown"), sd0, 30).await?;
-    a.wait_new(&backup_removed, r0, 30).await?;
+    a.wait_new(&installed, i0, 10).await?;
 
-    log("router-c respawns with on-startup max-metric: back in the lsdb, not an lfa");
+    log("router-c respawns with on-startup max-metric, then the period expires");
     c.wait_new(&changed(true, "on-startup"), st0, 90).await?;
     a.wait_new(&full_c, full0, 90).await?;
-    let b0 = a.count(&backup_added);
-    a.assert_quiet(&backup_added, b0, 10).await?;
-    c.assert_quiet(&changed(false, "expired"), exp0, 0).await?;
     c.wait_new(&changed(false, "expired"), exp0, 90).await?;
-    a.wait_new(&backup_added, b0, 60).await?;
-    a.assert_quiet(&primary_removed, primary_removed0, 0)
-        .await?;
 
-    log("restoring: router-c's max-metric off, router-b's loopback out of ospfv3");
+    log("restoring: router-c's max-metric off");
     c.provision(&c_flags(&[
         "--ospfv3-max-metric-on-shutdown",
         "0",
         "--ospfv3-max-metric-on-startup",
         "0",
     ]))
-    .await?;
-    let r0 = a.count(&backup_removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
-    a.wait_new(&backup_removed, r0, 60).await
+    .await
 }
 
 /// #618 (requires `ospfv3`): `eth1` (a veth) carries two VLAN subinterfaces,

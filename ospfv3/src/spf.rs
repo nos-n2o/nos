@@ -1346,6 +1346,26 @@ mod tests {
         assert_eq!(backup(lsas(0xFFFF, 1)), None, "root's link is max-metric");
     }
 
+    /// The same on a transit network: a peer whose link to it is
+    /// MaxLinkMetric is no alternate.
+    #[test]
+    fn stub_router_on_a_transit_network_is_never_an_alternate() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let lsas = |r3_metric: u16| {
+            [
+                router_lsa(r1, vec![transit(10, 10, r1, 1)]),
+                router_lsa(r2, vec![transit(10, 20, r1, 1), p2p(r3, 21, 31, 1)]),
+                router_lsa(r3, vec![transit(10, 30, r1, r3_metric), p2p(r2, 31, 21, 1)]),
+                network_lsa(10, r1, vec![r1, r2, r3]),
+                link_lsa(r2, 20, "fe80::2".parse().unwrap()),
+                link_lsa(r3, 30, "fe80::3".parse().unwrap()),
+                router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+            ]
+        };
+        assert!(compute(r1, &lsas(1))[0].backup_next_hop.is_some());
+        assert_eq!(compute(r1, &lsas(0xFFFF))[0].backup_next_hop, None);
+    }
+
     #[test]
     fn neighbor_whose_best_path_loops_through_root_is_not_an_alternate() {
         // 3's shortest way to 2 is back through root (1+1=2 < 10), so
