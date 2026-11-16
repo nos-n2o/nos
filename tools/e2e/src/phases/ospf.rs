@@ -1464,14 +1464,7 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let flags = |rid: &str, extra: &[&str]| {
         let mut f = ospf(rid);
-        f.extend(strings(&[
-            "--ospf-lls",
-            "true",
-            "--loopback-address",
-            OSPF_GR_LOOPBACK_ADDRESS,
-            "--ospf-loopback-profile",
-            OSPF_PROFILE,
-        ]));
+        f.extend(strings(&["--ospf-lls", "true"]));
         f.extend(strings(extra));
         f
     };
@@ -1480,7 +1473,14 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         A,
         flags(
             OSPF_ROUTER_ID,
-            &["--ospf-graceful-restart-grace-period", "120"],
+            &[
+                "--ospf-graceful-restart-grace-period",
+                "120",
+                "--loopback-address",
+                OSPF_GR_LOOPBACK_ADDRESS,
+                "--ospf-loopback-profile",
+                OSPF_PROFILE,
+            ],
         ),
     ))
     .await?;
