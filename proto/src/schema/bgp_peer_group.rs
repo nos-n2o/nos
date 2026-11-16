@@ -243,7 +243,7 @@ impl BgpRole {
     }
 }
 
-/// RFC 7911 ADD-PATH direction for a peer-group's unicast families: whether
+/// RFC 7911 ADD-PATH direction for a peer-group's unicast and VPN Flowspec families: whether
 /// this side offers to receive several paths per prefix, send them, or both.
 /// What is actually used per family is negotiated against the peer's own
 /// capability (RFC 7911 §5).
@@ -641,8 +641,8 @@ pub struct BgpPeerGroup {
     #[cli(topic = BgpPeerGroupLocalAs)]
     pub local_as: Option<BgpLocalAs>,
 
-    /// RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;
-    /// never EVPN). `None` is `Both` for a `route_server_client` group and off
+    /// RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families
+    /// (`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off
     /// otherwise. Carried in the OPEN, so a change restarts the sessions.
     #[serde(default)]
     #[garde(skip)]

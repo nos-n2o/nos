@@ -1136,14 +1136,14 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Receive"' \
   $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/add-path
 ```
 
-- The modes are `receive`, `send` and `both`. They apply to the group's `ipv4` and `ipv6` unicast families, never to `l2vpn-evpn`.
+- The modes are `receive`, `send` and `both`. They apply to the group's `ipv4`, `ipv6`, `vpnv4-flowspec` and `vpnv6-flowspec` families, never to `l2vpn-evpn`.
 - What a session uses is negotiated per family (RFC 7911 §5): NOS receives path identifiers only when it offered `receive` or `both` and the peer offered to send, and sends them only when it offered `send` or `both` and the peer offered to receive.
 - With receive negotiated, NOS keeps every path the peer sends for a prefix, instead of only the last one. Each path competes in best-path selection on its own, so two paths from one peer can be installed together as [multipath](#multipath). A withdrawal removes only the path it names, and one that names an unknown path is ignored.
 - Each path counts toward the peer's [maximum-prefix](#limiting-the-prefixes-a-peer-sends) limit, and `accepted_prefixes` in `GET /v1/bgp/summary` counts paths.
 - With send negotiated, a peer gets the best `add-path-send-count` paths for each prefix (see below). A route-server client gets every other source's path by default (see [Route server](#route-server-rfc-7947)).
 - A route-server client defaults to `both`. Any other group defaults to off. An explicit mode replaces the default, so `add-path receive` on a route-server client stops its multi-path view.
 - The capability is in the OPEN, so changing `add-path` resets the peer-group's sessions. `delete add-path` goes back to the default.
-- `bgp: add-path negotiated peer=… ipv4=… ipv6=…` is logged when a session with a configured mode comes up, each value being `none`, `receive`, `send` or `both`.
+- `bgp: add-path negotiated peer=… ipv4=… ipv6=… vpnv4_flowspec=… vpnv6_flowspec=…` is logged when a session with a configured mode comes up, each value being `none`, `receive`, `send` or `both`.
 
 To choose how many paths a send peer gets, set `add-path-send-count` on its peer-group:
 

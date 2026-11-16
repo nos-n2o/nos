@@ -398,7 +398,7 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::codec::Decoder;
 
-    fn peer(addr: &str, add_path: &[u16]) -> PeerUpInfo {
+    fn peer(addr: &str, add_path: &[(u16, u8)]) -> PeerUpInfo {
         PeerUpInfo {
             peer: addr.parse().unwrap(),
             asn: 65002,
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn add_path_ids_follow_the_session() {
         let p: IpNet = "10.1.0.0/16".parse().unwrap();
-        let info = peer("192.0.2.2", &[AFI_IPV4]);
+        let info = peer("192.0.2.2", &[(AFI_IPV4, 1)]);
         let ann = rib_route_to_update(p, 7, &route(None), true);
         let mut codec = BgpCodec {
             add_path_afis: info.add_path_afis.clone(),

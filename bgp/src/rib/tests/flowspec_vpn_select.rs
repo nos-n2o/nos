@@ -75,7 +75,7 @@ fn vflows(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
         .filter(|u| {
             matches!(
                 u,
-                OutboundUpdate::AnnounceVpnFlowspec(..) | OutboundUpdate::WithdrawVpnFlowspec(_)
+                OutboundUpdate::AnnounceVpnFlowspec(..) | OutboundUpdate::WithdrawVpnFlowspec(..)
             )
         })
         .collect()
@@ -91,7 +91,7 @@ fn announced(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Option<(Rd, AdvertisedF
 fn withdrawn(rx: &mut mpsc::Receiver<OutboundUpdate>) -> bool {
     vflows(rx)
         .iter()
-        .any(|u| matches!(u, OutboundUpdate::WithdrawVpnFlowspec(k) if *k == key()))
+        .any(|u| matches!(u, OutboundUpdate::WithdrawVpnFlowspec(k, _) if *k == key()))
 }
 
 fn key() -> VpnFlowKey {

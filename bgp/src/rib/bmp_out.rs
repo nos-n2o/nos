@@ -42,7 +42,7 @@ pub(crate) struct OutSnapshot {
     /// What the peer was last sent, as the RIB would send it again.
     pub post: Vec<OutboundUpdate>,
     /// AFIs for which this session sends ADD-PATH identifiers.
-    pub tx_afis: HashSet<u16>,
+    pub tx_afis: HashSet<(u16, u8)>,
     /// The candidate announcements (pre-policy, unicast).
     pub pre: Vec<UpdateMessage>,
 }
@@ -98,7 +98,7 @@ impl BgpRib {
         snap.tx_afis = outbox
             .add_path_tx
             .iter()
-            .map(|f| crate::gr::afi_safi(*f).0)
+            .map(|f| crate::gr::afi_safi(*f))
             .collect();
         let rebuild = |prefix: IpNet, route: &RibRoute| {
             build_advertisement(
