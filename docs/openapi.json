@@ -64943,6 +64943,62 @@
           }
         }
       ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginPolicy",
+                  "description": "Login lockout (failures and window). `serde(default)` so on-disk\nconfig saved before this field existed still loads."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `login-policy` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
         "parameters": [],
@@ -65083,6 +65139,64 @@
           }
         }
       ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds from the first failure that failures are counted, and a lockout lasts: 1 to 86400.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `lockout-window-secs` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
         "parameters": [],
@@ -65227,6 +65341,64 @@
           }
         }
       ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Failed logins inside the window that lock the account out: 1 to 100.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `max-failures` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
       "put": {
         "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
         "parameters": [],
