@@ -6,6 +6,7 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
 - [Common operations](#common-operations)
   - [Run OSPFv3 between two routers](#run-ospfv3-between-two-routers)
   - [Check neighbours, the LSDB and routes](#check-neighbours-the-lsdb-and-routes)
+  - [Advertise a LAN without speaking OSPFv3](#advertise-a-lan-without-speaking-ospfv3)
   - [Advertise a loopback](#advertise-a-loopback)
   - [Authenticate a link (RFC 7166)](#authenticate-a-link-rfc-7166)
   - [Set the instance ID](#set-the-instance-id)
@@ -86,6 +87,15 @@ show ospfv3 database
 ```
 
 The `type` column holds OSPFv3's LS type codes (RFC 5340 and RFC 8362): `0x2001` router, `0x2002` network, `0x2003` inter-area prefix, `0x2004` inter-area router, `0x4005` AS-external, `0x0008` link, `0x2009` intra-area prefix, and, in extended mode, `0xa021` E-Router, `0xa022` E-Network, `0xa023` E-Inter-Area-Prefix, `0xa024` E-Inter-Area-Router, `0xc025` E-AS-External, `0x8028` E-Link and `0xa029` E-Intra-Area-Prefix. Link LSAs are only valid on their own link, so the database also shows which link each one belongs to. AS-external LSAs belong to no area; they are listed under area `0.0.0.0`.
+
+### Advertise a LAN without speaking OSPFv3
+
+A passive profile advertises an attach point's IPv6 prefix (Intra-Area-Prefix-LSA) but sends no Hello and forms no adjacency, for a LAN with only hosts on it.
+
+- `set … profile <p> passive enable` on the profile, then attach it to the subinterface or broadcast domain as usual; `delete passive` makes the link live again without restarting the instance.
+- It cannot be combined with `crypto-key` or `bfd`: a commit with both is rejected.
+- A down kernel device removes the prefix, like a live link. The prefix's area counts toward the ABR rule.
+- `nos-ospfv3d` logs `ospfv3 passive interface advertised attach_point=<name>`.
 
 ### Advertise a loopback
 
@@ -290,6 +300,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
+| Passive | `set ospfv3 instance <name> area <area-id> profile <p> passive enable`; relative `set passive enable` / `delete passive` | `…/profile/<p>/passive` | `true`/`false`; default `false` | excludes crypto-key and bfd | advertise the attach point's prefix, no Hello, no adjacency | `GET …/profile/<p>/passive` |
 | crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <label>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"<label>","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; label of an admin key whose secret is 1 to 80 bytes; unset by default | labels must exist, at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | | the key must exist | signs sent packets; all keys verify | `show this` in the profile |
 | instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31; unset means 0 | 0 to 31 | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |

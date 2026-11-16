@@ -122,6 +122,17 @@ pub enum Ospfv3ProfileOp {
         /// MTU advertised in database descriptions (RFC 5340).
         mtu: u16,
     },
+    /// Toggles passive mode (prefixes advertised, no Hello, no adjacency).
+    SetPassive {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Name of the `OSPFv3` profile this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Toggles the RFC 2328 §10.6 DBD Interface MTU check.
     SetMtuIgnore {
         /// Name of the `OSPFv3` instance owning the target.
@@ -235,6 +246,7 @@ impl Ospfv3ProfileOp {
             | Ospfv3ProfileOp::ClearPriority { .. }
             | Ospfv3ProfileOp::SetMtu { .. } => self.apply_part1(config),
             Ospfv3ProfileOp::SetMtuIgnore { .. }
+            | Ospfv3ProfileOp::SetPassive { .. }
             | Ospfv3ProfileOp::ClearMtu { .. }
             | Ospfv3ProfileOp::SetNetworkType { .. }
             | Ospfv3ProfileOp::ClearNetworkType { .. }
@@ -269,6 +281,7 @@ impl Ospfv3ProfileOp {
                         network_type: None,
                         auth: None,
                         instance_id: None,
+                        passive: false,
                     });
                 }
                 Ok(())
@@ -377,6 +390,15 @@ impl Ospfv3ProfileOp {
     /// new one still fails to compile until it is routed to a part.
     fn apply_part2(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
+            Ospfv3ProfileOp::SetPassive {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.passive = *enabled;
+                Ok(())
+            }
             Ospfv3ProfileOp::SetMtuIgnore {
                 instance,
                 area_id,
@@ -543,6 +565,7 @@ mod tests {
             network_type: None,
             auth: None,
             instance_id: None,
+            passive: false,
         }
     }
 
@@ -760,5 +783,27 @@ mod tests {
             cfg.ospfv3_instances[0].areas[0].profiles[0].network_type,
             None
         );
+    }
+
+    #[test]
+    fn set_passive_toggles_the_flag() {
+        let mut cfg = Config {
+            ospfv3_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        for enabled in [true, false] {
+            Ospfv3ProfileOp::SetPassive {
+                instance: "o1".to_string(),
+                area_id: area_id("0.0.0.0"),
+                name: "p1".to_string(),
+                enabled,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+            assert_eq!(
+                cfg.ospfv3_instances[0].areas[0].profiles[0].passive,
+                enabled
+            );
+        }
     }
 }
