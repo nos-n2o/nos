@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -7,7 +8,7 @@ use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
     IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET,
-    LOGIN_BUSY, LOGIN_TICKET_TTL, SESSION_EXPIRED,
+    LOGIN_BUSY, LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT, SESSION_EXPIRED,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -24,6 +25,8 @@ use crate::users_client;
 // This is per connection only (a client can reconnect); `MAX_CONCURRENT_VERIFIES`
 // bounds the total cost of guessing, `nos-restd` adds a per-user lockout.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
+/// Ceiling of `LoginPolicy.max_failures` here (#1148): a connection never
+/// gets more than this many, whatever the policy says.
 const MAX_FAILED_LOGINS: u32 = 3;
 
 /// How many password verifications (argon2id, ~64 MiB x 4 threads each) run at
@@ -75,8 +78,15 @@ struct Ctx {
     login_slots: Semaphore,
     anon_slots: Arc<Semaphore>,
     anonymous_idle: Duration,
+    /// `LoginPolicy.max_failures`, live (#1148).
+    max_failures: Arc<AtomicU8>,
     /// When the over-cap warning last fired (at most one per second).
     last_cap_warn: Mutex<Option<Instant>>,
+}
+
+/// Failed logins after which a connection is dropped, for a policy's `max_failures`.
+fn failure_limit(max_failures: u8) -> u32 {
+    u32::from(max_failures).min(MAX_FAILED_LOGINS)
 }
 
 /// Binds `listen_socket` and spawns the accept loop for the endpoint-broker
@@ -106,6 +116,12 @@ pub fn start_with_limits(
 ) -> io::Result<JoinHandle<()>> {
     let listener = pki.identity.listen_optional_client_auth(listen_socket)?;
     info!(listen_socket = %listen_socket.display(), "broker IPC listening");
+    let max_failures = Arc::new(AtomicU8::new(MAX_FAILURES_DEFAULT));
+    tokio::spawn(users_client::follow_login_policy(
+        pki.identity.clone(),
+        sockets.config.clone(),
+        max_failures.clone(),
+    ));
     let ctx = Arc::new(Ctx {
         registry,
         sockets,
@@ -113,6 +129,7 @@ pub fn start_with_limits(
         login_slots: Semaphore::new(MAX_CONCURRENT_VERIFIES),
         anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
         anonymous_idle: limits.anonymous_idle,
+        max_failures,
         last_cap_warn: Mutex::new(None),
     });
     Ok(tokio::spawn(async move {
@@ -191,7 +208,14 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
             failed_logins += 1;
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
         }
-        if writer.send(event).await.is_err() || hang_up || failed_logins >= MAX_FAILED_LOGINS {
+        let limit = failure_limit(ctx.max_failures.load(Ordering::Relaxed));
+        if failed_logins >= limit {
+            warn!(
+                failures = failed_logins,
+                "login failures reached the limit, closing the connection"
+            );
+        }
+        if writer.send(event).await.is_err() || hang_up || failed_logins >= limit {
             break;
         }
     }
@@ -501,6 +525,14 @@ fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn failure_limit_follows_policy_up_to_the_ceiling() {
+        assert_eq!(failure_limit(1), 1);
+        assert_eq!(failure_limit(2), 2);
+        assert_eq!(failure_limit(5), MAX_FAILED_LOGINS);
+        assert_eq!(failure_limit(100), MAX_FAILED_LOGINS);
+    }
 
     #[tokio::test]
     async fn run_bounded_never_exceeds_its_slots() {

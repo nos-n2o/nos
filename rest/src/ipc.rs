@@ -151,6 +151,11 @@ impl Daemons {
         }
     }
 
+    /// The login lockout gate, for `login::follow_policy`.
+    pub fn login_gate(&self) -> Arc<crate::login::LoginGate> {
+        self.login_gate.clone()
+    }
+
     /// Sends `req` to the daemon at `socket` — which must prove it is
     /// `role`/`name` — and returns the first event of the reply, over a pooled
     /// connection when one is parked.

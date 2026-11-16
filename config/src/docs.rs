@@ -1798,6 +1798,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the S-BFD discriminator to probe.",
             "For `mode sbfd`: the reflector's S-BFD discriminator, written as an IPv4 address (its 32 bits). Unset uses the session peer's own IPv4 address, so a reflector configured with its own address needs nothing here. An IPv6 peer needs it.",
         ),
+        Topic::LoginPolicy => (
+            "Set the login lockout.",
+            "Failed logins are counted per source address and user over a window; reaching the limit locks that pair out (HTTP 429 on the REST API) until the window ends. Applied live by `nos-restd` and `nos-watchdogd`.",
+        ),
+        Topic::LoginPolicyMaxFailures => (
+            "Set the failed logins that lock an account.",
+            "1 to 100, default 5. `nos-watchdogd` additionally never allows more than 3 failures on one direct-login connection.",
+        ),
+        Topic::LoginPolicyLockoutWindow => (
+            "Set the lockout window in seconds.",
+            "1 to 86400, default 60. Failures are counted from the first one; a lockout lasts until the window ends. Counters already held are kept when the policy changes.",
+        ),
         Topic::SbfdReflector => (
             "Answer Seamless BFD probes.",
             "The RFC 7880 S-BFD reflector: stateless, listens on UDP 7784 in the VRF of every routing table, and answers a probe whose Your Discriminator is one of its discriminators. Off while no discriminator is set.",

@@ -12,14 +12,19 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::{Extension, Json};
 use base64::Engine as _;
-use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOGIN_BUSY, SESSION_EXPIRED};
+use nos_proto::{
+    LoginPolicy, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, LOCKOUT_WINDOW_SECS_DEFAULT,
+    LOGIN_BUSY, MAX_FAILURES_DEFAULT, SESSION_EXPIRED,
+};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 use utoipa::ToSchema;
 
 use crate::auth::PeerUser;
@@ -31,10 +36,9 @@ use crate::ipc::Daemons;
 // once), and `nos-watchdogd` is the authoritative bound on argon2 work (#381).
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
-/// After this many failures inside `FAILED_LOGIN_WINDOW` (counted from the
-/// first), further attempts on the account get `429` until the window ends.
-const MAX_FAILED_LOGINS: u32 = 5;
-const FAILED_LOGIN_WINDOW: Duration = Duration::from_secs(60);
+// After `LoginPolicy.max_failures` failures inside its `lockout_window_secs`
+// (counted from the first), further attempts on the account get `429` until
+// the window ends; `LoginGate::set_policy` swaps both live (#1148).
 
 /// Same window per source address, over all usernames. Higher than the
 /// per-user limit because a NAT or proxy puts many users behind one address;
@@ -54,6 +58,30 @@ pub struct ClientIp(pub IpAddr);
 /// from queueing unbounded IPC connections behind it.
 const MAX_INFLIGHT_LOGINS: usize = 8;
 
+/// Keeps `gate` on the running `login_policy` (#1148): applies it at start and
+/// after every commit that touches it; until `nos-configd` answers the gate
+/// keeps the defaults (or the last policy, if the connection drops).
+pub async fn follow_policy(gate: Arc<LoginGate>, config_socket: std::path::PathBuf) {
+    use futures::StreamExt;
+    use nos_daemon::config::{fetch_config, subscribe_diff};
+    use nos_proto::DiffScope;
+    loop {
+        if let Ok(mut events) = subscribe_diff(&config_socket, vec![DiffScope::LoginPolicy]).await {
+            while events.next().await.is_some_and(|e| e.is_ok()) {
+                if let Ok(cfg) = fetch_config(&config_socket).await {
+                    gate.set_policy(&cfg.login_policy);
+                    info!(
+                        max_failures = cfg.login_policy.max_failures,
+                        window_secs = cfg.login_policy.lockout_window_secs,
+                        "login policy applied"
+                    );
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// One attempt at a time per username, so guessing one account's password is
 /// limited to one guess per `FAILED_LOGIN_DELAY` however many streams or
 /// connections the guesses arrive on.
@@ -66,6 +94,8 @@ pub struct LoginGate {
     failures: Mutex<HashMap<(IpAddr, String), (u32, Instant)>>,
     /// Per source address: failures so far and when the window opened.
     failures_by_ip: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    max_failures: AtomicU32,
+    window_secs: AtomicU64,
 }
 
 impl Default for LoginGate {
@@ -81,7 +111,26 @@ impl LoginGate {
             locks: Mutex::default(),
             failures: Mutex::default(),
             failures_by_ip: Mutex::default(),
+            max_failures: AtomicU32::new(MAX_FAILURES_DEFAULT.into()),
+            window_secs: AtomicU64::new(LOCKOUT_WINDOW_SECS_DEFAULT.into()),
         }
+    }
+
+    /// Applies a new policy from the next failure on; counters already held
+    /// are kept.
+    pub(crate) fn set_policy(&self, p: &LoginPolicy) {
+        self.max_failures
+            .store(p.max_failures.into(), Ordering::Relaxed);
+        self.window_secs
+            .store(p.lockout_window_secs.into(), Ordering::Relaxed);
+    }
+
+    fn max_failures(&self) -> u32 {
+        self.max_failures.load(Ordering::Relaxed)
+    }
+
+    fn window(&self) -> Duration {
+        Duration::from_secs(self.window_secs.load(Ordering::Relaxed))
     }
 
     /// A slot for one login, or `429` straight away when all are taken.
@@ -99,47 +148,52 @@ impl LoginGate {
     fn retry_after(&self, ip: IpAddr, user: &str) -> Option<u64> {
         let failures = self.failures.lock().expect("login gate lock");
         let &(count, since) = failures.get(&(ip, user.to_string()))?;
-        let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
-        (count >= MAX_FAILED_LOGINS).then(|| left.as_secs() + 1)
+        let left = self.window().checked_sub(since.elapsed())?;
+        (count >= self.max_failures()).then(|| left.as_secs() + 1)
     }
 
     /// Seconds until `ip` may try again, if it is locked out.
     fn retry_after_ip(&self, ip: IpAddr) -> Option<u64> {
         let failures = self.failures_by_ip.lock().expect("login gate lock");
         let &(count, since) = failures.get(&ip)?;
-        let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
+        let left = self.window().checked_sub(since.elapsed())?;
         (count >= MAX_FAILED_LOGINS_PER_IP).then(|| left.as_secs() + 1)
     }
 
     fn record_failure_ip(&self, ip: IpAddr) {
+        let window = self.window();
         let mut failures = self.failures_by_ip.lock().expect("login gate lock");
         if failures.len() >= MAX_TRACKED_IPS && !failures.contains_key(&ip) {
-            failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+            failures.retain(|_, (_, since)| since.elapsed() < window);
             if failures.len() >= MAX_TRACKED_IPS {
                 failures.clear();
             }
         }
         let e = failures.entry(ip).or_insert((0, Instant::now()));
-        if e.1.elapsed() >= FAILED_LOGIN_WINDOW {
+        if e.1.elapsed() >= window {
             *e = (0, Instant::now());
         }
         e.0 += 1;
     }
 
     fn record_failure(&self, ip: IpAddr, user: &str) {
+        let (window, max) = (self.window(), self.max_failures());
         let mut failures = self.failures.lock().expect("login gate lock");
         let key = (ip, user.to_string());
         if failures.len() >= MAX_TRACKED_IPS && !failures.contains_key(&key) {
-            failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+            failures.retain(|_, (_, since)| since.elapsed() < window);
             if failures.len() >= MAX_TRACKED_IPS {
                 failures.clear();
             }
         }
         let e = failures.entry(key).or_insert((0, Instant::now()));
-        if e.1.elapsed() >= FAILED_LOGIN_WINDOW {
+        if e.1.elapsed() >= window {
             *e = (0, Instant::now());
         }
         e.0 += 1;
+        if e.0 == max {
+            warn!(user = ?user, address = %ip, failures = max, window_secs = window.as_secs(), "login lockout started");
+        }
     }
 
     fn clear(&self, ip: IpAddr, user: &str) {
@@ -342,7 +396,7 @@ mod tests {
     fn lockout_after_max_failures_until_cleared_per_address_and_user() {
         let gate = LoginGate::default();
         let (a, b): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
-        for _ in 0..MAX_FAILED_LOGINS - 1 {
+        for _ in 0..gate.max_failures() - 1 {
             gate.record_failure(a, "u");
         }
         assert_eq!(gate.retry_after(a, "u"), None);
@@ -352,12 +406,28 @@ mod tests {
         assert_eq!(gate.retry_after(a, "other"), None);
         assert_eq!(gate.retry_after(b, "u"), None);
         // Clearing is per pair too.
-        for _ in 0..MAX_FAILED_LOGINS {
+        for _ in 0..gate.max_failures() {
             gate.record_failure(b, "u");
         }
         gate.clear(a, "u");
         assert_eq!(gate.retry_after(a, "u"), None);
         assert!(gate.retry_after(b, "u").is_some());
+    }
+
+    #[test]
+    fn policy_swap_changes_threshold_and_keeps_counters() {
+        let gate = LoginGate::default();
+        let a: IpAddr = "192.0.2.1".parse().unwrap();
+        gate.record_failure(a, "u");
+        gate.record_failure(a, "u");
+        assert_eq!(gate.retry_after(a, "u"), None);
+        gate.set_policy(&LoginPolicy {
+            max_failures: 3,
+            lockout_window_secs: 10,
+        });
+        assert_eq!(gate.retry_after(a, "u"), None);
+        gate.record_failure(a, "u");
+        assert_eq!(gate.retry_after(a, "u"), Some(10));
     }
 
     #[test]
