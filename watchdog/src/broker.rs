@@ -21,13 +21,10 @@ use crate::registry::EndpointRegistry;
 use crate::users_client;
 
 /// A failed login costs the caller this much wall time, and the connection is
-/// dropped after `MAX_FAILED_LOGINS` of them.
+/// dropped after `LoginPolicy.max_failures` of them (default 5; #1148).
 // This is per connection only (a client can reconnect); `MAX_CONCURRENT_VERIFIES`
 // bounds the total cost of guessing, `nos-restd` adds a per-user lockout.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
-/// Ceiling of `LoginPolicy.max_failures` here (#1148): a connection never
-/// gets more than this many, whatever the policy says.
-const MAX_FAILED_LOGINS: u32 = 3;
 
 /// How many password verifications (argon2id, ~64 MiB x 4 threads each) run at
 /// once in this process, across every connection. The rest wait up to
@@ -82,11 +79,6 @@ struct Ctx {
     max_failures: Arc<AtomicU8>,
     /// When the over-cap warning last fired (at most one per second).
     last_cap_warn: Mutex<Option<Instant>>,
-}
-
-/// Failed logins after which a connection is dropped, for a policy's `max_failures`.
-fn failure_limit(max_failures: u8) -> u32 {
-    u32::from(max_failures).min(MAX_FAILED_LOGINS)
 }
 
 /// Binds `listen_socket` and spawns the accept loop for the endpoint-broker
@@ -208,7 +200,7 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
             failed_logins += 1;
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
         }
-        let limit = failure_limit(ctx.max_failures.load(Ordering::Relaxed));
+        let limit = u32::from(ctx.max_failures.load(Ordering::Relaxed));
         if failed_logins >= limit {
             warn!(
                 failures = failed_logins,
@@ -525,14 +517,6 @@ fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn failure_limit_follows_policy_up_to_the_ceiling() {
-        assert_eq!(failure_limit(1), 1);
-        assert_eq!(failure_limit(2), 2);
-        assert_eq!(failure_limit(5), MAX_FAILED_LOGINS);
-        assert_eq!(failure_limit(100), MAX_FAILED_LOGINS);
-    }
 
     #[tokio::test]
     async fn run_bounded_never_exceeds_its_slots() {

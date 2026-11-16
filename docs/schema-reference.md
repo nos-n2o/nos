@@ -9,7 +9,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 ## Login policy (`Config.login_policy`, #1148)
 
 - Singleton `LoginPolicy { max_failures: u8 (1..=100, default 5), lockout_window_secs: u32 (1..=86400, default 60) }`, `serde(default)` so older configs load; no op, edited through the generic path edit (`set login-policy max-failures 2`), diffed field-level (`ConfigDiff.login_policy`, `DiffScope::LoginPolicy`).
-- Read by `nos-restd` (`LoginGate`) and `nos-watchdogd` (per-connection cutoff, capped at 3); see `docs/architecture/auth.md`.
+- Read by `nos-restd` (`LoginGate`) and `nos-watchdogd` (per-connection cutoff, `max_failures` only; `lockout_window_secs` is REST-only); see `docs/architecture/auth.md`.
 
 ## Nesting one level under a parent
 

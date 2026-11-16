@@ -1804,7 +1804,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::LoginPolicyMaxFailures => (
             "Set the failed logins that lock an account.",
-            "1 to 100, default 5. `nos-watchdogd` additionally never allows more than 3 failures on one direct-login connection.",
+            "1 to 100, default 5.  `nos-watchdogd` drops a direct-login connection after this many bad logins (before #1148: 3); it has no window.",
         ),
         Topic::LoginPolicyLockoutWindow => (
             "Set the lockout window in seconds.",
