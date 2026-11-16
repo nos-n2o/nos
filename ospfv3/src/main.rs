@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_daemon::{bootstrap, watchdog};
+use nos_ospfv3::boot;
 use nos_ospfv3::link::LinkManager;
 use nos_ospfv3::{reconcile, rib_push_client, server};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
@@ -58,6 +59,12 @@ struct Args {
     #[arg(long, hide = true)]
     originate_lsinfinity: bool,
 
+    /// Directory for this daemon's persisted state: the RFC 5187
+    /// graceful-restart marker (`<instance>.gr`, consumed at start; it skips
+    /// RFC 6987's on-startup period after a graceful restart).
+    #[arg(long, default_value = "/var/lib/nos/ospfv3d")]
+    state_dir: PathBuf,
+
     /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
     /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfv3d-arg`
     /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
@@ -105,6 +112,8 @@ async fn main() -> anyhow::Result<()> {
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
+    let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
+    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()));
     links.set_originate_lsinfinity(args.originate_lsinfinity);
     links.set_router_lsa_max_links(args.router_lsa_max_links);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
@@ -154,10 +163,26 @@ async fn main() -> anyhow::Result<()> {
     info!(instance = %args.instance, planned_restart, "shutdown signal received");
     // Before `shutdown_tx`: the log forwarder stops on it, and these lines
     // are what a neighbor's operator (and nos-e2e) looks for.
+    let mut announced = false;
     if planned_restart {
-        links.announce_graceful_restart().await;
+        let grace_period = links.grace_period();
+        if grace_period != 0 {
+            // Lets the respawned process skip RFC 6987's on-startup period.
+            match boot::write_grace_marker(&grace_marker, unix_now() + u64::from(grace_period)) {
+                Ok(()) => {
+                    info!(instance = %args.instance, "ospfv3 graceful restart marker written");
+                }
+                Err(e) => {
+                    tracing::warn!(instance = %args.instance, error = %e, "cannot write ospfv3 graceful restart marker");
+                }
+            }
+        }
+        announced = links.announce_graceful_restart().await;
     }
-    links.max_metric_on_shutdown().await;
+    // RFC 6987 §3.2 (c): never under a grace period.
+    if !announced {
+        links.max_metric_on_shutdown().await;
+    }
 
     let _ = shutdown_tx.send(true);
     if let Err(e) = reconcile_task.await {
@@ -170,6 +195,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!(instance = %args.instance, "shutting down");
     Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Waits for SIGTERM or SIGINT — mirrors `nos-ospfd`'s own identical

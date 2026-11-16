@@ -244,7 +244,7 @@ $C -X POST $B/v1/transactions/drain/commit
 - **`administrative`.** On until removed: `delete ospfv3 instance v3 max-metric router-lsa administrative` brings it back.
 - **`on-startup <seconds>`** (5 to 86400). For this long after `nos-ospfv3d` starts. It takes effect on the next start, not when set; `delete` ends a period still running.
 - **`on-shutdown <seconds>`** (1 to 3). When `nos-ospfv3d` stops, it first advertises max-metric and waits this long before exiting. `nos-ospfv3d` withdraws no LSAs on a clean stop, so this is the whole delay. Skipped when the router is already a stub router.
-- **Not with graceful restart (RFC 6987 §3.2 (c)).** With `graceful-restart grace-period` configured, neither `on-startup` (no restart marker is kept, so it is skipped whenever a grace period is configured) nor `on-shutdown` runs.
+- **Not with graceful restart (RFC 6987 §3.2 (c)).** A planned restart with a grace period (SIGTERM) leaves a marker `/var/lib/nos/ospfv3d/<instance>.gr`; the respawned process consumes it and skips `on-startup` (log `ospfv3 stub router on-startup skipped after graceful restart`). `on-shutdown` is skipped whenever the grace period is announced.
 - **Check it.** The router logs `ospfv3 stub router max-metric changed active=true reason="administrative"` (or `"on-startup"`, `"on-shutdown"`), then `active=false` with `reason="expired"` or `"cleared"`. On another router, its backup next hop through this one is gone.
 
 ### Redistribute static routes (ASBR)

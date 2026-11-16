@@ -1946,6 +1946,9 @@ struct MaxMetric {
     until: Option<tokio::time::Instant>,
     /// The first `set_max_metric` call has happened.
     armed: bool,
+    /// Respawned after a graceful restart (`boot::take_grace_marker`): the
+    /// helpers kept the old topology, so on-startup is skipped.
+    after_graceful_restart: bool,
     /// The on-shutdown hold is running (set by `max_metric_on_shutdown`).
     shutting_down: bool,
     /// The last state logged by `max_metric_tick`.
@@ -2047,29 +2050,30 @@ impl LinkManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Set once, before the first `set_max_metric`, when this process is the
+    /// respawn of a graceful restart (`boot::take_grace_marker`).
+    pub fn set_after_graceful_restart(&self, after: bool) {
+        self.max_metric_state().after_graceful_restart = after;
+    }
+
     /// RFC 6987 knobs, every resync. The first call (the first config
-    /// resolution after start) arms the on-startup period; later calls never
-    /// re-arm it (it takes effect on the next start), and `None` ends a
-    /// running one. RFC 6987 §3.2 (c): never combined with graceful restart,
-    /// so on-startup is skipped when a grace period is configured.
-    // ponytail: v3 keeps no restart marker (v2's `<instance>.gr`), so a
-    // router with graceful restart configured never runs on-startup, instead
-    // of only skipping it after a graceful restart.
+    /// resolution after start) arms the on-startup period, skipped after a
+    /// graceful restart (RFC 6987 §3.2 (c)); later calls never re-arm it (it
+    /// takes effect on the next start), and `None` ends a running one.
     pub fn set_max_metric(
         &self,
         on_startup: Option<u32>,
         on_shutdown: Option<u8>,
         administrative: bool,
     ) {
-        let graceful = self.grace_period.load(Ordering::Relaxed) != 0;
         let mut mm = self.max_metric_state();
         mm.administrative = administrative;
         mm.on_shutdown = on_shutdown.unwrap_or(0);
         if !mm.armed {
             mm.armed = true;
             match on_startup {
-                Some(_) if graceful => {
-                    info!("ospfv3 stub router on-startup skipped, graceful restart is configured");
+                Some(_) if mm.after_graceful_restart => {
+                    info!("ospfv3 stub router on-startup skipped after graceful restart");
                 }
                 Some(secs) => {
                     mm.until =
@@ -2122,8 +2126,7 @@ impl LinkManager {
                 mm.on_shutdown
             }
         };
-        // RFC 6987 §3.2 (c): never combined with graceful restart.
-        if hold == 0 || self.grace_period.load(Ordering::Relaxed) != 0 {
+        if hold == 0 {
             return;
         }
         self.max_metric_state().shutting_down = true;
@@ -2155,8 +2158,8 @@ impl LinkManager {
         self.extended_lsa.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn grace_period(&self) -> u16 {
+    /// The configured RFC 5187 grace period, seconds (0 = off).
+    pub fn grace_period(&self) -> u16 {
         self.grace_period.load(Ordering::Relaxed)
     }
 
@@ -3138,10 +3141,11 @@ impl LinkManager {
     /// RFC 5187: when graceful restart is configured, has every link send
     /// a Grace-LSA to its `Full` neighbors (twice) and waits for them to go
     /// out. Called on a planned restart only, before `shutdown`.
-    pub async fn announce_graceful_restart(&self) {
+    /// Returns whether a grace period was announced.
+    pub async fn announce_graceful_restart(&self) -> bool {
         let grace_period = self.grace_period.load(Ordering::Relaxed);
         if grace_period == 0 {
-            return;
+            return false;
         }
         info!(
             grace_period,
@@ -3160,6 +3164,7 @@ impl LinkManager {
             }
             tokio::time::sleep(GRACE_SEND_WINDOW).await;
         }
+        true
     }
 
     pub async fn shutdown(&self) {
@@ -4034,17 +4039,14 @@ pub(crate) mod tests {
         assert!(!m.max_metric_tick(), "cleared");
     }
 
-    /// RFC 6987 §3.2 (c): no on-startup under graceful restart; on-shutdown
-    /// holds, then ends, only without it.
+    /// RFC 6987 §3.2 (c): no on-startup after a graceful restart; the
+    /// on-shutdown hold lasts its configured seconds.
     #[tokio::test(start_paused = true)]
-    async fn max_metric_never_combines_with_graceful_restart() {
+    async fn max_metric_on_startup_is_skipped_after_graceful_restart() {
         let m = LinkManager::new(1, None);
-        m.set_graceful_restart(Some(60));
+        m.set_after_graceful_restart(true);
         m.set_max_metric(Some(10), Some(2), false);
         assert!(!m.max_metric_tick());
-        let t = Instant::now();
-        m.max_metric_on_shutdown().await;
-        assert_eq!(Instant::now(), t, "no hold under graceful restart");
 
         let m = LinkManager::new(1, None);
         m.set_max_metric(None, Some(2), false);
