@@ -1454,6 +1454,120 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.wait_ospf_route_gone(OSPF_GR_LOOPBACK_ADDRESS, 5).await
 }
 
+/// RFC 4812 restart signaling over RFC 5613 LLS (requires `ospf`, runs after
+/// `ospf-graceful-restart`): with `lls` on both routers and a grace period on
+/// router-a, SIGTERM on router-a's `nos-ospfd` makes its last Hello carry the
+/// RS bit. Router-b must log the signal, keep the eth0.0 adjacency and
+/// router-a's loopback route through the restart, and see it `Full` again.
+/// Restores `lls` off and no graceful restart at the end.
+pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flags = |rid: &str, extra: &[&str]| {
+        let mut f = ospf(rid);
+        f.extend(strings(&[
+            "--ospf-lls",
+            "true",
+            "--loopback-address",
+            OSPF_GR_LOOPBACK_ADDRESS,
+            "--ospf-loopback-profile",
+            OSPF_PROFILE,
+        ]));
+        f.extend(strings(extra));
+        f
+    };
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    a.provision_flags(&with_base(
+        A,
+        flags(
+            OSPF_ROUTER_ID,
+            &["--ospf-graceful-restart-grace-period", "120"],
+        ),
+    ))
+    .await?;
+    b.provision_flags(&with_base(B, flags(OSPF_ROUTER_ID_B, &[])))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    b.wait(&format!(
+        "added route prefix={OSPF_GR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ))
+    .await?;
+    for _ in 0..60 {
+        if b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let signal = format!("ospf lls restart signal link=eth0.0 neighbor={OSPF_ROUTER_ID}");
+    let torn = format!(
+        "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
+    );
+    let (signal0, torn0) = (b.count(&signal), b.count_fresh(&torn).await);
+    let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
+    let (full_b0, full_a0) = (b.count(&full_on_b), a.count(&full_on_a));
+    log("sending SIGTERM to router-a's nos-ospfd; its last Hello carries RS");
+    w.dock
+        .signal_process("router-a", "nos-ospfd", "-TERM")
+        .await?;
+    let restart = async {
+        b.wait_new(&signal, signal0, 30).await?;
+        b.wait_new(&full_on_b, full_b0, 90).await?;
+        a.wait_new(&full_on_a, full_a0, 90).await?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        anyhow::Ok(())
+    };
+    let route_held = async {
+        loop {
+            if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
+                bail!(
+                    "router-b lost its ospf route to {OSPF_GR_LOOPBACK_ADDRESS} during the restart"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    tokio::select! {
+        r = restart => r?,
+        r = route_held => r?,
+    }
+    quiet_settled(b, &torn, torn0).await?;
+
+    log("restoring lls off and graceful restart off");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    for r in [a, b] {
+        r.edit(|c| {
+            for p in c
+                .ospf_instances
+                .iter_mut()
+                .flat_map(|i| i.areas.iter_mut())
+                .flat_map(|ar| ar.profiles.iter_mut())
+            {
+                p.lls = false;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    a.provision_flags(&with_base(
+        A,
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-graceful-restart-grace-period",
+            "0",
+            "--loopback-remove-address",
+            OSPF_GR_LOOPBACK_ADDRESS,
+            "--clear-ospf-loopback-profile",
+        ]),
+    ))
+    .await?;
+    b.wait_ospf_route_gone(OSPF_GR_LOOPBACK_ADDRESS, 30).await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    both_full_p2p(a, b).await
+}
+
 /// RFC 2328 §14 aging. Self-contained: both nos-ospfd processes start with a
 /// real `--lsa-age-multiplier` (1800s/3600s become 10s/20s).
 pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {

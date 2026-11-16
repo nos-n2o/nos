@@ -355,3 +355,113 @@ async fn helper_exits_grace_when_a_third_routers_topology_lsa_appears() {
     settle(2).await;
     assert!(!helping(&a, id(2)).await);
 }
+
+fn lls_link(helper_max: u32) -> LinkConfig {
+    LinkConfig {
+        lls: true,
+        helper_max_grace_period: helper_max,
+        ..link("eth0.0", 10)
+    }
+}
+
+fn rs_hello(cfg: &LinkConfig, eof: u32) -> packet::HelloPacket {
+    packet::HelloPacket {
+        lls: Some(crate::lls::Lls { eof: Some(eof) }),
+        ..matching_hello(cfg, Ipv4Addr::new(9, 9, 9, 10))
+    }
+}
+
+fn hello_from_peer(cfg: &LinkConfig, status: &StatusHandle, hello: &packet::HelloPacket) {
+    handle_hello(
+        cfg,
+        Ipv4Addr::new(1, 1, 1, 1),
+        status,
+        Ipv4Addr::new(10, 0, 0, 2),
+        hello,
+        false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
+    );
+}
+
+fn deadline_of(status: &StatusHandle) -> Option<Instant> {
+    status.borrow().neighbors[&Ipv4Addr::new(9, 9, 9, 10)].grace_deadline
+}
+
+/// RFC 4812: an RS Hello (which no longer lists us) holds a Full neighbor,
+/// for at most the helper cap, and only once.
+#[tokio::test(start_paused = true)]
+async fn rs_hello_holds_a_full_neighbor_once_and_capped() {
+    let cfg = lls_link(30);
+    let status = grace_status(None);
+    hello_from_peer(&cfg, &status, &rs_hello(&cfg, crate::lls::EOF_RS));
+    assert_eq!(state_of(&status), NeighborState::Full);
+    let first = deadline_of(&status).unwrap();
+    assert_eq!(first - Instant::now(), Duration::from_secs(30));
+    tokio::time::advance(Duration::from_secs(10)).await;
+    hello_from_peer(&cfg, &status, &rs_hello(&cfg, crate::lls::EOF_RS));
+    assert_eq!(deadline_of(&status), Some(first), "not extended again");
+    // The signal runs out: back under the inactivity timer, torn down.
+    tokio::time::advance(Duration::from_secs(21)).await;
+    expire_grace(&cfg, &status);
+    assert_eq!(deadline_of(&status), None);
+    hello_from_peer(&cfg, &status, &rs_hello(&cfg, 0));
+    assert_eq!(state_of(&status), NeighborState::Init);
+}
+
+#[tokio::test]
+async fn rs_is_ignored_when_lls_is_off_extended_virtual_or_capped_to_zero() {
+    let plain = link("eth0.0", 10);
+    let ext = LinkConfig {
+        lls: true,
+        auth: ext_auth(),
+        ..link("eth0.0", 10)
+    };
+    let vlink = LinkConfig {
+        virtual_link: Some(VirtualLinkEnd {
+            transit_area: Ipv4Addr::new(0, 0, 0, 1),
+            endpoint: Ipv4Addr::new(9, 9, 9, 10),
+            neighbor: Ipv4Addr::new(10, 0, 0, 2),
+        }),
+        ..lls_link(30)
+    };
+    for cfg in [plain, ext, vlink, lls_link(0)] {
+        let status = grace_status(None);
+        hello_from_peer(&cfg, &status, &rs_hello(&cfg, crate::lls::EOF_RS));
+        assert_eq!(deadline_of(&status), None);
+    }
+}
+
+/// RFC 4811: an LR Init DBD from a Full neighbor starts a resync that keeps
+/// it held; without LR it does not.
+#[tokio::test]
+async fn lr_dbd_holds_a_full_neighbor() {
+    let cfg = lls_link(30);
+    let lsdb = Mutex::new(Lsdb::default());
+    let local = Mutex::new(Lsdb::default());
+    for (eof, held) in [(0, false), (crate::lls::EOF_LR, true)] {
+        let status = grace_status(None);
+        let dbd = packet::DbdPacket {
+            lls: Some(crate::lls::Lls { eof: Some(eof) }),
+            router_id: Ipv4Addr::new(9, 9, 9, 10),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 1500,
+            options: 0,
+            init: true,
+            more: true,
+            master: true,
+            dd_sequence_number: 1,
+            lsa_headers: vec![],
+        };
+        handle_dbd(
+            &cfg,
+            Ipv4Addr::new(1, 1, 1, 1),
+            &status,
+            &lsdb,
+            &local,
+            &dbd,
+            100,
+        )
+        .await;
+        assert_eq!(deadline_of(&status).is_some(), held);
+    }
+}

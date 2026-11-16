@@ -90,6 +90,41 @@ pub(super) fn on_grace_lsa(
     });
 }
 
+/// RFC 4811/4812 helper side: a `Full` neighbor signalling a restart (`RS`,
+/// `resync = false`) or an out-of-band resync (`LR` on an Init DBD) is held
+/// in grace for `helper_max_grace_period` seconds (not extended if it is
+/// already in grace, e.g. from its Grace-LSA): its Router-LSA link
+/// stays and a one-way Hello or the Init DBD does not tear the adjacency
+/// down. It ends like an RFC 3623 grace (reaching `Full` again, expiry, or a
+/// topology change). Not honoured with a zero cap.
+pub(super) fn enter_lls_grace(
+    cfg: &LinkConfig,
+    status: &StatusHandle,
+    neighbor_id: Ipv4Addr,
+    resync: bool,
+) {
+    if cfg.helper_max_grace_period == 0 {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(u64::from(cfg.helper_max_grace_period));
+    let started = status.send_if_modified(|s| {
+        s.neighbors.get_mut(&neighbor_id).is_some_and(|n| {
+            let full = n.state == NeighborState::Full;
+            if full && n.grace_deadline.is_none() {
+                n.grace_deadline = Some(deadline);
+            }
+            full
+        })
+    });
+    if started {
+        if resync {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls resync started");
+        } else {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls restart signal");
+        }
+    }
+}
+
 /// RFC 3623 §3.2 (c) strict LSA checking: `origins` are the routers whose
 /// topology LSAs changed in this link's area. A neighbor in grace ends it
 /// when anyone but the neighbor itself changed one; it is then subject to the

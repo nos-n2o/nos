@@ -19,7 +19,7 @@ use self::originate::local_subnet;
 use self::rx::{
     accept_crypto_sequence, advance_adjacencies, execute_actions, handle_dbd, handle_hello,
     handle_lsack, handle_lsr, handle_lsu, initial_crypto_seq, run_election, send_hello,
-    sync_all_drouters,
+    send_hello_eof, sync_all_drouters,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -445,7 +445,7 @@ pub struct NeighborInfo {
     pub state: NeighborState,
     /// The peer's RFC 5613 LLS block from its last valid Hello/DBD; `None`
     /// when it carried none or LLS is not active here (`LinkConfig::lls_active`).
-    /// RFC 4811/4812 will read its `eof` LR/RS bits.
+    /// RFC 4811/4812 act on its `eof` LR/RS bits (`enter_lls_grace`).
     pub lls: Option<crate::lls::Lls>,
     pub priority: u8,
     pub declared_dr: Ipv4Addr,
@@ -756,6 +756,10 @@ pub async fn run(
             Some(command) = commands.recv() => match command {
                 LinkCommand::Grace(grace_period) => {
                     send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
+                    // RFC 4812: the last Hello says "restarting", for peers that read LLS not the Grace-LSA.
+                    if cfg.lls_active() && cfg.virtual_link.is_none() {
+                        send_hello_eof(&socket, &cfg, local_router_id, &status, &mut next_seq, lls::EOF_RS);
+                    }
                 }
                 LinkCommand::FloodNow => {
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
