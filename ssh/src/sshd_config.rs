@@ -15,7 +15,9 @@ pub fn extra_directives() -> &'static str {
 }
 
 /// Password-only (PAM does the check against `nos-watchdogd`); no forwarding,
-/// no tunnels, no environment from the user.
+/// no tunnels (`DisableForwarding` overrides the older per-kind directives, which stay as
+/// explicit belt and braces), no environment or `~/.ssh/rc` from the user. No `Subsystem` (no
+/// sftp) and no `ForceCommand` (it would run as `<shell> -c`, breaking the interactive login).
 ///
 /// `PAMServiceName nos-sshd` selects `/etc/pam.d/nos-sshd` (#998) instead of the
 /// distro's `sshd` service file; needs OpenSSH >= the trixie 10.0p2 the image ships.
@@ -32,7 +34,10 @@ pub fn render(s: &Settings) -> String {
          X11Forwarding no\n\
          AllowAgentForwarding no\n\
          AllowTcpForwarding no\n\
+         AllowStreamLocalForwarding no\n\
+         DisableForwarding yes\n\
          PermitTunnel no\n\
+         PermitUserRC no\n\
          PermitUserEnvironment no\n\
          LoginGraceTime 30\n\
          MaxAuthTries 3\n\
@@ -79,14 +84,22 @@ mod tests {
             "PermitRootLogin no",
             "HostKey /run/nos-sshd/rt1/ssh_host_ed25519_key",
             "AllowTcpForwarding no",
+            "AllowStreamLocalForwarding no",
+            "DisableForwarding yes",
             "PermitTunnel no",
+            "PermitUserRC no",
             "PermitUserEnvironment no",
             "LogLevel VERBOSE",
         ] {
             assert!(t.lines().any(|l| l == line), "missing {line}");
         }
         assert!(!t.contains("PubkeyAuthentication yes"));
-        assert!(!t.contains("Forwarding yes"));
+        assert!(!t
+            .lines()
+            .any(|l| l.contains("Forwarding yes") && l != "DisableForwarding yes"));
+        assert!(!t
+            .lines()
+            .any(|l| l.starts_with("Subsystem") || l.starts_with("ForceCommand")));
         assert!(t.ends_with(extra_directives()));
     }
 

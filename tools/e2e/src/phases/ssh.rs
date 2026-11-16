@@ -212,6 +212,13 @@ pub async fn ssh_login_shell(w: &mut World) -> anyhow::Result<()> {
     }
     a.assert_quiet(&user_line("redeemed"), redeemed, 3).await?;
 
+    log("ssh-login-shell: streamlocal and direct-tcpip forwarding are refused");
+    if ssh.direct_streamlocal("/run/nos/config.sock").await? {
+        bail!("a direct-streamlocal channel to the config socket must be refused");
+    }
+    if ssh.direct_tcpip("127.0.0.1", u32::from(SSH_PORT)).await? {
+        bail!("a direct-tcpip channel must be refused");
+    }
     // `nos` is setgid (to reach /run/nos), which makes it non-dumpable: even its owner cannot
     // read `/proc/<pid>/environ`, so the ticket in its environment is not exposed to the user's
     // other processes. That also means no live ticket can be fished out to replay; a ticket the
