@@ -136,6 +136,17 @@ pub enum OspfProfileOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Toggles passive mode (stub advertisement, no Hello, no adjacency).
+    SetPassive {
+        /// Name of the OSPF instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Clears the MTU of the OSPF profile so it reverts to the default.
     ClearMtu {
         /// Name of the OSPF instance owning the target.
@@ -253,6 +264,7 @@ impl OspfProfileOp {
             | OspfProfileOp::ClearPriority { .. }
             | OspfProfileOp::SetMtu { .. } => self.apply_part1(config),
             OspfProfileOp::SetMtuIgnore { .. }
+            | OspfProfileOp::SetPassive { .. }
             | OspfProfileOp::ClearMtu { .. }
             | OspfProfileOp::SetExtendedSequenceNumbers { .. }
             | OspfProfileOp::SetNetworkType { .. }
@@ -285,6 +297,7 @@ impl OspfProfileOp {
                         priority: None,
                         mtu: None,
                         mtu_ignore: false,
+                        passive: false,
                         network_type: None,
                         auth: None,
                         extended_sequence_numbers: false,
@@ -403,6 +416,15 @@ impl OspfProfileOp {
                 enabled,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.mtu_ignore = *enabled;
+                Ok(())
+            }
+            OspfProfileOp::SetPassive {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.passive = *enabled;
                 Ok(())
             }
             OspfProfileOp::ClearMtu {
@@ -608,6 +630,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            passive: false,
             network_type: None,
             auth: None,
             extended_sequence_numbers: false,
@@ -638,6 +661,25 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.ospf_instances[0].areas[0].profiles.len(), 1);
         assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].name, "p1");
+    }
+
+    #[test]
+    fn set_passive_toggles_the_flag() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        for enabled in [true, false] {
+            OspfProfileOp::SetPassive {
+                instance: "o1".to_string(),
+                area_id: area_id("0.0.0.0"),
+                name: "p1".to_string(),
+                enabled,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+            assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].passive, enabled);
+        }
     }
 
     #[test]

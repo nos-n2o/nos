@@ -4396,6 +4396,92 @@ pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full_on_a, full0, 90).await
 }
 
+/// Passive interface (#1137, requires `ospf`): router-a attaches a second,
+/// passive profile to a routed subinterface (`eth0.300`, 192.0.2.1/24).
+/// Its subnet is advertised as a stub network (router-b installs it over the
+/// active link) but no link starts and no OSPF event ever names it; clearing
+/// `passive` starts the link in place, setting it again stops it; the
+/// subinterface is deleted at the end.
+pub async fn ospf_passive(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let tag = SUBINTERFACE_TAG;
+    let link = format!("eth0.{tag}");
+    let lan = "192.0.2.0/24";
+    let passive_p = "ospf-passive-profile";
+    let flags = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            SUBINTERFACE_ADDRESS,
+            "--subinterface-tag",
+            &tag.to_string(),
+            "--routing-table",
+            "rt1",
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B.s(),
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-area",
+            OSPF_AREA,
+            "--ospf-profile",
+            passive_p,
+            "--ospf-interface-profile",
+            passive_p,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let advertised = format!("ospf passive interface advertised attach_point={link}");
+    let started = format!("ospf link driver started link={link}");
+    let stopped = format!("ospf link stopped link={link}");
+    let route = format!("added route prefix={lan}.*source=Some(Ospf)");
+    let (adv0, route0) = (a.count(&advertised), b.count(&route));
+
+    log("attaching a passive profile to router-a's eth0.300");
+    a.provision_flags(&flags(&["--ospf-passive", "true"]))
+        .await?;
+    a.wait_new(&advertised, adv0, 60).await?;
+    b.wait_new(&route, route0, 60).await?;
+    let events = format!("link={link}");
+    a.assert_quiet(&events, a.count(&events), 15).await?;
+
+    log("clearing passive: the link starts in place");
+    let adv1 = a.count(&advertised);
+    a.provision_flags(&flags(&["--ospf-passive", "false"]))
+        .await?;
+    a.wait(&started).await?;
+
+    log("passive again: the link stops, the stub returns");
+    a.provision_flags(&flags(&["--ospf-passive", "true"]))
+        .await?;
+    a.wait(&stopped).await?;
+    a.wait_new(&advertised, adv1, 60).await?;
+
+    a.provision_flags(&strings(&[
+        "--address",
+        SUBINTERFACE_ADDRESS,
+        "--subinterface-tag",
+        &tag.to_string(),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B.s(),
+        "--delete-subinterface",
+    ]))
+    .await
+}
+
 /// RFC 2328 §9.5 point-to-multipoint (requires `ospf`): the shared profile's
 /// network type forced to `point-to-multipoint` on router-a/router-b's eth0.0
 /// and bd-ospf bridge. Hello must still reach `Full` on both links with no

@@ -8,6 +8,7 @@ OSPF is the link-state interior gateway protocol for IPv4 (RFC 2328). NOS runs i
   - [Check neighbours, the LSDB and routes](#check-neighbours-the-lsdb-and-routes)
   - [Advertise a loopback](#advertise-a-loopback)
   - [Run OSPF on a LAN segment](#run-ospf-on-a-lan-segment)
+  - [Advertise a LAN without speaking OSPF](#advertise-a-lan-without-speaking-ospf)
   - [Authenticate a link, and change its key](#authenticate-a-link-and-change-its-key)
   - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
   - [Add a second area (ABR)](#add-a-second-area-abr)
@@ -97,6 +98,15 @@ $C $B/v1/ospf/neighbors | jq .
 $C $B/v1/ospf/database | jq .
 $C $B/v1/routes/rt1
 ```
+
+### Advertise a LAN without speaking OSPF
+
+A passive profile advertises an attach point's subnet as a stub network but sends no Hello and forms no adjacency, for a LAN with only hosts on it.
+
+- `set … profile <p> passive enable` on the profile, then attach it to the subinterface or broadcast domain as usual; `delete passive` makes the link live again without restarting the instance.
+- It cannot be combined with `auth`, `bfd` or `network-type point-to-multipoint`: a commit with both is rejected.
+- A down kernel device removes the stub, like a live link. The subnet's area counts toward the ABR rule.
+- `nos-ospfd` logs `ospf passive interface advertised attach_point=<name>`.
 
 ### Advertise a loopback
 
@@ -672,6 +682,7 @@ Absolute forms start with `set ospf instance <name> area <area-id> profile <prof
 | dead interval | `set … profile <p> dead-interval <s>`; relative `set dead-interval <s>` / `delete dead-interval` *(relative only)* | `dead-interval` | integer seconds, 0 to 65535; default 40 | greater than the hello interval when both are set | how long a silent neighbour is kept; must match the neighbour's; also the LAN wait time before the first election | `show ospf neigh` |
 | cost | `set … profile <p> cost <n>`; relative `set cost <n>` / `delete cost` *(relative only)* | `cost` | integer 1 to 65535; default 1 | 0 is refused | cost of the link in SPF | `show route <table>` on other routers, `GET /v1/routes/{table}` |
 | priority | `set … profile <p> priority <n>`; relative `set priority <n>` / `delete priority` *(relative only)* | `priority` | integer 0 to 255; default 1 | | DR/BDR election; 0 never becomes DR or BDR; no effect on point-to-point | `show ospf neigh` |
+| Passive | `set … profile <p> passive enable`; relative `set passive enable` / `delete passive` | `passive` | `true`/`false`; default `false` | | Advertise the attach point's subnet as a stub network, no Hello, no adjacency; excludes auth, bfd, point-to-multipoint | `GET …/profile/<p>/passive` |
 | MTU ignore | `set … profile <p> mtu-ignore enable`; relative `set mtu-ignore enable` / `delete mtu-ignore` | `mtu-ignore` | `true`/`false`; default `false` | | Skip the RFC 2328 §10.6 check that a neighbour's advertised MTU is not larger than the link's | `GET …/profile/<p>/mtu-ignore` |
 | MTU | `set … profile <p> mtu <bytes>`; relative `set mtu <bytes>` / `delete mtu` *(relative only)* | `mtu` | integer 0 to 65535; default: the link's own MTU (1500 if unknown) | | MTU advertised in database-description packets and used to size them; the interface's real MTU is not changed | `GET …/profile/<p>/mtu` |
 | network type | `set … profile <p> network-type point-to-point\|broadcast\|point-to-multipoint`; relative `set network-type …` / `delete network-type` *(relative only)* | `network-type`, `"PointToPoint"`, `"Broadcast"` or `"PointToMultipoint"` | default: point-to-point on a subinterface or loopback, broadcast on a broadcast domain | | forces the network type on every link using the profile | `show ospf neigh` (link state) |

@@ -49,6 +49,8 @@ struct State {
     down: HashMap<String, &'static str>,
     /// Links kept on their running values despite a failed lookup.
     degraded: HashSet<String>,
+    /// Passive attach points already logged as advertised (log on change).
+    passive: HashSet<String>,
 }
 
 /// Gates of `watched` in `table`, sorted: the resync trigger compares these.
@@ -181,6 +183,7 @@ struct Wanted {
     watched: HashSet<String>,
     next_down: HashMap<String, &'static str>,
     next_degraded: HashSet<String>,
+    next_passive: HashSet<String>,
     desired_links: Vec<LinkConfig>,
     bfd_wants: HashMap<String, nos_proto::schema::BfdProfile>,
     desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>,
@@ -212,6 +215,8 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         watched,
         next_down,
         next_degraded,
+        next_passive,
+        desired_stubs,
         desired_links,
         bfd_wants,
         ..
@@ -249,7 +254,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
         let addr = resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
-        let running = if attach.has_address {
+        let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
             None
@@ -266,6 +271,17 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        if profile.passive {
+            advertise_passive(
+                state,
+                next_passive,
+                desired_stubs,
+                &link_name,
+                area.area_id,
+                (m.local_addr, m.local_prefix_len, profile.cost.unwrap_or(1)),
+            );
+            continue;
+        }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
@@ -339,6 +355,8 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         watched,
         next_down,
         next_degraded,
+        next_passive,
+        desired_stubs,
         desired_links,
         bfd_wants,
         ..
@@ -370,7 +388,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
         let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
-        let running = if attach.has_address {
+        let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
             None
@@ -392,6 +410,17 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        if profile.passive {
+            advertise_passive(
+                state,
+                next_passive,
+                desired_stubs,
+                &link_name,
+                area.area_id,
+                (m.local_addr, m.local_prefix_len, profile.cost.unwrap_or(1)),
+            );
+            continue;
+        }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
@@ -489,6 +518,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         watched,
         next_down,
         next_degraded,
+        next_passive: HashSet::new(),
         desired_links: Vec::new(),
         bfd_wants: HashMap::new(),
         desired_stubs: HashMap::new(),
@@ -555,6 +585,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         watched,
         next_down,
         next_degraded,
+        next_passive,
         desired_links,
         bfd_wants,
         desired_stubs,
@@ -567,6 +598,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     state.watched = watched;
     state.down = next_down;
     state.degraded = next_degraded;
+    state.passive = next_passive;
 }
 
 /// The named BFD profile (validation guarantees it exists).
@@ -664,6 +696,29 @@ fn gate_link(
         }
         Gate::Ungated => Some(0),
     }
+}
+
+/// A passive attach point: no `LinkConfig`, only its subnet as a stub network
+/// of the profile's area (RFC 2328 §12.4.1.3). Logs on first appearance.
+fn advertise_passive(
+    state: &State,
+    next: &mut HashSet<String>,
+    stubs: &mut HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>,
+    link: &str,
+    area_id: Ipv4Addr,
+    (addr, prefix_len, cost): (Ipv4Addr, u8, u16),
+) {
+    let Ok(subnet) = Ipv4Net::new(addr, prefix_len) else {
+        return;
+    };
+    if !state.passive.contains(link) {
+        info!(attach_point = %link, "ospf passive interface advertised");
+    }
+    next.insert(link.to_string());
+    stubs
+        .entry(area_id)
+        .or_default()
+        .push((subnet.trunc(), cost));
 }
 
 /// Warns once per transition into "kept on the running link's values".

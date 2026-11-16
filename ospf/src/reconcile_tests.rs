@@ -393,6 +393,27 @@ async fn resync_broadcast_domain_builds_link() {
 }
 
 #[tokio::test]
+async fn resync_passive_subinterface_is_a_stub_not_a_link() {
+    let mut cfg = p2p_cfg();
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = true;
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+
+    assert!(
+        e.running("eth0.0").await.is_none(),
+        "no link for a passive one"
+    );
+    assert_eq!(
+        e.links.stub_networks().await,
+        HashMap::from([(
+            Ipv4Addr::UNSPECIFIED,
+            vec![("10.0.0.0/30".parse::<Ipv4Net>().unwrap(), 1)]
+        )])
+    );
+    assert_eq!(names(&e.state.passive), ["eth0.0"]);
+}
+
+#[tokio::test]
 async fn resync_loopback_feeds_stub_networks() {
     let mut cfg = p2p_cfg();
     cfg.ospf_instances[0].areas[0].profiles[0].cost = Some(5);
