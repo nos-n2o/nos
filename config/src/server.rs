@@ -270,6 +270,8 @@ where
     // of subscription.
     let (sub_tx, mut sub_rx) = mpsc::channel::<Event>(16);
     let mut sub_task: Option<JoinHandle<()>> = None;
+    // The shell's live unsaved flag (#1139); `Role::User` plain subscribers only.
+    let mut unsaved_task: Option<JoinHandle<()>> = None;
     // A Subscribe/SubscribeDiff client is expected to send its request then
     // drop (or never touch again) its write half — "the caller owns its
     // lifetime" per `client::subscribe`'s doc comment — so seeing EOF/an
@@ -298,7 +300,15 @@ where
                     }
                 };
                 let flow =
-                    on_request(req, &caller, &store, &mut writer, &sub_tx, &mut sub_task).await;
+                    on_request(
+                        req,
+                        &caller,
+                        &store,
+                        &mut writer,
+                        &sub_tx,
+                        (&mut sub_task, &mut unsaved_task),
+                    )
+                    .await;
                 if flow.is_break() {
                     break;
                 }
@@ -315,6 +325,7 @@ where
     }
 
     set_forwarder(&mut sub_task, None);
+    set_forwarder(&mut unsaved_task, None);
 }
 
 /// Handles one request, replying on `writer`. `Break` means the client is
@@ -325,7 +336,7 @@ async fn on_request<S>(
     store: &ConfigStore,
     writer: &mut FramedWrite<tokio::io::WriteHalf<S>, IpcCodec<Event>>,
     sub_tx: &mpsc::Sender<Event>,
-    sub_task: &mut Option<JoinHandle<()>>,
+    (sub_task, unsaved_task): (&mut Option<JoinHandle<()>>, &mut Option<JoinHandle<()>>),
 ) -> ControlFlow<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -347,6 +358,11 @@ where
         Request::Subscribe => {
             let (initial, forwarder) = store.subscribe_config(caller.role, sub_tx.clone()).await;
             set_forwarder(sub_task, Some(forwarder));
+            // Daemons expect only `Config` on a subscription; the shell also
+            // wants the unsaved flag, pushed so its prompt follows it live.
+            if caller.role == Role::User {
+                set_forwarder(unsaved_task, Some(store.subscribe_unsaved(sub_tx.clone())));
+            }
             debug!("IPC client subscribed");
             initial
         }
@@ -360,6 +376,7 @@ where
         }
         Request::Unsubscribe => {
             set_forwarder(sub_task, None);
+            set_forwarder(unsaved_task, None);
             debug!("IPC client unsubscribed");
             return ControlFlow::Continue(());
         }

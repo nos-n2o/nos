@@ -64,11 +64,15 @@ struct NosPrompt {
     hostname: Arc<Mutex<String>>,
     suffix: String,
     /// Running config not saved: a `*` after the hostname (#1139).
-    unsaved: bool,
+    unsaved: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NosPrompt {
-    fn for_mode(hostname: Arc<Mutex<String>>, mode: &Mode, unsaved: bool) -> Self {
+    fn for_mode(
+        hostname: Arc<Mutex<String>>,
+        mode: &Mode,
+        unsaved: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         let suffix = match mode {
             Mode::Operational => String::new(),
             Mode::Configuration {
@@ -89,7 +93,11 @@ impl NosPrompt {
 impl Prompt for NosPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         let hostname = self.hostname.lock().unwrap().clone();
-        let star = if self.unsaved { "*" } else { "" };
+        let star = if self.unsaved.load(std::sync::atomic::Ordering::Relaxed) {
+            "*"
+        } else {
+            ""
+        };
         Cow::Owned(format!("{hostname}{star}{}", self.suffix))
     }
 
@@ -218,18 +226,19 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
     // an `impl Fn()` bound.
     let repaint_signal = line_editor.repaint_signal();
     let notify_repaint = move || repaint_signal.request_repaint();
+    // Fed by the config subscription (`Event::SaveStatus`): live, no per-line call.
+    let unsaved = Arc::new(std::sync::atomic::AtomicBool::new(false));
     tokio::spawn(subscribe_hostname_task(
         config_socket.clone(),
         hostname.clone(),
+        unsaved.clone(),
         notify_repaint,
     ));
 
     println!("NOS interactive shell. Type 'help' for available commands, or press '?' at any point while typing.");
 
     loop {
-        // One tiny call per line; also catches REST commits and saves.
-        let unsaved = client::unsaved(&config_socket).await.unwrap_or(false);
-        let prompt = NosPrompt::for_mode(hostname.clone(), &mode, unsaved);
+        let prompt = NosPrompt::for_mode(hostname.clone(), &mode, unsaved.clone());
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
@@ -408,7 +417,7 @@ mod tests {
     fn prompt_shows_transaction_and_position() {
         let host = Arc::new(Mutex::new("r1".to_string()));
         let render = |mode: &Mode| {
-            NosPrompt::for_mode(host.clone(), mode, false)
+            NosPrompt::for_mode(host.clone(), mode, Arc::default())
                 .render_prompt_left()
                 .into_owned()
         };
@@ -418,9 +427,13 @@ mod tests {
             render(&config(&["bgp-instance", "i"], false)),
             "r1(t1/bgp-instance:i)"
         );
-        let star = NosPrompt::for_mode(host.clone(), &config(&[], false), true);
+        let star = NosPrompt::for_mode(
+            host.clone(),
+            &config(&[], false),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
         assert_eq!(star.render_prompt_left(), "r1*(t1)");
-        let p = NosPrompt::for_mode(host, &Mode::Operational, false);
+        let p = NosPrompt::for_mode(host, &Mode::Operational, Arc::default());
         assert_eq!(p.render_prompt_right(), "");
         assert_eq!(p.render_prompt_indicator(PromptEditMode::Default), "> ");
         assert_eq!(p.render_prompt_multiline_indicator(), ":::  ");

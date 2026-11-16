@@ -37,7 +37,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 - `Request::SubscribeDiff { scopes }` → `store.subscribe_diff(role, scopes, sub_tx)`: the initial diff, then `CommitUpdate::diff_for(role)` per commit (one `Arc<ConfigDiff>` per visibility class, #751; `diff_configs_for_role`, no projection clone, #778), scoped, skipped when empty. Forwarders live in `store.rs` (tests need no PKI).
 - `Request::Unsubscribe` → abort the active forwarder task.
 - `UserExists`, `List*Instances`, `GetRestApi`: `Restd`-only (#755, #759).
-- `SaveStatus` → `Event::SaveStatus` (`seq != saved_seq`, #1139).
+- `SaveStatus` → `Event::SaveStatus`; pushed on a `User` `Subscribe` (#1139).
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
 - `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction`/`DiffTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed { warnings }` (advice from `warnings::commit_warnings`, #501)/`Event::Discarded`/`Event::Diff`/`Event::Error`.
 - Lagged subscriber (#632): terminal `Event::Error("lagged")`, then the connection closes; the client resubscribes.

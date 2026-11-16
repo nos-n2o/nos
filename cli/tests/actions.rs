@@ -28,6 +28,13 @@ fn fake_configd(path: &Path) {
     let txn = Arc::new(Mutex::new(running.clone()));
     serve("configd", "", path, move |req: Request| {
         let mut cfg = txn.lock().unwrap();
+        if matches!(req, Request::Subscribe) {
+            // What `Role::User` subscribers get: the config, then the live flag (#1139).
+            return vec![
+                Event::Config(running.clone()),
+                Event::SaveStatus { unsaved: true },
+            ];
+        }
         vec![match req {
             Request::Get | Request::Subscribe => Event::Config(running.clone()),
             Request::Save => Event::Saved,
@@ -320,9 +327,11 @@ async fn every_show_command_runs_against_its_daemon() {
     let hostname = Arc::new(Mutex::new("nos".to_string()));
     let repainted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = Arc::clone(&repainted);
+    let unsaved = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let task = tokio::spawn(actions::subscribe_hostname_task(
         lab.config.clone(),
         Arc::clone(&hostname),
+        Arc::clone(&unsaved),
         move || flag.store(true, std::sync::atomic::Ordering::Relaxed),
     ));
     for _ in 0..100 {
@@ -331,7 +340,17 @@ async fn every_show_command_runs_against_its_daemon() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    for _ in 0..100 {
+        if unsaved.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     task.abort();
+    assert!(
+        unsaved.load(std::sync::atomic::Ordering::Relaxed),
+        "live `*`"
+    );
     assert_eq!(*hostname.lock().unwrap(), "r1");
     assert!(repainted.load(std::sync::atomic::Ordering::Relaxed));
 }

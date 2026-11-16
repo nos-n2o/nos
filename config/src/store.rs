@@ -205,6 +205,9 @@ struct Inner {
     /// running config (a commit, a password rehash, the ssh host key) is not
     /// on disk (#1139).
     saved_seq: std::sync::atomic::AtomicU64,
+    /// The `unsaved` flag, pushed to `Role::User` subscribers (the shell's
+    /// live `*`, #1139).
+    unsaved_tx: tokio::sync::watch::Sender<bool>,
     /// Held across registering and `tx.subscribe()`, and across reading it
     /// and `tx.send()`, so a commit's `pending` classes are exactly those of
     /// the receivers that get it.
@@ -264,6 +267,7 @@ impl ConfigStore {
             tx,
             seq: std::sync::atomic::AtomicU64::new(0),
             saved_seq: std::sync::atomic::AtomicU64::new(0),
+            unsaved_tx: tokio::sync::watch::channel(false).0,
             diff_subscribers: std::sync::Mutex::default(),
             config_path,
             idle_ttl: TX_IDLE_TTL,
@@ -339,6 +343,7 @@ impl ConfigStore {
         let subs = self.diff_subscribers();
         let pending = subs.keys().copied().collect();
         let seq = self.0.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.0.unsaved_tx.send_replace(true);
         // Ignore send errors — no active receivers is not a failure.
         let _ = self.0.tx.send(Arc::new(
             CommitUpdate::new(config, prev, pending).with_seq(seq),
@@ -412,7 +417,24 @@ impl ConfigStore {
         self.0
             .saved_seq
             .store(seq, std::sync::atomic::Ordering::SeqCst);
+        self.0.unsaved_tx.send_replace(self.unsaved());
         Ok(())
+    }
+
+    /// Pushes `Event::SaveStatus` to `out` now and on every change, until
+    /// `out` closes or the returned task is aborted.
+    pub fn subscribe_unsaved(&self, out: mpsc::Sender<Event>) -> JoinHandle<()> {
+        let mut rx = self.0.unsaved_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let unsaved = *rx.borrow_and_update();
+                if out.send(Event::SaveStatus { unsaved }).await.is_err()
+                    || rx.changed().await.is_err()
+                {
+                    break;
+                }
+            }
+        })
     }
 
     /// Whether the running config differs from what was last saved (or
@@ -1582,8 +1604,18 @@ mod tests {
         assert!(!store.unsaved());
         commit_password(&store, "t1", "alice", "one").await;
         assert!(store.unsaved());
+        let (out, mut rx) = mpsc::channel(8);
+        let _task = store.subscribe_unsaved(out);
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::SaveStatus { unsaved: true })
+        ));
         store.save_to_disk().await.unwrap();
         assert!(!store.unsaved());
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::SaveStatus { unsaved: false })
+        ));
         let old = store.running_snapshot().await.users[0].password.clone();
         store
             .upgrade_password_hash("alice", &old, nos_password::hash("one"))
