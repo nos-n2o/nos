@@ -1962,3 +1962,60 @@ async fn router_in_two_non_backbone_areas_is_no_abr() {
         assert_eq!(r.flags & lsa::ROUTER_FLAG_B, 0);
     }
 }
+
+/// #1137: toggling a profile passive and back never leaves a Router-LSA
+/// without the subnet's type-3 stub (the stub-only pass, the live link, the
+/// stub-only pass again), and the link starts and stops in place.
+#[tokio::test(start_paused = true)]
+async fn passive_toggle_keeps_the_stub_in_the_router_lsa() {
+    let wire = Arc::new(wire::Wire::default());
+    let manager = LinkManager::with_opener(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+        wire.opener(),
+    );
+    let router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let area = Ipv4Addr::UNSPECIFIED;
+    let subnet: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+    let stubs = || HashMap::from([(area, vec![(subnet, 1)])]);
+    let has_stub = |manager: &Arc<LinkManager>| {
+        let manager = Arc::clone(manager);
+        async move {
+            for lsdb in manager.lsdbs.lock().await.values() {
+                lsdb.lock()
+                    .await
+                    .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+            }
+            manager.originate_router_lsas(router_id).await;
+            let lsdb = manager.lsdb_for(area).await;
+            let lsa = lsdb.lock().await.get(&router_key(router_id)).unwrap();
+            let LsaBody::Router(body) = &lsa.body else {
+                panic!("expected router lsa")
+            };
+            body.links.iter().any(|l| {
+                l.link_type == LINK_TYPE_STUB_NETWORK && l.link_id == Ipv4Addr::new(10, 0, 0, 0)
+            })
+        }
+    };
+
+    manager.reconcile(Vec::new(), stubs(), router_id).await;
+    assert!(has_stub(&manager).await, "passive: stub only");
+    assert!(manager.running_config("eth0.0").await.is_none());
+
+    manager
+        .reconcile(vec![link("eth0.0", 10)], HashMap::new(), router_id)
+        .await;
+    assert!(
+        manager.running_config("eth0.0").await.is_some(),
+        "link starts"
+    );
+    assert!(has_stub(&manager).await, "live: the link's own stub");
+
+    manager.reconcile(Vec::new(), stubs(), router_id).await;
+    assert!(
+        manager.running_config("eth0.0").await.is_none(),
+        "link stops"
+    );
+    assert!(has_stub(&manager).await, "passive again");
+}

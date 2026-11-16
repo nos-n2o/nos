@@ -275,6 +275,15 @@ pub struct OspfProfile {
     #[serde(default)]
     #[cli(topic = OspfProfileExtendedSequenceNumbers, words = "extended-sequence-numbers enable", alias = "extended-sequence-numbers")]
     pub extended_sequence_numbers: bool,
+
+    /// Passive interface: the attach point's subnet is advertised as a stub
+    /// network but no Hello is sent and no adjacency forms. Excludes `auth`,
+    /// `bfd` and point-to-multipoint (nothing to authenticate or elect);
+    /// checked in `valid_profile_timers`, since it needs the siblings.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfilePassive, words = "passive enable", alias = "passive")]
+    pub passive: bool,
 }
 
 fn valid_cost(cost: Option<u16>) -> garde::Result {
@@ -303,6 +312,15 @@ fn unique_name(name: &str, ctx: &Config) -> garde::Result {
 /// shallower (`OspfProfile` has no further-nested collection to skip over).
 pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
     for p in profiles {
+        if p.passive
+            && (p.auth.is_some()
+                || p.bfd.is_some()
+                || p.network_type == Some(NetworkType::PointToMultipoint))
+        {
+            return Err(garde::Error::new(
+                "passive excludes auth, bfd and point-to-multipoint",
+            ));
+        }
         if p.extended_sequence_numbers {
             let ok = matches!(&p.auth, Some(OspfAuth::Crypto { keys })
                 if keys.iter().all(|k| k.algorithm != OspfCryptoAlgorithm::Md5));
@@ -353,6 +371,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            passive: false,
             network_type: None,
             auth: None,
             extended_sequence_numbers: false,
@@ -414,6 +433,33 @@ mod tests {
                 key("pw9", "123456789"),
             ],
         }
+    }
+
+    #[test]
+    fn passive_excludes_auth_bfd_and_point_to_multipoint() {
+        let check = |p: OspfProfile| {
+            config_with(vec![instance("o", vec![area("0.0.0.0", vec![p])])]).validate()
+        };
+        let passive = || OspfProfile {
+            passive: true,
+            ..profile("p")
+        };
+        assert!(check(passive()).is_ok());
+        assert!(check(OspfProfile {
+            auth: Some(OspfAuth::Simple { key: "pw8".into() }),
+            ..passive()
+        })
+        .is_err());
+        assert!(check(OspfProfile {
+            network_type: Some(NetworkType::PointToMultipoint),
+            ..passive()
+        })
+        .is_err());
+        assert!(check(OspfProfile {
+            network_type: Some(NetworkType::PointToMultipoint),
+            ..profile("p")
+        })
+        .is_ok());
     }
 
     #[test]
@@ -500,6 +546,7 @@ mod tests {
             priority: None,
             mtu: None,
             mtu_ignore: false,
+            passive: false,
             network_type: None,
             auth: None,
             extended_sequence_numbers: false,

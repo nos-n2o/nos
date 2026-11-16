@@ -393,6 +393,71 @@ async fn resync_broadcast_domain_builds_link() {
 }
 
 #[tokio::test]
+async fn resync_passive_subinterface_is_a_stub_not_a_link() {
+    let mut cfg = p2p_cfg();
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = true;
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+
+    assert!(
+        e.running("eth0.0").await.is_none(),
+        "no link for a passive one"
+    );
+    assert_eq!(
+        e.links.stub_networks().await,
+        HashMap::from([(
+            Ipv4Addr::UNSPECIFIED,
+            vec![("10.0.0.0/30".parse::<Ipv4Net>().unwrap(), 1)]
+        )])
+    );
+    assert_eq!(names(&e.state.passive), ["eth0.0"]);
+}
+
+#[tokio::test]
+async fn resync_passive_down_device_withdraws_the_stub() {
+    let mut cfg = p2p_cfg();
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = true;
+    let mut e = Env::ready(cfg);
+    e.link_tx.send(table(&[("eth0", 7, true)])).unwrap();
+    e.resync().await;
+    assert_eq!(e.links.stub_networks().await.len(), 1);
+
+    e.link_tx.send(table(&[("eth0", 7, false)])).unwrap();
+    e.resync().await;
+    assert!(e.links.stub_networks().await.is_empty(), "stub withdrawn");
+    assert!(e.state.passive.is_empty());
+    assert_eq!(e.state.down.get("eth0.0"), Some(&"admin-down"));
+
+    e.link_tx.send(table(&[("eth0", 7, true)])).unwrap();
+    e.resync().await;
+    assert_eq!(e.links.stub_networks().await.len(), 1, "stub back");
+}
+
+#[tokio::test]
+async fn resync_toggling_passive_swaps_link_and_stub_in_place() {
+    let mut cfg = p2p_cfg();
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = true;
+    let mut e = Env::ready(cfg.clone());
+    e.resync().await;
+    assert!(e.running("eth0.0").await.is_none());
+    assert_eq!(e.links.stub_networks().await.len(), 1);
+
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = false;
+    e.configd().set_config(cfg.clone());
+    e.resync().await;
+    assert!(e.running("eth0.0").await.is_some(), "link starts");
+    assert!(e.links.stub_networks().await.is_empty(), "stub withdrawn");
+    assert!(e.state.passive.is_empty());
+
+    cfg.ospf_instances[0].areas[0].profiles[0].passive = true;
+    e.configd().set_config(cfg);
+    e.resync().await;
+    assert!(e.running("eth0.0").await.is_none(), "link stops");
+    assert_eq!(e.links.stub_networks().await.len(), 1, "stub back");
+    assert_eq!(names(&e.state.passive), ["eth0.0"]);
+}
+
+#[tokio::test]
 async fn resync_loopback_feeds_stub_networks() {
     let mut cfg = p2p_cfg();
     cfg.ospf_instances[0].areas[0].profiles[0].cost = Some(5);
