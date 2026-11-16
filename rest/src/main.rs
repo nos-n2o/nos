@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         shutdown_rx.clone(),
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(table = %args.table, "nos-restd starting");
     // Dhat build only (#798): SIGUSR1 logs the live heap, so `mem-wave` can
     // put it next to `VmRSS`. A default build keeps SIGUSR1's default action.

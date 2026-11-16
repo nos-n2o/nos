@@ -1,4 +1,5 @@
 pub mod broker;
+pub mod heartbeat;
 pub mod instances;
 pub mod pki;
 pub mod registry;

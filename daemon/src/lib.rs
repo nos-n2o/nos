@@ -6,4 +6,5 @@
 pub mod bootstrap;
 pub mod config;
 pub mod ipc;
+pub mod liveness;
 pub mod watchdog;

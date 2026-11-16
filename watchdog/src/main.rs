@@ -224,6 +224,11 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_SOCKET)]
     config_socket: PathBuf,
 
+    /// Never restart a daemon whose heartbeat stopped (debugging a hang with a
+    /// debugger attached; see `docs/architecture/supervision.md`).
+    #[arg(long)]
+    no_heartbeat_kill: bool,
+
     /// Directory the per-instance daemon sockets (`bgp-<name>.sock`,
     /// `rib-<name>.sock`, …) are created in. The fixed sockets have their
     /// own flags.
@@ -326,7 +331,10 @@ async fn main() -> anyhow::Result<()> {
         rotate_every_secs = args.pki_rotate_every,
         "ipc certificate authority ready"
     );
-    let policy = BackoffPolicy::default();
+    let mut policy = BackoffPolicy::default();
+    if args.no_heartbeat_kill {
+        policy.liveness_timeout = None;
+    }
     let registry = EndpointRegistry::default();
     let managed = managed_families(&args, &pki, policy, &registry);
     let mut tasks = vec![
@@ -688,10 +696,17 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 /// doubled its `VmHWM` under route-PUT churn (1232 -> 616 MB at 66k routes
 /// with one arena, #766; same net as nos-logd's #756).
 fn configd_spec(args: &Args, pki: &Arc<Pki>) -> ProcessSpec {
-    let configd_args = std::iter::once("--log-socket".to_string())
-        .chain(std::iter::once(args.log_socket.display().to_string()))
-        .chain(args.configd_flags.iter().cloned())
-        .collect();
+    let configd_args = [
+        "--log-socket".to_string(),
+        args.log_socket.display().to_string(),
+    ]
+    .into_iter()
+    .chain([
+        "--watchdog-socket".to_string(),
+        args.listen_socket.display().to_string(),
+    ])
+    .chain(args.configd_flags.iter().cloned())
+    .collect();
     ProcessSpec::new("nos-configd", args.configd_bin.clone(), configd_args)
         .with_identity(pki.clone(), Role::Configd, "")
         .with_role_uid(args.child_gid)

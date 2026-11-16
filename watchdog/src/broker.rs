@@ -231,6 +231,8 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
         | WatchdogRequest::RestLogin { .. }
         | WatchdogRequest::RestRenew { .. }
         | WatchdogRequest::RestCertCheck { .. } => role == Some(Role::Restd.as_str()),
+        // Any supervised daemon (a person has no process to supervise).
+        WatchdogRequest::Heartbeat => role.is_some_and(|r| r != Role::User.as_str()),
     }
 }
 
@@ -249,6 +251,12 @@ async fn dispatch(
         });
     }
     match request {
+        WatchdogRequest::Heartbeat => {
+            if let Some(p) = peer {
+                crate::heartbeat::record(&p.role, &p.name);
+            }
+            WatchdogEvent::Ok
+        }
         WatchdogRequest::Login {
             user,
             password,

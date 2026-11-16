@@ -8,6 +8,7 @@ Library crate (#418) holding what every NOS daemon repeated verbatim. Depends on
 - `config::{ConfigClientError, fetch_config, subscribe_diff}`: one-shot `Get` and a `SubscribeDiff` stream. A diff is only a resync trigger; callers re-fetch the config.
 - `ipc::one_shot<Req, Ev>(socket, Role, req) -> Option<Ev>`: connect as `Role`, send one request, read one reply; the exchange is bounded by a 10 s reply timeout (`IpcError::Timeout`); any failure is a `trace!` and `None`. Per-daemon `get_interface`/`get_vrf_name` stay in their crate as thin wrappers matching the expected reply variant.
 - `bootstrap::{identity, init_tracing}`: stdin identity, then registry + `EnvFilter` (default `trace`) + fmt + `ForwardingLayer` + panic hook.
+- `liveness::start(watchdog_socket)`: heartbeat to `nos-watchdogd` (#1150): a runtime task bumps a counter, a std thread sends `Heartbeat` every 5 s only if it advanced. Call it right after `init_tracing`; see supervision.md "Liveness".
 
 ## Rules
 

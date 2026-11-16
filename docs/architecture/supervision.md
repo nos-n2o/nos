@@ -42,3 +42,10 @@ In every family's pass-through flags (`--bgpd-arg`, `--restd-arg`, `--sshd-arg`,
 **User ids** (#512, #513): `nos-watchdogd` runs as `nos-wd`; `supervise_one` starts each child with `ProcessSpec.uid`, the role's own uid (`ProcessSpec::with_role_uid`, from `--child-gid` in the image) after creating `/var/lib/nos/<role>` and logs `uid=`/`gid=` in its `starting` line. The ids switch before exec, so the children's file capabilities are unaffected. See "uid model" in [IPC security](ipc-security.md).
 
 - Per-process env (#756): `ProcessSpec.env`/`with_env` is applied after the scrubbed `CHILD_ENV` allowlist, so a child gets extra variables only when its spec asks; only `nos-logd` (#756) and `nos-configd` (#776) use it, both for `MALLOC_ARENA_MAX=1`; `nos-configd` also gets `MALLOC_TRIM_THRESHOLD_=131072` and `MALLOC_TOP_PAD_=0` (#796). `nos-restd` does not: the #766 measurements showed its RSS unchanged by it.
+
+**Liveness** (#1150): a hung daemon (deadlock, blocked runtime) is restarted, not only a dead one.
+- Every daemon except `nos-sshd` calls `nos_daemon::liveness::start(<--watchdog-socket>)` after `init_tracing` (`nos-configd` only when passed `--watchdog-socket`, which the watchdog always does). A runtime task bumps a counter every 1 s; a dedicated std thread reads it every 5 s and sends `WatchdogRequest::Heartbeat` only if it advanced, so a stuck runtime stops the beat.
+- The broker (`allowed`: any daemon role, not `user`) records `(role, name)` -> time in `watchdog/src/heartbeat.rs`. `supervise_one` checks every `timeout/4`: a child that has beaten at least once since its spawn and is silent for more than 20 s (3 x 5 s + 5 s grace) is logged (`heartbeat missed, killing the hung process`) and stopped through `shutdown_child` (SIGINT, 10 s, SIGKILL); the normal exponential backoff then restarts it.
+- A child that never beats (`nos-sshd`, a daemon still starting) is exempt; each spawn forgets the previous beat.
+- Debugging a daemon under a debugger: start `nos-watchdogd --no-heartbeat-kill`.
+- Only the runtime is observed; one wedged sub-task in a live runtime is not (see the `ponytail:` note in `daemon/src/liveness.rs`).
