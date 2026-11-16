@@ -127,6 +127,7 @@ fn masked(event: Event) -> Event {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per Request variant")]
 async fn dispatch_unmasked(
     store: &ConfigStore,
     caller: &Caller,

@@ -319,7 +319,7 @@ async fn user_roles(w: &World) -> anyhow::Result<()> {
         clients.push((name, a.rest.with_identity(&id)?));
     }
     for (name, client) in &clients {
-        log(&format!(
+        log(format!(
             "{name} reads the config but cannot edit or save it"
         ));
         let get = |m: Method, path: &'static str, body: Option<&'static str>| {

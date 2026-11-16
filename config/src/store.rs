@@ -750,12 +750,12 @@ impl ConfigStore {
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(if_match.as_deref())?;
-        if let Some(user) = own_password_only {
-            if !txn.changes_only_password_of(user) {
-                return Err(ConfigError::Forbidden(
-                    "this role may only change its own password".to_string(),
-                ));
-            }
+        if let Some(user) = own_password_only
+            && !txn.changes_only_password_of(user)
+        {
+            return Err(ConfigError::Forbidden(
+                "this role may only change its own password".to_string(),
+            ));
         }
         // Fast path: nothing committed since open, so validate before taking
         // the write guard. Otherwise merge under it (#1034).
