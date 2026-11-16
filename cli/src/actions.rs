@@ -131,16 +131,29 @@ pub async fn resolve_config_socket(watchdog_socket: &Path) -> PathBuf {
 pub async fn subscribe_hostname_task(
     socket: PathBuf,
     hostname: Arc<Mutex<String>>,
+    unsaved: Arc<std::sync::atomic::AtomicBool>,
     notify_repaint: impl Fn() + Send + 'static,
 ) {
+    use std::sync::atomic::Ordering::Relaxed;
     loop {
         if let Ok(mut reader) = client::subscribe(&socket).await {
-            while let Some(Ok(Event::Config(cfg))) = reader.next().await {
-                let mut guard = hostname.lock().unwrap();
-                if *guard != cfg.hostname {
-                    *guard = cfg.hostname;
-                    drop(guard);
-                    notify_repaint();
+            while let Some(Ok(event)) = reader.next().await {
+                match event {
+                    Event::Config(cfg) => {
+                        let mut guard = hostname.lock().unwrap();
+                        if *guard != cfg.hostname {
+                            *guard = cfg.hostname;
+                            drop(guard);
+                            notify_repaint();
+                        }
+                    }
+                    // The live `*` of the prompt (#1139), also while idle.
+                    Event::SaveStatus { unsaved: now } => {
+                        if unsaved.swap(now, Relaxed) != now {
+                            notify_repaint();
+                        }
+                    }
+                    _ => break,
                 }
             }
         }

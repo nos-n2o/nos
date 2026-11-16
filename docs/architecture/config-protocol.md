@@ -43,7 +43,7 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 ### Persistence
 
-- Unsaved tracking (#1139): `ConfigStore` compares `seq` (bumped by every broadcast, so by a commit, a password hash upgrade and `SetSshHostKey`) with `saved_seq` (set after a successful save). `Request::SaveStatus` replies `Event::SaveStatus`; `Event::Committed` carries the same `unsaved` flag. A failed save leaves it unsaved.
+- Unsaved tracking (#1139): `ConfigStore` compares `seq` (bumped by every broadcast, so by a commit, a password hash upgrade and `SetSshHostKey`) with `saved_seq` (set after a successful save). `Request::SaveStatus` replies `Event::SaveStatus` for one-shot callers (REST), and a `Role::User` `Subscribe` (the shell) also gets it pushed now and on every change (daemons never do); `Event::Committed` carries the same `unsaved` flag. A failed save leaves it unsaved.
 
 - `save_to_disk` writes a temp file, fsyncs it, renames it over `config.yaml`, then fsyncs the directory.
 - Before each save the previous `config.yaml` is copied (same durable write) to `config.yaml.bak`, but only if it parses and passes `validate_config`, so a bad primary never replaces the last good backup.

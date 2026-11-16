@@ -201,7 +201,9 @@ pub enum Event {
         /// The running config now differs from the saved one (#1139).
         unsaved: bool,
     },
-    /// Reply to `SaveStatus`: running differs from what `Save` last wrote (#1139).
+    /// Reply to `SaveStatus`; also pushed on a `Subscribe` to `Role::User`
+    /// (now, then on every change), so the shell's prompt follows it live.
+    /// Running differs from what `Save` last wrote (#1139).
     SaveStatus {
         /// True when a commit, rehash or host-key set is not on disk.
         unsaved: bool,

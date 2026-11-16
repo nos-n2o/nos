@@ -893,6 +893,7 @@ async fn the_hostname_task_keeps_retrying_an_absent_configd() {
     let task = tokio::spawn(actions::subscribe_hostname_task(
         missing,
         Arc::clone(&hostname),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         || {},
     ));
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

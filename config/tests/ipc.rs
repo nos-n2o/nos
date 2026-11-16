@@ -151,7 +151,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     // Give the accept loop a moment to be ready.
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let (mut reader, mut writer) = connect(&path).await;
+    let (mut reader, mut writer) = connect_as(&path, "watchdog", "t").await;
     writer.send(Request::Subscribe).await.unwrap();
 
     // Initial snapshot — empty config.
@@ -179,6 +179,55 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     }
 }
 
+/// A shell (`Role::User`) also gets the live unsaved flag; daemons never do (#1139).
+#[tokio::test]
+async fn user_subscription_pushes_the_unsaved_flag_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let cfg_path = tmp.path().join("config.yaml");
+    let store = ConfigStore::new(Config::default(), Some(cfg_path));
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(Request::Subscribe).await.unwrap();
+    let mut flags = Vec::new();
+    // Config, then the initial flag.
+    while flags.is_empty() {
+        if let Event::SaveStatus { unsaved } = next_event(&mut reader).await {
+            flags.push(unsaved);
+        }
+    }
+    assert_eq!(flags, [false]);
+
+    store
+        .open_transaction("t1", TransactionBase::Blank)
+        .await
+        .unwrap();
+    store.apply_op("t1", ensure_op("vrf-a")).await.unwrap();
+    store
+        .apply_op("t1", set_asn_op("vrf-a", 65001))
+        .await
+        .unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
+    loop {
+        if let Event::SaveStatus { unsaved } = next_event(&mut reader).await {
+            assert!(unsaved, "a commit flips it on");
+            break;
+        }
+    }
+    // A save flips it off while the shell sits idle.
+    store.save_to_disk().await.unwrap();
+    loop {
+        if let Event::SaveStatus { unsaved } = next_event(&mut reader).await {
+            assert!(!unsaved, "a save flips it off");
+            break;
+        }
+    }
+}
+
 #[tokio::test]
 async fn unsubscribe_stops_updates() {
     let tmp = tempfile::tempdir().unwrap();
@@ -190,7 +239,7 @@ async fn unsubscribe_stops_updates() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let (mut reader, mut writer) = connect(&path).await;
+    let (mut reader, mut writer) = connect_as(&path, "watchdog", "t").await;
     writer.send(Request::Subscribe).await.unwrap();
 
     // Consume initial snapshot.
@@ -238,7 +287,7 @@ async fn subscribe_survives_client_dropping_its_write_half() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let mut reader = {
-        let (mut reader, mut writer) = connect(&path).await;
+        let (mut reader, mut writer) = connect_as(&path, "watchdog", "t").await;
         writer.send(Request::Subscribe).await.unwrap();
         next_event(&mut reader).await; // initial snapshot
         reader
@@ -1062,7 +1111,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Connection A: subscribes (stands in for a future daemon like nos-bgp).
-    let (mut reader_a, mut writer_a) = connect(&sock_path).await;
+    let (mut reader_a, mut writer_a) = connect_as(&sock_path, "watchdog", "t").await;
     writer_a.send(Request::Subscribe).await.unwrap();
     let initial = next_event(&mut reader_a).await;
     assert!(matches!(initial, Event::Config(c) if c.bgp_instances.is_empty()));
@@ -1138,12 +1187,12 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
 
     // Two independently-connected subscribers, standing in for two `nos`
     // shells watching the same daemon.
-    let (mut reader_a, mut writer_a) = connect(&sock_path).await;
+    let (mut reader_a, mut writer_a) = connect_as(&sock_path, "watchdog", "t").await;
     writer_a.send(Request::Subscribe).await.unwrap();
     let initial_a = next_event(&mut reader_a).await;
     assert!(matches!(initial_a, Event::Config(c) if c.hostname == "nos"));
 
-    let (mut reader_b, mut writer_b) = connect(&sock_path).await;
+    let (mut reader_b, mut writer_b) = connect_as(&sock_path, "watchdog", "t").await;
     writer_b.send(Request::Subscribe).await.unwrap();
     let initial_b = next_event(&mut reader_b).await;
     assert!(matches!(initial_b, Event::Config(c) if c.hostname == "nos"));
