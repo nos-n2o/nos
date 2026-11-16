@@ -4457,9 +4457,9 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     let changed = |active: bool, reason: &str| {
         format!("ospfv3 stub router max-metric changed active={active} reason=\"{reason}\"")
     };
-    // Router-c's own Router-LSA (legacy or E-Router) newly installed on a.
+    // Router-c's own legacy Router-LSA (c runs without extended LSAs) newly installed on a.
     let installed = format!(
-        "ospfv3 lsa installed link=.* neighbor={OSPFV3_ROUTER_ID_C} lsa_type=\\(8193\\|40993\\) link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID_C}"
+        "ospfv3 lsa installed .* lsa_type=8193 link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID_C}"
     );
 
     log("router-c: max-metric router-lsa administrative; router-a must install a new Router-LSA");
