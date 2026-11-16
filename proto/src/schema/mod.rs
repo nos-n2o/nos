@@ -22,6 +22,8 @@ pub mod community_group;
 pub mod interface;
 pub mod lldp;
 pub mod logging;
+/// Login lockout settings (`LoginPolicy`).
+pub mod login_policy;
 /// `OSPFv2` areas (`OspfArea`): type, ranges, virtual links and interface profiles.
 pub mod ospf_area;
 /// An `OSPFv2` speaker (`OspfInstance`), one `nos-ospfd` process each.
@@ -85,6 +87,7 @@ pub use lldp::{LldpDestination, LldpSettings};
 pub use logging::{
     parse_fingerprint, LoggingSettings, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport,
 };
+pub use login_policy::{LoginPolicy, LOCKOUT_WINDOW_SECS_DEFAULT, MAX_FAILURES_DEFAULT};
 pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType, OspfVirtualLink};
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{
@@ -229,6 +232,13 @@ pub struct Config {
     #[cli(topic = Logging)]
     pub logging: LoggingSettings,
 
+    /// Login lockout (failures and window). `serde(default)` so on-disk
+    /// config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = LoginPolicy, words = "login-policy")]
+    pub login_policy: LoginPolicy,
+
     /// Local users allowed to log in. `serde(default)` so on-disk config saved
     /// before this field existed still loads (`nos-configd` then seeds `admin`).
     #[serde(default)]
@@ -329,6 +339,7 @@ impl Default for Config {
             hostname: default_hostname(),
             lldp: LldpSettings::default(),
             logging: LoggingSettings::default(),
+            login_policy: LoginPolicy::default(),
             users: Vec::new(),
             bfd_profiles: Vec::new(),
             sbfd_reflector: SbfdReflector::default(),

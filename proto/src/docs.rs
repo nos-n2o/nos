@@ -479,6 +479,12 @@ topics! {
     BfdProfileMode,
     /// `BfdProfile.sbfd_remote_discriminator`
     BfdProfileSbfdRemoteDiscriminator,
+    /// `Config.login_policy`
+    LoginPolicy,
+    /// `LoginPolicy.max_failures`
+    LoginPolicyMaxFailures,
+    /// `LoginPolicy.lockout_window_secs`
+    LoginPolicyLockoutWindow,
     /// `Config.sbfd_reflector`
     SbfdReflector,
     /// `SbfdReflector.discriminators`

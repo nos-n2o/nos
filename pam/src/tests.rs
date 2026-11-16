@@ -13,7 +13,7 @@ use nos_test_support::{FakeLogin, Reply};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
-use crate::module::{authenticate_user, check_account, guard};
+use crate::module::{audit_line, authenticate_user, check_account, guard};
 use crate::options::Options;
 use crate::session::NosTicket;
 
@@ -225,4 +225,17 @@ fn session_debug_shows_only_the_user() {
     let d = format!("{:?}", session("alice"));
     assert!(d.contains("alice"));
     assert!(!d.contains("TICKET") && !d.contains("encoded"));
+}
+
+#[test]
+fn the_ticket_never_reaches_the_log_or_debug_output() {
+    let (e, _f) = env(accepting);
+    let s = authenticate_user(&e.opts, "alice".as_ref(), pw("s3cret"), T).unwrap();
+    let hex = "07".repeat(32);
+    let line = audit_line("alice".as_ref(), "nos-sshd".as_ref(), "success");
+    for text in [line, format!("{s:?}")] {
+        assert!(!text.contains(s.encoded.as_str()), "{text}");
+        assert!(!text.contains(&hex), "{text}");
+        assert!(!text.contains("s3cret"), "{text}");
+    }
 }

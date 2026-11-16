@@ -1781,6 +1781,18 @@ mod tests {
     }
 
     #[test]
+    fn age_gap_over_max_age_diff_makes_younger_newer() {
+        let mut a = router_lsa().header;
+        let mut b = a;
+        a.age = 0;
+        b.age = 900;
+        assert_eq!(is_newer(&a, &b), Ordering::Equal);
+        b.age = 901;
+        assert_eq!(is_newer(&a, &b), Ordering::Greater);
+        assert_eq!(is_newer(&b, &a), Ordering::Less);
+    }
+
+    #[test]
     fn identical_headers_are_equal() {
         let a = router_lsa().header;
         assert_eq!(is_newer(&a, &a), Ordering::Equal);

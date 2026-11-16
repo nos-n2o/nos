@@ -96,6 +96,18 @@ impl World {
         Ok(())
     }
 
+    /// Reboots `id`'s container (volumes kept, tmpfs lost) and re-attaches to it: the REST CA
+    /// is new, so the old client and log follower are dropped. Waits for the REST API.
+    pub async fn restart(&mut self, id: Id) -> anyhow::Result<()> {
+        self.routers.remove(id.name);
+        self.dock.restart(id.name).await?;
+        let router = Router::attach(&self.dock, id).await?;
+        router.wait_ready().await?;
+        router.logs.settle().await;
+        self.routers.insert(id.name, router);
+        Ok(())
+    }
+
     /// Stops following `id`'s logs and removes its container and volumes.
     pub async fn remove(&mut self, id: Id) {
         self.routers.remove(id.name);

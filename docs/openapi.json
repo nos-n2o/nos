@@ -1982,6 +1982,10 @@
             "$ref": "#/components/schemas/LoggingSettings",
             "description": "Log export (remote syslog). `serde(default)` so on-disk config saved\nbefore this field existed still loads."
           },
+          "login_policy": {
+            "$ref": "#/components/schemas/LoginPolicy",
+            "description": "Login lockout (failures and window). `serde(default)` so on-disk\nconfig saved before this field existed still loads."
+          },
           "ospf_instances": {
             "description": "`OSPFv2` speakers; each gets its own `nos-ospfd` process.",
             "items": {
@@ -2170,6 +2174,13 @@
             },
             "type": "array"
           },
+          "login_policy": {
+            "description": "Field-level, like `lldp`: `Config.login_policy` is one singleton section.",
+            "items": {
+              "$ref": "#/components/schemas/FieldDiff"
+            },
+            "type": "array"
+          },
           "ospf_instances": {
             "description": "OSPF instance changes.",
             "items": {
@@ -2273,6 +2284,7 @@
           "lldp",
           "users",
           "logging",
+          "login_policy",
           "bfd_profiles",
           "sbfd_reflector",
           "spanning_tree",
@@ -3664,6 +3676,24 @@
               "$ref": "#/components/schemas/SyslogServer"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "LoginPolicy": {
+        "description": "Login lockout settings.",
+        "properties": {
+          "lockout_window_secs": {
+            "description": "Seconds from the first failure that failures are counted, and a lockout lasts: 1 to 86400.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_failures": {
+            "description": "Failed logins inside the window that lock the account out: 1 to 100.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "type": "object"
@@ -64826,6 +64856,432 @@
           }
         },
         "summary": "Set: The `transport` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/login-policy": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `login-policy` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginPolicy",
+                  "description": "Login lockout (failures and window). `serde(default)` so on-disk\nconfig saved before this field existed still loads."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `login-policy` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginPolicy",
+                "description": "Login lockout (failures and window). `serde(default)` so on-disk\nconfig saved before this field existed still loads."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginPolicy",
+                  "description": "Login lockout (failures and window). `serde(default)` so on-disk\nconfig saved before this field existed still loads."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `login-policy` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/login-policy/lockout-window-secs": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lockout-window-secs` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds from the first failure that failures are counted, and a lockout lasts: 1 to 86400.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lockout-window-secs` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Seconds from the first failure that failures are counted, and a lockout lasts: 1 to 86400.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds from the first failure that failures are counted, and a lockout lasts: 1 to 86400.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lockout-window-secs` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/login-policy/max-failures": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `max-failures` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Failed logins inside the window that lock the account out: 1 to 100.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `max-failures` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Failed logins inside the window that lock the account out: 1 to 100.",
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Failed logins inside the window that lock the account out: 1 to 100.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `max-failures` setting.",
         "tags": [
           "transactions"
         ]

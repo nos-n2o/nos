@@ -101,6 +101,8 @@ pub struct ConfigDiff {
     pub users: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.logging` is one singleton section.
     pub logging: Vec<FieldDiff>,
+    /// Field-level, like `lldp`: `Config.login_policy` is one singleton section.
+    pub login_policy: Vec<FieldDiff>,
     /// BFD profile changes.
     pub bfd_profiles: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.sbfd_reflector` is one singleton section.
@@ -136,6 +138,7 @@ impl ConfigDiff {
             && self.lldp.is_empty()
             && self.users.is_empty()
             && self.logging.is_empty()
+            && self.login_policy.is_empty()
             && self.bfd_profiles.is_empty()
             && self.sbfd_reflector.is_empty()
             && self.spanning_tree.is_empty()
@@ -240,6 +243,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            login_policy: if scopes.contains(&DiffScope::LoginPolicy) {
+                self.login_policy.clone()
+            } else {
+                Vec::new()
+            },
             bfd_profiles: if scopes.contains(&DiffScope::BfdProfiles) {
                 self.bfd_profiles.clone()
             } else {
@@ -315,6 +323,8 @@ pub enum DiffScope {
     Users,
     /// The logging section.
     Logging,
+    /// The login-policy section.
+    LoginPolicy,
     /// BFD profiles.
     BfdProfiles,
     /// The S-BFD reflector section.
@@ -416,7 +426,7 @@ mod tests {
             subsections: Vec::new(),
         };
         assert!(ConfigDiff::default().is_empty());
-        let setters: [Set; 24] = [
+        let setters: [Set; 25] = [
             |d, f, _| d.hostname = Some(f),
             |d, _, s| d.bgp_instances.push(s),
             |d, _, s| d.routing_tables.push(s),
@@ -435,6 +445,7 @@ mod tests {
             |d, f, _| d.lldp.push(f),
             |d, _, s| d.users.push(s),
             |d, f, _| d.logging.push(f),
+            |d, f, _| d.login_policy.push(f),
             |d, _, s| d.bfd_profiles.push(s),
             |d, f, _| d.sbfd_reflector.push(f),
             |d, f, _| d.spanning_tree.push(f),

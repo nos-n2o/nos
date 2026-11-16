@@ -286,11 +286,11 @@ async fn wrong_password_and_unknown_user_are_indistinguishable_and_slow() {
 }
 
 #[tokio::test]
-async fn three_failed_logins_drop_the_connection() {
+async fn five_failed_logins_drop_the_connection() {
     let e = env(vec![user("alice", "s3cret")]).await;
     let mut conn = dial(&e.anonymous(), &e.broker).await;
     let (csr, _) = generate_csr().unwrap();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let event = ask(&mut conn, login("alice", "nope", csr.clone())).await;
         assert!(matches!(event, WatchdogEvent::Denied(_)));
     }
@@ -829,11 +829,11 @@ async fn a_bad_ticket_password_looks_like_a_bad_login() {
 }
 
 #[tokio::test]
-async fn three_bad_redeems_drop_the_connection() {
+async fn five_bad_redeems_drop_the_connection() {
     let e = env(vec![user("alice", "s3cret")]).await;
     let mut conn = dial(&e.anonymous(), &e.broker).await;
     let (csr, _) = generate_csr().unwrap();
-    for _ in 0..3 {
+    for _ in 0..5 {
         let event = ask(&mut conn, redeem(vec![9; 32], csr.clone())).await;
         assert!(is_invalid_ticket(&event));
     }
