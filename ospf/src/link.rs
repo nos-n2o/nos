@@ -885,6 +885,9 @@ pub struct LinkManager {
     /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
     /// looks for a tunnel backup where there is no basic LFA.
     remote_lfa: AtomicBool,
+    /// RFC 8405 SPF throttle timers (`OspfInstance.spf_throttle`), read by
+    /// the route-push client on every change.
+    spf_timers: std::sync::Mutex<nos_ospf_common::throttle::Timers>,
     /// Each area's last RFC 8770 state — (H-bit honoured, routers with the
     /// H-bit) — only to log a change.
     host_bit_state: Mutex<HashMap<Ipv4Addr, (bool, usize)>>,
@@ -1013,6 +1016,7 @@ impl LinkManager {
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
             remote_lfa: AtomicBool::new(false),
+            spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
             host_bit_state: Mutex::new(HashMap::new()),
             restarting: AtomicBool::new(false),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
@@ -1061,6 +1065,14 @@ impl LinkManager {
 
     pub fn set_host_router(&self, on: bool) {
         self.host_router.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_spf_timers(&self, timers: nos_ospf_common::throttle::Timers) {
+        *self.spf_timers.lock().unwrap() = timers;
+    }
+
+    pub fn spf_timers(&self) -> nos_ospf_common::throttle::Timers {
+        *self.spf_timers.lock().unwrap()
     }
 
     pub fn set_remote_lfa(&self, on: bool) {

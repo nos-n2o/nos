@@ -281,6 +281,18 @@ topics! {
     OspfInstanceHostRouter,
     /// `OspfInstance.remote_lfa`
     OspfInstanceRemoteLfa,
+    /// `OspfInstance.spf_throttle`
+    OspfInstanceSpfThrottle,
+    /// `SpfThrottle.initial_ms`
+    OspfInstanceSpfThrottleInitial,
+    /// `SpfThrottle.short_ms`
+    OspfInstanceSpfThrottleShort,
+    /// `SpfThrottle.long_ms`
+    OspfInstanceSpfThrottleLong,
+    /// `SpfThrottle.holddown_ms`
+    OspfInstanceSpfThrottleHolddown,
+    /// `SpfThrottle.time_to_learn_ms`
+    OspfInstanceSpfThrottleTimeToLearn,
     /// `OspfInstance.areas`
     OspfArea,
     /// `OspfArea.profiles`

@@ -152,6 +152,7 @@ pub fn base_running() -> Config {
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
+            spf_throttle: nos_proto::SpfThrottle::default(),
         }],
         ospfv3_instances: vec![nos_proto::Ospfv3Instance {
             name: "v3".to_string(),

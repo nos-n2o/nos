@@ -156,6 +156,60 @@ pub struct OspfInstance {
     #[garde(skip)]
     #[cli(topic = OspfInstanceRemoteLfa, words = "remote-lfa")]
     pub remote_lfa: bool,
+
+    /// RFC 8405 SPF back-off timers; every field left unset keeps the RFC's
+    /// recommended value. Re-read on every resync, no link restarts.
+    #[serde(default)]
+    #[garde(custom(|t, _ctx: &Config| valid_spf_throttle(t)))]
+    #[cli(topic = OspfInstanceSpfThrottle, words = "spf-throttle")]
+    pub spf_throttle: SpfThrottle,
+}
+
+/// Per-instance RFC 8405 SPF throttle timers, milliseconds. `None` keeps the
+/// default of `nos-ospfd` (initial 50, short 200, long 5000, holddown 10000,
+/// time-to-learn 3000).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct SpfThrottle {
+    /// Delay of the first change after a quiet period.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSpfThrottleInitial, words = "initial")]
+    pub initial_ms: Option<u32>,
+    /// Delay while changes keep arriving.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSpfThrottleShort, words = "short")]
+    pub short_ms: Option<u32>,
+    /// Delay once the churn outlasts `time_to_learn_ms`.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSpfThrottleLong, words = "long")]
+    pub long_ms: Option<u32>,
+    /// Time without a change that returns to the initial delay; non-zero.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSpfThrottleHolddown, words = "holddown")]
+    pub holddown_ms: Option<u32>,
+    /// How long the short delay lasts before the long one applies.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSpfThrottleTimeToLearn, words = "time-to-learn")]
+    pub time_to_learn_ms: Option<u32>,
+}
+
+/// `initial <= short <= long` over the effective values (unset = default),
+/// and a non-zero holddown.
+fn valid_spf_throttle(t: &SpfThrottle) -> garde::Result {
+    let (i, s, l) = (
+        t.initial_ms.unwrap_or(50),
+        t.short_ms.unwrap_or(200),
+        t.long_ms.unwrap_or(5000),
+    );
+    if !(i <= s && s <= l) {
+        return Err(garde::Error::new(
+            "spf-throttle needs initial <= short <= long",
+        ));
+    }
+    if t.holddown_ms == Some(0) {
+        return Err(garde::Error::new("spf-throttle holddown must be above 0"));
+    }
+    Ok(())
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -177,6 +231,7 @@ impl Default for OspfInstance {
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
+            spf_throttle: SpfThrottle::default(),
         }
     }
 }
@@ -211,7 +266,7 @@ mod tests {
 
     use crate::schema::Config;
 
-    use super::OspfInstance;
+    use super::{OspfInstance, SpfThrottle};
 
     fn instance(name: &str) -> OspfInstance {
         OspfInstance {
@@ -230,6 +285,7 @@ mod tests {
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
+            spf_throttle: SpfThrottle::default(),
         }
     }
 
@@ -238,6 +294,25 @@ mod tests {
             ospf_instances: instances,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn spf_throttle_ordering_and_holddown_are_enforced() {
+        let ok = |f: fn(&mut super::SpfThrottle)| {
+            let mut i = instance("o1");
+            f(&mut i.spf_throttle);
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(ok(|t| t.initial_ms = Some(200)));
+        assert!(!ok(|t| t.initial_ms = Some(201)));
+        assert!(!ok(|t| t.long_ms = Some(100)));
+        assert!(ok(|t| {
+            t.short_ms = Some(10);
+            t.initial_ms = Some(5);
+        }));
+        assert!(!ok(|t| t.holddown_ms = Some(0)));
+        assert!(ok(|t| t.holddown_ms = Some(1)));
     }
 
     #[test]

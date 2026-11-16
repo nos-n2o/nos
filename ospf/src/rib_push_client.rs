@@ -126,7 +126,7 @@ async fn run(
         let mut throttle = SpfThrottle::new(Timers::default());
         loop {
             tokio::select! {
-                stop = wait_for_change(&changed, &mut shutdown, &mut throttle) => if stop { return },
+                stop = wait_for_change(&changed, &mut shutdown, &mut throttle, links.spf_timers()) => if stop { return },
                 _ = reader.read(&mut eof_buf) => {
                     warn!(table = %table, "nos-ribd closed the ospf push connection, reconnecting");
                     break;
@@ -173,9 +173,11 @@ async fn wait_for_change(
     changed: &tokio::sync::Notify,
     shutdown: &mut watch::Receiver<bool>,
     throttle: &mut SpfThrottle,
+    timers: Timers,
 ) -> bool {
     tokio::select! {
         () = changed.notified() => {
+            throttle.set_timers(timers);
             let (delay, state) = throttle.on_change(std::time::Instant::now());
             let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
             info!(delay_ms, state = state.name(), "ospf spf scheduled");
@@ -418,11 +420,11 @@ mod tests {
         for _ in 0..5 {
             n.notify_one();
         }
-        assert!(!wait_for_change(&n, &mut rx, &mut th).await);
+        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default()).await);
         assert_eq!(start.elapsed(), hold_down);
         // The burst is spent: the next wait falls back to the poll tick,
         // which is not a change and leaves the throttle alone.
-        assert!(!wait_for_change(&n, &mut rx, &mut th).await);
+        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default()).await);
         assert_eq!(start.elapsed(), hold_down + POLL_INTERVAL);
     }
 

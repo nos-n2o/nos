@@ -81,6 +81,13 @@ pub enum OspfInstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Replaces the RFC 8405 SPF throttle timers (unset fields keep the defaults).
+    SetSpfThrottle {
+        /// Name of the OSPF instance this op targets.
+        name: String,
+        /// The timers, in milliseconds.
+        throttle: crate::schema::SpfThrottle,
+    },
     /// Deletes the OSPF instance and everything nested under it.
     Delete {
         /// Name of the OSPF instance this op targets.
@@ -110,6 +117,7 @@ impl OspfInstanceOp {
                         remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
+                        spf_throttle: crate::schema::SpfThrottle::default(),
                     });
                 }
                 Ok(())
@@ -149,6 +157,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetRemoteLfa { name, enabled } => {
                 find_instance_mut(config, name)?.remote_lfa = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetSpfThrottle { name, throttle } => {
+                find_instance_mut(config, name)?.spf_throttle = throttle.clone();
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -195,7 +207,25 @@ mod tests {
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
+            spf_throttle: crate::schema::SpfThrottle::default(),
         }
+    }
+
+    #[test]
+    fn set_spf_throttle_replaces_the_timers() {
+        let mut cfg = Config::default();
+        cfg.ospf_instances.push(instance("o1"));
+        let throttle = crate::schema::SpfThrottle {
+            initial_ms: Some(200),
+            ..Default::default()
+        };
+        OspfInstanceOp::SetSpfThrottle {
+            name: "o1".into(),
+            throttle: throttle.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].spf_throttle, throttle);
     }
 
     #[test]

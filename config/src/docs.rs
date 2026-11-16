@@ -1204,6 +1204,30 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).",
             "For a destination whose only next hop has no basic loop-free alternate, installs a backup route that tunnels the traffic (IP-in-IP) to a PQ node: a router reachable without the protected link that itself reaches the destination without it — typical on rings of five or more routers. Link protection only. Also creates an IP-in-IP device in this router's routing table that decapsulates tunnelled traffic from any source, so this router can be another one's PQ node: enable it on every router of the area. `delete` turns it off.",
         ),
+        Topic::OspfInstanceSpfThrottle => (
+            "Tune the SPF back-off timers of this instance (RFC 8405).",
+            "After an LSDB change the route computation waits `initial` milliseconds; while changes keep arriving it waits `short`, and once they outlast `time-to-learn` it waits `long`; `holddown` without a change returns to `initial`. Unset values keep the defaults (initial 50, short 200, long 5000, holddown 10000, time-to-learn 3000). Needs initial <= short <= long and a non-zero holddown. Applied without restarting any link.",
+        ),
+        Topic::OspfInstanceSpfThrottleInitial => (
+            "Delay of the first SPF run after a quiet period, in milliseconds (default 50).",
+            "Must not exceed `short`. `delete` restores the default.",
+        ),
+        Topic::OspfInstanceSpfThrottleShort => (
+            "Delay of SPF runs while changes keep arriving, in milliseconds (default 200).",
+            "Between `initial` and `long`. `delete` restores the default.",
+        ),
+        Topic::OspfInstanceSpfThrottleLong => (
+            "Delay of SPF runs once the churn outlasts `time-to-learn`, in milliseconds (default 5000).",
+            "At least `short`. `delete` restores the default.",
+        ),
+        Topic::OspfInstanceSpfThrottleHolddown => (
+            "Time without a change that returns SPF to the initial delay, in milliseconds (default 10000).",
+            "Must be above 0. `delete` restores the default.",
+        ),
+        Topic::OspfInstanceSpfThrottleTimeToLearn => (
+            "How long the short delay lasts before the long one applies, in milliseconds (default 3000).",
+            "`delete` restores the default.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(
