@@ -528,7 +528,7 @@ impl BgpRib {
         let vpn_flow = self
             .vpn_flow_stale
             .get(&peer)
-            .is_some_and(|s| s.iter().any(|k| family.is_none_or(|x| x == k.0)));
+            .is_some_and(|s| s.iter().any(|k| family.is_none_or(|x| x == (k.0).0)));
         ip || evpn || flowspec || vpn || rtc || vpn_flow
     }
 
@@ -726,7 +726,7 @@ impl BgpRib {
             .get(&peer)
             .into_iter()
             .flat_map(|t| t.keys().cloned())
-            .partition(|k| families.contains(&k.0));
+            .partition(|k| families.contains(&(k.0).0));
         self.vpn_flow_stale.entry(peer).or_default().extend(keep);
         for k in drop {
             self.drop_vpn_flow(peer, &k);

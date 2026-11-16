@@ -24,8 +24,8 @@ use nos_proto::AddressFamily;
 use super::flowspec_out::{flow_rib_route, import_flow, AdvertisedFlowspec};
 use super::flowspec_validate::{dest_of, validate, FlowValidity, Unicast};
 use super::{
-    best_index, best_path, debug, info, warn, BgpRib, Candidate, FlowspecRoute, OutboundUpdate,
-    RouteOrigin, VpnFlowKey, VpnRoute,
+    best_index, debug, info, warn, BgpRib, Candidate, FlowspecRoute, OutboundUpdate, RouteOrigin,
+    VpnFlowCopy, VpnFlowKey, VpnRoute,
 };
 use crate::flowspec::FlowSpec;
 use crate::message::{self, PathAttributes, UpdateMessage};
@@ -52,10 +52,11 @@ pub(super) struct VpnFlowRx<'a> {
 type VrfUnicast<'a> = HashMap<IpNet, Vec<&'a VpnRoute>>;
 
 impl BgpRib {
-    /// Rules held from `peer` of SAFI 134, `[vpnv4, vpnv6]`.
+    /// Copies (one per rule and path id) held from `peer` of SAFI 134,
+    /// `[vpnv4, vpnv6]`: each counts as one route for maximum-prefix.
     pub(super) fn accepted_vpn_flow(&self, peer: IpAddr) -> [u32; 2] {
         let mut n = [0u32; 2];
-        for (family, _) in self
+        for ((family, _), _) in self
             .vpn_flow_adj_rib_in
             .get(&peer)
             .into_iter()
@@ -72,7 +73,7 @@ impl BgpRib {
     /// check against).
     pub(super) fn learn_flowspec_vpn(&mut self, update: &UpdateMessage, rx: &VpnFlowRx<'_>) {
         let from = rx.from;
-        let mut keys = Vec::new();
+        let mut copies: Vec<VpnFlowCopy> = Vec::new();
         for mp in update
             .mp_reach
             .iter()
@@ -105,60 +106,66 @@ impl BgpRib {
                     received_at: Instant::now(),
                     validity: None,
                 };
-                keys.push(k.clone());
-                // ponytail: one copy per (peer, key) until #1126; a later path replaces the earlier.
-                if let Some(id) = mp.nlri_path_ids.get(i)
-                    && table.contains_key(&k)
-                {
-                    debug!(peer = %from, path_id = id, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "add-path: later path of a vpn flowspec rule replaces the earlier one");
-                }
+                // A copy is (rule, path id); a re-announcement of one replaces it.
+                let id = mp.nlri_path_ids.get(i).copied().unwrap_or(0);
+                let c: VpnFlowCopy = (k, id);
+                copies.push(c.clone());
                 // The policy rewrites the held copy: keep the raw one.
                 if let Some(r) = retain.as_deref_mut() {
-                    r.insert(k.clone(), route.clone());
+                    r.insert(c.clone(), route.clone());
                 }
                 if let Some(p) = &import
                     && !import_flow(p, &mut route, from, peer_as, confed)
                 {
                     super::stats::bump(&mut self.peer_stats.entry(from).or_default().rejected, 1);
-                    if table.remove(&k).is_some()
+                    if table.remove(&c).is_some()
                         && let Some(h) = super::bmp_tap::tap(self.bmp.as_ref())
                     {
-                        h.vpn_flow_post(from, &k, None);
+                        h.vpn_flow_post(from, &c, None);
                     }
                     warn!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "flowspec route rejected by import policy");
                     continue;
                 }
-                if let Some(old) = table.get(&k)
+                if let Some(old) = table.get(&c)
                     && old.attributes == route.attributes
                 {
                     route.received_at = old.received_at;
                 }
-                if table.insert(k.clone(), route.clone()) != Some(route.clone()) {
+                if table.insert(c.clone(), route.clone()) != Some(route.clone()) {
                     if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
-                        h.vpn_flow_post(from, &k, Some(&route));
+                        h.vpn_flow_post(from, &c, Some(&route));
                     }
-                    info!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "flowspec route learned");
+                    if id == 0 {
+                        info!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "flowspec route learned");
+                    } else {
+                        info!(peer = %from, family = %family, rd = %format_rd(&n.rd), route = %n.flow, path_id = id, "flowspec route learned");
+                    }
                 }
             }
         }
-        for k in keys {
-            self.revalidate_vpn_flow(from, &k);
+        for c in copies {
+            self.revalidate_vpn_flow(from, &c);
         }
     }
 
-    /// Removes rule `k` from `peer`'s SAFI 134 Adj-RIB-In (logged).
-    pub(super) fn drop_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) -> bool {
-        self.vpn_flow_validity.remove(&(peer, k.clone()));
-        self.retained.take_vpn_flow(peer, k);
+    /// Removes copy `c` from `peer`'s SAFI 134 Adj-RIB-In (logged).
+    pub(super) fn drop_vpn_flow(&mut self, peer: IpAddr, c: &VpnFlowCopy) -> bool {
+        let k = &c.0;
+        self.vpn_flow_validity.remove(&(peer, c.clone()));
+        self.retained.take_vpn_flow(peer, c);
         let removed = self
             .vpn_flow_adj_rib_in
             .get_mut(&peer)
-            .and_then(|t| t.remove(k))
+            .and_then(|t| t.remove(c))
             .is_some();
         if removed {
-            info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), route = %(k.1).1, "flowspec route withdrawn");
+            if c.1 == 0 {
+                info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), route = %(k.1).1, "flowspec route withdrawn");
+            } else {
+                info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), route = %(k.1).1, path_id = c.1, "flowspec route withdrawn");
+            }
             if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
-                h.vpn_flow_post(peer, k, None);
+                h.vpn_flow_post(peer, c, None);
             }
         }
         self.select_vpn_flow(k);
@@ -167,7 +174,7 @@ impl BgpRib {
 
     /// Drops everything `peer` sent in SAFI 134 (session down).
     pub(super) fn drop_peer_vpn_flows(&mut self, peer: IpAddr) {
-        let keys: Vec<VpnFlowKey> = self
+        let keys: Vec<VpnFlowCopy> = self
             .vpn_flow_adj_rib_in
             .get(&peer)
             .into_iter()
@@ -215,10 +222,11 @@ impl BgpRib {
 
     /// Re-validates rule `k` of `peer` in every VRF that imports it (and
     /// forgets the VRFs that no longer do), logging each change.
-    pub(super) fn revalidate_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) {
-        let Some(r) = self.vpn_flow_adj_rib_in.get(&peer).and_then(|t| t.get(k)) else {
+    pub(super) fn revalidate_vpn_flow(&mut self, peer: IpAddr, c: &VpnFlowCopy) {
+        let k = &c.0;
+        let Some(r) = self.vpn_flow_adj_rib_in.get(&peer).and_then(|t| t.get(c)) else {
             // Rejected by the import policy: no copy, so nothing to select.
-            self.vpn_flow_validity.remove(&(peer, k.clone()));
+            self.vpn_flow_validity.remove(&(peer, c.clone()));
             self.select_vpn_flow(k);
             return;
         };
@@ -243,20 +251,24 @@ impl BgpRib {
             let v = validate(&flow, mode, |net| self.vrf_best(&cands, net), more_specific);
             new.insert(t, v);
         }
-        let old = self.vpn_flow_validity.get(&(peer, k.clone()));
+        let old = self.vpn_flow_validity.get(&(peer, c.clone()));
         let mut changed: Vec<(&String, &FlowValidity)> = new
             .iter()
             .filter(|(t, v)| old.and_then(|o| o.get(*t)) != Some(*v))
             .collect();
         changed.sort_by_key(|(t, _)| *t);
         for (table, v) in changed {
-            info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), table = %table, flow = %(k.1).1, validity = %v, "flowspec validity changed");
+            if c.1 == 0 {
+                info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), table = %table, flow = %(k.1).1, validity = %v, "flowspec validity changed");
+            } else {
+                info!(peer = %peer, family = %k.0, rd = %format_rd(&(k.1).0), table = %table, flow = %(k.1).1, validity = %v, path_id = c.1, "flowspec validity changed");
+            }
         }
         self.vpn_flow_visits += 1;
         if new.is_empty() {
-            self.vpn_flow_validity.remove(&(peer, k.clone()));
+            self.vpn_flow_validity.remove(&(peer, c.clone()));
         } else {
-            self.vpn_flow_validity.insert((peer, k.clone()), new);
+            self.vpn_flow_validity.insert((peer, c.clone()), new);
         }
         // A validity flip (or the first validation) decides the candidates.
         self.select_vpn_flow(k);
@@ -264,27 +276,31 @@ impl BgpRib {
 
     /// Valid in at least one VRF that imports it: a best-path candidate
     /// (RFC 8955 section 6 validation, per VRF as RFC 4364 distributes it).
-    fn vpn_flow_usable(&self, peer: IpAddr, k: &VpnFlowKey) -> bool {
+    fn vpn_flow_usable(&self, peer: IpAddr, c: &VpnFlowCopy) -> bool {
         self.vpn_flow_validity
-            .get(&(peer, k.clone()))
+            .get(&(peer, c.clone()))
             .is_some_and(|m| m.values().any(|v| *v == FlowValidity::Valid))
     }
 
-    /// The peer whose copy of `k` is best among the copies `keep` accepts
-    /// (standard `best_path`, no IGP step: there is no next hop).
-    fn best_vpn_flow_peer(&self, k: &VpnFlowKey, keep: impl Fn(IpAddr) -> bool) -> Option<IpAddr> {
-        let candidates: Vec<Candidate> = self
-            .vpn_flow_adj_rib_in
-            .iter()
-            .filter_map(|(p, t)| {
-                let r = t.get(k).filter(|_| keep(*p))?;
-                Some((flow_rib_route(*p, r, self.confed_peers.contains(p)), 0))
-            })
-            .collect();
-        match best_path(&candidates, &HashMap::new())?.origin {
-            RouteOrigin::Peer(p) => Some(p),
-            RouteOrigin::Local => None,
+    /// The (peer, path id) whose copy of `k` is best among the copies `keep`
+    /// accepts (standard decision, no IGP step: there is no next hop; step 10
+    /// compares the path id).
+    // ponytail: scans every held copy per call (the copies of a rule share no
+    // index); O(held copies), an index by rule if `tools/bench-bgp.sh` shows it.
+    fn best_vpn_flow_copy(
+        &self,
+        k: &VpnFlowKey,
+        keep: impl Fn(IpAddr, &VpnFlowCopy) -> bool,
+    ) -> Option<(IpAddr, u32)> {
+        let mut who = Vec::new();
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for (p, t) in &self.vpn_flow_adj_rib_in {
+            for (c, r) in t.iter().filter(|(c, _)| c.0 == *k && keep(*p, c)) {
+                who.push((*p, c.1));
+                candidates.push((flow_rib_route(*p, r, self.confed_peers.contains(p)), c.1));
+            }
         }
+        best_index(&candidates, &HashMap::new()).map(|i| who[i])
     }
 
     /// Re-decides rule `k`'s best path among the valid, imported copies every
@@ -293,8 +309,11 @@ impl BgpRib {
     /// (`vpn_flows_of`).
     pub(super) fn select_vpn_flow(&mut self, k: &VpnFlowKey) {
         let new = self
-            .best_vpn_flow_peer(k, |p| self.vpn_flow_usable(p, k))
-            .and_then(|p| Some((p, self.vpn_flow_adj_rib_in.get(&p)?.get(k)?.clone())));
+            .best_vpn_flow_copy(k, |p, c| self.vpn_flow_usable(p, c))
+            .and_then(|(p, id)| {
+                let r = self.vpn_flow_adj_rib_in.get(&p)?.get(&(k.clone(), id))?;
+                Some((p, id, r.clone()))
+            });
         if self.vpn_flow_loc.get(k) == new.as_ref() {
             return;
         }
@@ -333,7 +352,7 @@ impl BgpRib {
         let adv = self
             .vpn_flow_loc
             .get(k)
-            .and_then(|(src, r)| self.advertise_vpn_flow(peer, k, *src, r));
+            .and_then(|(src, _, r)| self.advertise_vpn_flow(peer, k, *src, r));
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
             return;
         };
@@ -393,9 +412,9 @@ impl BgpRib {
         let Some(set) = self.vpn_flow_stale.get_mut(&peer) else {
             return 0;
         };
-        let keys: Vec<_> = set.iter().filter(|k| k.0 == family).cloned().collect();
-        set.retain(|k| k.0 != family);
-        keys.iter().filter(|k| self.drop_vpn_flow(peer, k)).count()
+        let keys: Vec<_> = set.iter().filter(|c| (c.0).0 == family).cloned().collect();
+        set.retain(|c| (c.0).0 != family);
+        keys.iter().filter(|c| self.drop_vpn_flow(peer, c)).count()
     }
 
     /// A VPN unicast prefix changed: revalidate the held rules whose
@@ -404,7 +423,7 @@ impl BgpRib {
         if self.vpn_flow_adj_rib_in.is_empty() {
             return;
         }
-        let hit: Vec<(IpAddr, VpnFlowKey)> = self
+        let hit: Vec<(IpAddr, VpnFlowCopy)> = self
             .vpn_flow_adj_rib_in
             .iter()
             .flat_map(|(p, t)| t.iter().map(move |(k, r)| (*p, k, r)))
@@ -419,36 +438,41 @@ impl BgpRib {
     }
 
     /// The copy of each VPN flow rule that `table` enforces (#1086, #1111,
-    /// owner D7): per (RD, rule), the best path among the peers' copies valid
-    /// in `table`, then the lowest RD per (family, rule), matching
-    /// `best_import`'s tie-break. IPv4 first, RFC 8955 section 5.1 order.
+    /// owner D7): per (RD, rule), the best path among every copy (any peer,
+    /// any path id, #1126) valid in `table`, then the lowest RD per (family,
+    /// rule), matching `best_import`'s tie-break. IPv4 first, RFC 8955
+    /// section 5.1 order.
     // ponytail: computed on read, O(copies of each held rule) per table per
     // snapshot; a cache per table if `tools/bench-bgp.sh` shows it.
-    fn vpn_flows_of(&self, table: &str) -> Vec<(&VpnFlowKey, IpAddr, &FlowspecRoute)> {
-        let mut best: HashMap<(AddressFamily, &FlowSpec), (&VpnFlowKey, IpAddr, &FlowspecRoute)> =
+    fn vpn_flows_of(&self, table: &str) -> Vec<(&VpnFlowCopy, IpAddr, &FlowspecRoute)> {
+        let mut best: HashMap<(AddressFamily, &FlowSpec), (&VpnFlowCopy, IpAddr, &FlowspecRoute)> =
             HashMap::new();
-        let keys: std::collections::HashSet<&VpnFlowKey> = self
-            .vpn_flow_adj_rib_in
-            .values()
-            .flatten()
-            .map(|(k, _)| k)
-            .collect();
-        for k in keys {
-            let valid_here = |p: IpAddr| {
-                self.vpn_flow_validity
-                    .get(&(p, k.clone()))
+        let mut groups: HashMap<&VpnFlowKey, Vec<(&VpnFlowCopy, IpAddr, &FlowspecRoute)>> =
+            HashMap::new();
+        for (p, t) in &self.vpn_flow_adj_rib_in {
+            for (c, r) in t {
+                let valid_here = self
+                    .vpn_flow_validity
+                    .get(&(*p, c.clone()))
                     .and_then(|m| m.get(table))
-                    == Some(&FlowValidity::Valid)
-            };
-            let Some(peer) = self.best_vpn_flow_peer(k, valid_here) else {
+                    == Some(&FlowValidity::Valid);
+                if valid_here {
+                    groups.entry(&c.0).or_default().push((c, *p, r));
+                }
+            }
+        }
+        for (k, copies) in groups {
+            let scored: Vec<Candidate> = copies
+                .iter()
+                .map(|(c, p, r)| (flow_rib_route(*p, r, self.confed_peers.contains(p)), c.1))
+                .collect();
+            let Some(i) = best_index(&scored, &HashMap::new()) else {
                 continue;
             };
-            let Some(r) = self.vpn_flow_adj_rib_in.get(&peer).and_then(|t| t.get(k)) else {
-                continue;
-            };
-            let slot = best.entry((k.0, &(k.1).1)).or_insert((k, peer, r));
-            if (k.1).0 < ((slot.0).1).0 {
-                *slot = (k, peer, r);
+            let win = copies[i];
+            let slot = best.entry((k.0, &(k.1).1)).or_insert(win);
+            if (k.1).0 < (((slot.0).0).1).0 {
+                *slot = win;
             }
         }
         let mut out: Vec<_> = best.into_values().collect();
@@ -483,16 +507,16 @@ impl BgpRib {
         )
     }
 
-    /// `k`, held from `peer`, is the copy `table` enforces.
-    pub fn vpn_flow_enforced(&self, table: &str, peer: IpAddr, k: &VpnFlowKey) -> bool {
+    /// Copy `id` of `k`, held from `peer`, is the copy `table` enforces.
+    pub fn vpn_flow_enforced(&self, table: &str, peer: IpAddr, k: &VpnFlowKey, id: u32) -> bool {
         self.vpn_flows_of(table)
             .iter()
-            .any(|(key, p, _)| *key == k && *p == peer)
+            .any(|(c, p, _)| c.0 == *k && c.1 == id && *p == peer)
     }
 
     /// The VRF set changed: every rule may import elsewhere.
     pub(super) fn revalidate_all_vpn_flows(&mut self) {
-        let all: Vec<(IpAddr, VpnFlowKey)> = self
+        let all: Vec<(IpAddr, VpnFlowCopy)> = self
             .vpn_flow_adj_rib_in
             .iter()
             .flat_map(|(p, t)| t.keys().map(move |k| (*p, k.clone())))

@@ -2713,6 +2713,15 @@
             "description": "The NLRI rendered as text (`dest 192.0.2.0/24 proto =6 dst-port =25`).",
             "type": "string"
           },
+          "path_id": {
+            "description": "The RFC 7911 path id of a SAFI 134 copy, set only when non-zero: one\npeer can send several copies of one rule (#1126).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "peer": {
             "description": "The advertising peer.",
             "type": "string"

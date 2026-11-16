@@ -16,7 +16,7 @@ use super::vpn_out::vpn_family;
 use super::{
     apply_policy, family_index, info, ov_state, warn, Arc, BgpRib, CompiledPolicy, EvpnNlri,
     EvpnRoute, FlowspecKey, FlowspecRoute, HashMap, HashSet, IpAddr, IpNet, PolicyPeer, RibRoute,
-    VpnFlowKey, VpnRoute,
+    VpnFlowCopy, VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 use nos_proto::{AddressFamily, FamilyReeval, ReevalFamily};
@@ -43,7 +43,7 @@ pub(super) struct Retained {
     /// VPN paths as received (the policy rewrites the held copy).
     pub(super) vpn: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
     /// VPN Flowspec rules as received (#1085).
-    pub(super) vpn_flow: HashMap<IpAddr, HashMap<VpnFlowKey, FlowspecRoute>>,
+    pub(super) vpn_flow: HashMap<IpAddr, HashMap<VpnFlowCopy, FlowspecRoute>>,
 }
 
 /// The import policies a re-evaluation applies, as the peer slot holds them.
@@ -112,13 +112,13 @@ impl Retained {
     pub(super) fn vpn_flow_slot(
         &mut self,
         peer: IpAddr,
-    ) -> Option<&mut HashMap<VpnFlowKey, FlowspecRoute>> {
+    ) -> Option<&mut HashMap<VpnFlowCopy, FlowspecRoute>> {
         self.enabled
             .contains(&peer)
             .then(|| self.vpn_flow.entry(peer).or_default())
     }
 
-    pub(super) fn take_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowKey) {
+    pub(super) fn take_vpn_flow(&mut self, peer: IpAddr, k: &VpnFlowCopy) {
         if let Some(t) = self.vpn_flow.get_mut(&peer) {
             t.remove(k);
         }
@@ -158,7 +158,7 @@ enum ReevalKey {
     Unicast(IpNet),
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
-    VpnFlow(VpnFlowKey),
+    VpnFlow(VpnFlowCopy),
     Vpn(VpnKey<IpNet>),
 }
 
@@ -642,7 +642,7 @@ impl BgpRib {
     fn reeval_vpn_flow(
         &mut self,
         peer: IpAddr,
-        k: &VpnFlowKey,
+        c: &VpnFlowCopy,
         policy: Option<&CompiledPolicy>,
         stats: &mut [Tally; 9],
     ) -> bool {
@@ -650,30 +650,31 @@ impl BgpRib {
             .retained
             .vpn_flow
             .get(&peer)
-            .and_then(|t| t.get(k))
+            .and_then(|t| t.get(c))
             .cloned()
         else {
             return false;
         };
+        let k = &c.0;
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
         let confed = self.confed_peers.contains(&peer);
         let accepted = policy.is_none_or(|p| import_flow(p, &mut route, peer, peer_as, confed));
         let rd = format_rd(&(k.1).0);
         let table = self.vpn_flow_adj_rib_in.entry(peer).or_default();
         let changed = if accepted {
-            if let Some(old) = table.get(k)
+            if let Some(old) = table.get(c)
                 && old.attributes == route.attributes
             {
                 route.received_at = old.received_at;
             }
-            let changed = table.get(k).map(|o| &o.attributes) != Some(&route.attributes);
+            let changed = table.get(c).map(|o| &o.attributes) != Some(&route.attributes);
             if changed {
                 info!(peer = %peer, family = %k.0, rd = %rd, route = %(k.1).1, "flowspec route learned");
-                table.insert(k.clone(), route);
+                table.insert(c.clone(), route);
             }
             changed
         } else {
-            let removed = table.remove(k).is_some();
+            let removed = table.remove(c).is_some();
             if removed {
                 warn!(peer = %peer, family = %k.0, rd = %rd, route = %(k.1).1, "flowspec route rejected by import policy");
             }

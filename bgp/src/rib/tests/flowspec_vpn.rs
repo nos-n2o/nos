@@ -320,8 +320,14 @@ fn the_lowest_rd_copy_is_enforced_per_vrf() {
     feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
     let k = |rd| (AddressFamily::Vpnv4Flowspec, (rd, flow()));
     for table in ["red", "blue"] {
-        assert!(rib.vpn_flow_enforced(table, addr(SRC), &k(RD1)), "{table}");
-        assert!(!rib.vpn_flow_enforced(table, addr(SRC), &k(RD2)), "{table}");
+        assert!(
+            rib.vpn_flow_enforced(table, addr(SRC), &k(RD1), 0),
+            "{table}"
+        );
+        assert!(
+            !rib.vpn_flow_enforced(table, addr(SRC), &k(RD2), 0),
+            "{table}"
+        );
     }
     let sizes: Vec<_> = rib
         .vpn_flowspec_push_snapshot()
@@ -332,12 +338,12 @@ fn the_lowest_rd_copy_is_enforced_per_vrf() {
     assert_eq!(sizes, [("red".into(), 1), ("blue".into(), 1)]);
     // Withdrawn: the other copy takes over.
     feed(&mut rib, SRC, &flow_unreach(RD1, flow()));
-    assert!(rib.vpn_flow_enforced("red", addr(SRC), &k(RD2)));
+    assert!(rib.vpn_flow_enforced("red", addr(SRC), &k(RD2), 0));
     // A rule only `blue` imports is not enforced in `red`.
     feed(&mut rib, SRC, &flow_unreach(RD2, flow()));
     feed(&mut rib, SRC, &flow_reach(65001, vec![RT2], RD2, flow()));
-    assert!(rib.vpn_flow_enforced("blue", addr(SRC), &k(RD2)));
-    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k(RD2)));
+    assert!(rib.vpn_flow_enforced("blue", addr(SRC), &k(RD2), 0));
+    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k(RD2), 0));
 }
 
 /// The IGP admits a VPN path late (its next hop was unresolved): the rules
@@ -386,13 +392,16 @@ fn each_vrf_enforces_the_copy_valid_in_it_whichever_peer_wins() {
     let k = (AddressFamily::Vpnv4Flowspec, (RD1, flow()));
     for other_first in [false, true] {
         let rib = two_copies(other_first);
-        assert!(rib.vpn_flow_enforced("red", addr(SRC), &k), "{other_first}");
-        assert!(!rib.vpn_flow_enforced("red", addr(OTHER), &k));
         assert!(
-            rib.vpn_flow_enforced("blue", addr(OTHER), &k),
+            rib.vpn_flow_enforced("red", addr(SRC), &k, 0),
             "{other_first}"
         );
-        assert!(!rib.vpn_flow_enforced("blue", addr(SRC), &k));
+        assert!(!rib.vpn_flow_enforced("red", addr(OTHER), &k, 0));
+        assert!(
+            rib.vpn_flow_enforced("blue", addr(OTHER), &k, 0),
+            "{other_first}"
+        );
+        assert!(!rib.vpn_flow_enforced("blue", addr(SRC), &k, 0));
         assert_eq!(sizes(&rib), [("red".into(), 1), ("blue".into(), 1)]);
     }
 }
@@ -414,4 +423,97 @@ fn invalidating_the_copy_in_a_vrf_leaves_nothing_there() {
     }];
     feed(&mut rib, OTHER, &w);
     assert_eq!(sizes(&rib), [("red".into(), 1), ("blue".into(), 0)]);
+}
+
+/// #1126: one peer sends two copies of one (RD, rule) under Add-Path ids 1
+/// and 2, RT:1 and RT:2: `red` imports the first, `blue` the second.
+fn add_path_copies() -> BgpRib {
+    let mut rib = setup();
+    unicast(&mut rib, SRC, 65001, "10.10.0.0/24");
+    let mut u = reach(SRC, vec![65001], vec![nlri(RD2, "10.10.0.0/24", 1)]);
+    u.attributes.as_mut().unwrap().extended_communities = vec![RT2];
+    feed(&mut rib, SRC, &u);
+    for (id, rt) in [(1, RT), (2, RT2)] {
+        feed(&mut rib, SRC, &copy_reach(id, rt));
+    }
+    rib
+}
+
+fn copy_reach(id: u32, rt: u64) -> UpdateMessage {
+    let mut u = flow_reach(65001, vec![rt], RD1, flow());
+    u.mp_reach[0].nlri_path_ids = vec![id];
+    u
+}
+
+fn copy_unreach(id: u32) -> UpdateMessage {
+    let mut u = flow_unreach(RD1, flow());
+    u.mp_unreach[0].withdrawn_path_ids = vec![id];
+    u
+}
+
+#[test]
+fn copies_of_one_rule_from_one_peer_are_each_enforced_in_their_vrf() {
+    let k = (AddressFamily::Vpnv4Flowspec, (RD1, flow()));
+    let rib = add_path_copies();
+    assert_eq!(rib.accepted_vpn_flow(addr(SRC)), [2, 0]);
+    assert!(rib.vpn_flow_enforced("red", addr(SRC), &k, 1));
+    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k, 2));
+    assert!(rib.vpn_flow_enforced("blue", addr(SRC), &k, 2));
+    assert!(!rib.vpn_flow_enforced("blue", addr(SRC), &k, 1));
+    // Two rows, told apart by the path id.
+    let f = FlowFilter {
+        family: Some(AddressFamily::Vpnv4Flowspec),
+        vrf: None,
+    };
+    let keys = rib.flowspec_keys(&f);
+    assert_eq!(keys.len(), 2);
+    let mut ids: Vec<_> = keys
+        .iter()
+        .map(|k| rib.flowspec_at(k).unwrap().path_id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, [Some(1), Some(2)]);
+}
+
+#[test]
+fn withdrawing_one_copy_leaves_the_other() {
+    let k = (AddressFamily::Vpnv4Flowspec, (RD1, flow()));
+    let mut rib = add_path_copies();
+    feed(&mut rib, SRC, &copy_unreach(1));
+    assert_eq!(rib.accepted_vpn_flow(addr(SRC)), [1, 0]);
+    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k, 1));
+    assert!(rib.vpn_flow_enforced("blue", addr(SRC), &k, 2));
+    assert_eq!(sizes(&rib), [("red".into(), 0), ("blue".into(), 1)]);
+}
+
+#[test]
+fn a_new_announcement_of_a_copy_replaces_only_that_copy() {
+    let k = (AddressFamily::Vpnv4Flowspec, (RD1, flow()));
+    let mut rib = add_path_copies();
+    // Copy 1 now carries RT:2 only: it moves from `red` to `blue`.
+    feed(&mut rib, SRC, &copy_reach(1, RT2));
+    assert_eq!(rib.accepted_vpn_flow(addr(SRC)), [2, 0]);
+    assert!(!rib.vpn_flow_enforced("red", addr(SRC), &k, 1));
+    // Both copies are now valid in `blue`: it enforces exactly one.
+    assert_ne!(
+        rib.vpn_flow_enforced("blue", addr(SRC), &k, 1),
+        rib.vpn_flow_enforced("blue", addr(SRC), &k, 2)
+    );
+    assert_eq!(sizes(&rib), [("red".into(), 0), ("blue".into(), 1)]);
+}
+
+#[test]
+fn losing_the_session_drops_every_copy() {
+    let mut rib = add_path_copies();
+    rib.peer_disconnected(addr(SRC), crate::rib::Disconnect::Hard);
+    assert_eq!(rib.accepted_vpn_flow(addr(SRC)), [0, 0]);
+    assert_eq!(sizes(&rib), [("red".into(), 0), ("blue".into(), 0)]);
+}
+
+#[test]
+fn a_copy_without_a_path_id_is_id_zero_and_replaced_by_a_repeat() {
+    let mut rib = setup();
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
+    feed(&mut rib, SRC, &flow_reach(65001, vec![RT], RD1, flow()));
+    assert_eq!(rib.accepted_vpn_flow(addr(SRC)), [1, 0]);
 }

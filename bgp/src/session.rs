@@ -1019,6 +1019,7 @@ impl SessionManager {
                             t,
                             peer,
                             &(route.family, (rd, route.nlri.clone())),
+                            shown.path_id.unwrap_or(0),
                         ),
                         _ => false,
                     }
@@ -1032,6 +1033,8 @@ impl SessionManager {
                     }),
                     family: route.family.to_string(),
                     rd: shown.rd.map(|rd| crate::vpn::format_rd(&rd)),
+                    // 0 is "no Add-Path": only a copy with an id is told apart.
+                    path_id: shown.path_id.filter(|i| *i != 0),
                     peer,
                     nlri: route.nlri.to_string(),
                     extended_communities: route

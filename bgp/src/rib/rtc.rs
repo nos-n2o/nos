@@ -448,7 +448,7 @@ impl BgpRib {
         let touched: Vec<_> = self
             .vpn_flow_loc
             .iter()
-            .filter(|(_, (_, r))| {
+            .filter(|(_, (_, _, r))| {
                 keys.iter()
                     .any(|n| n.covers_any(&r.attributes.extended_communities))
             })
