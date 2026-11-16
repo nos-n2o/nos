@@ -1528,7 +1528,7 @@ pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> S
         lines.push(format!(
             "  {} area {} if-state {} neighbor {neighbor_router_id} {} last-hello {last_hello} \
              hello-interval {} dead-interval {} priority {} neighbor-priority {neighbor_priority} \
-             dr {} bdr {}",
+             dr {} bdr {} lls {}",
             link.link,
             link.area_id,
             render_ospf_interface_state(link.interface_state),
@@ -1538,9 +1538,25 @@ pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> S
             link.priority,
             render_ip_or_dash(link.dr),
             render_ip_or_dash(link.bdr),
+            render_lls(link.lls),
         ));
     }
     lines.join("\n")
+}
+
+/// RFC 5613 LLS column: `none`, or `eof 0x<word>` plus ` lr`/` rs` when set.
+fn render_lls(lls: Option<nos_proto::LlsSummary>) -> String {
+    let Some(l) = lls else {
+        return "none".to_string();
+    };
+    let mut out = format!("eof 0x{:08x}", l.eof);
+    if l.lr {
+        out.push_str(" lr");
+    }
+    if l.rs {
+        out.push_str(" rs");
+    }
+    out
 }
 
 /// Render one OSPF instance's installed-LSA headers, one line per LSA —
@@ -2666,6 +2682,7 @@ mod tests {
             neighbor_priority: None,
             dr: None,
             bdr: None,
+            lls: None,
         }
     }
 
@@ -2683,7 +2700,7 @@ mod tests {
             render_ospf_neighbors("o1", &[down_link("eth0.0")]),
             "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor - Down \
              last-hello - hello-interval 10 dead-interval 40 priority 1 neighbor-priority - \
-             dr - bdr -"
+             dr - bdr - lls none"
         );
     }
 
@@ -2698,7 +2715,7 @@ mod tests {
             render_ospf_neighbors("o1", &[link]),
             "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor 9.9.9.10 \
              2-Way last-hello 3s hello-interval 10 dead-interval 40 priority 1 \
-             neighbor-priority 1 dr - bdr -"
+             neighbor-priority 1 dr - bdr - lls none"
         );
     }
 
@@ -2715,8 +2732,16 @@ mod tests {
             render_ospf_neighbors("o1", &[link]),
             "ospf instance o1:\n  broadcast-domain:bd1 area 0.0.0.0 if-state backup neighbor \
              9.9.9.10 2-Way last-hello - hello-interval 10 dead-interval 40 priority 1 \
-             neighbor-priority 200 dr 9.9.9.10 bdr 1.1.1.1"
+             neighbor-priority 200 dr 9.9.9.10 bdr 1.1.1.1 lls none"
         );
+    }
+
+    #[test]
+    fn render_ospf_neighbors_lls_flags() {
+        let lls = |eof, lr, rs| Some(nos_proto::LlsSummary { eof, lr, rs });
+        assert_eq!(render_lls(lls(0, false, false)), "eof 0x00000000");
+        assert_eq!(render_lls(lls(3, true, true)), "eof 0x00000003 lr rs");
+        assert_eq!(render_lls(lls(2, false, true)), "eof 0x00000002 rs");
     }
 
     #[test]

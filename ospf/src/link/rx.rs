@@ -8,7 +8,7 @@ use super::originate::local_netmask;
 use super::{
     debug, election, exchange, info, lsa, neighbor, packet, should_form_adjacency,
     start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, HashMap, Instant, InterfaceState,
-    Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, LsAckPacket, LsaBody, Lsdb, LsrPacket,
+    Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, Lls, LsAckPacket, LsaBody, Lsdb, LsrPacket,
     LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
     SystemTime, UNIX_EPOCH,
 };
@@ -316,7 +316,7 @@ pub(super) fn send_hello(
     drop(current);
 
     let pkt = packet::HelloPacket {
-        lls: None,
+        lls: cfg.lls_active().then_some(Lls { eof: Some(0) }),
         router_id: local_router_id,
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
@@ -344,6 +344,38 @@ pub(super) fn send_hello(
 
 /// The Hello options for a link's area: E outside a stub area/NSSA (RFC 2328
 /// §3.6), N in an NSSA (RFC 3101 §2.1).
+/// Encodes a DBD built by `exchange` (which does not know the link config),
+/// adding the RFC 5613 LLS block when `cfg.lls_active()`.
+pub(super) fn encode_dbd_for(
+    cfg: &LinkConfig,
+    dbd: &DbdPacket,
+    auth: &packet::OutgoingAuth<'_>,
+) -> Vec<u8> {
+    if cfg.lls_active() {
+        let mut d = dbd.clone();
+        d.lls = Some(Lls { eof: Some(0) });
+        packet::encode_dbd(&d, auth)
+    } else {
+        packet::encode_dbd(dbd, auth)
+    }
+}
+
+/// Records the peer's LLS block on `info` (dropped when LLS is not active),
+/// logging once per change.
+fn note_lls(cfg: &LinkConfig, id: Ipv4Addr, info: &mut NeighborInfo, lls: Option<&Lls>) {
+    let new = if cfg.lls_active() { lls.cloned() } else { None };
+    if info.lls == new {
+        return;
+    }
+    if let Some(l) = &new {
+        info!(
+            link = %cfg.attach_point, neighbor = %id, eof = l.eof.unwrap_or(0),
+            "ospf lls received"
+        );
+    }
+    info.lls = new;
+}
+
 pub(super) fn hello_options(cfg: &LinkConfig) -> u8 {
     match (cfg.stub, cfg.nssa) {
         (_, true) => packet::OPTION_N,
@@ -356,6 +388,10 @@ pub(super) fn hello_options(cfg: &LinkConfig) -> u8 {
 /// early (RFC 2328's "`BackupSeen`" shortcut — a neighbor already declaring
 /// itself DR means the election result is already knowable).
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one Hello validation + neighbor update sequence"
+)]
 pub(super) fn handle_hello(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
@@ -496,6 +532,7 @@ pub(super) fn handle_hello(
             .entry(hello.router_id)
             .or_insert_with(|| NeighborInfo {
                 state: NeighborState::Down,
+                lls: None,
                 priority: 0,
                 declared_dr: Ipv4Addr::UNSPECIFIED,
                 declared_bdr: Ipv4Addr::UNSPECIFIED,
@@ -506,6 +543,7 @@ pub(super) fn handle_hello(
                 last_crypto_seq: HashMap::new(),
                 grace_deadline: None,
             });
+        note_lls(cfg, hello.router_id, entry, hello.lls.as_ref());
         entry.state = new_state;
         entry.priority = hello.router_priority;
         entry.declared_dr = dr_id;
@@ -576,7 +614,7 @@ pub(super) fn advance_adjacencies(
         let auth = cfg
             .auth
             .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-        if let Err(e) = socket.send_unicast(neighbor_addr, &packet::encode_dbd(&dbd, &auth)) {
+        if let Err(e) = socket.send_unicast(neighbor_addr, &encode_dbd_for(cfg, &dbd, &auth)) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
         }
         let new_state = neighbor::step(NeighborState::TwoWay, neighbor::Event::AdjacencyEligible);
@@ -608,6 +646,15 @@ pub(super) async fn handle_dbd(
         let neighbor = snapshot.neighbors.get(&dbd.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
+    if cfg.lls_active() {
+        status.send_if_modified(|s| {
+            s.neighbors.get_mut(&dbd.router_id).is_some_and(|n| {
+                let before = n.lls.clone();
+                note_lls(cfg, dbd.router_id, n, dbd.lls.as_ref());
+                n.lls != before
+            })
+        });
+    }
 
     // RFC 2328 §10.6: only in ExStart/Exchange; the neighbor stays in ExStart.
     if matches!(old_state, NeighborState::ExStart | NeighborState::Exchange)
@@ -915,7 +962,7 @@ pub(super) fn execute_actions(
                 if copies != 1 {
                     info!(link = %cfg.attach_point, neighbor = %neighbor_id, copies, "ospf dbd fault injected");
                 }
-                ("dbd", vec![packet::encode_dbd(&pkt, &auth); copies])
+                ("dbd", vec![encode_dbd_for(cfg, &pkt, &auth); copies])
             }
             exchange::Action::SendLsr(requests) => {
                 ("lsr", split_lsr(cfg, next_seq, local_router_id, &requests))

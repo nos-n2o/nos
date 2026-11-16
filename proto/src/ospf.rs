@@ -97,6 +97,22 @@ pub struct NeighborSummary {
     /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub bdr: Option<Ipv4Addr>,
+    /// The neighbor's RFC 5613 LLS data. `None` when it sent no valid LLS
+    /// block, or LLS is off on this link.
+    #[serde(default)]
+    pub lls: Option<LlsSummary>,
+}
+
+/// A neighbor's RFC 5613 Link-Local Signaling data (EOF TLV).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlsSummary {
+    /// Raw Extended Options and Flags word.
+    pub eof: u32,
+    /// LSDB Resynchronization bit (RFC 4811), shown only.
+    pub lr: bool,
+    /// Restart Signal bit (RFC 4812), shown only.
+    pub rs: bool,
 }
 
 /// One installed LSA's header fields, for `show ospf database` — never the
