@@ -990,3 +990,28 @@ async fn an_active_anonymous_client_is_not_cut_by_the_idle_timeout() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// A daemon's `Heartbeat` is recorded for its supervisor; a person or an
+/// anonymous peer may not send one (#1150).
+#[tokio::test]
+async fn heartbeat_is_for_daemons_only() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Bgpd, "hb-r1"), &e.broker).await;
+    assert_eq!(nos_watchdog::heartbeat::last("bgpd", "hb-r1"), None);
+    assert!(matches!(
+        ask(&mut conn, WatchdogRequest::Heartbeat).await,
+        WatchdogEvent::Ok
+    ));
+    assert!(nos_watchdog::heartbeat::last("bgpd", "hb-r1").is_some());
+
+    let mut conn = dial(&e.daemon(Role::User, "alice"), &e.broker).await;
+    assert!(matches!(
+        ask(&mut conn, WatchdogRequest::Heartbeat).await,
+        WatchdogEvent::Denied(_)
+    ));
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    assert!(matches!(
+        ask(&mut conn, WatchdogRequest::Heartbeat).await,
+        WatchdogEvent::Denied(_)
+    ));
+}

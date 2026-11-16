@@ -102,6 +102,9 @@ pub struct BackoffPolicy {
     pub max: Duration,
     pub multiplier: u32,
     pub stable_after: Duration,
+    /// A child that has beaten (`Heartbeat`) and then falls silent for this
+    /// long is restarted (#1150); `None` disables it (`--no-heartbeat-kill`).
+    pub liveness_timeout: Option<Duration>,
 }
 
 impl Default for BackoffPolicy {
@@ -111,6 +114,8 @@ impl Default for BackoffPolicy {
             max: Duration::from_secs(30),
             multiplier: 2,
             stable_after: Duration::from_secs(60),
+            // 3 x the daemons' 5 s beat interval + 5 s grace.
+            liveness_timeout: Some(Duration::from_secs(20)),
         }
     }
 }
@@ -194,6 +199,9 @@ pub async fn supervise_one(
                 continue;
             }
         };
+        if let Some(id) = &spec.identity {
+            crate::heartbeat::forget(id.role.as_str(), &id.name);
+        }
         let issued = Arc::new(Mutex::new(Vec::new()));
         let pusher = spec
             .identity
@@ -201,15 +209,38 @@ pub async fn supervise_one(
             .zip(child.stdin.take())
             .map(|(id, stdin)| push_identity(spec.name.clone(), id, stdin, issued.clone()));
 
-        let child_exited = tokio::select! {
-            status = child.wait() => {
-                match status {
-                    Ok(status) => warn!(process = %spec.name, %status, "exited"),
-                    Err(e) => error!(process = %spec.name, error = %e, "wait() failed"),
+        let mut check = tokio::time::interval(
+            policy
+                .liveness_timeout
+                .map_or(Duration::from_secs(3600), |t| {
+                    (t / 4).max(Duration::from_millis(10))
+                }),
+        );
+        let child_exited = loop {
+            tokio::select! {
+                status = child.wait() => {
+                    match status {
+                        Ok(status) => warn!(process = %spec.name, %status, "exited"),
+                        Err(e) => error!(process = %spec.name, error = %e, "wait() failed"),
+                    }
+                    break true;
                 }
-                true
+                _ = shutdown.changed() => break false,
+                _ = check.tick() => {
+                    let hung = spec.identity.as_ref().zip(policy.liveness_timeout).filter(|(id, t)| {
+                        crate::heartbeat::missed(
+                            crate::heartbeat::last(id.role.as_str(), &id.name),
+                            tokio::time::Instant::now(),
+                            *t,
+                        )
+                    });
+                    if hung.is_some() {
+                        warn!(process = %spec.name, "heartbeat missed, killing the hung process");
+                        shutdown_child(&spec.name, &mut child).await;
+                        break true;
+                    }
+                }
             }
-            _ = shutdown.changed() => false,
         };
 
         if !child_exited {
@@ -474,6 +505,56 @@ mod backoff_tests {
         assert!(!task.is_finished(), "the child must be running");
         tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    /// A child that beat once and then fell silent is killed and respawned; one
+    /// that never beat, or keeps beating, is left alone (#1150).
+    #[tokio::test]
+    async fn a_silent_child_is_restarted_only_after_it_beat() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(600),
+            Duration::from_secs(300),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let spawns =
+            |name: &str| {
+                let log = dir.path().join(name);
+                let script = format!("echo x >> {}; exec sleep 300", log.display());
+                let spec = ProcessSpec::new(name, "/bin/sh", vec!["-c".into(), script])
+                    .with_identity(pki.clone(), Role::Configd, name);
+                (spec, log)
+            };
+        let policy = BackoffPolicy {
+            base: Duration::from_millis(50),
+            liveness_timeout: Some(Duration::from_millis(800)),
+            ..BackoffPolicy::default()
+        };
+        let count =
+            |p: &std::path::Path| std::fs::read_to_string(p).map_or(0, |s| s.lines().count());
+        let (tx, rx) = watch::channel(false);
+        let (silent, silent_log) = spawns("hb-silent");
+        let (quiet, quiet_log) = spawns("hb-never");
+        let (steady, steady_log) = spawns("hb-steady");
+        let tasks: Vec<_> = [silent, quiet, steady]
+            .into_iter()
+            .map(|s| tokio::spawn(supervise_one(s, policy, rx.clone())))
+            .collect();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        crate::heartbeat::record("configd", "hb-silent");
+        for _ in 0..40 {
+            crate::heartbeat::record("configd", "hb-steady");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(count(&silent_log) >= 2, "silent child restarted");
+        assert_eq!(count(&quiet_log), 1, "never-beat child exempt");
+        assert_eq!(count(&steady_log), 1, "beating child untouched");
+        tx.send(true).unwrap();
+        for t in tasks {
+            t.await.unwrap();
+        }
     }
 
     #[test]

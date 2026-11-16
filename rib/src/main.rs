@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         shutdown_rx.clone(),
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(table = %args.table, peer = ?identity.peer(), "nos-ribd starting");
 
     let sock = args

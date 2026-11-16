@@ -41,6 +41,11 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
+    /// `nos-watchdogd`'s broker socket, for the liveness heartbeat. Passed by
+    /// nos-watchdog; unset (a hand-run configd) means no heartbeat.
+    #[arg(long)]
+    watchdog_socket: Option<PathBuf>,
+
     /// Only present when built with `--features dhat-heap`. Path to write
     /// the dhat heap-profile report to on exit (SIGINT).
     #[cfg(feature = "dhat-heap")]
@@ -97,6 +102,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .with_context(|| format!("failed to bind {}", args.listen))?;
 
+    if let Some(socket) = args.watchdog_socket {
+        nos_daemon::liveness::start(socket);
+    }
     tracing::info!(peer = ?identity.peer(), "ipc identity loaded");
     tracing::info!(config_file = %args.config_file.display(), "config file path");
 

@@ -330,6 +330,10 @@ pub enum WatchdogRequest {
         /// DER-encoded certificate signing request.
         csr_der: Vec<u8>,
     },
+    /// A supervised daemon's liveness beat (#1150), sent only while its
+    /// runtime is making progress; `nos-watchdogd` restarts a daemon whose
+    /// beats stop. Any daemon role; answered with `Ok`.
+    Heartbeat,
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -374,6 +378,7 @@ impl fmt::Debug for WatchdogRequest {
             WatchdogRequest::RedeemTicket { .. } => {
                 f.debug_struct("RedeemTicket").finish_non_exhaustive()
             }
+            WatchdogRequest::Heartbeat => f.write_str("Heartbeat"),
         }
     }
 }
@@ -397,7 +402,7 @@ pub enum WatchdogEvent {
     /// Reply to `Login`/`RenewCert`: refused. Deliberately one opaque
     /// message for unknown user and wrong password alike.
     Denied(String),
-    /// Reply to `RestCertCheck`: the certificate is live.
+    /// Reply to `RestCertCheck` (the certificate is live) and `Heartbeat`.
     Ok,
     /// Reply to `IssueRestServerCert`: the listener's certificate, the REST CA
     /// that signed it (the trust anchor for client certificates), and how long

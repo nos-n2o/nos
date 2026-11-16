@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         shutdown_rx.clone(),
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(driver = ?args.driver, "nos-acld starting");
     match args.driver {
         DriverKind::Linux => {
