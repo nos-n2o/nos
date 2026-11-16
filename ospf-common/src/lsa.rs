@@ -10,6 +10,9 @@ use std::net::Ipv4Addr;
 /// RFC 2328 Appendix B `MaxAge`, in seconds — identical in RFC 5340.
 pub const MAX_AGE: u16 = 3600;
 
+/// RFC 2328 Appendix B `MaxAgeDiff`, in seconds — identical in RFC 5340.
+pub const MAX_AGE_DIFF: u16 = 900;
+
 /// The 20-byte common LSA header, as far as the database cares.
 pub trait LsaHeader: Copy + Debug + PartialEq {
     /// The `(type, link-state id, advertising router)` slot; `lsa_type` is a
@@ -25,9 +28,9 @@ pub trait LsaHeader: Copy + Debug + PartialEq {
 
     /// RFC 2328 §13.1's "which LSA instance is newer": higher sequence number
     /// wins, then higher checksum, then an instance at `MAX_AGE` (being
-    /// flushed) is newer than one that isn't. `Equal` is §13.1's "same
-    /// instance"; the `MaxAgeDiff` tie-break is deliberately not implemented
-    /// (instances tying on sequence and checksum are the same content).
+    /// flushed) is newer than one that isn't, then (neither at `MAX_AGE`) an age
+    /// differing by more than `MAX_AGE_DIFF` makes the younger one newer.
+    /// `Equal` is §13.1's "same instance".
     fn is_newer(&self, other: &Self) -> Ordering {
         if self.seq() != other.seq() {
             return self.seq().cmp(&other.seq());
@@ -38,7 +41,15 @@ pub trait LsaHeader: Copy + Debug + PartialEq {
         match (self.age() == MAX_AGE, other.age() == MAX_AGE) {
             (true, false) => Ordering::Greater,
             (false, true) => Ordering::Less,
-            _ => Ordering::Equal,
+            (true, true) => Ordering::Equal,
+            (false, false) => {
+                let (a, b) = (self.age(), other.age());
+                if a.abs_diff(b) > MAX_AGE_DIFF {
+                    b.cmp(&a)
+                } else {
+                    Ordering::Equal
+                }
+            }
         }
     }
 }
@@ -186,6 +197,11 @@ mod tests {
             (h(1, 4, MAX_AGE), h(1, 4, 10), Greater),
             (h(1, 4, 10), h(1, 4, MAX_AGE), Less),
             (h(1, 4, 10), h(1, 4, 99), Equal),
+            (h(1, 4, 0), h(1, 4, 900), Equal),
+            (h(1, 4, 900), h(1, 4, 0), Equal),
+            (h(1, 4, 0), h(1, 4, 901), Greater),
+            (h(1, 4, 901), h(1, 4, 0), Less),
+            (h(1, 4, 0), h(1, 4, MAX_AGE - 1), Greater),
             (h(1, 4, MAX_AGE), h(1, 4, MAX_AGE), Equal),
         ];
         for (a, b, want) in table {

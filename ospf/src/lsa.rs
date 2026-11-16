@@ -687,15 +687,8 @@ pub(crate) fn lsa_checksum(without_age: &[u8]) -> u16 {
     u16::from_be_bytes([x, y])
 }
 
-/// RFC 2328 §13.1's "which LSA instance is newer": higher sequence number
-/// wins, then higher checksum, then an instance at `MAX_AGE` (being flushed)
-/// is always considered newer than one that isn't. Returns `Ordering::Equal`
-/// for what §13.1 calls "the same instance" — this deliberately doesn't
-/// implement the `MaxAgeDiff` age-difference tie-break: a real age-increment
-/// timer now runs (`link::LinkManager`'s age tick, see `lsdb::Lsdb::
-/// age_and_evict`), but two instances that already tie on sequence number
-/// and checksum are the same content regardless of stored age, so there's no
-/// ambiguity left for `MaxAgeDiff` to resolve.
+/// RFC 2328 §13.1 instance freshness (sequence, checksum, `MaxAge`, then
+/// `MaxAgeDiff`); the rule lives in `nos_ospf_common::lsa::LsaHeader::is_newer`.
 pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
     nos_ospf_common::lsa::LsaHeader::is_newer(a, b)
 }
