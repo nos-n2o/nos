@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use crate::evpn::EvpnNlri;
 use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
 use crate::rib::{
-    EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnFlowKey, VpnRoute,
+    EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnFlowCopy, VpnRoute,
 };
 use crate::vpn::VpnKey;
 use ipnet::IpNet;
@@ -636,10 +636,10 @@ impl Hub {
     }
 
     /// The post-policy stream for VPN Flowspec rule `k` (SAFI 134).
-    pub fn vpn_flow_post(&self, peer: IpAddr, k: &VpnFlowKey, route: Option<&FlowspecRoute>) {
+    pub fn vpn_flow_post(&self, peer: IpAddr, c: &VpnFlowCopy, route: Option<&FlowspecRoute>) {
         self.emit(peer, true, |_| match route {
-            Some(r) => monitor::vpn_flowspec_to_update(k, r),
-            None => monitor::vpn_flowspec_withdraw_to_update(k),
+            Some(r) => monitor::vpn_flowspec_to_update(c, r),
+            None => monitor::vpn_flowspec_withdraw_to_update(c),
         });
     }
 

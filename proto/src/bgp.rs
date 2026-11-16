@@ -182,6 +182,10 @@ pub struct FlowspecRouteSummary {
     /// The Route Distinguisher of a VPN rule (SAFI 134); `None` for the others.
     #[serde(default)]
     pub rd: Option<String>,
+    /// The RFC 7911 path id of a SAFI 134 copy, set only when non-zero: one
+    /// peer can send several copies of one rule (#1126).
+    #[serde(default)]
+    pub path_id: Option<u32>,
 }
 
 /// One received VPN-IPv4/VPN-IPv6 path (RFC 4364/4659, SAFI 128), for

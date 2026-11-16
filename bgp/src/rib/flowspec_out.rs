@@ -168,19 +168,20 @@ impl BgpRib {
         }
         let mut vpn_rerun = Vec::new();
         if let Some(table) = self.vpn_flow_adj_rib_in.get_mut(&peer) {
-            for (k, r) in table.iter_mut() {
+            for (c, r) in table.iter_mut() {
+                let k = &c.0;
                 let accepted = import_flow(&policy, r, peer, peer_as, confed);
                 if !accepted {
                     warn!(peer = %peer, family = %k.0, rd = %crate::vpn::format_rd(&(k.1).0), route = %(k.1).1, "flowspec route rejected by import policy");
                 }
-                vpn_rerun.push((k.clone(), accepted));
+                vpn_rerun.push((c.clone(), accepted));
             }
         }
-        for (k, accepted) in vpn_rerun {
+        for (c, accepted) in vpn_rerun {
             if accepted {
-                self.revalidate_vpn_flow(peer, &k); // a rewrite may change the winner
+                self.revalidate_vpn_flow(peer, &c); // a rewrite may change the winner
             } else {
-                self.drop_vpn_flow(peer, &k);
+                self.drop_vpn_flow(peer, &c);
             }
         }
         self.flowspec_import.insert(peer, policy);

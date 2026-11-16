@@ -422,7 +422,7 @@ pub enum FlowRow {
     /// A SAFI 133 rule.
     Plain(FlowspecKey),
     /// A SAFI 134 rule (#1084).
-    Vpn(VpnFlowKey, Option<String>),
+    Vpn(VpnFlowCopy, Option<String>),
 }
 
 /// Which rows a `show bgp flowspec` walk wants (`flowspec_keys`).
@@ -442,6 +442,8 @@ pub struct FlowShown<'a> {
     pub route: &'a FlowspecRoute,
     /// The RD of a SAFI 134 rule.
     pub rd: Option<crate::vpn::Rd>,
+    /// The Add-Path id of a SAFI 134 copy.
+    pub path_id: Option<u32>,
     /// A SAFI 134 rule's validity text (per VRF); `None` for SAFI 133, whose
     /// own `route.validity` applies.
     pub validity: Option<String>,
@@ -455,6 +457,9 @@ pub(crate) type FlowspecKey = (AddressFamily, FlowSpec);
 /// A VPN Flowspec (SAFI 134) Adj-RIB-In key: the family (the bytes differ per
 /// AFI) and `(RD, rule)` (#1084).
 pub(crate) type VpnFlowKey = (AddressFamily, VpnKey<FlowSpec>);
+/// One received copy of a SAFI 134 rule: the rule and its RFC 7911 path id
+/// (0 for a peer without Add-Path), #1126.
+pub(crate) type VpnFlowCopy = (VpnFlowKey, u32);
 
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,20 +836,20 @@ pub struct BgpRib {
     /// RT kept (see `vpn_out`).
     vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
     /// Received VPN Flowspec (SAFI 134) rules per peer (#1084).
-    vpn_flow_adj_rib_in: HashMap<IpAddr, HashMap<VpnFlowKey, FlowspecRoute>>,
+    vpn_flow_adj_rib_in: HashMap<IpAddr, HashMap<VpnFlowCopy, FlowspecRoute>>,
     /// Per held SAFI 134 rule, its validity in each VRF table that imports it.
-    vpn_flow_validity: HashMap<(IpAddr, VpnFlowKey), HashMap<String, FlowValidity>>,
+    vpn_flow_validity: HashMap<(IpAddr, VpnFlowCopy), HashMap<String, FlowValidity>>,
     /// SAFI 134 revalidations so far (what the tests count).
     vpn_flow_visits: u64,
     /// Per SAFI 134 rule, the selected copy and the peer it came from
     /// (`select_vpn_flow`): the advertisement (Loc-RIB) winner, not the
     /// enforced set, which is chosen per VRF (`vpn_flows_of`). Per-VRF
     /// advertisement needs Add-Path for SAFI 134 (#1124).
-    vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, FlowspecRoute)>,
+    vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, u32, FlowspecRoute)>,
     /// What each peer was last sent per SAFI 134 rule (`sync_vpn_flow_to`).
     vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,
     /// The SAFI 134 twin of `flowspec_stale`.
-    vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowKey>>,
+    vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowCopy>>,
     /// Per key, the selected copy and where it came from (`select_vpn`).
     vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
@@ -1510,13 +1515,14 @@ impl BgpRib {
         let mut keys: Vec<FlowKey> = Vec::new();
         if vpn_wanted {
             for (peer, t) in &self.vpn_flow_adj_rib_in {
-                for (k, r) in t {
+                for (c, r) in t {
+                    let k = &c.0;
                     if filter.family.is_some_and(|f| f != k.0) {
                         continue;
                     }
                     let held = |v: &str| {
                         self.vpn_flow_validity
-                            .get(&(*peer, k.clone()))
+                            .get(&(*peer, c.clone()))
                             .is_some_and(|m| m.contains_key(v))
                     };
                     if filter.vrf.is_some_and(|v| !held(v)) {
@@ -1527,9 +1533,14 @@ impl BgpRib {
                         cursor: nos_proto::FlowspecRouteCursor {
                             peer: *peer,
                             family: r.family.to_string(),
-                            nlri: format!("{} {}", crate::vpn::format_rd(&(k.1).0), r.nlri),
+                            nlri: match c.1 {
+                                0 => format!("{} {}", crate::vpn::format_rd(&(k.1).0), r.nlri),
+                                id => {
+                                    format!("{} {} #{id}", crate::vpn::format_rd(&(k.1).0), r.nlri)
+                                }
+                            },
                         },
-                        row: Some(FlowRow::Vpn(k.clone(), table)),
+                        row: Some(FlowRow::Vpn(c.clone(), table)),
                     });
                 }
             }
@@ -1562,12 +1573,14 @@ impl BgpRib {
                 peer,
                 route: self.flowspec_adj_rib_in.get(&peer)?.get(k)?,
                 rd: None,
+                path_id: None,
                 validity: None,
                 table: None,
             },
-            FlowRow::Vpn(k, table) => {
-                let route = self.vpn_flow_adj_rib_in.get(&peer)?.get(k)?;
-                let held = self.vpn_flow_validity.get(&(peer, k.clone()));
+            FlowRow::Vpn(c, table) => {
+                let k = &c.0;
+                let route = self.vpn_flow_adj_rib_in.get(&peer)?.get(c)?;
+                let held = self.vpn_flow_validity.get(&(peer, c.clone()));
                 let validity = match table {
                     Some(t) => held?.get(t).map(ToString::to_string),
                     None => held.map(|m| {
@@ -1583,6 +1596,7 @@ impl BgpRib {
                     peer,
                     route,
                     rd: Some((k.1).0),
+                    path_id: Some(c.1),
                     validity: Some(validity.unwrap_or_else(|| "-".to_string())),
                     table: table.clone(),
                 }

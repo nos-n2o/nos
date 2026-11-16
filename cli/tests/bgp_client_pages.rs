@@ -96,6 +96,7 @@ async fn flowspec_routes_are_walked_page_by_page() {
             dataplane: None,
             family: "ipv4-flowspec".into(),
             rd: None,
+            path_id: None,
         };
         match after {
             None => BgpEvent::FlowspecRoutesPage {

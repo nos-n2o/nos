@@ -110,7 +110,7 @@ fn withdraw_unicast(rib: &mut BgpRib) {
 }
 
 fn selected(rib: &BgpRib) -> Option<IpAddr> {
-    rib.vpn_flow_loc.get(&key()).map(|(p, _)| *p)
+    rib.vpn_flow_loc.get(&key()).map(|(p, _, _)| *p)
 }
 
 #[test]

@@ -2431,6 +2431,7 @@ async fn bgp_evpn_and_flowspec_are_paged_per_instance_with_an_opaque_cursor() {
                 dataplane: None,
                 family: "ipv4-flowspec".into(),
                 rd: None,
+                path_id: None,
             }],
             next: after.is_none().then(|| FlowspecRouteCursor {
                 peer,

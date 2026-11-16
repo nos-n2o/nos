@@ -1373,7 +1373,9 @@ pub fn render_bgp_flowspec_lines(routes: &[FlowspecRouteSummary]) -> String {
                 r.peer,
                 r.rd.as_ref()
                     .map_or(String::new(), |rd| format!("rd {rd} ")),
-                r.nlri,
+                r.path_id
+                    .map_or(String::new(), |id| format!("path-id {id} "))
+                    + &r.nlri,
                 r.extended_communities.join(" "),
                 r.validity,
                 if r.actions.is_empty() {
@@ -2627,6 +2629,7 @@ mod tests {
             dataplane: None,
             family: "ipv4-flowspec".into(),
             rd: None,
+            path_id: None,
         };
         assert_eq!(
             render_bgp_flowspec("r1", std::slice::from_ref(&route)),
@@ -2638,6 +2641,11 @@ mod tests {
             ..route.clone()
         };
         assert!(render_bgp_flowspec("r1", &[bare]).ends_with("valid actions: none"));
+        let copy = FlowspecRouteSummary {
+            path_id: Some(7),
+            ..route.clone()
+        };
+        assert!(render_bgp_flowspec("r1", &[copy]).contains("from 10.0.0.2 path-id 7 dest "));
         let best = FlowspecRouteSummary {
             dataplane: Some("installed".to_string()),
             ..route

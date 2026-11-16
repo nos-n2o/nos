@@ -4615,6 +4615,107 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `flowspec-vpn-add-path` (#1126): a scripted speaker (`vpnflow_add_path.py`,
+/// router-g) sends router-a two RFC 7911 paths of one VPN Flowspec rule (RD
+/// `65001:5`): path 1 under RT `65000:1`, path 2 under RT `65000:2`, with one
+/// VPNv4 route covering the destination under both. `vrf-red` imports the
+/// first and `vrf-blue` the second, so each validates and shows its own copy
+/// (with its path id); the script later withdraws path 1 and the other copy
+/// stays.
+pub async fn flowspec_vpn_add_path(w: &mut World) -> anyhow::Result<()> {
+    let mut flags = vpn_flags("65000:1");
+    flags.extend(strings(&["--vpn-flowspec", "--add-path", "both"]));
+    w.start(A, Some(flags), &[]).await?;
+    // The second VRF, importing RT 65000:2.
+    let mut blue = vpn_flags("65000:2");
+    for i in 1..blue.len() {
+        match blue[i - 1].as_str() {
+            "--vpn-table" => blue[i] = "vrf-blue".into(),
+            "--vpn-rd" | "--vpn-rt-export" => blue[i] = "65000:101".into(),
+            _ => {}
+        }
+    }
+    blue.extend(strings(&["--vpn-flowspec", "--add-path", "both"]));
+    w.a()?.provision_flags(&blue).await?;
+    w.dock
+        .ensure_image(
+            PY_SPEAKER_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENTRYPOINT [\"python3\", \"-u\"]\n"
+            ),
+        )
+        .await?;
+    let script = include_str!("vpnflow_add_path.py")
+        .replace("@IP_A@", IP_A.s())
+        .replace("@IP_G@", IP_G.s())
+        .replace("@ASN@", &ASN_G.to_string())
+        .replace("@RID@", RID_G)
+        .replace("@WITHDRAW_AFTER@", "40");
+    w.dock
+        .start_plain(
+            "router-g",
+            PY_SPEAKER_IMAGE,
+            NET,
+            IP_G.s(),
+            &["/etc/vpnflow_add_path.py"],
+            ("/etc", "vpnflow_add_path.py", script.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    a.established().await?;
+    a.wait(&format!(
+        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
+    ))
+    .await?;
+
+    log("two paths of one rule: each VRF validates its own copy, told apart by the path id");
+    for id in [1, 2] {
+        a.wait(&format!(
+            "flowspec route learned peer={IP_G} family=vpnv4-flowspec rd=65001:5 .*path_id={id}"
+        ))
+        .await?;
+    }
+    for (table, id) in [("vrf-red", 1), ("vrf-blue", 2)] {
+        a.wait(&format!(
+            "flowspec validity changed peer={IP_G} family=vpnv4-flowspec rd=65001:5 table={table}.*validity=valid path_id={id}"
+        ))
+        .await?;
+        let body = a
+            .rest_expect(
+                Method::GET,
+                &format!("/v1/bgp/flowspec?vrf={table}"),
+                None,
+                200,
+            )
+            .await?;
+        let other = 3 - id;
+        if !body.contains(&format!("\"path_id\":{id}"))
+            || body.contains(&format!("\"path_id\":{other}"))
+        {
+            bail!("show bgp flowspec vrf {table} must list only path {id}: {body}");
+        }
+    }
+
+    log("withdrawing path 1 leaves path 2");
+    a.wait(&format!(
+        "flowspec route withdrawn peer={IP_G} family=vpnv4-flowspec rd=65001:5 .*path_id=1"
+    ))
+    .await?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            "/v1/bgp/flowspec?family=vpnv4-flowspec",
+            None,
+            200,
+        )
+        .await?;
+    if body.contains("\"path_id\":1") || !body.contains("\"path_id\":2") {
+        bail!("withdrawing path 1 must leave path 2 only: {body}");
+    }
+    Ok(())
+}
+
 /// `flowspec-vpn`, dataplane half (#1086): router-b, on a VLAN subinterface
 /// of its own, sends TCP probes to router-a's address on the `flowspec`
 /// subinterface in `vrf-red`. GoBGP's SAFI 134 `then discard` rule (RT

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use nos_proto::AddressFamily;
 
-use super::{BgpRib, FlowspecKey, VpnFlowKey};
+use super::{BgpRib, FlowspecKey, VpnFlowCopy};
 use crate::bmp::{monitor, Hub};
 use crate::evpn::EvpnNlri;
 use crate::message::UpdateMessage;
@@ -30,7 +30,7 @@ pub(crate) enum BmpKey {
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
     Vpn(VpnKey<IpNet>),
-    VpnFlow(VpnFlowKey),
+    VpnFlow(VpnFlowCopy),
 }
 
 impl BgpRib {

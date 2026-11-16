@@ -660,26 +660,24 @@ impl BgpRib {
             }
         }
         if let Some(stale) = self.vpn_flow_stale.get_mut(&from) {
-            for (m_afi, n) in update
+            let announced = update
                 .mp_reach
                 .iter()
-                .flat_map(|m| m.flowspec_vpn.iter().map(move |n| (m.afi, n)))
-                .chain(
-                    update
-                        .mp_unreach
-                        .iter()
-                        .flat_map(|m| m.flowspec_vpn.iter().map(move |n| (m.afi, n))),
-                )
-            {
+                .flat_map(|m| vpn_flow_rows(m.afi, &m.flowspec_vpn, &m.nlri_path_ids));
+            let withdrawn = update
+                .mp_unreach
+                .iter()
+                .flat_map(|m| vpn_flow_rows(m.afi, &m.flowspec_vpn, &m.withdrawn_path_ids));
+            for (m_afi, n, id) in announced.chain(withdrawn) {
                 if let Some(f) = super::flowspec_vpn::vpn_flow_family(m_afi) {
-                    stale.remove(&(f, (n.rd, n.flow.clone())));
+                    stale.remove(&((f, (n.rd, n.flow.clone())), id));
                 }
             }
         }
         for u in &update.mp_unreach {
             if let Some(family) = super::flowspec_vpn::vpn_flow_family(u.afi) {
-                for n in &u.flowspec_vpn {
-                    self.drop_vpn_flow(from, &(family, (n.rd, n.flow.clone())));
+                for (_, n, id) in vpn_flow_rows(u.afi, &u.flowspec_vpn, &u.withdrawn_path_ids) {
+                    self.drop_vpn_flow(from, &((family, (n.rd, n.flow.clone())), id));
                 }
             }
         }
@@ -986,8 +984,8 @@ impl BgpRib {
                 self.drop_vpn(from, &(n.rd, n.prefix));
             }
             if let Some(family) = super::flowspec_vpn::vpn_flow_family(m.afi) {
-                for n in &m.flowspec_vpn {
-                    self.drop_vpn_flow(from, &(family, (n.rd, n.flow.clone())));
+                for (_, n, id) in vpn_flow_rows(m.afi, &m.flowspec_vpn, &m.nlri_path_ids) {
+                    self.drop_vpn_flow(from, &((family, (n.rd, n.flow.clone())), id));
                 }
             }
             let Some(family) = flowspec_family(m.afi) else {
@@ -1054,4 +1052,17 @@ fn received_local_pref(received: Option<u32>, internal: bool) -> u32 {
     } else {
         DEFAULT_LOCAL_PREF
     }
+}
+
+/// `(afi, NLRI, id)` rows of one batch, id 0 when it carries none (a peer
+/// without Add-Path for the family).
+fn vpn_flow_rows<'a>(
+    afi: u16,
+    nlris: &'a [crate::flowspec::FlowSpecVpn],
+    ids: &'a [u32],
+) -> impl Iterator<Item = (u16, &'a crate::flowspec::FlowSpecVpn, u32)> {
+    nlris
+        .iter()
+        .enumerate()
+        .map(move |(i, n)| (afi, n, ids.get(i).copied().unwrap_or(0)))
 }
