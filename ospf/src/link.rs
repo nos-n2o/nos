@@ -31,8 +31,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    BfdDiag, LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState,
-    RedistributeUpdate,
+    BfdDiag, LinkInterfaceState, LlsSummary, LsaSummary, NeighborSummary, NetworkType,
+    OspfNeighborState, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -46,6 +46,7 @@ use crate::bfd;
 use crate::bfd_client::{Host, Target, Want};
 use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
+use crate::lls::{self, Lls};
 use crate::lsa::{
     self, AsExternalLsaBody, GraceLsaBody, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody,
     RouterLink, RouterLsaBody, SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
@@ -177,6 +178,10 @@ const GRACE_SEND_WINDOW: Duration = Duration::from_millis(500);
 /// field change (including a re-resolved `vrf`/`local_addr`, or a changed
 /// `network_type`/`priority`) restarts the link.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-link on/off knobs"
+)]
 pub struct LinkConfig {
     /// Display key, matching `reconcile::attach_points_for`'s existing
     /// `"<interface>.<tag>"`/`"broadcast-domain:<name>"` convention.
@@ -216,6 +221,8 @@ pub struct LinkConfig {
     pub mtu: u16,
     /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
     pub mtu_ignore: bool,
+    /// `lls`: RFC 5613 Link-Local Signaling. Read through `lls_active`.
+    pub lls: bool,
     /// The kernel device's ifindex from the `nos-interfaced` link stream (0 for
     /// a virtual link or before the stream's first snapshot). A recreated
     /// device gets a new one, which restarts the link (fresh raw socket).
@@ -300,6 +307,8 @@ fn resolve_virtual_link(
         // DBDs; we send the transit link's and skip the check instead.
         mtu: transit.mtu,
         mtu_ignore: true,
+        // Virtual links take no profile; LLS is always off there.
+        lls: false,
         ifindex: 0,
         auth: v.auth.clone(),
         stub: false,
@@ -358,7 +367,7 @@ pub enum LinkAuthConfig {
 }
 
 impl LinkAuthConfig {
-    fn is_extended(&self) -> bool {
+    pub(crate) fn is_extended(&self) -> bool {
         matches!(self, LinkAuthConfig::Crypto { extended: true, .. })
     }
 
@@ -434,6 +443,10 @@ pub enum InterfaceState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NeighborInfo {
     pub state: NeighborState,
+    /// The peer's RFC 5613 LLS block from its last valid Hello/DBD; `None`
+    /// when it carried none or LLS is not active here (`LinkConfig::lls_active`).
+    /// RFC 4811/4812 will read its `eof` LR/RS bits.
+    pub lls: Option<crate::lls::Lls>,
     pub priority: u8,
     pub declared_dr: Ipv4Addr,
     pub declared_bdr: Ipv4Addr,
@@ -619,6 +632,9 @@ pub async fn run(
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospf link driver started");
     if cfg.auth.is_extended() {
         info!(link = %cfg.attach_point, boot_count, "ospf link using rfc 7474 extended sequence numbers");
+        if cfg.lls {
+            warn!(link = %cfg.attach_point, "ospf lls enabled but ignored with rfc 7474 extended sequence numbers");
+        }
     }
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospf interface reached waiting");
@@ -1621,6 +1637,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
             neighbor_priority: None,
             dr: status.dr,
             bdr: status.bdr,
+            lls: None,
         }];
     }
 
@@ -1640,8 +1657,24 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
             neighbor_priority: Some(info.priority),
             dr: status.dr,
             bdr: status.bdr,
+            lls: info.lls.as_ref().map(|l| {
+                let eof = l.eof.unwrap_or(0);
+                LlsSummary {
+                    eof,
+                    lr: eof & lls::EOF_LR != 0,
+                    rs: eof & lls::EOF_RS != 0,
+                }
+            }),
         })
         .collect()
+}
+
+impl LinkConfig {
+    /// RFC 5613 LLS is sent and recorded only when enabled and the link does
+    /// not use RFC 7474 (its extended-crypto CA-TLV is unsupported).
+    pub fn lls_active(&self) -> bool {
+        self.lls && !self.auth.is_extended()
+    }
 }
 
 /// Equal in every field but `cost`, which `apply_links` updates in place.

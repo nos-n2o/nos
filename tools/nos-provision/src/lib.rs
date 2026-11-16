@@ -1531,6 +1531,11 @@ pub struct Args {
     #[arg(long)]
     pub ospf_mtu_ignore: Option<bool>,
 
+    /// If set (requires `--ospf-profile`), toggles `lls` on it
+    /// (`OspfProfileOp::SetLls`), RFC 5613 Link-Local Signaling.
+    #[arg(long)]
+    pub ospf_lls: Option<bool>,
+
     /// If set (requires `--ospf-profile`), toggles `passive` on it
     /// (`OspfProfileOp::SetPassive`): the subnet is advertised as a stub, no Hello.
     #[arg(long)]
@@ -4179,6 +4184,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled,
                 }));
             }
+            if let Some(enabled) = args.ospf_lls {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetLls {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(kind) = args.ospf_profile_network_type.as_deref() {
                 let (instance, name) = (instance.clone(), name.clone());
                 ops.push(ConfigOp::OspfProfile(match kind {
@@ -4256,6 +4269,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_mtu_ignore.is_some() {
                 bail!("--ospf-mtu-ignore requires --ospf-profile to also be set");
             }
+            if args.ospf_lls.is_some() {
+                bail!("--ospf-lls requires --ospf-profile to also be set");
+            }
             if args.ospf_passive.is_some() {
                 bail!("--ospf-passive requires --ospf-profile to also be set");
             }
@@ -4275,6 +4291,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     } else if args.ospf_profile_mtu.is_some()
         || args.ospf_mtu_ignore.is_some()
+        || args.ospf_lls.is_some()
         || args.ospf_passive.is_some()
         || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
@@ -6685,6 +6702,25 @@ mod tests {
         assert!(err(&["--ospf-router-id", "1.1.1.1"]).contains("--ospf-instance"));
         assert!(err(&["--ospf-instance", "o"]).contains("--ospf-router-id"));
         assert!(err(&["--ospfv3-profile", "p"]).contains("--ospfv3-area"));
+    }
+
+    #[test]
+    fn ospf_lls_flag_pushes_set_lls() {
+        let args = parse(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--ospf-lls",
+            "true",
+        ]);
+        shows(&build_ops(&args).unwrap(), "SetLls");
+        let orphan = parse(&["--ospf-lls", "true"]);
+        assert!(build_ops(&orphan).is_err());
     }
 
     #[test]
