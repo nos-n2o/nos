@@ -159,7 +159,7 @@ fn fake_configd(path: &Path, kind: Configd) {
                 Event::Error("configd is down".to_string())
             }
             Request::Get | Request::Subscribe => Event::Config(running.clone()),
-            Request::Save => Event::Saved,
+            Request::Save { .. } => Event::Saved,
             Request::OpenTransaction { name, .. } if name == "unopenable" => {
                 Event::Error("cannot open".to_string())
             }

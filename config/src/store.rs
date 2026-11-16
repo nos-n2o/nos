@@ -70,6 +70,23 @@ impl Transaction {
         }
     }
 
+    /// Whether this transaction differs from the config it was opened on in
+    /// `user`'s password alone. A `Blank` transaction (no base) never does.
+    fn changes_only_password_of(&self, user: &str) -> bool {
+        let Some(base) = &self.base else {
+            return false;
+        };
+        let mut c = (*self.config).clone();
+        let Some(mine) = c.users.iter_mut().find(|u| u.name == user) else {
+            return false;
+        };
+        let Some(was) = base.users.iter().find(|u| u.name == user) else {
+            return false;
+        };
+        mine.password.clone_from(&was.password);
+        c == **base
+    }
+
     /// RFC 9110 §13.1.1: `Some(list)` must contain the current generation
     /// (an empty list never does); `None` is unconditional.
     fn check(&self, if_match: Option<&[u64]>) -> Result<(), ConfigError> {
@@ -295,6 +312,22 @@ impl ConfigStore {
             .any(|u| u.name == name)
     }
 
+    /// `name`'s role in the running config, looked up per request so a role
+    /// change applies at once (#1147). Scans under the read lock, no clone.
+    /// Fails closed: a user the config no longer has is read-only. A config
+    /// with no users at all (never the case on a running system: one is
+    /// seeded and the last cannot be removed) has no roles to apply.
+    pub async fn user_role(&self, name: &str) -> nos_proto::UserRole {
+        let r = self.0.running.read().await;
+        if r.users.is_empty() {
+            return nos_proto::UserRole::Admin;
+        }
+        r.users
+            .iter()
+            .find(|u| u.name == name)
+            .map_or(nos_proto::UserRole::ReadOnly, |u| u.role)
+    }
+
     /// BGP instance names of the running config (no config clone, #759).
     pub async fn bgp_instance_names(&self) -> Vec<String> {
         let r = self.0.running.read().await;
@@ -359,14 +392,24 @@ impl ConfigStore {
     pub async fn subscribe_config(
         &self,
         role: Role,
+        mask: bool,
         out: mpsc::Sender<Event>,
     ) -> (Event, JoinHandle<()>) {
         let rx = self.0.tx.subscribe();
         let (snap, seq) = self.snapshot_seq().await;
+        // ponytail: `mask` is fixed at subscribe time; a role change reaches an open subscription only on reconnect.
+        let view = move |c: &Config| {
+            let c = c.for_role(role);
+            if mask {
+                c.masked()
+            } else {
+                c
+            }
+        };
         let task = forward(rx, seq, None, out, move |u| async move {
-            Some(Event::Config(u.config.for_role(role)))
+            Some(Event::Config(view(&u.config)))
         });
-        let initial = Event::Config(snap.for_role(role));
+        let initial = Event::Config(view(&snap));
         (initial, task)
     }
 
@@ -690,11 +733,30 @@ impl ConfigStore {
         name: &str,
         if_match: Option<Vec<u64>>,
     ) -> Result<Vec<String>, ConfigError> {
+        self.commit_transaction_as(name, if_match, None).await
+    }
+
+    /// [`Self::commit_transaction`] for a caller that is not an admin
+    /// (`own_password_only` = its user name): refused unless the transaction
+    /// differs from its base in that user's password alone (#1147).
+    pub async fn commit_transaction_as(
+        &self,
+        name: &str,
+        if_match: Option<Vec<u64>>,
+        own_password_only: Option<&str>,
+    ) -> Result<Vec<String>, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         txn.check(if_match.as_deref())?;
+        if let Some(user) = own_password_only {
+            if !txn.changes_only_password_of(user) {
+                return Err(ConfigError::Forbidden(
+                    "this role may only change its own password".to_string(),
+                ));
+            }
+        }
         // Fast path: nothing committed since open, so validate before taking
         // the write guard. Otherwise merge under it (#1034).
         let fast = match &txn.base {
@@ -722,6 +784,10 @@ impl ConfigStore {
             .map_or(txn.config.users.is_empty(), |m| m.users.is_empty());
         if users_empty && !running.users.is_empty() {
             return Err(ConfigError::NoUsersLeft);
+        }
+        let users = merged.as_ref().map_or(&txn.config.users, |m| &m.users);
+        if !users.is_empty() && !users.iter().any(|u| u.role == nos_proto::UserRole::Admin) {
+            return Err(ConfigError::NoAdminLeft);
         }
         let removed = txs
             .remove(name)
@@ -1016,6 +1082,7 @@ mod tests {
                 users: vec![nos_proto::User {
                     name: "alice".into(),
                     password: "pw".into(),
+                    ..Default::default()
                 }],
                 ..Config::default()
             },
@@ -1061,6 +1128,7 @@ mod tests {
         let user = nos_proto::User {
             name: "u".into(),
             password: "hash".into(),
+            ..Default::default()
         };
         let pending = [Role::User, Role::Bgpd, Role::Watchdog]
             .into_iter()
@@ -1162,6 +1230,7 @@ mod tests {
         nos_proto::User {
             name: name.into(),
             password: "pw".into(),
+            ..Default::default()
         }
     }
 
@@ -1213,7 +1282,7 @@ mod tests {
             64,
         );
         let (out, mut rx) = mpsc::channel(1024);
-        let (first, task) = store.subscribe_config(Role::Watchdog, out).await;
+        let (first, task) = store.subscribe_config(Role::Watchdog, false, out).await;
         assert!(matches!(first, Event::Config(_)));
         let mut hs = Vec::new();
         for i in 0..20 {
@@ -1298,7 +1367,7 @@ mod tests {
         let mut subs = Vec::new();
         for _ in 0..20 {
             let (out, rx) = mpsc::channel(1024);
-            let (first, task) = store.subscribe_config(Role::Watchdog, out).await;
+            let (first, task) = store.subscribe_config(Role::Watchdog, false, out).await;
             subs.push((first, rx, task));
             tokio::task::yield_now().await;
         }
@@ -2506,6 +2575,36 @@ mod tests {
         let store = ConfigStore::new(cfg, None);
         let users = store.running_snapshot().await.users.clone();
         assert!(nos_password::verify("admin", &users[0].password));
+    }
+
+    #[tokio::test]
+    async fn commit_that_leaves_no_admin_is_refused() {
+        use nos_proto::UserRole::{Admin, ReadOnly};
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "t1", "alice", "pw").await;
+        commit_password(&store, "t2", "bob", "pw").await;
+        assert_eq!(store.user_role("alice").await, Admin);
+        assert_eq!(store.user_role("nobody").await, ReadOnly, "fails closed");
+        let demote = |who: &'static str| {
+            let store = store.clone();
+            async move {
+                let t = format!("d-{who}");
+                store
+                    .open_transaction(&t, TransactionBase::Current)
+                    .await
+                    .unwrap();
+                let path = segs(&format!("users/{who}/role"));
+                store
+                    .set_transaction_path(&t, &path, Some("\"ReadOnly\""), None, None)
+                    .await
+                    .unwrap();
+                store.commit_transaction(&t, None).await
+            }
+        };
+        demote("alice").await.unwrap();
+        assert!(matches!(demote("bob").await, Err(ConfigError::NoAdminLeft)));
+        assert_eq!(store.user_role("alice").await, ReadOnly);
+        assert_eq!(store.user_role("bob").await, Admin);
     }
 
     #[tokio::test]

@@ -65,11 +65,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::User => (
             "Create or delete a local user.",
-            "A local user may log in to the shell and to the REST API; every user is a full administrator. `delete` removes the user, and any certificate already issued to them is refused on its next use. A commit that would leave no user at all is refused.",
+            "A local user may log in to the shell and to the REST API; what it may do is its role (`set user <name> role`). `delete` removes the user, and any certificate already issued to them is refused on its next use. A commit that would leave no user at all is refused.",
         ),
         Topic::UserPassword => (
             "Set a local user's password.",
             "Given in clear text; nos-configd stores only its argon2id hash, and setting the same password again keeps the existing hash, so it is not a change.",
+        ),
+        Topic::UserRole => (
+            "Set what a local user may do: admin, operator or read-only.",
+            "`admin` (the default, and what users stored before roles existed are) may do everything. `operator` and `read-only` may not edit, commit or save the configuration; both see secrets masked as <hidden>. Both may change their own password. The role is looked up on every request, so a change applies at once without a re-login. A commit that would leave no admin is refused.",
         ),
         Topic::Admin => (
             "The admin keystore: secrets other sections reference by label.",

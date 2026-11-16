@@ -37,7 +37,7 @@ fn fake_configd(path: &Path) {
         }
         vec![match req {
             Request::Get | Request::Subscribe => Event::Config(running.clone()),
-            Request::Save => Event::Saved,
+            Request::Save { .. } => Event::Saved,
             Request::OpenTransaction { name, .. } | Request::GetTransaction { name } => {
                 Event::Transaction(snapshot(&name, &cfg))
             }

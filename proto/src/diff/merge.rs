@@ -296,6 +296,7 @@ mod tests {
         User {
             name: name.into(),
             password: pw.into(),
+            ..Default::default()
         }
     }
 

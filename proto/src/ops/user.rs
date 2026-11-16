@@ -50,6 +50,7 @@ impl UserOp {
                     config.users.push(User {
                         name: name.clone(),
                         password: password.clone(),
+                        ..User::default()
                     });
                 }
                 Ok(())

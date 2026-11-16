@@ -8,6 +8,8 @@ pub enum ApiError {
     /// No valid client certificate, or a login that failed.
     Unauthorized(String),
     NotFound(String),
+    /// The user's role (`User.role`) does not allow this (#1147).
+    Forbidden(String),
     /// The body's `Content-Type` is not one this endpoint accepts.
     UnsupportedMediaType(String),
     /// A list key selector matches several elements and none exactly.
@@ -37,7 +39,9 @@ impl ApiError {
     /// daemon sends plain strings, so this keys on the stable prefixes of
     /// `nos-config`'s `ConfigError` messages.
     pub fn from_config(msg: String) -> Self {
-        if msg.starts_with("no transaction named")
+        if msg.starts_with("forbidden") {
+            ApiError::Forbidden(msg)
+        } else if msg.starts_with("no transaction named")
             || msg.starts_with("config path: no such config path")
         {
             ApiError::NotFound(msg)
@@ -76,6 +80,7 @@ impl IntoResponse for ApiError {
                 return resp;
             }
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             ApiError::UnsupportedMediaType(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::TooManyRequests {
@@ -236,6 +241,20 @@ mod tests {
         assert!(matches!(
             ApiError::from_config(e.to_string()),
             ApiError::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn role_refusal_is_403_and_no_admin_left_422() {
+        use nos_config::error::ConfigError as E;
+        let f = E::Forbidden("read-only may not edit".into());
+        assert!(matches!(
+            ApiError::from_config(f.to_string()),
+            ApiError::Forbidden(_)
+        ));
+        assert!(matches!(
+            ApiError::from_config(E::NoAdminLeft.to_string()),
+            ApiError::Unprocessable(_)
         ));
     }
 

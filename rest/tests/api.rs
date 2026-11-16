@@ -110,6 +110,7 @@ async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<
         users: vec![User {
             name: USER.to_string(),
             password: PASSWORD.to_string(),
+            ..Default::default()
         }],
         ..Config::default()
     };

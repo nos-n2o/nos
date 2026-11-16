@@ -45,6 +45,8 @@ Error: too many failed login attempts
 
 If the router's login service cannot be reached, the shell refuses to start: nothing works without a login. On a freshly installed router the only user is `admin`, password `admin`. See [Concepts: Users and logging in](concepts.md#users-and-logging-in).
 
+**Roles (#1147).** `set user <name> role admin|operator|read-only` (default `admin`). A `read-only` or `operator` user sees the config with every secret as `<hidden>`, may open a transaction and change its own password (`set user <self> password ...`), and gets `forbidden: role ... may not do that` on any other edit, `commit` of other changes and `save`. A role change applies to an open shell on its next command.
+
 ### Using `nos` as an SSH login shell
 
 - When `NOS_LOGIN_TICKET` is set (PAM puts it in the session environment of an ssh login), `nos` redeems that PAM login ticket for a certificate: no `login:`/`password:` prompt. Without the variable nothing changes.

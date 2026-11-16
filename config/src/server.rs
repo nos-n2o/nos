@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, PeerId};
-use nos_proto::{Event, IpcCodec, Request, Role};
+use nos_proto::{Event, IpcCodec, Request, Role, UserRole};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -96,7 +96,43 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
 /// Handles every `Request` variant except `Subscribe`/`Unsubscribe`, which
 /// the caller manages itself since they control the connection's forwarder
 /// task rather than producing a single reply `Event`.
-async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) -> Option<Event> {
+async fn dispatch_request(
+    store: &ConfigStore,
+    caller: &Caller,
+    req: Request,
+    view: View,
+) -> Option<Event> {
+    let mask = view.mask;
+    let event = dispatch_unmasked(store, caller, req, view.restrict).await?;
+    Some(if mask { masked(event) } else { event })
+}
+
+/// What `User.role` makes of one request's reply and commit (#1147).
+struct View {
+    /// Secrets read `<hidden>`.
+    mask: bool,
+    /// The user whose password is the only thing a commit may change.
+    restrict: Option<String>,
+}
+
+/// A non-admin person's view of a reply: secrets read `<hidden>` (#1147).
+fn masked(event: Event) -> Event {
+    match event {
+        Event::Config(c) => Event::Config(c.masked()),
+        Event::Transaction(mut t) => {
+            t.config = t.config.masked();
+            Event::Transaction(t)
+        }
+        other => other,
+    }
+}
+
+async fn dispatch_unmasked(
+    store: &ConfigStore,
+    caller: &Caller,
+    req: Request,
+    restrict: Option<String>,
+) -> Option<Event> {
     Some(match req {
         Request::Get => Event::Config(store.running_snapshot().await.for_role(caller.role)),
         Request::ListBgpInstances => Event::InstanceNames(store.bgp_instance_names().await),
@@ -107,7 +143,7 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         Request::SaveStatus => Event::SaveStatus {
             unsaved: store.unsaved(),
         },
-        Request::Save => match store.save_to_disk().await {
+        Request::Save { .. } => match store.save_to_disk().await {
             Ok(()) => Event::Saved,
             Err(e) => {
                 warn!(error = %e, "save to disk failed");
@@ -145,7 +181,10 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             name,
             if_match,
             actor,
-        } => match store.commit_transaction(&name, if_match).await {
+        } => match store
+            .commit_transaction_as(&name, if_match, restrict.as_deref())
+            .await
+        {
             Ok(warnings) => {
                 info!(transaction = ?name, actor = ?effective_actor(caller, actor), "config commit audit");
                 for w in &warnings {
@@ -184,6 +223,7 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             value,
             if_match,
             position,
+            ..
         } => {
             match store
                 .set_transaction_path(&name, &path, value.as_deref(), if_match, position)
@@ -202,6 +242,7 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
             value,
             if_match,
             position,
+            ..
         } => {
             match store
                 .edit_transaction_path(&name, &path, value.as_deref(), if_match, position)
@@ -242,6 +283,19 @@ async fn dispatch_request(store: &ConfigStore, caller: &Caller, req: Request) ->
         },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
+}
+
+/// The `actor` a request body names (what `Restd` vouches for).
+fn body_actor(req: &Request) -> Option<String> {
+    match req {
+        Request::Save { actor }
+        | Request::OpenTransaction { actor, .. }
+        | Request::ApplyOp { actor, .. }
+        | Request::CommitTransaction { actor, .. }
+        | Request::SetTransactionPath { actor, .. }
+        | Request::EditTransactionPath { actor, .. } => actor.clone(),
+        _ => None,
+    }
 }
 
 /// Who a transaction request is attributed to. A `User` is its certificate
@@ -354,9 +408,39 @@ where
             .await;
         return ControlFlow::Break(());
     }
+    // A person's role, looked up per request so a change applies without a
+    // re-login. Fail closed: a user the config no longer has is read-only.
+    let mut view = View {
+        mask: false,
+        restrict: None,
+    };
+    if matches!(caller.role, Role::User | Role::Restd) {
+        let actor = effective_actor(caller, body_actor(&req));
+        let role = store.user_role(&actor).await;
+        if !authz::permitted(role, &actor, &req) {
+            let shown = format!("{req:?}");
+            warn!(
+                actor = ?actor, role = ?role,
+                request = %shown.chars().take(80).collect::<String>(),
+                "config request refused: the user's role does not allow it"
+            );
+            let msg = format!("forbidden: role {role:?} may not do that");
+            return match writer.send(Event::Error(msg)).await {
+                Ok(()) => ControlFlow::Continue(()),
+                Err(_) => ControlFlow::Break(()),
+            };
+        }
+        if role != UserRole::Admin {
+            // `Restd` masks for REST itself and needs the unmasked config.
+            view.mask = caller.role == Role::User;
+            view.restrict = Some(actor);
+        }
+    }
     let reply = match req {
         Request::Subscribe => {
-            let (initial, forwarder) = store.subscribe_config(caller.role, sub_tx.clone()).await;
+            let (initial, forwarder) = store
+                .subscribe_config(caller.role, view.mask, sub_tx.clone())
+                .await;
             set_forwarder(sub_task, Some(forwarder));
             // Daemons expect only `Config` on a subscription; the shell also
             // wants the unsaved flag, pushed so its prompt follows it live.
@@ -380,7 +464,7 @@ where
             debug!("IPC client unsubscribed");
             return ControlFlow::Continue(());
         }
-        req => match dispatch_request(store, caller, req).await {
+        req => match dispatch_request(store, caller, req, view).await {
             Some(reply) => reply,
             None => return ControlFlow::Continue(()),
         },

@@ -15,8 +15,22 @@ use nos_proto_derive::Cli;
 /// `nos-configd` hashes on the way in, so a committed config never has any.
 pub const PASSWORD_HASH_PREFIX: &str = "$argon2id$";
 
-/// A local user who may log in to `nos-cli` and call the REST API (HTTP
-/// Basic). Every user is a full administrator — there are no roles.
+/// What a local user may do (RFC 8341 NACM style), enforced by `nos-configd`
+/// on every request, so a role change applies without a re-login.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum UserRole {
+    /// Everything: edit, commit, save, manage users, read secrets.
+    #[default]
+    Admin,
+    /// Read-only on the configuration (no editing) plus operational commands.
+    Operator,
+    /// Reads the configuration with secrets masked; may only change its own password.
+    ReadOnly,
+}
+
+/// A local user who may log in to `nos-cli` and call the REST API (mutual
+/// TLS after a password login). What it may do is its `role`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
@@ -37,6 +51,13 @@ pub struct User {
     #[garde(custom(|p: &String, _ctx: &Config| valid_password_hash(p)))]
     #[cli(topic = UserPassword, secret)]
     pub password: String,
+
+    /// See [`UserRole`]. `#[serde(default)]`: users stored before roles
+    /// existed stay administrators.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = UserRole)]
+    pub role: UserRole,
 }
 
 // Manual `Debug`: never print the password field (a hash, or briefly clear text).
@@ -45,6 +66,7 @@ impl fmt::Debug for User {
         f.debug_struct("User")
             .field("name", &self.name)
             .field("password", &"<hidden>")
+            .field("role", &self.role)
             .finish()
     }
 }
@@ -87,6 +109,7 @@ mod tests {
         User {
             name: name.to_string(),
             password: password.to_string(),
+            ..Default::default()
         }
     }
 
