@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     /// The same on a transit network: a peer whose link to it is
-    /// MaxLinkMetric is no alternate.
+    /// `MaxLinkMetric` is no alternate.
     #[test]
     fn stub_router_on_a_transit_network_is_never_an_alternate() {
         let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
