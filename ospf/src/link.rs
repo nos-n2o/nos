@@ -903,6 +903,12 @@ pub struct LinkManager {
     active_ranges: Mutex<HashMap<Ipv4Net, u32>>,
     /// The one-time no-backbone `warn!` was logged and the state still holds.
     no_backbone_warned: AtomicBool,
+    /// `is_backbone_abr` at the last summary pass, for the transition log (#1170).
+    backbone_attached: AtomicBool,
+    /// Unit tests that exercise ABR summarisation without a live adjacency
+    /// treat the backbone as attached; the #1170 tests clear it.
+    #[cfg(test)]
+    backbone_forced: AtomicBool,
     /// Each NSSA's last translator election result (RFC 3101 §3.1), only to
     /// log a change.
     nssa_translating: Mutex<HashMap<Ipv4Addr, bool>>,
@@ -1013,6 +1019,9 @@ impl LinkManager {
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
             no_backbone_warned: AtomicBool::new(false),
+            backbone_attached: AtomicBool::new(false),
+            #[cfg(test)]
+            backbone_forced: AtomicBool::new(true),
             nssa_translating: Mutex::new(HashMap::new()),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
@@ -1079,15 +1088,38 @@ impl LinkManager {
         self.is_backbone_abr().await
     }
 
-    /// RFC 2328 §16.2: an ABR attached to the backbone (a virtual link
-    /// counts, #37 D5) examines only the backbone's summaries.
+    /// RFC 3509 §2.1 (Cisco variant, #1170): an ABR is configured in 2+
+    /// areas and *actively* attached to the backbone. It examines only the
+    /// backbone's summaries (RFC 2328 §16.2); without an active backbone it
+    /// reads every area's (§2.1), and sets no B-bit.
     async fn is_backbone_abr(&self) -> bool {
-        let areas = self.attached_areas().await;
-        areas.len() >= 2 && areas.contains(&Ipv4Addr::UNSPECIFIED)
+        self.attached_areas().await.len() >= 2 && self.backbone_active().await
     }
 
-    /// Every area this router has a link or loopback stub in, plus the
-    /// backbone while a virtual link is configured.
+    /// RFC 3509 §2.1: the backbone counts only with a `Full` adjacency on an
+    /// area-0 link, or an up virtual link (§16.7 found its endpoint). A
+    /// loopback stub or a configured-but-down link does not attach.
+    async fn backbone_active(&self) -> bool {
+        #[cfg(test)]
+        if self.backbone_forced.load(Ordering::Relaxed) {
+            return true;
+        }
+        if !self.resolved_virtual.lock().await.is_empty() {
+            return true;
+        }
+        self.links.lock().await.values().any(|e| {
+            e.config.area_id.is_unspecified()
+                && e.status
+                    .borrow()
+                    .neighbors
+                    .values()
+                    .any(|n| n.state == NeighborState::Full)
+        })
+    }
+
+    /// Every area this router is configured in (a link or loopback stub),
+    /// plus the backbone while a virtual link is configured; whether the
+    /// backbone is up is `backbone_active`.
     async fn attached_areas(&self) -> HashSet<Ipv4Addr> {
         let mut areas: HashSet<Ipv4Addr> = self
             .links

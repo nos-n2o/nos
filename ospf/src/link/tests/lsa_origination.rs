@@ -1927,6 +1927,7 @@ async fn router_in_two_non_backbone_areas_is_no_abr() {
         Some(exchange::DEFAULT_DBD_MAX_HEADERS),
         crate::boot::BootCounter::in_memory(),
     );
+    manager.backbone_forced.store(false, Ordering::Relaxed);
     let area1 = Ipv4Addr::new(0, 0, 0, 1);
     let area2 = Ipv4Addr::new(0, 0, 0, 2);
     let me = Ipv4Addr::new(1, 1, 1, 1);
@@ -2018,4 +2019,118 @@ async fn passive_toggle_keeps_the_stub_in_the_router_lsa() {
         "link stops"
     );
     assert!(has_stub(&manager).await, "passive again");
+}
+
+/// An area-0 link entry whose only neighbor is in `state`; the returned
+/// sender moves it (RFC 3509 §2.1: the backbone counts only while `Full`).
+async fn inject_backbone_link(manager: &LinkManager, state: NeighborState) -> StatusHandle {
+    let (tx, rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    tx.send_modify(|s| {
+        s.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 9),
+            neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2)),
+        );
+    });
+    let (commands, _) = mpsc::unbounded_channel();
+    manager.links.lock().await.insert(
+        "bb-test".to_string(),
+        LinkEntry {
+            config: link("bb-test", 10),
+            task: tokio::spawn(std::future::pending()),
+            status: rx,
+            commands,
+            link_local_lsdb: Arc::new(Mutex::new(Lsdb::new())),
+        },
+    );
+    tx
+}
+
+async fn summaries(manager: &LinkManager, a: Ipv4Addr) -> usize {
+    let lsdb = manager.lsdb_for(a).await;
+    let all = lsdb.lock().await.all();
+    all.iter()
+        .filter(|l| l.header.lsa_type == lsa::LSA_TYPE_NETWORK_SUMMARY)
+        .filter(|l| l.header.age < lsa::MAX_AGE)
+        .count()
+}
+
+/// #1170, RFC 3509 §2.1 (Cisco): the backbone attaches only with a `Full`
+/// area-0 adjacency; loopbacks in area 0 alone do not, and losing the
+/// adjacency drops the B-bit and the summaries on the next pass.
+#[tokio::test]
+async fn abr_needs_a_full_backbone_adjacency() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    manager.backbone_forced.store(false, Ordering::Relaxed);
+    let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    let net0: Ipv4Net = "192.168.10.0/24".parse().unwrap();
+    let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(area0, vec![(net0, 1)]), (area1, vec![(net1, 1)])]),
+            me,
+        )
+        .await;
+    // Loopback stubs in area 0 alone: no attachment.
+    assert!(!manager.is_area_border_router().await);
+
+    let tx = inject_backbone_link(&manager, NeighborState::ExStart).await;
+    assert!(!manager.is_area_border_router().await);
+    tx.send_modify(|s| {
+        s.neighbors
+            .values_mut()
+            .for_each(|n| n.state = NeighborState::Full);
+    });
+    assert!(manager.is_area_border_router().await);
+    manager.originate_router_lsas(me).await;
+    manager.originate_summary_lsas(me).await;
+    assert!(summaries(&manager, area1).await >= 1);
+
+    // Adjacency lost: not an ABR, the summaries are flushed.
+    tx.send_modify(|s| {
+        s.neighbors
+            .values_mut()
+            .for_each(|n| n.state = NeighborState::Down);
+    });
+    assert!(!manager.is_area_border_router().await);
+    manager.originate_summary_lsas(me).await;
+    assert_eq!(summaries(&manager, area1).await, 0);
+}
+
+/// #1170: an up virtual link attaches the backbone; a configured one that
+/// §16.7 has not found up does not.
+#[tokio::test]
+async fn up_virtual_link_attaches_the_backbone() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    manager.backbone_forced.store(false, Ordering::Relaxed);
+    let area1 = Ipv4Addr::new(0, 0, 0, 1);
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(area1, vec![("192.168.11.0/24".parse().unwrap(), 1)])]),
+            me,
+        )
+        .await;
+    manager
+        .set_virtual_links(vec![VirtualLinkConfig {
+            transit_area: area1,
+            endpoint: Ipv4Addr::new(2, 2, 2, 2),
+            hello_interval: 10,
+            dead_interval: 40,
+            auth: LinkAuthConfig::None,
+        }])
+        .await;
+    assert!(!manager.is_area_border_router().await);
+    manager.resolved_virtual.lock().await.push(link("vl", 10));
+    assert!(manager.is_area_border_router().await);
 }
