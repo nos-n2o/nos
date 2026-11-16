@@ -18,12 +18,12 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 | Type | File | Role |
 |------|------|------|
-| `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Arc<Config>>` + `transactions: Mutex<HashMap<String, Transaction>>` (`Arc<Config>` each, #773) + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
+| `ConfigStore` | `store.rs` | `Clone` handle over `running: RwLock<Arc<Config>>` + `transactions: Mutex<HashMap<String, Transaction>>` (`Arc<Config>` each, #773) + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
 | `CommitUpdate` | `store.rs` | Internal — one commit: `config` (running's `Arc`) + `prev` until each live diff class has its diff (#773) |
-| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `PreconditionFailed` (an `if_match` named a stale generation, `nos-restd` maps it to 412), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
+| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft`, `TransactionNotFound`, `PreconditionFailed`/`StaleBase` (stale `if_match` / same-key merge conflict, 412), `MergedInvalid` (422), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, … |
 | `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
 | `authz::allowed()` | `authz.rs` | Pure per-request allow-list: config reads (`Get`/`Subscribe*`/`Describe`) for every authenticated daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm — a new `Request` variant won't compile until classified. A refused request gets `Event::Error("permission denied")` and the connection is closed |
-| `users::{hash_clear_passwords, seed_default_user}` | `users.rs` | Replaces clear-text `User.password`s with argon2id hashes (reusing an earlier hash the clear text still verifies against, so re-setting a password is no diff); called by `ConfigStore` after every edit and on load. `seed_default_user` adds `admin`/`admin` when there are no users (called from `main.rs`) |
+| `users::{hash_clear_passwords, seed_default_user}` | `users.rs` | Replaces clear-text `User.password`s with argon2id hashes (reusing an earlier hash it still verifies against: re-setting is no diff); run after every edit and on load. `seed_default_user` adds `admin`/`admin` when there are no users (called from `main.rs`) |
 | `docs::command_doc()` | `docs.rs` | The CLI help text for every `nos_proto::Topic` (`Request::Describe`), one arm per topic — an exhaustive `match`, so a topic without text doesn't compile. Topics are one per config-tree node or field (the `#[cli(topic)]` on a schema field, see `nos_proto::cli`), per sugar word, and per non-edit request; the text is written for the shell's user. The schema's `///` doc comments are the REST API's text, deliberately separate (#109) |
 | `nss_users` | `nss_users.rs` | `UserDb`: user names to `/run/nos-users/passwd`, stable uids (#999) |
 | `persistence::{save_to_disk, load_or_default}` | `persistence.rs` | Serialize/atomically write (0600), and load-with-fallback (warns when the file is group/other readable), the config file |
@@ -51,13 +51,14 @@ By convention the socket is `/run/nos/config.sock`; tests use a tempdir.
 
 ## Config file convention
 
-By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a primary that is unreadable, unparseable or fails `validate_config` falls back to `.bak` (must validate; primary rewritten), then to a blank config with the seeded admin; never fails (reverses #401). See `docs/architecture/config-protocol.md`.
+By convention (not yet enforced elsewhere), the persisted config file lives at `/var/lib/nos/configd/config.yaml`, overridable via `--config-file`. A missing file at startup gives `Config::default()`; a primary that is unreadable, unparseable or fails `validate_config` falls back to `.bak` (must validate; primary rewritten), then to a blank config with the seeded admin; never fails. See `docs/architecture/config-protocol.md`.
 
 ## ConfigStore rules
 
 - Lock ordering: always lock `transactions` before `running`.
 - Path edits (#775, `path_edit.rs`): plan on `&Config`, then apply via `Arc::make_mut`; a new `Config` field joins `sections!`.
 - Every `Transaction` carries `generation: u64` (0 at open, +1 per successful `apply_op`/`set_transaction_path`), in every snapshot. `if_match: Option<Vec<u64>>` (a list; empty never matches) on `set_transaction_path`/`commit_transaction`/`discard_transaction` is an RFC 9110 §13.1.1 compare-and-set under the `transactions` lock; a mismatch is `ConfigError::PreconditionFailed`, nothing changed. Only `nos-restd` sends one.
+- Commit of a `Current` transaction is a 3-way merge onto running (`Transaction.base`, #1034); `Blank` has no base.
 - Bounded (#388): 32 open transactions, names `[A-Za-z0-9._-]{1,64}`, 4h idle sweep, 4 clear passwords per edit; hashing runs on `spawn_blocking` with no lock held.
 
 Details: [internals](../docs/internals/config.md) (the `ConfigStore` method list).

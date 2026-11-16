@@ -35,6 +35,7 @@ Limits on the transaction surface (#388), all in `store.rs`:
 
 Config sharing (#773):
 - `running` and every `Transaction.config` are `Arc<Config>`. `open_transaction(Current)` shares running's Arc; a path edit goes through `Arc::make_mut` (the first one copies) and `apply_op` stores a new Arc, so running never changes under a transaction.
+- `Transaction.base` (#1034): `Some(running's Arc at open)` for `Current`, `None` for `Blank`. Commit with `ptr_eq(base, running)` validates before the `running` write guard and swaps as before; otherwise it merges and validates under the guard. A stale base pins one old `Arc<Config>` per open transaction (max 32, 4h sweep). `upgrade_password_hash` locks `transactions` first and rewrites each transaction's base/config for the user.
 - `commit_transaction` removes the transaction, runs `sync_routing_table_refs` through `Arc::make_mut` (no copy: the Arc is unshared by then), and hands the same Arc to `running` and to the broadcast `CommitUpdate`.
 - `apply_op` still copies the config once per op (an op may fail half-applied); only the shell sends ops.
 

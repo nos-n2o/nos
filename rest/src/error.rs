@@ -271,4 +271,22 @@ mod tests {
         assert_eq!(s, 502);
         assert!(!b.contains("Config"));
     }
+
+    /// #1034: a merge conflict is a 412, a merged-invalid result a 422.
+    #[test]
+    fn merge_refusals_map_to_412_and_422() {
+        use nos_config::error::ConfigError as E;
+        let stale = E::StaleBase {
+            paths: vec!["a/b".into()],
+        };
+        assert!(matches!(
+            ApiError::from_config(stale.to_string()),
+            ApiError::PreconditionFailed(_)
+        ));
+        let bad = E::MergedInvalid(Box::new(E::NoUsersLeft));
+        assert!(matches!(
+            ApiError::from_config(bad.to_string()),
+            ApiError::Unprocessable(_)
+        ));
+    }
 }

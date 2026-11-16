@@ -28,6 +28,15 @@ pub enum ConfigError {
     /// transaction has moved past. `nos-restd` keys on the message prefix.
     #[error("precondition failed: transaction generation is {actual}, not one of {expected:?}")]
     PreconditionFailed { expected: Vec<u64>, actual: u64 },
+    /// Commit rebases a `Current` transaction onto running by 3-way merge
+    /// (#1034); these paths changed on both sides. Same `precondition failed`
+    /// prefix, so `nos-restd` answers 412.
+    #[error("precondition failed: {}; re-apply your change on a fresh transaction or edit the conflicting values", stale_paths(paths))]
+    StaleBase { paths: Vec<String> },
+    /// The merge itself was clean but the result does not validate
+    /// (keeps the 422 prefix).
+    #[error("validation failed: after merging concurrent changes: {0}")]
+    MergedInvalid(Box<ConfigError>),
     #[error("invalid transaction name: use 1-64 characters of letters, digits, '.', '_' or '-'")]
     InvalidTransactionName,
     #[error("too many transactions: {0} are open; commit or discard one first")]
@@ -54,6 +63,19 @@ pub enum ConfigError {
     Serialization(#[from] serde_norway::Error),
 }
 
+fn stale_paths(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths.len().saturating_sub(10) {
+        0 => format!("another transaction changed the same value: {shown}"),
+        n => format!("another transaction changed the same values: {shown}, and {n} more"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,8 +94,20 @@ mod tests {
             ConfigError::SshHostKeyRefused,
             ConfigError::MaskedSecret("user 'u'".into()),
             ConfigError::TooManyClearPasswords(4),
+            ConfigError::MergedInvalid(Box::new(ConfigError::NoUsersLeft)),
         ] {
             assert!(e.to_string().starts_with("validation failed"), "{e}");
         }
+    }
+
+    #[test]
+    fn stale_base_keeps_the_412_prefix_and_caps_the_paths() {
+        let paths: Vec<String> = (0..12).map(|i| format!("p{i}")).collect();
+        let m = ConfigError::StaleBase { paths }.to_string();
+        assert!(m.starts_with("precondition failed"), "{m}");
+        assert!(
+            m.contains("p9") && !m.contains("p10") && m.contains("and 2 more"),
+            "{m}"
+        );
     }
 }
