@@ -55,6 +55,8 @@ pub struct SpfThrottle {
     state: State,
     last_change: Option<Instant>,
     learn_start: Option<Instant>,
+    /// A change already came inside the current learn window: churn, not a lone change.
+    churn: bool,
 }
 
 impl SpfThrottle {
@@ -64,6 +66,7 @@ impl SpfThrottle {
             state: State::Quiet,
             last_change: None,
             learn_start: None,
+            churn: false,
         }
     }
 
@@ -81,16 +84,26 @@ impl SpfThrottle {
             State::Quiet => {
                 self.state = State::ShortWait;
                 self.learn_start = Some(now);
+                self.churn = false;
                 self.timers.initial
             }
             State::ShortWait => {
-                let learned = self
+                let expired = self
                     .learn_start
                     .is_some_and(|t| now.saturating_duration_since(t) >= self.timers.time_to_learn);
-                if learned {
+                if expired && self.churn {
                     self.state = State::LongWait;
                     self.timers.long
                 } else {
+                    // A lone change after the window is not churn: restart
+                    // the window instead of paying the long delay (RFC 8405
+                    // only backs off for events that keep arriving).
+                    if expired {
+                        self.learn_start = Some(now);
+                        self.churn = false;
+                    } else {
+                        self.churn = true;
+                    }
                     self.timers.short
                 }
             }
@@ -133,6 +146,16 @@ mod tests {
         assert_eq!(t.on_change(t0 + ms(9_999)), (ms(200), State::ShortWait));
         // 10 s after the previous change: quiet again
         assert_eq!(t.on_change(t0 + ms(19_999)), (ms(50), State::Quiet));
+    }
+
+    #[test]
+    fn a_lone_change_after_the_learn_window_stays_short() {
+        let t0 = Instant::now();
+        let mut t = SpfThrottle::new(Timers::default());
+        t.on_change(t0);
+        assert_eq!(t.on_change(t0 + ms(4000)), (ms(200), State::ShortWait));
+        assert_eq!(t.on_change(t0 + ms(5000)), (ms(200), State::ShortWait));
+        assert_eq!(t.on_change(t0 + ms(6000)), (ms(200), State::ShortWait));
     }
 
     #[test]

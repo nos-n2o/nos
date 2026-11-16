@@ -5938,13 +5938,13 @@ pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
 
     // Quiet for longer than the 10 s hold-down, then one change: back to 50 ms.
     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
-    let quiet0 = b.count("ospf spf scheduled delay_ms=50 state=quiet");
+    let quiet0 = b.count("ospf spf scheduled delay_ms=50 state=\"quiet\"");
     let before = a.count(&reorig_pat);
     let mut flags = base.clone();
-    flags.extend(strings(&["--redistribute-metric", "20"]));
+    flags.extend(strings(&["--redistribute-metric", "50"]));
     a.provision_flags(&flags).await?;
     a.wait_new(&reorig_pat, before, 60).await?;
-    b.wait_new("ospf spf scheduled delay_ms=50 state=quiet", quiet0, 30)
+    b.wait_new("ospf spf scheduled delay_ms=50 state=\"quiet\"", quiet0, 30)
         .await?;
     a.provision(&["--clear-redistribute-to-ospf"]).await?;
     Ok(())
