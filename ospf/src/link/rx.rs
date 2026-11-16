@@ -3,7 +3,7 @@
 
 use nos_ospf_common::ratelimit::{WarnLimiter, MAX_NEIGHBORS_PER_LINK};
 
-use super::grace::{in_grace, on_grace_lsa};
+use super::grace::{enter_lls_grace, in_grace, on_grace_lsa};
 use super::originate::local_netmask;
 use super::{
     debug, election, exchange, info, lsa, neighbor, packet, should_form_adjacency,
@@ -12,6 +12,7 @@ use super::{
     LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
     SystemTime, UNIX_EPOCH,
 };
+use crate::lls;
 
 /// `warn!` through the link's `WarnLimiter` (#394): a peer sending bad Hellos
 /// must not turn them into unbounded log lines. A line that follows dropped
@@ -283,6 +284,19 @@ pub(super) fn send_hello(
     status: &StatusHandle,
     next_seq: &mut u64,
 ) {
+    send_hello_eof(socket, cfg, local_router_id, status, next_seq, 0);
+}
+
+/// `send_hello` with an RFC 5613 EOF word: `lls::EOF_RS` for the last Hello of
+/// a planned restart (RFC 4812).
+pub(super) fn send_hello_eof(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+    eof: u32,
+) {
     let current = status.borrow();
     let neighbors: Vec<Ipv4Addr> = current
         .neighbors
@@ -316,7 +330,7 @@ pub(super) fn send_hello(
     drop(current);
 
     let pkt = packet::HelloPacket {
-        lls: cfg.lls_active().then_some(Lls { eof: Some(0) }),
+        lls: cfg.lls_active().then_some(Lls { eof: Some(eof) }),
         router_id: local_router_id,
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
@@ -346,18 +360,33 @@ pub(super) fn send_hello(
 /// §3.6), N in an NSSA (RFC 3101 §2.1).
 /// Encodes a DBD built by `exchange` (which does not know the link config),
 /// adding the RFC 5613 LLS block when `cfg.lls_active()`.
+///
+/// `resync` sets the RFC 4811 LR bit: this DBD belongs to a resynchronization
+/// of an adjacency that stays advertised (the neighbor is in grace).
 pub(super) fn encode_dbd_for(
     cfg: &LinkConfig,
     dbd: &DbdPacket,
     auth: &packet::OutgoingAuth<'_>,
+    resync: bool,
 ) -> Vec<u8> {
     if cfg.lls_active() {
         let mut d = dbd.clone();
-        d.lls = Some(Lls { eof: Some(0) });
+        d.lls = Some(Lls {
+            eof: Some(if resync { lls::EOF_LR } else { 0 }),
+        });
         packet::encode_dbd(&d, auth)
     } else {
         packet::encode_dbd(dbd, auth)
     }
+}
+
+/// The peer's EOF word, 0 when LLS is inactive on this link, the peer sent
+/// none, or the link is virtual (RFC 4811/4812 act on real links only).
+fn peer_eof(cfg: &LinkConfig, lls: Option<&Lls>) -> u32 {
+    if cfg.virtual_link.is_some() || !cfg.lls_active() {
+        return 0;
+    }
+    lls.and_then(|l| l.eof).unwrap_or(0)
 }
 
 /// Records the peer's LLS block on `info` (dropped when LLS is not active),
@@ -485,6 +514,11 @@ pub(super) fn handle_hello(
     }
 
     let saw_self = hello.neighbors.contains(&local_router_id);
+    // RFC 4812: a Full neighbor announcing a restart is helped like an
+    // RFC 3623 one, before its (now one-way) Hello is evaluated below.
+    if peer_eof(cfg, hello.lls.as_ref()) & lls::EOF_RS != 0 {
+        enter_lls_grace(cfg, status, hello.router_id, false);
+    }
     let old_state = status
         .borrow()
         .neighbors
@@ -614,7 +648,10 @@ pub(super) fn advance_adjacencies(
         let auth = cfg
             .auth
             .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-        if let Err(e) = socket.send_unicast(neighbor_addr, &encode_dbd_for(cfg, &dbd, &auth)) {
+        if let Err(e) = socket.send_unicast(
+            neighbor_addr,
+            &encode_dbd_for(cfg, &dbd, &auth, in_grace(status, neighbor_id)),
+        ) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
         }
         let new_state = neighbor::step(NeighborState::TwoWay, neighbor::Event::AdjacencyEligible);
@@ -654,6 +691,12 @@ pub(super) async fn handle_dbd(
                 n.lls != before
             })
         });
+    }
+
+    // RFC 4811: an LR-flagged Init DBD from a Full neighbor resynchronizes it
+    // with the adjacency kept advertised (the exchange below restarts it).
+    if dbd.init && peer_eof(cfg, dbd.lls.as_ref()) & lls::EOF_LR != 0 {
+        enter_lls_grace(cfg, status, dbd.router_id, true);
     }
 
     // RFC 2328 §10.6: only in ExStart/Exchange; the neighbor stays in ExStart.
@@ -962,7 +1005,10 @@ pub(super) fn execute_actions(
                 if copies != 1 {
                     info!(link = %cfg.attach_point, neighbor = %neighbor_id, copies, "ospf dbd fault injected");
                 }
-                ("dbd", vec![encode_dbd_for(cfg, &pkt, &auth); copies])
+                (
+                    "dbd",
+                    vec![encode_dbd_for(cfg, &pkt, &auth, in_grace(status, neighbor_id)); copies],
+                )
             }
             exchange::Action::SendLsr(requests) => {
                 ("lsr", split_lsr(cfg, next_seq, local_router_id, &requests))
