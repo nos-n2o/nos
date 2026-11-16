@@ -2663,3 +2663,120 @@ async fn show_routes_and_listener_never_fetch_the_config() {
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");
 }
+
+/// `PATCH` with an explicit `Content-Type` and optional `If-Match`.
+async fn patch(
+    app: &Router,
+    uri: &str,
+    ctype: &str,
+    body: &str,
+    if_match: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut req = HttpRequest::builder()
+        .method(Method::PATCH)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, ctype)
+        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+    if let Some(t) = if_match {
+        req = req.header(header::IF_MATCH, t);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn patch_merges_keeps_siblings_deletes_on_null_and_honours_if_match() {
+    const MP: &str = "application/merge-patch+json";
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/t1?base=blank", None).await;
+    let url = "/v1/transactions/t1/bgp-instance/r1";
+    let mut r1 = bgp_instance("r1", 65000);
+    r1["cluster_id"] = json!("9.9.9.9");
+    send(app, Method::PUT, url, Some(r1)).await;
+
+    // In-place change: siblings survive.
+    let (s, v) = patch(app, url, MP, r#"{"asn":65009}"#, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        (&v["asn"], &v["router_id"]),
+        (&json!(65009), &json!("1.1.1.1"))
+    );
+    // Parameters on the media type are fine.
+    let ct = "application/merge-patch+json; charset=utf-8";
+    assert_eq!(
+        patch(app, url, ct, r#"{"asn":65010}"#, None).await.0,
+        StatusCode::OK
+    );
+    // null deletes the key.
+    let (s, v) = patch(app, url, MP, r#"{"cluster_id":null}"#, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["cluster_id"].is_null(), "{v}");
+    assert_eq!(v["asn"], 65010);
+    // A scalar field addressed directly.
+    let (s, v) = patch(app, "/v1/transactions/t1/hostname", MP, r#""h2""#, None).await;
+    assert_eq!((s, v), (StatusCode::OK, json!("h2")));
+
+    // Media type and body errors; nothing changes.
+    for ct in ["application/json", "text/plain"] {
+        assert_eq!(
+            patch(app, url, ct, "{}", None).await.0,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+    assert_eq!(
+        patch(app, url, MP, "{", None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // If-Match: a stale tag is 412 and changes nothing; the current one works.
+    let (_, etag, _) = send_full(
+        app,
+        Method::GET,
+        "/v1/transactions/t1",
+        None,
+        Some(USER),
+        None,
+    )
+    .await;
+    let cur = etag.unwrap();
+    assert_eq!(
+        patch(app, url, MP, r#"{"asn":1}"#, Some("\"999\"")).await.0,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        patch(
+            app,
+            "/v1/transactions/gone/hostname",
+            MP,
+            r#""x""#,
+            Some("*")
+        )
+        .await
+        .0,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        patch(app, "/v1/transactions/gone/hostname", MP, r#""x""#, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, v) = send(app, Method::GET, &format!("{url}/asn"), None).await;
+    assert_eq!(v, 65010);
+    assert_eq!(
+        patch(app, url, MP, r#"{"asn":1}"#, Some(&cur)).await.0,
+        StatusCode::OK
+    );
+}
