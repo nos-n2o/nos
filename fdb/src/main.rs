@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         shutdown_rx.clone(),
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(domain = %args.domain, peer = ?identity.peer(), driver = %args.driver, "nos-fdbd starting");
 
     let listen_socket = args

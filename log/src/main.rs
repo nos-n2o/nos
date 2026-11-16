@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server_task = server::start(&args.listen_socket, store.clone(), &identity)
         .context("starting log IPC server")?;
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let syslog_task = tokio::spawn(syslog::reconcile::run(
         args.watchdog_socket.clone(),

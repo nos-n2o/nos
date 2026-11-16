@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         log_shutdown_rx,
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(instance = %args.instance, "nos-ospfd starting");
 
     let Some(config_socket) = watchdog::resolve_with_retry(

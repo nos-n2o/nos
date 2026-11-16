@@ -18,6 +18,7 @@ clap               = { workspace = true }
 anyhow             = { workspace = true }
 tracing-subscriber = { workspace = true }
 nos-proto          = { workspace = true }
+nos-daemon = { workspace = true }
 nos-pki            = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }

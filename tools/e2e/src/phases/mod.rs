@@ -108,6 +108,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "rest" => drivers::rest(w).await,
         "acl" => acl::acl(w).await,
         "flowspec-dataplane" => acl::flowspec_dataplane(w).await,
+        "daemon-heartbeat" => drivers::daemon_heartbeat(w).await,
         "syslog" => drivers::syslog(w).await,
         "ospf" => ospf::ospf_phase(w).await,
         "ospf-p2mp" => ospf::ospf_p2mp(w).await,
@@ -222,6 +223,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "syslog",
             "acl",
             "flowspec-dataplane",
+            "daemon-heartbeat",
         ],
         "rpl" => &[
             "up",
@@ -389,6 +391,7 @@ pub const ALL: &[&str] = &[
     "syslog",
     "acl",
     "flowspec-dataplane",
+    "daemon-heartbeat",
     "policy",
     "redistribute-policy",
     "communities",
