@@ -278,8 +278,7 @@ impl Engine {
     /// force-version, MSTP, Rapid-PVST+; `Pvst::apply_plan` calls this per tree); nothing has changed then.
     pub fn apply_plan(&mut self, plan: &Plan) -> Result<Vec<Out>, Rebuild> {
         let old = &self.plan;
-        if self.mst.is_some()
-            || plan.mst.is_some()
+        if self.mst.is_some() != plan.mst.is_some()
             || plan.pvst.is_some()
             || old.pvst.is_some()
             || plan.rstp_version != old.rstp_version
@@ -295,8 +294,16 @@ impl Engine {
         let mut news = Vec::new();
         for ((cfg, slot), &n) in plan.ports.iter().zip(&kept).zip(&numbers) {
             let params = port_params(cfg, n).map_err(|_| Rebuild)?;
+            for m in &cfg.mst {
+                PortId::new(m.priority, n).map_err(|_| Rebuild)?;
+            }
             if slot.is_none() {
                 news.push((cfg.clone(), params, n));
+            }
+        }
+        if let Some(m) = &plan.mst {
+            for &(id, prio) in &m.instances {
+                BridgeId::new(prio, id, self.mac).map_err(|_| Rebuild)?;
             }
         }
         if plan.priority != old.priority {
@@ -343,6 +350,35 @@ impl Engine {
             self.numbers.push(number);
             self.gone.push(false);
             self.counters.push(StpPortCounters::default());
+        }
+        if let (Some(new), Some(m)) = (&plan.mst, self.mst.as_mut()) {
+            let params: Vec<PortParams> = (0..self.ports.len())
+                .map(|i| PortParams {
+                    id: PortId::new(self.ports[i].priority, self.numbers[i])
+                        .expect("validated above"),
+                    path_cost: self.bridge.ports[i].path_cost,
+                    admin_edge: self.ports[i].edge == EdgePort::Admin,
+                    auto_edge: self.ports[i].edge == EdgePort::Auto,
+                })
+                .collect();
+            let cfgs = self.ports.iter().map(|p| p.mst.clone()).collect();
+            // A domain moving between trees, or a tree appearing or going,
+            // changes what each `(tree, port)` push means.
+            if new.domains != m.plan.domains || new.instances != m.plan.instances {
+                self.pushed.clear();
+            }
+            if new.config_id() != m.id {
+                info!(
+                    name = %new.name,
+                    revision = new.revision,
+                    digest = %digest::hex(&new.digest),
+                    instances = new.instances.len(),
+                    "{}",
+                    events::MST_CONFIGURATION
+                );
+            }
+            m.apply_plan(new, self.mac, plan.timers, &self.bridge, &params, cfgs)
+                .map_err(|_| Rebuild)?;
         }
         self.plan = plan.clone();
         Ok(self.drain())
@@ -589,6 +625,7 @@ impl Engine {
                 .ports
                 .iter()
                 .enumerate()
+                .filter(|(i, _)| !self.gone[*i])
                 .map(|(i, cfg)| {
                     let boundary = self
                         .mst
