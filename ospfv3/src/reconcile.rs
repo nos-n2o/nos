@@ -481,11 +481,19 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         extended_lsa = own.extended_lsa,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
+        max_metric_on_startup = ?own.max_metric_on_startup,
+        max_metric_on_shutdown = ?own.max_metric_on_shutdown,
+        max_metric_administrative = own.max_metric_administrative,
         redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
     links.set_extended_lsa(own.extended_lsa);
     links.set_graceful_restart(own.graceful_restart_grace_period);
+    links.set_max_metric(
+        own.max_metric_on_startup,
+        own.max_metric_on_shutdown,
+        own.max_metric_administrative,
+    );
 
     let env = Env {
         cfg: &cfg,

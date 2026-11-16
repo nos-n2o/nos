@@ -97,3 +97,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 `link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.
 
 `nos-e2e ospfv3`, `ospfv3-asbr`, `ospfv3-abr`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-mtu-mismatch`, `ospfv3-instance-id`, `ospfv3-p2p-rid-change`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination`, `ospfv3-router-lsa-split` (see root `CLAUDE.md`).
+
+## Stub router (RFC 6987, #1149)
+
+- `LinkManager::set_max_metric` (every resync) / `max_metric_tick` (once per origination pass, logs `ospfv3 stub router max-metric changed`) / `max_metric_on_shutdown` (called from `main` before `shutdown_tx`; re-originates, `flood_now`, holds <= 3s; `LinkEntry.grace_tx` carries `0` = flood now). `router_lsa_links` advertises every p2p/transit link at 0xFFFF; Intra-Area-Prefix metrics untouched. Never combined with graceful restart: no marker file in v3, so on-startup is skipped and on-shutdown is a no-op whenever a grace period is configured. `spf::alternates` skips a link whose cost or reverse cost is 0xFFFF (RFC 5286 §3.5). `ospfv3-stub-router` e2e.

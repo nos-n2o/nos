@@ -242,7 +242,7 @@
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 300 hmac-sha256 secret","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","auth"],[{"algorithm":"HmacSha256","is_current":false,"key":"secret","key_id":300}]]]}
 {"line":"delete crypto-key 65536","rejected":true}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[]}
-{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"graceful_restart_grace_period":null,"graceful_restart_helper_max_grace_period":null,"name":"o1","redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"graceful_restart_grace_period":null,"graceful_restart_helper_max_grace_period":null,"max_metric_administrative":false,"max_metric_on_shutdown":null,"max_metric_on_startup":null,"name":"o1","redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0","navigate":["ospfv3-instance","o1","area","0.0.0.0"],"writes":[]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0 profile p1","navigate":["ospfv3-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],true]]}

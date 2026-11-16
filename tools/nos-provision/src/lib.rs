@@ -1584,6 +1584,18 @@ pub struct Args {
     /// instance; `0` clears it.
     #[arg(long)]
     pub ospfv3_graceful_restart_helper_max_grace_period: Option<u32>,
+    /// RFC 6987 `max-metric router-lsa on-startup <secs>` for that instance
+    /// (requires `--ospfv3-instance`); `0` clears it.
+    #[arg(long)]
+    pub ospfv3_max_metric_on_startup: Option<u32>,
+    /// RFC 6987 `max-metric router-lsa on-shutdown <secs>` for that instance
+    /// (requires `--ospfv3-instance`); `0` clears it.
+    #[arg(long)]
+    pub ospfv3_max_metric_on_shutdown: Option<u8>,
+    /// RFC 6987 `max-metric router-lsa administrative` for that instance
+    /// (requires `--ospfv3-instance`): `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospfv3_max_metric_administrative: Option<bool>,
 
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -4325,6 +4337,30 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 Ospfv3InstanceOp::SetGracefulRestartHelperMaxGracePeriod {
                     name: name.clone(),
                     seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
+        if let Some(seconds) = args.ospfv3_max_metric_on_startup {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetMaxMetricOnStartup {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
+        if let Some(seconds) = args.ospfv3_max_metric_on_shutdown {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetMaxMetricOnShutdown {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
+        if let Some(enabled) = args.ospfv3_max_metric_administrative {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetMaxMetricAdministrative {
+                    name: name.clone(),
+                    enabled,
                 },
             ));
         }

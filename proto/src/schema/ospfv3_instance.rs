@@ -83,6 +83,33 @@ pub struct Ospfv3Instance {
     #[garde(range(min = 1, max = 3600))]
     #[cli(topic = Ospfv3InstanceGracefulRestartHelperMaxGracePeriod, words = "graceful-restart helper max-grace-period")]
     pub graceful_restart_helper_max_grace_period: Option<u32>,
+
+    /// RFC 6987 stub router for this many seconds (5-86400) after
+    /// `nos-ospfv3d` starts: every transit and point-to-point link in its
+    /// Router-LSA costs 65535, so traffic avoids the router while its routes
+    /// converge; its own prefixes stay reachable. Takes effect on the next
+    /// start, and is skipped after an RFC 5187 graceful restart. `None`
+    /// (default) disables it, and ends a period that is still running.
+    #[serde(default)]
+    #[garde(range(min = 5, max = 86400))]
+    #[cli(topic = Ospfv3InstanceMaxMetricOnStartup, words = "max-metric router-lsa on-startup")]
+    pub max_metric_on_startup: Option<u32>,
+
+    /// RFC 6987 stub router for this many seconds (1-3) when `nos-ospfv3d`
+    /// stops (not on a graceful restart) before it exits, so traffic moves
+    /// away first. At most 3s, inside `nos-watchdogd`'s 10s stop budget.
+    /// `None` (default) disables it.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 3))]
+    #[cli(topic = Ospfv3InstanceMaxMetricOnShutdown, words = "max-metric router-lsa on-shutdown")]
+    pub max_metric_on_shutdown: Option<u8>,
+
+    /// RFC 6987 stub router until turned off: drains transit traffic before
+    /// maintenance. Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
+    pub max_metric_administrative: bool,
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -97,6 +124,9 @@ impl Default for Ospfv3Instance {
             extended_lsa: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
     }
 }
@@ -136,6 +166,9 @@ mod tests {
             extended_lsa: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
     }
 
@@ -162,5 +195,24 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a"), instance("vrf-b")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn max_metric_ranges_are_enforced() {
+        let with = |startup, shutdown| {
+            let mut i = instance("o1");
+            i.max_metric_on_startup = startup;
+            i.max_metric_on_shutdown = shutdown;
+            let cfg = Config {
+                ospfv3_instances: vec![i],
+                ..Default::default()
+            };
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(Some(5), Some(1)));
+        assert!(with(Some(86400), Some(3)));
+        assert!(!with(Some(4), None));
+        assert!(!with(None, Some(0)));
+        assert!(!with(None, Some(4)));
     }
 }

@@ -157,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
     if planned_restart {
         links.announce_graceful_restart().await;
     }
+    links.max_metric_on_shutdown().await;
 
     let _ = shutdown_tx.send(true);
     if let Err(e) = reconcile_task.await {
