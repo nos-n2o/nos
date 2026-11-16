@@ -4577,8 +4577,35 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
 pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let prefix = OSPFV3_ECMP_LOOPBACK_ADDRESS;
+    // Both paths up whatever an earlier phase left: the p2p `eth0.0` and the
+    // bridge, each at the default cost.
+    let both = |id, svi4, svi6, address, router_id| {
+        let mut f = ospfv3(address, router_id);
+        f.extend(ospfv3_broadcast_with_l2(svi4, svi6));
+        with_base(id, f)
+    };
+    a.provision_flags(&both(
+        A,
+        OSPF_BROADCAST_ADDRESS_A,
+        OSPFV3_BROADCAST_ADDRESS_A,
+        OSPFV3_ADDRESS_A,
+        OSPFV3_ROUTER_ID,
+    ))
+    .await?;
+    b.provision_flags(&both(
+        B,
+        OSPF_BROADCAST_ADDRESS_B,
+        OSPFV3_BROADCAST_ADDRESS_B,
+        OSPFV3_ADDRESS_B,
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
     let added = format!("added route prefix={prefix}.*next_hops=2.*source=Some(Ospf)");
     let a0 = a.count(&added);
+    // Only the loopback's first IPv6 address is originated, so `ospfv3-lfa`'s
+    // goes first (as `ospfv3-abr` does) and ours is removed again at the end.
+    b.provision(&["--loopback-remove-address", OSPFV3_LFA_LOOPBACK_ADDRESS])
+        .await?;
     b.provision(&[
         "--ospfv3-loopback-address",
         prefix,
@@ -4590,7 +4617,12 @@ pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
 
     let removed = format!("removed route prefix={prefix}");
     let r0 = a.count(&removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&[
+        "--loopback-remove-address",
+        prefix,
+        "--clear-ospfv3-loopback-profile",
+    ])
+    .await?;
     a.wait_new(&removed, r0, 60).await
 }
 
