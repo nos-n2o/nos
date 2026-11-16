@@ -1283,6 +1283,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              dropped, which leaves the neighbor stuck in ExStart. With mtu-ignore set the \
              check is skipped and the adjacency forms regardless.",
         ),
+        Topic::OspfProfilePassive => (
+            "Enable or disable passive mode on an OSPF profile.",
+            "Sets passive on a profile. An attach point using a passive profile advertises its \
+             subnet as a stub network in the Router-LSA but sends no Hello and forms no \
+             adjacency. Cannot be combined with authentication, BFD or point-to-multipoint.",
+        ),
         Topic::OspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             concat!(

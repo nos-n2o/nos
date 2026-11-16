@@ -1531,6 +1531,11 @@ pub struct Args {
     #[arg(long)]
     pub ospf_mtu_ignore: Option<bool>,
 
+    /// If set (requires `--ospf-profile`), toggles `passive` on it
+    /// (`OspfProfileOp::SetPassive`): the subnet is advertised as a stub, no Hello.
+    #[arg(long)]
+    pub ospf_passive: Option<bool>,
+
     /// If set (requires `--ospf-profile`), overrides this profile's
     /// hello-interval (`OspfProfileOp::SetHelloInterval`) — for verifying
     /// RFC 2328 §10.5's packet-validity check drops a Hello whose
@@ -4154,6 +4159,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(enabled) = args.ospf_passive {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetPassive {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(enabled) = args.ospf_mtu_ignore {
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetMtuIgnore {
                     instance: instance.clone(),
@@ -4239,6 +4252,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_mtu_ignore.is_some() {
                 bail!("--ospf-mtu-ignore requires --ospf-profile to also be set");
             }
+            if args.ospf_passive.is_some() {
+                bail!("--ospf-passive requires --ospf-profile to also be set");
+            }
             if args.ospf_profile_network_type.is_some() {
                 bail!("--ospf-profile-network-type requires --ospf-profile to also be set");
             }
@@ -4255,6 +4271,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     } else if args.ospf_profile_mtu.is_some()
         || args.ospf_mtu_ignore.is_some()
+        || args.ospf_passive.is_some()
         || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
         || args.ospf_extended_seq.is_some()
@@ -6672,6 +6689,7 @@ mod tests {
         assert!(with(&["--ospf-crypto-key", "1:md5:k"]).contains("--ospf-profile"));
         assert!(with(&["--ospf-profile-mtu", "1500"]).contains("--ospf-profile"));
         assert!(with(&["--ospf-mtu-ignore", "true"]).contains("--ospf-profile"));
+        assert!(with(&["--ospf-passive", "true"]).contains("--ospf-profile"));
         assert!(with(&["--ospf-profile-network-type", "broadcast"]).contains("--ospf-profile"));
         assert!(with(&["--ospf-profile-hello-interval", "5"]).contains("--ospf-profile"));
         assert!(with(&[
@@ -6711,6 +6729,8 @@ mod tests {
             "--ospf-profile",
             "p",
             "--ospf-mtu-ignore",
+            "true",
+            "--ospf-passive",
             "true",
             "--ospf-profile-network-type",
             "point-to-multipoint",
@@ -6754,6 +6774,7 @@ mod tests {
             "SetHostRouter",
             "not_advertise: false",
             "SetMtuIgnore",
+            "SetPassive",
             "SetNetworkType",
             "PointToMultipoint",
             "metric: Some(20)",

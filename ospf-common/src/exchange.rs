@@ -390,6 +390,27 @@ fn seed_summary<L: Lsa>(
         .collect();
 }
 
+/// RFC 5243 §3 summary optimization: drops from our pending summary every
+/// header the neighbor's DBD already lists at an equal or newer instance, so
+/// we do not describe LSAs it has. Only the content shrinks; M/MS/I bits and
+/// sequence numbers are untouched, and an emptied summary still ends with M=0.
+fn trim_summary<L: Lsa>(adj: &mut AdjacencyData<L>, dbd: &Dbd<L::Header, L::Lls>) {
+    if dbd.lsa_headers.is_empty() || adj.summary_remaining.is_empty() {
+        return;
+    }
+    let theirs: HashMap<_, _> = dbd.lsa_headers.iter().map(|h| (h.key(), h)).collect();
+    let before = adj.summary_remaining.len();
+    adj.summary_remaining.retain(|h| {
+        theirs
+            .get(&h.key())
+            .is_none_or(|n| n.is_newer(h) == Ordering::Less)
+    });
+    let removed = before - adj.summary_remaining.len();
+    if removed > 0 {
+        tracing::debug!(removed, neighbor = %dbd.router_id, "ospf dbd summary trimmed");
+    }
+}
+
 /// The slave's side of one round: adopt the sender's sequence number,
 /// extend the request list from its chunk, and reply with our own next
 /// chunk. Shared by `on_dbd_in_exstart` (the first round, where the sequence
@@ -405,6 +426,7 @@ fn slave_process_poll<L: Lsa>(
     adj.dd_sequence_number = dbd.dd_sequence_number;
     adj.request_list
         .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
+    trim_summary(adj, dbd);
     let (chunk, more) = pop_chunk(&mut adj.summary_remaining, p.max_headers);
     let reply = Dbd {
         router_id: p.local_router_id,
@@ -435,7 +457,11 @@ fn master_process_reply<L: Lsa>(
 ) -> (Option<DbdOf<L>>, bool) {
     adj.request_list
         .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
-    if !dbd.more && adj.summary_remaining.is_empty() {
+    // Judged before trimming: a summary emptied by RFC 5243 has not yet been
+    // answered by a final M=0 poll, which the slave needs to finish.
+    let had_nothing_left = adj.summary_remaining.is_empty();
+    trim_summary(adj, dbd);
+    if !dbd.more && had_nothing_left {
         return (None, true);
     }
     adj.dd_sequence_number = adj.dd_sequence_number.wrapping_add(1);

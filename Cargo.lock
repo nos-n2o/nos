@@ -2647,6 +2647,7 @@ dependencies = [
  "futures",
  "socket2",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
