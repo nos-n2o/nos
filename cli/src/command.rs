@@ -228,6 +228,16 @@ mod tests {
     }
 
     #[test]
+    fn history_and_rollback() {
+        assert_eq!(
+            Command::parse("show configuration history"),
+            Command::ShowHistory
+        );
+        assert_eq!(Command::parse("rollback 3"), Command::Rollback { n: 3 });
+        assert!(matches!(Command::parse("rollback x"), Command::Unknown(_)));
+    }
+
+    #[test]
     fn show_this() {
         assert_eq!(Command::parse("show this"), Command::Show);
     }

@@ -2028,6 +2028,12 @@ fn emphasize_middle(chars: &[char], prefix: usize, suffix: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_formats_a_unix_time() {
+        assert_eq!(utc(1_700_000_000), "2023-11-14 22:13:20");
+        assert_eq!(utc(u64::MAX), u64::MAX.to_string());
+    }
+
     use std::net::Ipv4Addr;
 
     use nos_proto::SectionDiff;
