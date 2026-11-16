@@ -4690,3 +4690,28 @@ pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
     a.provision(&flags("--remove-static-route")).await?;
     Ok(())
 }
+
+/// #1150: a daemon that stops (SIGSTOP: the process lives, its runtime does
+/// not turn) stops beating; `nos-watchdogd` kills and restarts it. `nos-lldpd`
+/// is the victim: a fixed singleton nothing else here depends on.
+pub async fn daemon_heartbeat(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    // It must have beaten once for the watchdog to expect more; every beat
+    // is one 5 s tick after start, so allow for the first one.
+    let starting = "starting process=nos-lldpd";
+    let base = a.count(starting);
+    log("freezing router-a's nos-lldpd with SIGSTOP");
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    w.dock
+        .signal_process("router-a", "nos-lldpd", "-STOP")
+        .await?;
+    let a = w.a()?;
+    a.wait_new(
+        "heartbeat missed, killing the hung process process=nos-lldpd",
+        a.count("heartbeat missed, killing the hung process process=nos-lldpd"),
+        90,
+    )
+    .await?;
+    a.wait_new(starting, base, 60).await?;
+    Ok(())
+}

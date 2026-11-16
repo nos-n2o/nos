@@ -93,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         identity.clone(),
         shutdown_rx.clone(),
     );
+    nos_daemon::liveness::start(args.watchdog_socket.clone());
     info!(instance = %args.instance, "nos-ospfv3d starting");
 
     let Some(config_socket) = watchdog::resolve_with_retry(

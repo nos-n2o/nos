@@ -19,6 +19,7 @@ garde      = { workspace = true }
 precis-core     = { workspace = true }
 precis-profiles = { workspace = true }
 nos-proto  = { workspace = true }
+nos-daemon = { workspace = true }
 nos-password = { workspace = true }
 nos-log-client     = { workspace = true }
 nos-pki            = { workspace = true }
