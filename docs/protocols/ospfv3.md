@@ -220,6 +220,33 @@ How it behaves:
 - **End of the grace period.** When the restarted router's adjacency is Full again, the helper logs `ospfv3 helper: neighbor reformed, exiting grace early`. If it never comes back, the helper logs `ospfv3 helper: grace period expired` and the ordinary dead interval applies from then on.
 - `delete ospfv3 instance v3 graceful-restart grace-period` turns it off.
 
+### Drain traffic away from a router (RFC 6987 stub router)
+
+Make other routers avoid this one for transit, while its own prefixes stay reachable. Same three settings as OSPFv2:
+
+```
+configure drain
+set ospfv3 instance v3 max-metric router-lsa administrative
+set ospfv3 instance v3 max-metric router-lsa on-startup 300
+set ospfv3 instance v3 max-metric router-lsa on-shutdown 3
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/drain
+$C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/drain/ospfv3-instance/v3/max-metric-administrative
+$C -X PUT -H 'Content-Type: application/json' -d '300' $B/v1/transactions/drain/ospfv3-instance/v3/max-metric-on-startup
+$C -X PUT -H 'Content-Type: application/json' -d '3' $B/v1/transactions/drain/ospfv3-instance/v3/max-metric-on-shutdown
+$C -X POST $B/v1/transactions/drain/commit
+```
+
+- **What changes.** Every point-to-point and transit-network link in the (E-)Router-LSA costs 65535. Prefixes live in Intra-Area-Prefix-LSAs and keep their metric; other routers' inter-area and external metrics are untouched. There is no H-bit in OSPFv3. Other routers use this one for transit only when there is no other path, and never as a loop-free alternate.
+- **`administrative`.** On until removed: `delete ospfv3 instance v3 max-metric router-lsa administrative` brings it back.
+- **`on-startup <seconds>`** (5 to 86400). For this long after `nos-ospfv3d` starts. It takes effect on the next start, not when set; `delete` ends a period still running.
+- **`on-shutdown <seconds>`** (1 to 3). When `nos-ospfv3d` stops, it first advertises max-metric and waits this long before exiting. `nos-ospfv3d` withdraws no LSAs on a clean stop, so this is the whole delay. Skipped when the router is already a stub router.
+- **Not with graceful restart (RFC 6987 §3.2 (c)).** A planned restart with a grace period (SIGTERM) leaves a marker `/var/lib/nos/ospfv3d/<instance>.gr`; the respawned process consumes it and skips `on-startup` (log `ospfv3 stub router on-startup skipped after graceful restart`). `on-shutdown` is skipped whenever the grace period is announced.
+- **Check it.** The router logs `ospfv3 stub router max-metric changed active=true reason="administrative"` (or `"on-startup"`, `"on-shutdown"`), then `active=false` with `reason="expired"` or `"cleared"`. On another router, its backup next hop through this one is gone.
+
 ### Redistribute static routes (ASBR)
 
 `redistribute ospfv3` advertises the routing table's IPv6 static routes into its OSPFv3 instance, which makes this router an AS boundary router (ASBR). The table needs a static routing instance and an OSPFv3 instance:
@@ -295,6 +322,9 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
+| max-metric administrative | `set ospfv3 instance <name> max-metric router-lsa administrative`; `delete ospfv3 instance <name> max-metric router-lsa administrative` | `ospfv3-instance/<name>/max-metric-administrative` | bool; off by default | | RFC 6987 stub router until removed | `ospfv3 stub router max-metric changed` |
+| max-metric on-startup | `set ospfv3 instance <name> max-metric router-lsa on-startup <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router for this long after the next start | `reason="on-startup"` |
+| max-metric on-shutdown | `set ospfv3 instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router for this long before the process exits | `reason="on-shutdown"` |
 | routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
 | area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas, one the backbone, make an ABR | `show ospfv3 database` |
 | redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |

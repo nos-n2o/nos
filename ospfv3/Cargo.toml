@@ -33,6 +33,7 @@ nos-rpl            = { workspace = true }
 sha1               = { workspace = true }
 sha2               = { workspace = true }
 hmac               = { workspace = true }
+tempfile           = { workspace = true }
 
 [[bin]]
 name = "nos-ospfv3d"
@@ -41,5 +42,4 @@ path = "src/main.rs"
 [dev-dependencies]
 nos-pki  = { workspace = true, features = ["testing"] }
 tokio    = { workspace = true, features = ["test-util"] }
-tempfile = { workspace = true }
 nos-test-support = { workspace = true, features = ["fakes"] }

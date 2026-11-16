@@ -319,6 +319,12 @@ topics! {
     Ospfv3InstanceGracefulRestart,
     /// `Ospfv3Instance.graceful_restart_helper_max_grace_period`
     Ospfv3InstanceGracefulRestartHelperMaxGracePeriod,
+    /// `Ospfv3Instance.max_metric_on_startup`
+    Ospfv3InstanceMaxMetricOnStartup,
+    /// `Ospfv3Instance.max_metric_on_shutdown`
+    Ospfv3InstanceMaxMetricOnShutdown,
+    /// `Ospfv3Instance.max_metric_administrative`
+    Ospfv3InstanceMaxMetricAdministrative,
     /// `Ospfv3Instance.areas`
     Ospfv3Area,
     /// `Ospfv3Area.profiles`

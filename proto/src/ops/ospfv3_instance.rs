@@ -45,6 +45,27 @@ pub enum Ospfv3InstanceOp {
         /// Cap in seconds.
         seconds: Option<u32>,
     },
+    /// Sets (`Some`) or clears (`None`) RFC 6987's on-startup period.
+    SetMaxMetricOnStartup {
+        /// Name of the `OSPFv3` instance this op targets.
+        name: String,
+        /// Duration in seconds.
+        seconds: Option<u32>,
+    },
+    /// Sets (`Some`) or clears (`None`) RFC 6987's on-shutdown hold.
+    SetMaxMetricOnShutdown {
+        /// Name of the `OSPFv3` instance this op targets.
+        name: String,
+        /// Duration in seconds.
+        seconds: Option<u8>,
+    },
+    /// Turns RFC 6987's administrative max-metric on or off.
+    SetMaxMetricAdministrative {
+        /// Name of the `OSPFv3` instance this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Deletes the `OSPFv3` instance and everything nested under it.
     Delete {
         /// Name of the `OSPFv3` instance this op targets.
@@ -67,6 +88,9 @@ impl Ospfv3InstanceOp {
                         extended_lsa: false,
                         graceful_restart_grace_period: None,
                         graceful_restart_helper_max_grace_period: None,
+                        max_metric_on_startup: None,
+                        max_metric_on_shutdown: None,
+                        max_metric_administrative: false,
                     });
                 }
                 Ok(())
@@ -86,6 +110,18 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
                 find_instance_mut(config, name)?.graceful_restart_grace_period = *grace_period;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetMaxMetricOnStartup { name, seconds } => {
+                find_instance_mut(config, name)?.max_metric_on_startup = *seconds;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetMaxMetricOnShutdown { name, seconds } => {
+                find_instance_mut(config, name)?.max_metric_on_shutdown = *seconds;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetMaxMetricAdministrative { name, enabled } => {
+                find_instance_mut(config, name)?.max_metric_administrative = *enabled;
                 Ok(())
             }
             Ospfv3InstanceOp::Delete { name } => {
@@ -125,6 +161,9 @@ mod tests {
             extended_lsa: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
     }
 
@@ -188,6 +227,47 @@ mod tests {
         assert!(cfg.ospfv3_instances[0].extended_lsa);
         op(false).apply(&mut cfg).unwrap();
         assert!(!cfg.ospfv3_instances[0].extended_lsa);
+    }
+
+    #[test]
+    fn set_max_metric_fields() {
+        let mut cfg = Config {
+            ospfv3_instances: vec![instance("o1")],
+            ..Default::default()
+        };
+        let name = || "o1".to_string();
+        for op in [
+            Ospfv3InstanceOp::SetMaxMetricOnStartup {
+                name: name(),
+                seconds: Some(30),
+            },
+            Ospfv3InstanceOp::SetMaxMetricOnShutdown {
+                name: name(),
+                seconds: Some(3),
+            },
+            Ospfv3InstanceOp::SetMaxMetricAdministrative {
+                name: name(),
+                enabled: true,
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let i = &cfg.ospfv3_instances[0];
+        assert_eq!(
+            (
+                i.max_metric_on_startup,
+                i.max_metric_on_shutdown,
+                i.max_metric_administrative
+            ),
+            (Some(30), Some(3), true)
+        );
+        let err = Ospfv3InstanceOp::SetMaxMetricAdministrative {
+            name: "nope".to_string(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::Ospfv3InstanceNotFound(n) if n == "nope"));
     }
 
     #[test]

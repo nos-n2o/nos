@@ -7,6 +7,11 @@
 // plumbing, so the files stay in `ospf/src` (not `nos-daemon`).
 #[path = "../../ospf/src/bfd_client.rs"]
 pub mod bfd_client;
+// The RFC 5187 graceful-restart marker (`<instance>.gr`) is shared with
+// `nos-ospfd`; v3 does not use the boot counter (RFC 7166 keeps its sequence
+// in the socket).
+#[path = "../../ospf/src/boot.rs"]
+pub mod boot;
 pub mod exchange;
 pub mod interface_client;
 pub mod link;

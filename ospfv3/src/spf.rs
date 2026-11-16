@@ -406,6 +406,9 @@ pub fn compute_in(
     out.into_values().collect()
 }
 
+/// RFC 6987 `MaxLinkMetric` (`link.rs` advertises a stub router with it).
+const MAX_LINK_METRIC: u16 = 0xFFFF;
+
 /// One candidate first hop for a loop-free alternate: a router adjacent to
 /// root, reached at its link-local `addr` over root's `interface_id`, with
 /// the shortest-path distances *from that router* to every vertex.
@@ -437,11 +440,25 @@ fn alternates(
     };
     // (neighbor router-id, its link-local address, root's ifindex, root's cost)
     let mut candidates: Vec<(Ipv4Addr, Ipv6Addr, u32, u32)> = Vec::new();
-    for l in &root_lsa.links {
+    // RFC 5286 §3.5: never along a link whose cost or reverse cost (the
+    // neighbor's own link back to root, or to the network) is MaxLinkMetric,
+    // an RFC 6987 stub router on either end.
+    let usable = |b: &crate::lsa::RouterLsaLink| b.metric != MAX_LINK_METRIC;
+    for l in root_lsa.links.iter().filter(|l| usable(l)) {
         let cost = u32::from(l.metric);
         match l.link_type {
             LINK_TYPE_POINT_TO_POINT => {
                 let w = l.neighbor_router_id;
+                let back_ok = routers.get(&w).is_some_and(|b| {
+                    b.links.iter().any(|bl| {
+                        bl.link_type == LINK_TYPE_POINT_TO_POINT
+                            && bl.neighbor_router_id == root
+                            && usable(bl)
+                    })
+                });
+                if !back_ok {
+                    continue;
+                }
                 if let Some((addr, ifid)) = p2p_next_hop(routers, links, root, w) {
                     candidates.push((w, addr, ifid, cost));
                 }
@@ -452,6 +469,16 @@ fn alternates(
                     continue;
                 };
                 for &r in net.attached_routers.iter().filter(|&&r| r != root) {
+                    let back_ok = routers.get(&r).is_some_and(|b| {
+                        b.links.iter().any(|bl| {
+                            bl.link_type == LINK_TYPE_TRANSIT_NETWORK
+                                && lsa::interface_id_key(bl.neighbor_interface_id) == network_id
+                                && usable(bl)
+                        })
+                    });
+                    if !back_ok {
+                        continue;
+                    }
                     if let Some(addr) = network_next_hop(routers, links, network_id, r) {
                         candidates.push((r, addr, l.interface_id, cost));
                     }
@@ -1296,6 +1323,47 @@ mod tests {
             Some("fe80::3".parse::<Ipv6Addr>().unwrap())
         );
         assert_eq!(routes[0].backup_interface_id, Some(2));
+    }
+
+    /// RFC 5286 §3.5 / RFC 6987: a stub router (`MaxLinkMetric` on its links,
+    /// or on root's link to it) is never an alternate.
+    #[test]
+    fn stub_router_is_never_an_alternate() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let lsas = |root_cost: u16, r3_cost: u16| {
+            vec![
+                router_lsa(r1, vec![p2p(r2, 1, 1, 1), p2p(r3, 2, 1, root_cost)]),
+                router_lsa(r2, vec![p2p(r1, 1, 1, 1), p2p(r3, 2, 2, 1)]),
+                router_lsa(r3, vec![p2p(r1, 1, 2, r3_cost), p2p(r2, 2, 2, r3_cost)]),
+                link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+                link_lsa(r3, 1, "fe80::3".parse().unwrap()),
+                router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+            ]
+        };
+        let backup = |l: Vec<Arc<Lsa>>| compute(r1, &l)[0].backup_next_hop;
+        assert!(backup(lsas(1, 1)).is_some());
+        assert_eq!(backup(lsas(1, 0xFFFF)), None, "neighbor is a stub router");
+        assert_eq!(backup(lsas(0xFFFF, 1)), None, "root's link is max-metric");
+    }
+
+    /// The same on a transit network: a peer whose link to it is
+    /// `MaxLinkMetric` is no alternate.
+    #[test]
+    fn stub_router_on_a_transit_network_is_never_an_alternate() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let lsas = |r3_metric: u16| {
+            [
+                router_lsa(r1, vec![transit(10, 10, r1, 1)]),
+                router_lsa(r2, vec![transit(10, 20, r1, 1), p2p(r3, 21, 31, 1)]),
+                router_lsa(r3, vec![transit(10, 30, r1, r3_metric), p2p(r2, 31, 21, 1)]),
+                network_lsa(10, r1, vec![r1, r2, r3]),
+                link_lsa(r2, 20, "fe80::2".parse().unwrap()),
+                link_lsa(r3, 30, "fe80::3".parse().unwrap()),
+                router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+            ]
+        };
+        assert!(compute(r1, &lsas(1))[0].backup_next_hop.is_some());
+        assert_eq!(compute(r1, &lsas(0xFFFF))[0].backup_next_hop, None);
     }
 
     #[test]

@@ -1371,6 +1371,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Cap the grace period this router grants a restarting neighbor (RFC 5187 helper).",
             "A neighbor's Grace-LSA is honoured for its remaining grace period (grace period minus the LSA's age) but never longer than this many seconds (1-3600, default 1800). Helping also ends at once when another router's topology LSA changes (strict LSA checking). `delete` restores the default.",
         ),
+        Topic::Ospfv3InstanceMaxMetricOnStartup => (
+            "Advertise this router as a stub router for a while after it starts (RFC 6987).",
+            "For this many seconds (5-86400) after nos-ospfv3d starts, every transit and point-to-point link in this router's Router-LSA costs 65535, so traffic avoids the router while its routes converge; its own prefixes stay reachable at their normal cost. Takes effect on the next start. Skipped after a graceful restart, whose helpers keep the old topology. `delete` turns it off, and ends a period that is still running.",
+        ),
+        Topic::Ospfv3InstanceMaxMetricOnShutdown => (
+            "Advertise this router as a stub router before it stops (RFC 6987).",
+            "When nos-ospfv3d stops (not a graceful restart), it first advertises every transit and point-to-point link at cost 65535 and holds that for this many seconds (1-3) before exiting, so traffic moves away before the router disappears. Skipped when its Router-LSA changed in the last 5 seconds. `delete` turns it off.",
+        ),
+        Topic::Ospfv3InstanceMaxMetricAdministrative => (
+            "Advertise this router as a stub router until removed (RFC 6987).",
+            "Every transit and point-to-point link in this router's Router-LSA costs 65535 while set, so traffic avoids the router whenever another path exists, for draining it before maintenance. Its own prefixes stay reachable, and neighbors stop using it as a loop-free alternate. `delete` turns it off.",
+        ),
         Topic::Ospfv3Area => (
             "Create or delete an OSPFv3 area.",
             "An area of an OSPFv3 instance, identified by a dotted-quad area-id. `edit` creates it if missing and navigates into it; `delete` removes it with its profiles.",
