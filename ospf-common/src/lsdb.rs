@@ -324,6 +324,15 @@ mod tests {
     }
 
     #[test]
+    fn age_newer_instance_replaces_held_one() {
+        let mut db = Db::new();
+        db.install(with(9, 1, 5, 1001));
+        assert_eq!(db.install(with(9, 1, 5, 100)), InstallOutcome::Superseded);
+        assert_eq!(db.get(&9).unwrap().header().age(), 100);
+        assert_eq!(db.install(with(9, 1, 5, 1001)), InstallOutcome::Rejected);
+    }
+
+    #[test]
     fn first_install_is_installed() {
         let mut db = Db::new();
         assert_eq!(db.install(lsa(1)), InstallOutcome::Installed);
