@@ -209,6 +209,8 @@ In the transaction, `show this` shows your current object or the whole transacti
 
 `commit` validates the transaction and applies it. If it succeeds, you are back in operational mode. If it fails, the errors are printed and you stay in the transaction. `discard` (or `abort`) deletes the transaction without touching the running config.
 
+To undo commits, `show configuration history` lists the last 20 running configs a commit replaced (newest first: index, UTC time, `commit` or `rollback`, user) and `rollback <n>` (configuration mode) restores the config as it was `n` commits ago (admin role only). `rollback 1` undoes the latest commit; `rollback 0` does nothing; an `n` beyond the list is an error. A rollback is a normal commit: validated (one that would leave no user is refused), applied by every daemon, and a new history entry, so it can be rolled back too. It is not saved until `save`.
+
 Back in operational mode, `save` writes the running config to `/var/lib/nos/configd/config.yaml` so it survives a restart.
 
 A failed commit leaves everything as it was, so you can fix the problem and commit again:
@@ -367,6 +369,8 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `set <list element> first\|last\|before <key>\|after <key>` / `move <list element> first\|last\|before <key>\|after <key>` | Inserts or moves a list element: one `EditTransactionPath` write of the element with `position` set (`move` re-sends the element as it is). Handled in `config_grammar.rs` (`Walk::positioned`, `parse_move`) |
 | `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutesPage` over one connection — every prefix, every candidate route ordered best to worst, printed page by page as it arrives (works in any mode). The table is not snapshotted: routes that change during the walk may be missed or shown, but never repeated |
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
+| `show configuration history` | `Request::ListHistory`; prints index, UTC time, kind and user of the commits kept on disk (works in any mode) |
+| `rollback <n>` | `Request::Rollback { index: n }`; restores the config `n` commits back as a normal commit (configuration mode) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |
 | `configure <name> [from blank\|current]` | Enters configuration mode on a named transaction — creates it if new (default base: `current`), resumes it unchanged if it already exists |
 | `edit bgp instance <name>` | Creates the instance in the transaction if missing, then navigates into it |

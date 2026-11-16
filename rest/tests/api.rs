@@ -464,6 +464,44 @@ async fn save_writes_the_running_config_to_disk() {
     assert!(saved.contains("saved-host"), "{saved}");
 }
 
+/// #1141: history lists a commit, rollback undoes it, an unknown index is 404.
+#[tokio::test]
+async fn history_and_rollback() {
+    let f = fixture_with(vec![], Some("config.yaml")).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/h?base=current", None).await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/h/hostname",
+        Some(json!("hist-host")),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/h/commit", None).await;
+    let (s, v) = send(app, Method::GET, "/v1/history", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        (v[0]["index"].clone(), v[0]["kind"].clone()),
+        (json!(1), json!("commit"))
+    );
+    let (s, v) = send(app, Method::POST, "/v1/rollback/1", None).await;
+    assert_eq!(
+        (s, v["committed"].clone()),
+        (StatusCode::OK, json!("rollback 1"))
+    );
+    let (_, cfg) = send(app, Method::GET, "/v1/config", None).await;
+    assert_ne!(cfg["hostname"], json!("hist-host"));
+    let (s, _) = send(app, Method::POST, "/v1/rollback/99", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn history_without_a_config_file_is_a_bad_gateway() {
+    let f = fixture(vec![]).await;
+    let (s, _) = send(&f.app, Method::GET, "/v1/history", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY);
+}
+
 #[tokio::test]
 async fn save_failure_is_a_bad_gateway() {
     // No config file: nos-configd refuses the save, through no fault of the client.

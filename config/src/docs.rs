@@ -2092,6 +2092,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Reset to `none`.",
             ),
         ),
+        Topic::ShowHistory => (
+            "Show the commit history that `rollback` can go back to.",
+            "Lists the last 20 running configs a commit replaced, newest first, with the \
+             time and the user of the commit that replaced each one. The number in the first \
+             column is the argument of `rollback`. The history is kept on disk next to the \
+             config file and survives a restart; it is independent of `save`.",
+        ),
+        Topic::Rollback => (
+            "Restore the running config as it was N commits ago.",
+            "`rollback 1` undoes the latest commit, `rollback 2` the two latest. It is a \
+             normal commit of the old config: it is validated (a rollback that would leave \
+             no user is refused), broadcast to every daemon, and recorded as a new history \
+             entry, so a rollback can itself be rolled back. `rollback 0` does nothing. The \
+             result is not saved to disk until `save`.",
+        ),
     };
     CommandDoc {
         topic,

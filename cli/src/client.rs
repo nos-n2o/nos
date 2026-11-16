@@ -240,6 +240,38 @@ pub async fn diff_transaction(socket_path: &Path, name: &str) -> Result<ConfigDi
     }
 }
 
+/// `Request::ListHistory`: newest first.
+pub async fn list_history(socket_path: &Path) -> Result<Vec<nos_proto::HistoryEntry>, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(Request::ListHistory).await?;
+    match reader.next().await {
+        Some(Ok(Event::History(h))) => Ok(h),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to ListHistory".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// `Request::Rollback`: the commit's warnings and whether running is unsaved.
+pub async fn rollback(socket_path: &Path, index: u32) -> Result<(Vec<String>, bool), ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::Rollback { index, actor: None })
+        .await?;
+    match reader.next().await {
+        Some(Ok(Event::Committed { warnings, unsaved })) => Ok((warnings, unsaved)),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to Rollback".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
 /// Deletes a named transaction without touching the running config.
 pub async fn discard_transaction(socket_path: &Path, name: &str) -> Result<(), ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;

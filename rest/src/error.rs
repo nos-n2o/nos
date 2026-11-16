@@ -42,6 +42,7 @@ impl ApiError {
         if msg.starts_with("forbidden") {
             ApiError::Forbidden(msg)
         } else if msg.starts_with("no transaction named")
+            || msg.starts_with("no history entry")
             || msg.starts_with("config path: no such config path")
         {
             ApiError::NotFound(msg)

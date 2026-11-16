@@ -23,6 +23,8 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::GetRestApi { .. } => role == Role::Restd,
         Request::Save { .. }
         | Request::SaveStatus
+        | Request::ListHistory
+        | Request::Rollback { .. }
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
         | Request::GetTransaction { .. }
@@ -54,6 +56,7 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. }
         | Request::SaveStatus
+        | Request::ListHistory
         | Request::OpenTransaction { .. }
         | Request::GetTransaction { .. }
         | Request::DiffTransaction { .. }
@@ -66,7 +69,7 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::GetRestApi { .. }
         | Request::UpgradePasswordHash { .. }
         | Request::SetSshHostKey { .. } => true,
-        Request::Save { .. } => false,
+        Request::Save { .. } | Request::Rollback { .. } => false,
         Request::ApplyOp { op, .. } => {
             matches!(op, ConfigOp::User(UserOp::SetPassword { name, .. }) if name == actor)
         }
@@ -128,6 +131,16 @@ mod tests {
             assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
             let ssh = Request::SetSshHostKey { seed: "s".into() };
             assert_eq!(allowed(role, &ssh), role == Role::Sshd, "{role:?} ssh key");
+            assert_eq!(
+                allowed(role, &Request::ListHistory),
+                may_edit,
+                "{role:?} history"
+            );
+            let back = Request::Rollback {
+                index: 1,
+                actor: None,
+            };
+            assert_eq!(allowed(role, &back), may_edit, "{role:?} rollback");
             let probe = Request::UserExists { name: "u".into() };
             assert_eq!(allowed(role, &probe), role == Role::Restd, "{role:?} probe");
             for r in [
@@ -191,5 +204,19 @@ mod tests {
                 assert!(permitted(ur, "bob", &r), "{ur:?} {r:?}");
             }
         }
+    }
+
+    /// #1141: a non-admin may list the history but not roll back.
+    #[test]
+    fn rollback_is_admin_only_and_history_is_readable() {
+        let back = Request::Rollback {
+            index: 1,
+            actor: None,
+        };
+        for r in [UserRole::Operator, UserRole::ReadOnly] {
+            assert!(permitted(r, "u", &Request::ListHistory));
+            assert!(!permitted(r, "u", &back));
+        }
+        assert!(permitted(UserRole::Admin, "u", &back));
     }
 }

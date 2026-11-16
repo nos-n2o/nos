@@ -83,7 +83,7 @@ pub use interface::{
     LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LinkState,
     PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
 };
-pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
+pub use ipc::{Event, HistoryEntry, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
 pub use lacp::{
     LacpAgreement, LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,

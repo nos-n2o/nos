@@ -1029,6 +1029,27 @@ fn render_log_level(level: LogLevel) -> &'static str {
     }
 }
 
+/// `YYYY-MM-DD HH:MM:SS` (UTC) of Unix `secs`, or the number when out of range.
+pub fn utc(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|s| OffsetDateTime::from_unix_timestamp(s).ok())
+        .map_or_else(
+            || secs.to_string(),
+            |dt| {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    dt.year(),
+                    u8::from(dt.month()),
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second()
+                )
+            },
+        )
+}
+
 /// Render one log entry as one line: `<timestamp> <LEVEL> <source> <target>: <message> {fields}`.
 pub fn render_log_entry(entry: &LogEntry) -> String {
     let timestamp = i64::try_from(entry.timestamp_ms)
@@ -2007,6 +2028,12 @@ fn emphasize_middle(chars: &[char], prefix: usize, suffix: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_formats_a_unix_time() {
+        assert_eq!(utc(1_700_000_000), "2023-11-14 22:13:20");
+        assert_eq!(utc(u64::MAX), u64::MAX.to_string());
+    }
+
     use std::net::Ipv4Addr;
 
     use nos_proto::SectionDiff;

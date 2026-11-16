@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
+use crate::history::History;
 use crate::nss_users::{names_differ, UserDb};
 use crate::path_edit::{self, Planned};
 use crate::secrets::unmask_op;
@@ -236,6 +237,8 @@ struct Inner {
     idle_ttl: Duration,
     /// Mirrors the user names to the NSS passwd file (#999); `None` in tests.
     user_db: Option<UserDb>,
+    /// Replaced running configs on disk (#1141); `None` without a config path.
+    history: Option<Arc<History>>,
 }
 
 /// A cheap, cloneable handle to the daemon's config state: the running
@@ -281,7 +284,9 @@ impl ConfigStore {
         normalize_names(&mut initial.users);
         hash_clear_passwords(&mut initial.users, &[]);
         let (tx, _) = broadcast::channel(cap);
+        let history = config_path.as_deref().and_then(History::open).map(Arc::new);
         Self(Arc::new(Inner {
+            history,
             running: RwLock::new(Arc::new(initial)),
             transactions: Mutex::new(HashMap::new()),
             tx,
@@ -745,6 +750,64 @@ impl ConfigStore {
         if_match: Option<Vec<u64>>,
         own_password_only: Option<&str>,
     ) -> Result<Vec<String>, ConfigError> {
+        self.commit_as(name, if_match, own_password_only, "commit", "")
+            .await
+    }
+
+    /// The commit history, newest first (#1141).
+    pub async fn history(&self) -> Result<Vec<nos_proto::HistoryEntry>, ConfigError> {
+        let h = self.history_handle()?;
+        let entries = tokio::task::spawn_blocking(move || h.entries())
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(entries.into_iter().map(|(e, _)| e).collect())
+    }
+
+    fn history_handle(&self) -> Result<Arc<History>, ConfigError> {
+        self.0
+            .history
+            .clone()
+            .ok_or(ConfigError::HistoryUnavailable)
+    }
+
+    /// Restores the config `index` commits back through the normal commit
+    /// path (a transaction holding it: validation, `NoUsersLeft`, warnings,
+    /// one broadcast), which records its own history entry. `0` is a no-op.
+    pub async fn rollback(&self, index: u32, actor: &str) -> Result<Vec<String>, ConfigError> {
+        if index == 0 {
+            return Ok(Vec::new());
+        }
+        let h = self.history_handle()?;
+        let config = tokio::task::spawn_blocking(move || h.get(index))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))??;
+        let name = format!(
+            "rollback-{}",
+            self.0.seq.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        let txn = Transaction {
+            config,
+            base: None,
+            dirty: true,
+            generation: 0,
+            last_used: Instant::now(),
+        };
+        self.0.transactions.lock().await.insert(name.clone(), txn);
+        let res = self.commit_as(&name, None, None, "rollback", actor).await;
+        if res.is_err() {
+            self.0.transactions.lock().await.remove(&name);
+        }
+        res
+    }
+
+    pub(crate) async fn commit_as(
+        &self,
+        name: &str,
+        if_match: Option<Vec<u64>>,
+        own_password_only: Option<&str>,
+        kind: &'static str,
+        actor: &str,
+    ) -> Result<Vec<String>, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
@@ -810,6 +873,9 @@ impl ConfigStore {
 
         let prev = std::mem::replace(&mut *running, Arc::clone(&config));
         info!(transaction = %name, "config committed");
+        if let Some(h) = &self.0.history {
+            h.push(Arc::clone(&prev), kind, actor);
+        }
         // Under the `running` write guard, so two commits never write out of order.
         // ponytail: sync IO, a few hundred bytes on tmpfs; spawn_blocking if user counts grow.
         if let Some(db) = &self.0.user_db
@@ -2903,5 +2969,93 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::PreconditionFailed { .. }));
+    }
+
+    async fn commit_op(store: &ConfigStore, tx: &str, op: ConfigOp) {
+        store
+            .open_transaction(tx, TransactionBase::Current)
+            .await
+            .unwrap();
+        store.apply_op(tx, op).await.unwrap();
+        store.commit_transaction(tx, None).await.unwrap();
+    }
+
+    /// #1141: rollback restores a deleted section, is itself a history entry,
+    /// 0 is a no-op, out of range is refused, and it survives a restart.
+    #[tokio::test]
+    async fn rollback_restores_a_deleted_section_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.yaml");
+        let store = ConfigStore::new(Config::default(), Some(path.clone()));
+        commit_password(&store, "t0", "alice", "pw").await;
+        store
+            .open_transaction("t1", TransactionBase::Current)
+            .await
+            .unwrap();
+        store.apply_op("t1", ensure_op("a")).await.unwrap();
+        store.apply_op("t1", set_asn_op("a", 65000)).await.unwrap();
+        store.commit_transaction("t1", None).await.unwrap();
+        commit_op(
+            &store,
+            "t2",
+            ConfigOp::BgpInstance(BgpInstanceOp::Delete { name: "a".into() }),
+        )
+        .await;
+        assert_eq!(store.running_snapshot().await.bgp_instances.len(), 0);
+        let h = store.history().await.unwrap();
+        assert_eq!(h.len(), 3);
+        assert_eq!((h[0].index, h[0].kind.as_str()), (1, "commit"));
+
+        store.rollback(0, "x").await.unwrap();
+        assert_eq!(store.history().await.unwrap().len(), 3, "0 is a no-op");
+        store.rollback(1, "bob").await.unwrap();
+        assert_eq!(store.running_snapshot().await.bgp_instances.len(), 1);
+        let h = store.history().await.unwrap();
+        assert_eq!(h.len(), 4);
+        assert_eq!(
+            (h[0].kind.as_str(), h[0].actor.as_str()),
+            ("rollback", "bob")
+        );
+        assert!(matches!(
+            store.rollback(99, "bob").await,
+            Err(ConfigError::HistoryOutOfRange { .. })
+        ));
+
+        // A new daemon on the same config path still has the history.
+        let again = ConfigStore::new(Config::default(), Some(path));
+        assert_eq!(again.history().await.unwrap().len(), 4);
+        again.rollback(1, "bob").await.unwrap();
+        assert_eq!(again.running_snapshot().await.bgp_instances.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn rollback_that_would_leave_no_user_is_refused_and_unavailable_without_a_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(Config::default(), Some(dir.path().join("c.yaml")));
+        commit_password(&store, "t1", "alice", "pw").await;
+        // Entry 1 is the blank config: no users.
+        assert!(matches!(
+            store.rollback(1, "x").await,
+            Err(ConfigError::NoUsersLeft)
+        ));
+        assert_eq!(
+            store.history().await.unwrap().len(),
+            1,
+            "failed rollback adds nothing"
+        );
+        assert_eq!(store.running_snapshot().await.users.len(), 1);
+        let none = ConfigStore::new(Config::default(), None);
+        assert!(matches!(
+            none.rollback(1, "x").await,
+            Err(ConfigError::HistoryUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_commit_leaves_history_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(Config::default(), Some(dir.path().join("c.yaml")));
+        assert!(store.commit_transaction("missing", None).await.is_err());
+        assert_eq!(store.history().await.unwrap().len(), 0);
     }
 }

@@ -3907,6 +3907,18 @@ async fn start_gobgp_as(w: &World, afi_safis: &[&str], asn: u32) -> anyhow::Resu
 /// `start_gobgp_as`, with `gr`: RFC 4724 graceful restart (restart and helper
 /// roles) enabled for every family in `afi_safis`.
 async fn start_gobgp_gr(w: &World, afi_safis: &[&str], asn: u32, gr: bool) -> anyhow::Result<()> {
+    start_gobgp_full(w, afi_safis, asn, gr, &[]).await
+}
+
+/// `start_gobgp_gr`, with RFC 7911 ADD-PATH (receive and send, up to 4
+/// paths) enabled for the families of `afi_safis` named in `add_path`.
+async fn start_gobgp_full(
+    w: &World,
+    afi_safis: &[&str],
+    asn: u32,
+    gr: bool,
+    add_path: &[&str],
+) -> anyhow::Result<()> {
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
         .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
@@ -3930,6 +3942,11 @@ async fn start_gobgp_gr(w: &World, afi_safis: &[&str], asn: u32, gr: bool) -> an
         if gr {
             conf.push_str(
                 "    [neighbors.afi-safis.mp-graceful-restart.config]\n      enabled = true\n",
+            );
+        }
+        if add_path.contains(n) {
+            conf.push_str(
+                "    [neighbors.afi-safis.add-paths.config]\n      receive = true\n      send-max = 4\n",
             );
         }
     }
@@ -4381,16 +4398,26 @@ async fn flowspec_soft_reconfig(
 pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     let mut flags = vpn_flags("65000:1");
     flags.push("--vpn-flowspec".into());
-    gobgp_speaker(
+    // RFC 7911 on SAFI 134 only (#1125): the whole phase then runs with a
+    // path id before every rule on the GoBGP session.
+    flags.extend(strings(&["--add-path", "both"]));
+    w.start(A, Some(flags), &[]).await?;
+    start_gobgp_full(
         w,
-        flags,
         &["l3vpn-ipv4-unicast", "l3vpn-ipv4-flowspec"],
-        &[],
+        ASN_G,
+        false,
+        &["l3vpn-ipv4-flowspec"],
     )
     .await?;
     let a = w.a()?;
     a.wait(&format!(
         "address families negotiated peer={IP_G} families=\\[.*\"vpnv4-flowspec\""
+    ))
+    .await?;
+    // Only the SAFI 134 tuple is common: SAFI 1 stays unframed.
+    a.wait(&format!(
+        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
     ))
     .await?;
     flowspec_vpn_propagation(w).await?;

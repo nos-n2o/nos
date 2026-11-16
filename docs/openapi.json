@@ -588,7 +588,7 @@
         "type": "string"
       },
       "BgpAddPath": {
-        "description": "RFC 7911 ADD-PATH direction for a peer-group's unicast families: whether\nthis side offers to receive several paths per prefix, send them, or both.\nWhat is actually used per family is negotiated against the peer's own\ncapability (RFC 7911 §5).",
+        "description": "RFC 7911 ADD-PATH direction for a peer-group's unicast and VPN Flowspec families: whether\nthis side offers to receive several paths per prefix, send them, or both.\nWhat is actually used per family is negotiated against the peer's own\ncapability (RFC 7911 §5).",
         "enum": [
           "Receive",
           "Send",
@@ -1122,7 +1122,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/BgpAddPath",
-                "description": "RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;\nnever EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
               },
               {
                 "type": "null"
@@ -2844,6 +2844,38 @@
           "notification",
           "restarting",
           "families"
+        ],
+        "type": "object"
+      },
+      "HistoryEntry": {
+        "description": "One kept running config (#1141). `index` is what `Rollback` takes: `1` is\nthe config replaced by the latest commit.",
+        "properties": {
+          "actor": {
+            "description": "Who made that commit (empty when unknown).",
+            "type": "string"
+          },
+          "index": {
+            "description": "Argument to `Rollback`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "`commit` or `rollback`: what made that commit.",
+            "type": "string"
+          },
+          "time": {
+            "description": "Seconds since the Unix epoch of the commit that replaced this config.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "time",
+          "actor",
+          "kind"
         ],
         "type": "object"
       },
@@ -8023,6 +8055,40 @@
         ]
       }
     },
+    "/v1/history": {
+      "get": {
+        "operationId": "history",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/HistoryEntry"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-configd keeps no history (no config file)"
+          }
+        },
+        "summary": "Commit history (what `rollback` can restore)",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/interfaces": {
       "get": {
         "operationId": "interfaces",
@@ -8683,6 +8749,60 @@
         "summary": "Renew the client certificate",
         "tags": [
           "auth"
+        ]
+      }
+    },
+    "/v1/rollback/{n}": {
+      "post": {
+        "operationId": "rollback",
+        "parameters": [
+          {
+            "description": "how many commits to go back; 0 does nothing",
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "n is beyond the kept history"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the old config no longer validates, or would remove every user"
+          }
+        },
+        "summary": "Roll back the last n commits",
+        "tags": [
+          "transactions"
         ]
       }
     },
@@ -24469,7 +24589,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;\nnever EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },
@@ -24548,7 +24668,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;\nnever EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },
@@ -24594,7 +24714,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BgpAddPath",
-                "description": "RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;\nnever EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
               }
             }
           },
@@ -24606,7 +24726,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;\nnever EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },

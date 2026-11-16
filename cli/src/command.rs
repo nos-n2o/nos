@@ -139,6 +139,12 @@ pub enum Command {
         interface: String,
     },
     Save,
+    /// `show configuration history`
+    ShowHistory,
+    /// `rollback <n>` — configuration mode.
+    Rollback {
+        n: u32,
+    },
     Help,
     /// `exit` | `quit` | `end`
     Exit,
@@ -219,6 +225,16 @@ mod tests {
             Command::parse("show config admin"),
             Command::ShowConfigAdmin
         );
+    }
+
+    #[test]
+    fn history_and_rollback() {
+        assert_eq!(
+            Command::parse("show configuration history"),
+            Command::ShowHistory
+        );
+        assert_eq!(Command::parse("rollback 3"), Command::Rollback { n: 3 });
+        assert!(matches!(Command::parse("rollback x"), Command::Unknown(_)));
     }
 
     #[test]

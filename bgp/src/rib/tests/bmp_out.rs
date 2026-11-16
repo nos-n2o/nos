@@ -212,7 +212,7 @@ fn post_snapshot_rebuilds_what_the_peer_was_sent() {
 fn add_path_snapshot_keeps_the_path_ids_it_sent() {
     let mut rib = accepting(true);
     let snap = rib.bmp_out_snapshot(addr(DST), true, false);
-    assert_eq!(snap.tx_afis, HashSet::from([1]), "AFI 1 carries ids");
+    assert_eq!(snap.tx_afis, HashSet::from([(1, 1)]), "AFI 1 carries ids");
     let ids: Vec<_> = snap
         .post
         .iter()

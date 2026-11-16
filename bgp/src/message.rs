@@ -716,7 +716,7 @@ pub fn next_hop_is_martian(nh: IpAddr, own: Option<IpAddr>) -> bool {
 /// unconditionally like this crate's other capabilities).
 #[derive(Debug, Clone, Default)]
 pub struct BgpCodec {
-    pub add_path_afis: HashSet<u16>,
+    pub add_path_afis: HashSet<(u16, u8)>,
     /// True once the peer's OPEN lacked the four-octet AS capability (RFC 6793
     /// §4.2): `AS_PATH` is then 2-byte in both directions, with `AS4_PATH`
     /// carrying the real path. Set at the same point as `add_path_afis`.
@@ -728,6 +728,27 @@ pub struct BgpCodec {
 }
 
 impl BgpCodec {
+    /// RFC 7911 section 3: once SAFI 134 ADD-PATH is negotiated for sending,
+    /// every NLRI needs an id. Until the sender allocates real ones (#1127)
+    /// a batch without ids gets id 0.
+    fn fill_flowspec_vpn_ids(&self, update: &mut UpdateMessage) {
+        let on = |afi| self.add_path_afis.contains(&(afi, SAFI_FLOWSPEC_VPN));
+        for m in update
+            .mp_reach
+            .iter_mut()
+            .filter(|m| m.safi == SAFI_FLOWSPEC_VPN && on(m.afi))
+        {
+            m.nlri_path_ids.resize(m.flowspec_vpn.len(), 0);
+        }
+        for m in update
+            .mp_unreach
+            .iter_mut()
+            .filter(|m| m.safi == SAFI_FLOWSPEC_VPN && on(m.afi))
+        {
+            m.withdrawn_path_ids.resize(m.flowspec_vpn.len(), 0);
+        }
+    }
+
     fn max_len(&self, message_type: u8) -> usize {
         // RFC 8654 §4: OPEN and KEEPALIVE stay at 4096 even when negotiated.
         if self.extended && message_type != TYPE_OPEN && message_type != TYPE_KEEPALIVE {
@@ -802,7 +823,8 @@ impl Encoder<BgpMessage> for BgpCodec {
     fn encode(&mut self, item: BgpMessage, dst: &mut BytesMut) -> Result<(), WireError> {
         let (message_type, body) = match item {
             BgpMessage::Open(open) => (TYPE_OPEN, encode_open(&open)),
-            BgpMessage::Update(update) => {
+            BgpMessage::Update(mut update) => {
+                self.fill_flowspec_vpn_ids(&mut update);
                 // One UPDATE too big for this session's limit is split into
                 // several (RFC 4271 §4.3 / RFC 8654): halve its largest NLRI
                 // list until every piece fits.
@@ -990,10 +1012,10 @@ fn split_update(
         }
         SplitField::MpReachFlowspecVpn(i) => {
             let m = &mut first.mp_reach[i];
-            let flowspec_vpn = m.flowspec_vpn.split_off(mid);
+            let (flowspec_vpn, ids) = tail(&mut m.flowspec_vpn, &mut m.nlri_path_ids, mid);
             second.mp_reach.push(MpReachNlri {
                 nlri: vec![],
-                nlri_path_ids: vec![],
+                nlri_path_ids: ids,
                 evpn: vec![],
                 flowspec: vec![],
                 flowspec_vpn,
@@ -1047,10 +1069,10 @@ fn split_update(
         }
         SplitField::MpUnreachFlowspecVpn(i) => {
             let m = &mut first.mp_unreach[i];
-            let flowspec_vpn = m.flowspec_vpn.split_off(mid);
+            let (flowspec_vpn, ids) = tail(&mut m.flowspec_vpn, &mut m.withdrawn_path_ids, mid);
             second.mp_unreach.push(MpUnreachNlri {
                 withdrawn: vec![],
-                withdrawn_path_ids: vec![],
+                withdrawn_path_ids: ids,
                 evpn: vec![],
                 flowspec: vec![],
                 flowspec_vpn,
@@ -1656,7 +1678,7 @@ struct AttrAcc {
 fn parse_one_attribute(
     attr_type: u8,
     value: &[u8],
-    add_path_afis: &HashSet<u16>,
+    add_path_afis: &HashSet<(u16, u8)>,
     two_octet_as: bool,
     acc: &mut AttrAcc,
 ) -> Result<(), WireError> {
@@ -1821,7 +1843,7 @@ fn parse_one_attribute(
 
 fn parse_path_attributes(
     mut data: &[u8],
-    add_path_afis: &HashSet<u16>,
+    add_path_afis: &HashSet<(u16, u8)>,
     two_octet_as: bool,
 ) -> Result<ParsedAttributes, WireError> {
     let mut acc = AttrAcc::default();
@@ -2000,7 +2022,10 @@ fn encode_rtc_nlris(nlris: &[RtcNlri], out: &mut Vec<u8>) {
 /// skipped by their own declared lengths (this crate never emits any, but
 /// stays tolerant of a peer that does). `add_path_afis` decides whether this
 /// batch's own `afi` carries a leading Path Identifier per NLRI entry.
-fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachNlri, WireError> {
+fn decode_mp_reach(
+    data: &[u8],
+    add_path_afis: &HashSet<(u16, u8)>,
+) -> Result<MpReachNlri, WireError> {
     if data.len() < 5 {
         return Err(WireError::MalformedMpAttribute);
     }
@@ -2080,15 +2105,17 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
         });
     }
     if safi == SAFI_FLOWSPEC_VPN {
+        let (flowspec_vpn, nlri_path_ids) =
+            decode_flowspec_vpn(afi, &data[pos..], add_path_afis.contains(&(afi, safi)))?;
         return Ok(MpReachNlri {
             afi,
             safi,
             next_hop,
             nlri: Vec::new(),
-            nlri_path_ids: Vec::new(),
+            nlri_path_ids,
             evpn: Vec::new(),
             flowspec: Vec::new(),
-            flowspec_vpn: decode_flowspec_vpn(afi, &data[pos..])?,
+            flowspec_vpn,
             vpn: Vec::new(),
             rtc: Vec::new(),
         });
@@ -2107,8 +2134,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             rtc: Vec::new(),
         });
     }
-    // No ADD-PATH here: `add_path_afis` is keyed by AFI only, so consulting
-    // it would misread IPv4/IPv6 unicast's negotiation as SAFI 128's.
+    // No ADD-PATH for SAFI 128 (#1130): never read ids for it.
     if safi == SAFI_VPN {
         return Ok(MpReachNlri {
             afi,
@@ -2123,7 +2149,8 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             rtc: Vec::new(),
         });
     }
-    let (nlri, nlri_path_ids) = decode_prefixes(afi, &data[pos..], add_path_afis.contains(&afi))?;
+    let (nlri, nlri_path_ids) =
+        decode_prefixes(afi, &data[pos..], add_path_afis.contains(&(afi, safi)))?;
     Ok(MpReachNlri {
         afi,
         safi,
@@ -2143,7 +2170,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
 /// Path Identifier per withdrawn entry.
 fn decode_mp_unreach(
     data: &[u8],
-    add_path_afis: &HashSet<u16>,
+    add_path_afis: &HashSet<(u16, u8)>,
 ) -> Result<MpUnreachNlri, WireError> {
     if data.len() < 3 {
         return Err(WireError::MalformedMpAttribute);
@@ -2177,14 +2204,16 @@ fn decode_mp_unreach(
         });
     }
     if safi == SAFI_FLOWSPEC_VPN {
+        let (flowspec_vpn, withdrawn_path_ids) =
+            decode_flowspec_vpn(afi, &data[3..], add_path_afis.contains(&(afi, safi)))?;
         return Ok(MpUnreachNlri {
             afi,
             safi,
             withdrawn: Vec::new(),
-            withdrawn_path_ids: Vec::new(),
+            withdrawn_path_ids,
             evpn: Vec::new(),
             flowspec: Vec::new(),
-            flowspec_vpn: decode_flowspec_vpn(afi, &data[3..])?,
+            flowspec_vpn,
             vpn: Vec::new(),
             rtc: Vec::new(),
         });
@@ -2216,7 +2245,7 @@ fn decode_mp_unreach(
         });
     }
     let (withdrawn, withdrawn_path_ids) =
-        decode_prefixes(afi, &data[3..], add_path_afis.contains(&afi))?;
+        decode_prefixes(afi, &data[3..], add_path_afis.contains(&(afi, safi)))?;
     Ok(MpUnreachNlri {
         afi,
         safi,
@@ -2249,27 +2278,42 @@ fn decode_flowspec(afi: u16, mut data: &[u8]) -> Result<Vec<FlowSpec>, WireError
 }
 
 /// As [`decode_flowspec`] for SAFI 134 (RD-prefixed rules).
-fn decode_flowspec_vpn(afi: u16, mut data: &[u8]) -> Result<Vec<FlowSpecVpn>, WireError> {
+/// With `with_ids` (ADD-PATH negotiated for the family, RFC 7911 section 3)
+/// each rule is preceded by a 4-octet Path Identifier, returned aligned.
+fn decode_flowspec_vpn(
+    afi: u16,
+    mut data: &[u8],
+    with_ids: bool,
+) -> Result<(Vec<FlowSpecVpn>, Vec<u32>), WireError> {
     let afi = match afi {
         AFI_IPV4 => flowspec::Afi::V4,
         AFI_IPV6 => flowspec::Afi::V6,
         _ => return Err(WireError::MalformedUpdate),
     };
-    let mut out = Vec::new();
+    let (mut out, mut ids) = (Vec::new(), Vec::new());
     while !data.is_empty() {
+        if with_ids {
+            let id = data.get(..4).ok_or(WireError::MalformedUpdate)?;
+            ids.push(u32::from_be_bytes([id[0], id[1], id[2], id[3]]));
+            data = &data[4..];
+        }
         let (rule, used) =
             FlowSpecVpn::decode(afi, data).map_err(|_| WireError::MalformedUpdate)?;
         out.push(rule);
         data = &data[used..];
     }
-    Ok(out)
+    Ok((out, ids))
 }
 
-fn encode_flowspec_vpn(rules: &[FlowSpecVpn], out: &mut Vec<u8>) {
+/// `ids` (aligned with `rules`, empty when ADD-PATH is off) go before each rule.
+fn encode_flowspec_vpn(rules: &[FlowSpecVpn], ids: &[u32], out: &mut Vec<u8>) {
     // ponytail: a rule that fails to encode is skipped, as for SAFI 133.
-    for r in rules {
+    for (i, r) in rules.iter().enumerate() {
         let mut one = Vec::new();
         if r.encode(&mut one).is_ok() {
+            if let Some(id) = ids.get(i) {
+                out.extend_from_slice(&id.to_be_bytes());
+            }
             out.extend_from_slice(&one);
         }
     }
@@ -2311,7 +2355,7 @@ fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
     out.extend_from_slice(&encode_prefixes(&mp.nlri, &mp.nlri_path_ids));
     mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     encode_flowspec(&mp.flowspec, &mut out);
-    encode_flowspec_vpn(&mp.flowspec_vpn, &mut out);
+    encode_flowspec_vpn(&mp.flowspec_vpn, &mp.nlri_path_ids, &mut out);
     vpn::encode_vpn_reach(&mp.vpn, &mut out);
     encode_rtc_nlris(&mp.rtc, &mut out);
     out
@@ -2324,7 +2368,7 @@ fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
     out.extend_from_slice(&encode_prefixes(&mp.withdrawn, &mp.withdrawn_path_ids));
     mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     encode_flowspec(&mp.flowspec, &mut out);
-    encode_flowspec_vpn(&mp.flowspec_vpn, &mut out);
+    encode_flowspec_vpn(&mp.flowspec_vpn, &mp.withdrawn_path_ids, &mut out);
     vpn::encode_vpn_unreach(&mp.vpn, &mut out);
     encode_rtc_nlris(&mp.rtc, &mut out);
     out
@@ -2375,13 +2419,13 @@ fn parse_as_path(mut data: &[u8], width: usize) -> Result<AsPath, WireError> {
 /// carries a leading RFC 7911 Path Identifier.
 fn parse_update(
     body: &[u8],
-    add_path_afis: &HashSet<u16>,
+    add_path_afis: &HashSet<(u16, u8)>,
     two_octet_as: bool,
 ) -> Result<UpdateMessage, WireError> {
     if body.len() < 2 {
         return Err(WireError::MalformedUpdate);
     }
-    let with_ids_v4 = add_path_afis.contains(&AFI_IPV4);
+    let with_ids_v4 = add_path_afis.contains(&(AFI_IPV4, 1));
     let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
     let mut pos = 2;
     if body.len() < pos + withdrawn_len {
@@ -4082,6 +4126,104 @@ mod tests {
     }
 
     #[test]
+    fn vpn_flowspec_path_ids_follow_the_negotiation() {
+        let rules = vpn_flow_rules(flowspec::Afi::V4);
+        let reach = |ids: Vec<u32>| MpReachNlri {
+            afi: AFI_IPV4,
+            safi: SAFI_FLOWSPEC_VPN,
+            next_hop: Ipv4Addr::UNSPECIFIED.into(),
+            nlri: vec![],
+            nlri_path_ids: ids,
+            evpn: vec![],
+            flowspec: vec![],
+            flowspec_vpn: rules.clone(),
+            vpn: Vec::new(),
+            rtc: Vec::new(),
+        };
+        let on = HashSet::from([(AFI_IPV4, SAFI_FLOWSPEC_VPN)]);
+        let unicast_only = HashSet::from([(AFI_IPV4, 1)]);
+        let ids: Vec<u32> = (7..).take(rules.len()).collect();
+        // With ids: the id sits before each rule's length octet (RFC 7911 section 3).
+        let wire = encode_mp_reach(&reach(ids.clone()));
+        let nh_end = 5; // afi(2) safi(1) nh-len(1) snpa(1)
+        assert_eq!(&wire[nh_end..nh_end + 4], &7u32.to_be_bytes());
+        assert_eq!(decode_mp_reach(&wire, &on).unwrap(), reach(ids));
+        // Without ids: identical to before, and SAFI 1 negotiation does not leak in.
+        let wire = encode_mp_reach(&reach(vec![]));
+        assert_eq!(
+            decode_mp_reach(&wire, &HashSet::new()).unwrap(),
+            reach(vec![])
+        );
+        assert_eq!(
+            decode_mp_reach(&wire, &unicast_only).unwrap(),
+            reach(vec![])
+        );
+        // A truncated id is malformed, not a panic.
+        assert!(decode_mp_reach(&[0, 1, 134, 0, 0, 1, 2], &on).is_err());
+        // Withdrawals carry ids the same way.
+        let un = MpUnreachNlri {
+            afi: AFI_IPV4,
+            safi: SAFI_FLOWSPEC_VPN,
+            withdrawn: vec![],
+            withdrawn_path_ids: vec![3; rules.len()],
+            evpn: vec![],
+            flowspec: vec![],
+            flowspec_vpn: rules,
+            vpn: Vec::new(),
+            rtc: Vec::new(),
+        };
+        assert_eq!(decode_mp_unreach(&encode_mp_unreach(&un), &on).unwrap(), un);
+    }
+
+    #[test]
+    fn encoder_fills_id_zero_for_negotiated_vpn_flowspec_and_splits_ids() {
+        let rules: Vec<FlowSpecVpn> = (0..=255u8)
+            .map(|i| FlowSpecVpn {
+                rd: RD_A,
+                flow: FlowSpec::decode(flowspec::Afi::V4, &[5, 1, 24, 10, i, 0])
+                    .unwrap()
+                    .0,
+            })
+            .collect();
+        let update = UpdateMessage {
+            attributes: Some(attrs(vec![65001], Some(100))),
+            mp_reach: vec![MpReachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_FLOWSPEC_VPN,
+                next_hop: Ipv4Addr::UNSPECIFIED.into(),
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                flowspec_vpn: rules,
+                vpn: Vec::new(),
+                rtc: Vec::new(),
+            }],
+            ..empty_update()
+        };
+        let set = HashSet::from([(AFI_IPV4, SAFI_FLOWSPEC_VPN)]);
+        let mut enc = BgpCodec {
+            add_path_afis: set.clone(),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        enc.encode(BgpMessage::Update(update), &mut buf).unwrap();
+        let mut dec = BgpCodec {
+            add_path_afis: set,
+            ..Default::default()
+        };
+        let (mut rules_seen, mut frames) = (0, 0);
+        while let Some(BgpMessage::Update(u)) = dec.decode(&mut buf).unwrap() {
+            frames += 1;
+            let m = &u.mp_reach[0];
+            assert_eq!(m.nlri_path_ids, vec![0; m.flowspec_vpn.len()]);
+            rules_seen += m.flowspec_vpn.len();
+        }
+        assert!(frames > 1, "256 rules do not fit one 4096-octet UPDATE");
+        assert_eq!(rules_seen, 256);
+    }
+
+    #[test]
     fn oversized_flowspec_batches_split_to_fit() {
         let rules: Vec<FlowSpec> = (0..=255u8)
             .map(|i| {
@@ -4444,7 +4586,7 @@ mod tests {
         };
         update.attributes.as_mut().unwrap().next_hop = Ipv4Addr::UNSPECIFIED;
         let mut codec = BgpCodec {
-            add_path_afis: HashSet::from([AFI_IPV4, AFI_IPV6]),
+            add_path_afis: HashSet::from([(AFI_IPV4, 1), (AFI_IPV6, 1)]),
             ..BgpCodec::default()
         };
         let mut buf = BytesMut::new();
@@ -4461,7 +4603,7 @@ mod tests {
                 vpn::encode_vpn_unreach(&vpn_routes(1), &mut b);
                 b
             },
-            &HashSet::from([AFI_IPV4]),
+            &HashSet::from([(AFI_IPV4, 1)]),
         )
         .unwrap();
         assert_eq!((un.vpn.len(), un.withdrawn_path_ids.len()), (1, 0));
@@ -4829,7 +4971,7 @@ mod tests {
 
     #[test]
     fn withdraw_carries_add_path_ids() {
-        let add_path = HashSet::from([AFI_IPV4]);
+        let add_path = HashSet::from([(AFI_IPV4, 1)]);
         let mut attrs = valid_attrs();
         attrs.extend_from_slice(&[0x80, ATTR_COMMUNITY, 1, 0]);
         // ADD-PATH NLRI: path id 7, 10.0.0.0/8

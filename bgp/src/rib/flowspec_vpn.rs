@@ -94,7 +94,7 @@ impl BgpRib {
             let confed = self.confed_peers.contains(&from);
             let mut retain = self.retained.vpn_flow_slot(from);
             let table = self.vpn_flow_adj_rib_in.entry(from).or_default();
-            for n in &mp.flowspec_vpn {
+            for (i, n) in mp.flowspec_vpn.iter().enumerate() {
                 let k: VpnFlowKey = (family, (n.rd, n.flow.clone()));
                 let mut route = FlowspecRoute {
                     family,
@@ -106,6 +106,12 @@ impl BgpRib {
                     validity: None,
                 };
                 keys.push(k.clone());
+                // ponytail: one copy per (peer, key) until #1126; a later path replaces the earlier.
+                if let Some(id) = mp.nlri_path_ids.get(i)
+                    && table.contains_key(&k)
+                {
+                    debug!(peer = %from, path_id = id, family = %family, rd = %format_rd(&n.rd), route = %n.flow, "add-path: later path of a vpn flowspec rule replaces the earlier one");
+                }
                 // The policy rewrites the held copy: keep the raw one.
                 if let Some(r) = retain.as_deref_mut() {
                     r.insert(k.clone(), route.clone());
@@ -346,7 +352,7 @@ impl BgpRib {
                     info!(peer = %peer, family = %k.0, rd = %format_rd(&rd), route = %(k.1).1, "flowspec route advertisement withdrawn");
                     outbox
                         .tx
-                        .send(OutboundUpdate::WithdrawVpnFlowspec(k.clone()));
+                        .send(OutboundUpdate::WithdrawVpnFlowspec(k.clone(), None));
                 }
             }
         }

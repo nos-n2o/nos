@@ -27,7 +27,7 @@ pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
 /// Temp file in `path`'s directory (same filesystem, so the rename is
 /// atomic), fsynced, renamed over `path`, then the directory fsynced so the
 /// rename survives power loss.
-fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -106,7 +106,7 @@ fn try_load(path: &Path) -> Result<(Config, Vec<u8>), Option<String>> {
 }
 
 /// Validates `cfg` after the steps `main` and `ConfigStore::new` apply.
-fn check_as_run(cfg: &Config) -> Result<(), ConfigError> {
+pub(crate) fn check_as_run(cfg: &Config) -> Result<(), ConfigError> {
     let mut c = cfg.clone();
     crate::users::seed_default_user(&mut c);
     nos_proto::sync_routing_table_refs(&mut c);

@@ -289,6 +289,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::Save
     ),
     cmd!(
+        ["show" "configuration" "history"],
+        Doc::FromConfig(Topic::ShowHistory),
+        Always,
+        Command::ShowHistory
+    ),
+    cmd!(
+        ["rollback" (n: Number)],
+        Doc::FromConfig(Topic::Rollback),
+        Configuration,
+        |n| Command::Rollback { n: n.parse().ok()? }
+    ),
+    cmd!(
         ["help"],
         Doc::Local {
             summary: "Show available commands for the current mode.",
