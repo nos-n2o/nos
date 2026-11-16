@@ -345,7 +345,9 @@ async fn user_roles(w: &World) -> anyhow::Result<()> {
         }
     }
 
-    log("promoting a user revokes its old certificate (the user record changed); a new login edits");
+    log(
+        "promoting a user revokes its old certificate (the user record changed); a new login edits",
+    );
     a.edit(|config| {
         let u = config.users.iter_mut().find(|u| u.name == "ro-user");
         u.context("ro-user vanished")?.role = UserRole::Admin;
