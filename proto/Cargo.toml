@@ -28,3 +28,6 @@ precis-profiles = { workspace = true }
 [features]
 # `ToSchema` derives for the REST API's OpenAPI spec (`nos-restd`); off for every other daemon.
 openapi = ["dep:utoipa"]
+
+[dev-dependencies]
+proptest = { workspace = true }

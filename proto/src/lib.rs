@@ -70,7 +70,8 @@ pub use broker::{
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{
-    diff_configs, diff_configs_for_role, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff,
+    diff_configs, diff_configs_for_role, merge_configs, ConfigDiff, DiffScope, DiffStatus,
+    FieldDiff, MergeConflict, SectionDiff,
 };
 pub use docs::{CommandDoc, Topic};
 pub use fdb::{

@@ -2734,6 +2734,7 @@ dependencies = [
  "postcard",
  "precis-core",
  "precis-profiles",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
