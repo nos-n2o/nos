@@ -25,7 +25,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use nos_ospf_common::throttle::{SpfThrottle, Timers};
 
 use crate::link::LinkManager;
 use nos_daemon::watchdog::resolve_once;
@@ -33,8 +35,6 @@ use nos_daemon::watchdog::resolve_once;
 // ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
 // an LSDB (neighbor state, area reconcile); upgrade by notifying from them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Pause after a change before recomputing, so an LSU burst runs one SPF.
-const HOLD_DOWN: Duration = Duration::from_millis(50);
 /// Matches every other reconnect/resolve loop in this codebase.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -123,9 +123,10 @@ async fn run(
         // Inner loop: same connection, same owning table, until the table
         // changes to something else (including `None`) or a write fails.
         let changed = links.route_changed();
+        let mut throttle = SpfThrottle::new(Timers::default());
         loop {
             tokio::select! {
-                stop = wait_for_change(&changed, &mut shutdown) => if stop { return },
+                stop = wait_for_change(&changed, &mut shutdown, &mut throttle) => if stop { return },
                 _ = reader.read(&mut eof_buf) => {
                     warn!(table = %table, "nos-ribd closed the ospf push connection, reconnecting");
                     break;
@@ -165,14 +166,21 @@ where
 }
 
 /// Waits for the next reason to recompute routes: an LSDB change (then a
-/// `HOLD_DOWN` pause, so an LSU burst costs one SPF, not one per LSA), the
-/// `POLL_INTERVAL` fallback, or shutdown. Returns `true` to stop entirely.
+/// RFC 8405 throttle pause, so an LSU burst costs one SPF, not one per LSA),
+/// the `POLL_INTERVAL` fallback (not a change: it bypasses the throttle so a
+/// 2 s tick can't keep it in `long_wait`), or shutdown. Returns `true` to stop.
 async fn wait_for_change(
     changed: &tokio::sync::Notify,
     shutdown: &mut watch::Receiver<bool>,
+    throttle: &mut SpfThrottle,
 ) -> bool {
     tokio::select! {
-        () = changed.notified() => wait_or_shutdown(HOLD_DOWN, shutdown).await,
+        () = changed.notified() => {
+            let (delay, state) = throttle.on_change(std::time::Instant::now());
+            let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+            info!(delay_ms, state = state.name(), "ospf spf scheduled");
+            wait_or_shutdown(delay, shutdown).await
+        }
         () = tokio::time::sleep(POLL_INTERVAL) => false,
         _ = shutdown.changed() => *shutdown.borrow(),
     }
@@ -404,15 +412,18 @@ mod tests {
     async fn change_wakes_early_and_bursts_coalesce() {
         let n = tokio::sync::Notify::new();
         let (_tx, mut rx) = watch::channel(false);
+        let mut th = SpfThrottle::new(Timers::default());
+        let hold_down = Timers::default().initial;
         let start = tokio::time::Instant::now();
         for _ in 0..5 {
             n.notify_one();
         }
-        assert!(!wait_for_change(&n, &mut rx).await);
-        assert_eq!(start.elapsed(), HOLD_DOWN);
-        // The burst is spent: the next wait falls back to the poll tick.
-        assert!(!wait_for_change(&n, &mut rx).await);
-        assert_eq!(start.elapsed(), HOLD_DOWN + POLL_INTERVAL);
+        assert!(!wait_for_change(&n, &mut rx, &mut th).await);
+        assert_eq!(start.elapsed(), hold_down);
+        // The burst is spent: the next wait falls back to the poll tick,
+        // which is not a change and leaves the throttle alone.
+        assert!(!wait_for_change(&n, &mut rx, &mut th).await);
+        assert_eq!(start.elapsed(), hold_down + POLL_INTERVAL);
     }
 
     /// A snapshot heavier than `chunk` reaches the RIB as `FullPart`s closed

@@ -5903,3 +5903,49 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(20)).await;
     Ok(())
 }
+
+/// `ospf-throttle` (#1138, RFC 8405): flapping a redistributed static's
+/// metric re-originates its Type-5 every ~2 s; router-b's SPF throttle must
+/// back off to the long delay, schedule no more SPFs than flaps, and return
+/// to the initial delay after a quiet period.
+pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
+    const FLAPS: usize = 8;
+    let (a, b) = (w.a()?, w.b()?);
+    let base = with_base(A, asbr(ospf(OSPF_ROUTER_ID)));
+    a.provision_flags(&base).await?;
+    let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
+    let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
+    a.wait(&reorig_pat).await?;
+    let sched = "ospf spf scheduled";
+    let sched0 = b.count(sched);
+    let long0 = b.count("ospf spf scheduled delay_ms=5000");
+    for i in 0..FLAPS {
+        let before = a.count(&reorig_pat);
+        let metric = if i % 2 == 0 { "50" } else { "20" };
+        let mut flags = base.clone();
+        flags.extend(strings(&["--redistribute-metric", metric]));
+        a.provision_flags(&flags).await?;
+        a.wait_new(&reorig_pat, before, 60).await?;
+    }
+    b.wait_new("ospf spf scheduled delay_ms=5000", long0, 30)
+        .await?;
+    let scheduled = b.count(sched) - sched0;
+    anyhow::ensure!(
+        scheduled <= FLAPS * 2,
+        "{scheduled} SPFs scheduled for {FLAPS} flaps"
+    );
+    log(format!("{scheduled} SPFs scheduled for {FLAPS} flaps"));
+
+    // Quiet for longer than the 10 s hold-down, then one change: back to 50 ms.
+    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    let quiet0 = b.count("ospf spf scheduled delay_ms=50 state=\"quiet\"");
+    let before = a.count(&reorig_pat);
+    let mut flags = base.clone();
+    flags.extend(strings(&["--redistribute-metric", "50"]));
+    a.provision_flags(&flags).await?;
+    a.wait_new(&reorig_pat, before, 60).await?;
+    b.wait_new("ospf spf scheduled delay_ms=50 state=\"quiet\"", quiet0, 30)
+        .await?;
+    a.provision(&["--clear-redistribute-to-ospf"]).await?;
+    Ok(())
+}
