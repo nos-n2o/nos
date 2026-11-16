@@ -3344,8 +3344,8 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&route, route0, 60).await?;
     // #1212: "no link starts, no OSPF event names it". Not bare `link={link}`:
     // that also matches `kernel interface down ... reason=absent`, logged
-    // while nos-interfaced has not yet created the device.
-    a.wait_interface(&link).await?;
+    // while nos-interfaced has not yet created the device (`GET /v1/interfaces`
+    // is config-derived, so it cannot tell when the device exists).
     let events = format!(
         "ospfv3 link driver started link={link}\\|ospfv3 link stopped link={link}\\|ospfv3 neighbor .*link={link}\\|ospfv3 hello.*link={link}"
     );
@@ -5067,8 +5067,8 @@ pub async fn ospf_passive(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&route, route0, 60).await?;
     // #1212: "no link starts, no OSPF event names it". Not bare `link={link}`:
     // that also matches `kernel interface down ... reason=absent`, logged
-    // while nos-interfaced has not yet created the device.
-    a.wait_interface(&link).await?;
+    // while nos-interfaced has not yet created the device (`GET /v1/interfaces`
+    // is config-derived, so it cannot tell when the device exists).
     let events = format!(
         "ospf link driver started link={link}\\|ospf link stopped link={link}\\|ospf neighbor .*link={link}\\|ospf hello.*link={link}"
     );

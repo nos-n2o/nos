@@ -631,25 +631,6 @@ impl Router {
             .collect()
     }
 
-    /// Waits until `GET /v1/interfaces` lists `name` (up to 60s). State-based:
-    /// a daemon log line can precede the kernel device (#1212).
-    pub async fn wait_interface(&self, name: &str) -> anyhow::Result<()> {
-        let needle = format!("\"{name}\"");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let body = self
-                .rest_expect(Method::GET, "/v1/interfaces", None, 200)
-                .await?;
-            if body.contains(&needle) {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!("{}: interface {name} never listed after 60s", self.name());
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
     /// Waits (up to 60s) for the pattern to appear at all.
     pub async fn wait(&self, pattern: &str) -> anyhow::Result<()> {
         self.wait_new(pattern, 0, 60).await
