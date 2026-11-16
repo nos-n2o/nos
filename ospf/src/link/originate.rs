@@ -943,6 +943,10 @@ impl LinkManager {
         } else if !self.no_backbone_warned.swap(true, Ordering::Relaxed) {
             warn!("ospf attached to 2+ areas without the backbone: not an ABR, no summaries");
         }
+        // RFC 3509 §2.1 (#1170): the transitions of the backbone attachment.
+        if self.backbone_attached.swap(abr, Ordering::Relaxed) != abr {
+            info!(abr, "ospf abr backbone attachment changed");
+        }
         // Per source area: what to summarize from it (its area ranges
         // applied, RFC 2328 §12.4.3), the ASBRs in it, and its own intra-area
         // prefixes/ASBRs (a destination area never receives what it already

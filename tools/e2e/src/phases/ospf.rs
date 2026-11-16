@@ -985,6 +985,31 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
+    // RFC 3509 §2.1 (Cisco, #1170): the backbone counts only with a Full
+    // adjacency. A mismatched hello-interval on router-b kills it (dead
+    // interval), so router-b stops being an ABR and flushes its summary;
+    // restoring it brings both back.
+    let abr_up = "ospf abr backbone attachment changed abr=true";
+    let abr_down = "ospf abr backbone attachment changed abr=false";
+    b.wait(abr_up).await?;
+    let (down0, up0) = (b.count(abr_down), b.count(abr_up));
+    let flushed3 = b.count("ospf lsa prematurely aged.*lsa_type=3");
+    let originated3 = b.count("ospf lsa originated.*lsa_type=3");
+    let mut broken = ospf_instance_only(OSPF_ROUTER_ID_B);
+    broken.extend(strings(&["--ospf-profile-hello-interval", "5"]));
+    log("breaking the backbone adjacency on router-b: no longer an ABR");
+    b.provision_flags(&with_base(B, broken)).await?;
+    b.wait_new(abr_down, down0, 90).await?;
+    b.wait_new("ospf lsa prematurely aged.*lsa_type=3", flushed3, 30)
+        .await?;
+    log("restoring the backbone adjacency: an ABR again");
+    let mut fixed = ospf_instance_only(OSPF_ROUTER_ID_B);
+    fixed.extend(strings(&["--ospf-profile-hello-interval", "10"]));
+    b.provision_flags(&with_base(B, fixed)).await?;
+    b.wait_new(abr_up, up0, 90).await?;
+    b.wait_new("ospf lsa originated.*lsa_type=3", originated3, 30)
+        .await?;
+
     // RFC 2328 §14.1: the loopback leaving area 1 (router-b's only presence
     // there) must flush the Type-3 — prematurely aged on router-b, MaxAge-
     // flushed on router-a and its kernel route removed — within seconds.
