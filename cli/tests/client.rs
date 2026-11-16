@@ -329,10 +329,16 @@ async fn commit_transaction_returns_ok_on_success() {
             name: "demo".to_string(),
             if_match: None,
         },
-        Event::Committed { warnings: vec![] },
+        Event::Committed {
+            warnings: vec![],
+            unsaved: true,
+        },
     ));
 
-    commit_transaction(&path, "demo").await.unwrap();
+    assert_eq!(
+        commit_transaction(&path, "demo").await.unwrap(),
+        (vec![], true)
+    );
 
     server.await.unwrap();
 }

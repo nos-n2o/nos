@@ -63,10 +63,12 @@ const FALLBACK_HOSTNAME: &str = "nos";
 struct NosPrompt {
     hostname: Arc<Mutex<String>>,
     suffix: String,
+    /// Running config not saved: a `*` after the hostname (#1139).
+    unsaved: bool,
 }
 
 impl NosPrompt {
-    fn for_mode(hostname: Arc<Mutex<String>>, mode: &Mode) -> Self {
+    fn for_mode(hostname: Arc<Mutex<String>>, mode: &Mode, unsaved: bool) -> Self {
         let suffix = match mode {
             Mode::Operational => String::new(),
             Mode::Configuration {
@@ -76,14 +78,19 @@ impl NosPrompt {
                 transaction, path, ..
             } => format!("({transaction}/{path})"),
         };
-        Self { hostname, suffix }
+        Self {
+            hostname,
+            suffix,
+            unsaved,
+        }
     }
 }
 
 impl Prompt for NosPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         let hostname = self.hostname.lock().unwrap().clone();
-        Cow::Owned(format!("{hostname}{}", self.suffix))
+        let star = if self.unsaved { "*" } else { "" };
+        Cow::Owned(format!("{hostname}{star}{}", self.suffix))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
@@ -220,7 +227,9 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
     println!("NOS interactive shell. Type 'help' for available commands, or press '?' at any point while typing.");
 
     loop {
-        let prompt = NosPrompt::for_mode(hostname.clone(), &mode);
+        // One tiny call per line; also catches REST commits and saves.
+        let unsaved = client::unsaved(&config_socket).await.unwrap_or(false);
+        let prompt = NosPrompt::for_mode(hostname.clone(), &mode, unsaved);
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
@@ -399,7 +408,7 @@ mod tests {
     fn prompt_shows_transaction_and_position() {
         let host = Arc::new(Mutex::new("r1".to_string()));
         let render = |mode: &Mode| {
-            NosPrompt::for_mode(host.clone(), mode)
+            NosPrompt::for_mode(host.clone(), mode, false)
                 .render_prompt_left()
                 .into_owned()
         };
@@ -409,7 +418,9 @@ mod tests {
             render(&config(&["bgp-instance", "i"], false)),
             "r1(t1/bgp-instance:i)"
         );
-        let p = NosPrompt::for_mode(host, &Mode::Operational);
+        let star = NosPrompt::for_mode(host.clone(), &config(&[], false), true);
+        assert_eq!(star.render_prompt_left(), "r1*(t1)");
+        let p = NosPrompt::for_mode(host, &Mode::Operational, false);
         assert_eq!(p.render_prompt_right(), "");
         assert_eq!(p.render_prompt_indicator(PromptEditMode::Default), "> ");
         assert_eq!(p.render_prompt_multiline_indicator(), ":::  ");
