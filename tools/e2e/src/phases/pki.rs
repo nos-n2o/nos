@@ -292,8 +292,7 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
 
 /// #1147: `User.role` is enforced by `nos-configd` per request. A read-only
 /// and an operator user read the config but get 403 on every edit and on
-/// `save`; promoting the user applies to the very same certificate, no
-/// re-login.
+/// `save`; after promoting the user, a fresh login edits.
 async fn user_roles(w: &World) -> anyhow::Result<()> {
     use nos_proto::UserRole;
     let a = w.a()?;
@@ -346,14 +345,17 @@ async fn user_roles(w: &World) -> anyhow::Result<()> {
         }
     }
 
-    log("promoting a user applies to its existing certificate");
+    log("promoting a user revokes its old certificate (the user record changed); a new login edits");
     a.edit(|config| {
         let u = config.users.iter_mut().find(|u| u.name == "ro-user");
         u.context("ro-user vanished")?.role = UserRole::Admin;
         Ok(())
     })
     .await?;
-    let (_, client) = &clients[0];
+    let Ok(id) = a.rest.login("ro-user", "role-password").await? else {
+        bail!("ro-user could not log in again");
+    };
+    let client = &a.rest.with_identity(&id)?;
     let (s, _) = a
         .rest_with(
             client,

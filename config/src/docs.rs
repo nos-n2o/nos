@@ -73,7 +73,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::UserRole => (
             "Set what a local user may do: admin, operator or read-only.",
-            "`admin` (the default, and what users stored before roles existed are) may do everything. `operator` and `read-only` may not edit, commit or save the configuration; both see secrets masked as <hidden>. Both may change their own password. The role is looked up on every request, so a change applies at once without a re-login. A commit that would leave no admin is refused.",
+            "`admin` (the default, and what users stored before roles existed are) may do everything. `operator` and `read-only` may not edit, commit or save the configuration; both see secrets masked as <hidden>. Both may change their own password. The role is looked up on every request; changing a user also revokes that user's certificates, so they log in again. A commit that would leave no admin is refused.",
         ),
         Topic::Admin => (
             "The admin keystore: secrets other sections reference by label.",
