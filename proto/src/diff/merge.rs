@@ -485,6 +485,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore = "256 generated configs, minutes under the interpreter")]
         fn identity_laws(b in arb_cfg(), o in arb_cfg(), t in arb_cfg()) {
             prop_assert_eq!(merge_configs(&b, &o, &b).unwrap(), o.clone());
             prop_assert_eq!(merge_configs(&b, &b, &t).unwrap(), t.clone());
@@ -493,6 +494,7 @@ mod tests {
 
         /// Without the shortcuts: the field walk itself honours the laws.
         #[test]
+        #[cfg_attr(miri, ignore = "256 generated configs, minutes under the interpreter")]
         fn walk_identity_laws(b in arb_cfg(), o in arb_cfg()) {
             let mut b2 = b.clone();
             b2.hostname = "zz".into();
