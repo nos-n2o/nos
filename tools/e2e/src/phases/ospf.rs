@@ -623,8 +623,19 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
 
     let removed = format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}");
     let removed0 = a.count(&removed);
-    // #1212: time from the first install after this point, not the newest
-    // one before the removal.
+    // #1212: the SPF throttle (ospf-common `Timers::default`) stays in
+    // `long_wait` (5 s) until `holddown` (10 s) passes without a change, so
+    // after the churn above the removal would be delayed 5 s by design, not
+    // by the event-driven push. Let it fall back to `quiet` first.
+    for _ in 0..6 {
+        let spf = a.count_fresh("ospf spf scheduled").await;
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        if a.count("ospf spf scheduled") == spf {
+            break;
+        }
+    }
+    // Time from the first install after this point, not the newest one
+    // before the removal.
     let installed0 = a.count_fresh(&installed).await;
     b.provision(&["--clear-ospf-loopback-profile"]).await?;
     a.wait_new(&removed, removed0, 60).await?;
