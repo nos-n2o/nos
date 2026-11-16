@@ -1,6 +1,9 @@
 mod generate;
+mod merge;
+mod walk;
 
 pub use generate::diff_values;
+pub use merge::{merge_configs, MergeConflict};
 
 use serde::{Deserialize, Serialize};
 

@@ -22,6 +22,7 @@ use crate::cli::{root, Field, Kind, Node};
 use crate::schema::StaticRoutingInstance;
 use crate::Config;
 
+use super::walk::{get, key_of};
 use super::{ConfigDiff, DiffStatus, FieldDiff, SectionDiff};
 
 /// A secret that is still there but changed.
@@ -292,10 +293,6 @@ fn put(d: &mut ConfigDiff, name: &str, mut fields: Vec<FieldDiff>, subs: Vec<Sec
     true
 }
 
-fn key_of(n: &Node) -> Option<&Field> {
-    n.fields.iter().find(|k| k.key)
-}
-
 /// A keyed list's element, as `(key words, element)`.
 fn key_words(key: &Field, e: &Value) -> String {
     words(&(key.kind)(), &e[key.name]).join(" ")
@@ -366,10 +363,6 @@ fn field(
 
 fn items(v: Option<&Value>) -> &[Value] {
     v.and_then(Value::as_array).map_or(&[][..], Vec::as_slice)
-}
-
-fn get<'v>(o: Option<&'v Value>, f: &Field) -> Option<&'v Value> {
-    o.map(|o| o.get(f.name).unwrap_or(&Value::Null))
 }
 
 struct Ctx<'a> {

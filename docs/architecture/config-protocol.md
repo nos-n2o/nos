@@ -170,6 +170,15 @@ Editing the config happens inside a **named transaction**, held server-side in `
 - `nos` sends its writes, then reads the transaction once to check that its position still exists.
 - `SetTransactionPath` (full-snapshot reply) stays in the enum for wire compatibility; no in-tree client sends it.
 
+### Merging a stale transaction (#605, #1033)
+
+`nos_proto::merge_configs(base, ours, theirs)` is a schema-guided 3-way merge (`proto/src/diff/merge.rs`); `ours` is a transaction, `theirs` the running config, `base` what the transaction was opened on. It only returns `Config` or the conflicting paths; `nos-configd` does not call it yet (#1034).
+- Struct fields and `Option<struct>` present on all sides: per field.
+- Keyed list of structs (`#[cli(key)]`): elements matched by key. Added or removed by one side: taken. Removed by one and modified by the other, or added differently by both: conflict. Order is running's, ours-added elements after their predecessor; only ours reordered: ours; both reordered differently: conflict on the list.
+- Everything else is one atomic leaf: scalar, enum, scalar or unkeyed list (`prefix-list` entries, order is meaning), secret, `render` field, a list with a duplicate key. Changed differently on both sides: conflict.
+- Hidden (derived) fields take running's value.
+- Conflicts are reported all at once, as `config_path` segments (`bgp-instance/r1/peer-group/a`). A conflict-free merge can still be invalid: validate the result.
+
 ### Config plane vs data plane
 
 | Plane | Transport | Pattern |
