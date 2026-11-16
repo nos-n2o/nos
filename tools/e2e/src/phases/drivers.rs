@@ -1700,6 +1700,7 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     };
     let takeover = format!("{}Forwarding", state(alt_if));
     let base_takeover = b.count(&takeover);
+    let base_lost = b.count(&format!("port carrier lost port={root_if}"));
     // #323: the change shows in the logs of both routers, and in the counters.
     let tc = "topology change port=";
     let tc_rx = "topology change port=.*cause=received";
@@ -1711,9 +1712,8 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     w.set_link("router-b", root_if, false).await?;
     b.wait_new(&takeover, base_takeover, 10).await?;
     b.assert_delay_under(
-        &format!("port carrier lost port={root_if}"),
-        &takeover,
-        base_takeover,
+        (&format!("port carrier lost port={root_if}"), base_lost),
+        (&takeover, base_takeover),
         1000,
     )?;
     let sb = stp_summary(b).await?;
