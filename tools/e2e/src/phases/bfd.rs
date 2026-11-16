@@ -481,11 +481,11 @@ async fn reflector_is(
 }
 
 /// `bfd-sbfd`, self-contained (RFC 7880/7881, #294). Router-b runs an S-BFD
-/// reflector for discriminator 10.50.0.3 (its own address) and nothing else;
+/// reflector for its own address as discriminator and nothing else;
 /// router-a guards a static route via router-b with `bfd-profile sb` (mode
 /// sbfd, 100 ms x 3, no remote discriminator: the peer's address). The
 /// initiator comes Up from reflections alone (REST: kind `SbfdInitiator`,
-/// remote discriminator `IP_B` as a number (171048963 in lab 0); router-b holds no session and its
+/// remote discriminator `IP_B` as a number; router-b holds no session and its
 /// `GET /v1/bfd/reflector` counts the replies) and the route is installed.
 /// An FRR `bfdd` (`router-f`) keeps a classical session with router-a
 /// throughout. Router-b then answers for 10.77.0.1 instead: router-a goes
@@ -545,7 +545,7 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     );
     let v = reflector_is(b, 10, "replies", |v| v["replied"].as_u64() > Some(0)).await?;
     anyhow::ensure!(
-        v["discriminators"] == serde_json::json!([171_048_963]),
+        v["discriminators"] == serde_json::json!([disc]),
         "reflector discriminators: {v}"
     );
 
