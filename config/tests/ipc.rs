@@ -461,10 +461,22 @@ async fn save_persists_running_config_to_disk() {
         .unwrap();
 
     let (mut reader, mut writer) = connect(&sock_path).await;
+    writer.send(Request::SaveStatus).await.unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::SaveStatus { unsaved: true }
+    ));
+    let (mut reader, mut writer) = connect(&sock_path).await;
     writer.send(Request::Save).await.unwrap();
 
     let event = next_event(&mut reader).await;
     assert!(matches!(event, Event::Saved));
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer.send(Request::SaveStatus).await.unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::SaveStatus { unsaved: false }
+    ));
 
     let saved = nos_config::persistence::load_or_default(&config_path);
     assert_eq!(saved.bgp_instances.len(), 1);
@@ -691,7 +703,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
         .unwrap();
     assert!(matches!(
         next_event(&mut reader).await,
-        Event::Committed { warnings } if warnings.is_empty()
+        Event::Committed { warnings, .. } if warnings.is_empty()
     ));
 
     // Fresh connection, one-shot Get, matching the CLI's actual usage pattern.

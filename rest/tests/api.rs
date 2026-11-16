@@ -341,8 +341,13 @@ async fn transaction_lifecycle_over_the_config_tree() {
     let (s, v) = send(app, Method::POST, "/v1/transactions/t1/commit", None).await;
     assert_eq!(
         (s, v),
-        (StatusCode::OK, json!({ "committed": "t1", "warnings": [] }))
+        (
+            StatusCode::OK,
+            json!({ "committed": "t1", "warnings": [], "unsaved": true })
+        )
     );
+    let (s, v) = send(app, Method::GET, "/v1/config/status", None).await;
+    assert_eq!((s, v), (StatusCode::OK, json!({ "unsaved": true })));
     let (_, running) = send(app, Method::GET, "/v1/config", None).await;
     assert_eq!(running["hostname"], "rest-host");
     assert_eq!(running["bgp_instances"][0]["asn"], 65001);

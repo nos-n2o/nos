@@ -84,6 +84,21 @@ pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientEr
     }
 }
 
+/// Whether the running config is unsaved (`Request::SaveStatus`, #1139).
+pub async fn unsaved(socket_path: &Path) -> Result<bool, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(Request::SaveStatus).await?;
+    match reader.next().await {
+        Some(Ok(Event::SaveStatus { unsaved })) => Ok(unsaved),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to SaveStatus".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
 /// Dials the daemon, sends a one-shot `Request::Save`, and waits for
 /// confirmation that the running config was persisted to disk.
 pub async fn save_running_config(socket_path: &Path) -> Result<(), ClientError> {
@@ -177,11 +192,12 @@ pub async fn get_transaction(
 }
 
 /// Validates and commits a named transaction, replacing the running config.
-/// Returns the daemon's commit warnings.
+/// Returns the daemon's commit warnings and whether the running config is
+/// now unsaved.
 pub async fn commit_transaction(
     socket_path: &Path,
     name: &str,
-) -> Result<Vec<String>, ClientError> {
+) -> Result<(Vec<String>, bool), ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;
     writer
         .send(Request::CommitTransaction {
@@ -191,7 +207,7 @@ pub async fn commit_transaction(
         })
         .await?;
     match reader.next().await {
-        Some(Ok(Event::Committed { warnings })) => Ok(warnings),
+        Some(Ok(Event::Committed { warnings, unsaved })) => Ok((warnings, unsaved)),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
         Some(Ok(_)) => Err(ClientError::Daemon(
             "unexpected event in reply to CommitTransaction".to_string(),

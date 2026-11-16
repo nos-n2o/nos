@@ -18,6 +18,13 @@ default-filter = "not test(commit_and_put_cost_at_66k_routes)"
 # forever; terminate it so it counts as caught rather than a Timeout (#374).
 slow-timeout = { period = "30s", terminate-after = 1 }
 
+# The lagged_* config tests are CPU-bound (100 commits over a config growing to
+# 300 instances, plus a stalled forwarder re-encoding it per event): ~9s unloaded,
+# past 30s on a loaded shard (#1119). Longer limit, same hang-kill as #374.
+[[profile.mutants.overrides]]
+filter = "test(lagged_)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 [[profile.mutants.scripts]]
 filter = "all()"
 run-wrapper = "mem-cap"

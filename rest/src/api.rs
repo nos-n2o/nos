@@ -99,6 +99,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(tx::diff))
         .routes(routes!(tx::commit))
         .routes(routes!(tx::save))
+        .routes(routes!(tx::status))
         .routes(routes!(tx::open, tx::get, tx::put, tx::delete))
         .split_for_parts()
 }

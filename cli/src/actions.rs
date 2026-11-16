@@ -455,8 +455,8 @@ async fn handle_leave_prompt(
     }
     match ask_leave(&transaction) {
         LeaveChoice::Commit => match client::commit_transaction(socket, &transaction).await {
-            Ok(warnings) => {
-                print_committed(&transaction, &warnings);
+            Ok((warnings, unsaved)) => {
+                print_committed(&transaction, &warnings, unsaved);
                 Mode::Operational
             }
             Err(e) => {
@@ -1782,8 +1782,9 @@ async fn edit_policy_source_line(
 }
 
 /// Confirmation line, then one `warning:` line per commit warning on stderr.
-fn print_committed(transaction: &str, warnings: &[String]) {
-    println!("transaction '{transaction}' committed");
+fn print_committed(transaction: &str, warnings: &[String], unsaved: bool) {
+    let note = if unsaved { " (not saved)" } else { "" };
+    println!("transaction '{transaction}' committed{note}");
     for w in warnings {
         eprintln!("warning: {w}");
     }
@@ -1792,8 +1793,8 @@ fn print_committed(transaction: &str, warnings: &[String]) {
 async fn commit(mode: Mode, socket: &Path) -> Mode {
     let transaction = current_transaction(&mode);
     match client::commit_transaction(socket, &transaction).await {
-        Ok(warnings) => {
-            print_committed(&transaction, &warnings);
+        Ok((warnings, unsaved)) => {
+            print_committed(&transaction, &warnings, unsaved);
             Mode::Operational
         }
         Err(e) => {

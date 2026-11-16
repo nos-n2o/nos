@@ -1849,6 +1849,10 @@
           "committed": {
             "type": "string"
           },
+          "unsaved": {
+            "description": "The running config is not saved to disk yet (`POST /v1/config/save`).",
+            "type": "boolean"
+          },
           "warnings": {
             "description": "Non-blocking advice about the committed config; `[]` when none.",
             "items": {
@@ -1859,7 +1863,8 @@
         },
         "required": [
           "committed",
-          "warnings"
+          "warnings",
+          "unsaved"
         ],
         "type": "object"
       },
@@ -2274,6 +2279,19 @@
           "stp_port_profiles",
           "acls",
           "admin"
+        ],
+        "type": "object"
+      },
+      "ConfigStatus": {
+        "description": "`GET /v1/config/status` body.",
+        "properties": {
+          "unsaved": {
+            "description": "A commit, password rehash or ssh host-key set is not on disk (#1139).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "unsaved"
         ],
         "type": "object"
       },
@@ -7801,6 +7819,27 @@
           }
         },
         "summary": "Save the running config to disk",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/config/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigStatus"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "Is the running config saved?",
         "tags": [
           "transactions"
         ]

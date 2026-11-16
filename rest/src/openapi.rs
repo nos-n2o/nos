@@ -254,6 +254,7 @@ mod tests {
             "/v1/config",
             "/v1/transactions/{tx}/commit",
             "/v1/config/save",
+            "/v1/config/status",
         ] {
             assert!(paths.contains_key(p), "missing {p}");
         }
