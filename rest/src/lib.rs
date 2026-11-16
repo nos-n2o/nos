@@ -11,6 +11,7 @@ pub mod error;
 pub mod ipc;
 pub mod listen;
 pub mod login;
+pub mod merge_patch;
 pub mod openapi;
 pub mod ratelimit;
 pub mod show;

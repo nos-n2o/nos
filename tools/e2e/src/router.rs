@@ -265,11 +265,15 @@ impl Router {
         body: Option<&str>,
         extra: Option<(&str, &str)>,
     ) -> anyhow::Result<(u16, Option<String>, String)> {
-        let mut req = client.request(method, format!("{}{path}", self.rest.base()));
+        let mut req = client.request(method.clone(), format!("{}{path}", self.rest.base()));
         if let Some(b) = body {
-            req = req
-                .header("content-type", "application/json")
-                .body(b.to_string());
+            // RFC 7396 merge-patch for PATCH (#1151), plain JSON otherwise.
+            let ctype = if method == Method::PATCH {
+                "application/merge-patch+json"
+            } else {
+                "application/json"
+            };
+            req = req.header("content-type", ctype).body(b.to_string());
         }
         if let Some((name, value)) = extra {
             req = req.header(name, value);

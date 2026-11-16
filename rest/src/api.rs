@@ -100,7 +100,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(tx::commit))
         .routes(routes!(tx::save))
         .routes(routes!(tx::status))
-        .routes(routes!(tx::open, tx::get, tx::put, tx::delete))
+        .routes(routes!(tx::open, tx::get, tx::put, tx::patch, tx::delete))
         .split_for_parts()
 }
 
@@ -128,11 +128,18 @@ pub fn router(daemons: Daemons) -> Router {
         // The trailing-slash form of the root is the same resource.
         .route(
             "/v1/transactions/{tx}/",
-            get(tx::get).post(tx::open).put(tx::put).delete(tx::delete),
+            get(tx::get)
+                .post(tx::open)
+                .put(tx::put)
+                .patch(tx::patch)
+                .delete(tx::delete),
         )
         .route(
             "/v1/transactions/{tx}/{*path}",
-            get(tx::get).put(tx::put).delete(tx::delete),
+            get(tx::get)
+                .put(tx::put)
+                .patch(tx::patch)
+                .delete(tx::delete),
         )
         .route(
             "/openapi.json",

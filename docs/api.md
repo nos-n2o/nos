@@ -186,7 +186,7 @@ Configuration changes over REST use the same named transactions as the shell (se
 | `POST /v1/transactions/{tx}?base=current\|blank` | Open `tx`, starting from the running config (default) or empty; or resume it if it already exists | `201` created / `200` resumed |
 | `GET /v1/transactions/{tx}` | The transaction: `name`, `generation`, `dirty` (has edits), `resumed`, and the whole `config` | `200` |
 | `PUT /v1/transactions/{tx}` | Replace the transaction's whole config with the JSON body | `200` |
-| `GET` / `PUT` / `DELETE /v1/transactions/{tx}/{path}` | Read, set or remove one part of the config (see [the next section](#the-config-tree-as-urls)) | `200` / `200` / `204` |
+| `GET` / `PUT` / `PATCH` / `DELETE /v1/transactions/{tx}/{path}` | Read, set, merge-patch or remove one part of the config (see [the next section](#the-config-tree-as-urls)) | `200` / `200` / `200` / `204` |
 | `GET /v1/transactions/{tx}/diff` | What committing would change | `200` |
 | `POST /v1/transactions/{tx}/commit` | Validate and commit; `422` if invalid (the transaction stays open) | `200` `{"committed":"<tx>","warnings":[...]}` (advice, `[]` when none) |
 | `DELETE /v1/transactions/{tx}` | Discard | `204` |
@@ -234,6 +234,11 @@ Every part of the configuration has a URL under `/v1/transactions/{tx}/`, built 
 - **Encode `/` inside a key as `%2F`**, for example a prefix: `route/192.0.2.0%2F24`. The server splits the path before decoding, so the encoded slash stays part of the key.
 - **A `PUT` to a list element that does not exist appends it.** The key in the body must match the key in the URL.
 - **Choose the place with a query parameter on that `PUT`:** `?first`, `?last`, `?before=<key>` or `?after=<key>`, where the key names a sibling in the same list (percent-encoded like any key). It applies to a new element (insert there) and to an existing one (move it: `PUT` the element's current body). Give at most one parameter; two, an unknown one, or an empty `before=`/`after=` is `400`. An unknown sibling is `404` and nothing changes. A `PUT` to a field, or to a whole list, takes none.
+- **`PATCH` merges instead of replacing** (JSON Merge Patch, RFC 7396). Send `Content-Type: application/merge-patch+json` (`415` otherwise); the body is merged into the part's current JSON as `GET` shows it, then stored like a `PUT` (same `If-Match`, validation, `<hidden>` secrets and 2 MiB limit).
+  - An object member sets or merges that key; `null` removes it (the field returns to its default); any non-object, arrays included, replaces.
+  - A list is an array, so `PATCH` on a list equals a `PUT`. To change one element, `PATCH` its keyed URL: `curl -X PATCH -H 'Content-Type: application/merge-patch+json' -d '{"asn":65010}' .../bgp-instance/r1`.
+  - The merge is computed against the generation it read; a concurrent edit gives `412`, so retry.
+  - `?first`/`?last`/`?before`/`?after` work as on `PUT`.
 - **The body is the JSON form of that part of the config**, exactly as `GET` returns it: a string for `hostname`, an object for a routing table, and so on. Every schema is in the [OpenAPI document](#the-openapi-document).
 - `diff` and `commit` are reserved: they are operations, never config sections.
 
