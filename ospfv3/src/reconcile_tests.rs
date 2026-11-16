@@ -1439,3 +1439,28 @@ async fn run_reconnects_after_a_read_error() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn resync_passive_advertises_the_prefix_without_a_link_and_toggles() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].areas[0].profiles[0].passive = true;
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+
+    assert!(e.running("nostst0.0").await.is_none(), "no link");
+    let net = V6.parse::<Ipv6Net>().unwrap().trunc();
+    assert_eq!(
+        e.links.loopback_prefixes().await,
+        HashMap::from([(Ipv4Addr::UNSPECIFIED, vec![(net, 1)])])
+    );
+    assert_eq!(names(&e.state.passive), ["nostst0.0"]);
+
+    // Clearing the flag starts the link and drops the stub, no restart.
+    let mut cfg = e.configd().config();
+    cfg.ospfv3_instances[0].areas[0].profiles[0].passive = false;
+    e.configd().set_config(cfg);
+    e.resync().await;
+    assert!(e.running("nostst0.0").await.is_some());
+    assert!(e.links.loopback_prefixes().await.is_empty());
+    assert!(e.state.passive.is_empty());
+}

@@ -1609,6 +1609,10 @@ pub struct Args {
     /// (`Ospfv3ProfileOp::SetMtuIgnore`).
     #[arg(long)]
     pub ospfv3_mtu_ignore: Option<bool>,
+    /// If set (requires `--ospfv3-profile`), toggles `passive` on it
+    /// (`Ospfv3ProfileOp::SetPassive`): the prefixes are advertised, no Hello.
+    #[arg(long)]
+    pub ospfv3_passive: Option<bool>,
     /// If set (requires `--ospfv3-profile`), the profile's RFC 5340 Instance
     /// ID (`Ospfv3ProfileOp::SetInstanceId`); `0` clears it.
     #[arg(long)]
@@ -4379,6 +4383,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     hello_interval,
                 }));
             }
+            if let Some(enabled) = args.ospfv3_passive {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetPassive {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(enabled) = args.ospfv3_mtu_ignore {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtuIgnore {
                     instance: instance.clone(),
@@ -4411,11 +4423,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         } else if args.ospfv3_profile_mtu.is_some()
             || args.ospfv3_profile_hello_interval.is_some()
             || args.ospfv3_mtu_ignore.is_some()
+            || args.ospfv3_passive.is_some()
             || args.ospfv3_crypto_key.is_some()
             || args.ospfv3_instance_id.is_some()
         {
             bail!(
-                "--ospfv3-profile-mtu/--ospfv3-profile-hello-interval/--ospfv3-mtu-ignore/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
+                "--ospfv3-profile-mtu/--ospfv3-profile-hello-interval/--ospfv3-mtu-ignore/--ospfv3-passive/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
             );
         }
     } else if args.ospfv3_profile.is_some() {
@@ -6816,6 +6829,7 @@ mod tests {
             ["--ospfv3-crypto-key", "1:hmac-sha1:k"],
             ["--ospfv3-instance-id", "1"],
             ["--ospfv3-profile-mtu", "1500"],
+            ["--ospfv3-passive", "true"],
             ["--ospfv3-profile-hello-interval", "3"],
         ] {
             assert!(err(&[&v3[..], &extra].concat()).contains("--ospfv3-profile"));

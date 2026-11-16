@@ -3022,6 +3022,94 @@ pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
     ospfv3_bridge_mtu(w).await
 }
 
+/// Passive interface (#1142, requires `ospfv3`, `ospf-passive`'s twin):
+/// router-a attaches a second, passive profile to a routed subinterface
+/// (`eth0.300`, `fd77:300::1/64`). Its prefix is advertised (router-b installs
+/// it over the active link) but no link starts and no OSPFv3 event ever names
+/// it; clearing `passive` starts the link in place, setting it again stops it;
+/// the subinterface is deleted at the end.
+pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let tag = SUBINTERFACE_TAG;
+    let link = format!("eth0.{tag}");
+    let lan = "fd77:300::/64";
+    let passive_p = "ospfv3-passive-profile";
+    let flags = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            SUBINTERFACE_ADDRESS,
+            "--address6",
+            "fd77:300::1/64",
+            "--subinterface-tag",
+            &tag.to_string(),
+            "--routing-table",
+            "rt1",
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            OSPFV3_ROUTER_ID,
+            "--ospfv3-area",
+            OSPFV3_AREA,
+            "--ospfv3-profile",
+            passive_p,
+            "--ospfv3-interface-profile",
+            passive_p,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let advertised = format!("ospfv3 passive interface advertised attach_point={link}");
+    let started = format!("ospfv3 link driver started link={link}");
+    let stopped = format!("ospfv3 link stopped link={link}");
+    let route = format!("added route prefix={lan}.*source=Some(Ospf)");
+    let (adv0, route0) = (a.count(&advertised), b.count(&route));
+
+    log("attaching a passive profile to router-a's eth0.300");
+    a.provision_flags(&flags(&["--ospfv3-passive", "true"]))
+        .await?;
+    a.wait_new(&advertised, adv0, 60).await?;
+    b.wait_new(&route, route0, 60).await?;
+    let events = format!("link={link}");
+    a.assert_quiet(&events, a.count(&events), 15).await?;
+
+    log("clearing passive: the link starts in place");
+    let adv1 = a.count(&advertised);
+    a.provision_flags(&flags(&["--ospfv3-passive", "false"]))
+        .await?;
+    a.wait(&started).await?;
+
+    log("passive again: the link stops, the prefix returns");
+    a.provision_flags(&flags(&["--ospfv3-passive", "true"]))
+        .await?;
+    a.wait(&stopped).await?;
+    a.wait_new(&advertised, adv1, 60).await?;
+
+    a.provision_flags(&strings(&[
+        "--address",
+        SUBINTERFACE_ADDRESS,
+        "--subinterface-tag",
+        &tag.to_string(),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B.s(),
+        "--delete-subinterface",
+    ]))
+    .await
+}
+
 /// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its
 /// packets dropped by router-b (logged at debug) and no new Full forms; 1 on
 /// both reaches Full with a non-zero id on the wire both ways. Requires

@@ -43,6 +43,8 @@ struct State {
     down: HashMap<String, &'static str>,
     /// Links kept on their running values despite a failed lookup.
     degraded: HashSet<String>,
+    /// Passive attach points already logged as advertised (log on change).
+    passive: HashSet<String>,
 }
 
 /// Gates of `watched` in `table`, sorted: the resync trigger compares these.
@@ -173,6 +175,7 @@ struct Wanted {
     watched: HashSet<String>,
     next_down: HashMap<String, &'static str>,
     next_degraded: HashSet<String>,
+    next_passive: HashSet<String>,
     desired_links: Vec<LinkConfig>,
     bfd_wants: HashMap<String, nos_proto::schema::BfdProfile>,
     desired_loopback_prefixes: HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>>,
@@ -205,6 +208,8 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         watched,
         next_down,
         next_degraded,
+        next_passive,
+        desired_loopback_prefixes,
         desired_links,
         bfd_wants,
         ..
@@ -239,7 +244,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
         let link = resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
-        let running = if attach.has_address {
+        let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
             None
@@ -259,6 +264,17 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        if profile.passive {
+            advertise_passive(
+                state,
+                next_passive,
+                desired_loopback_prefixes,
+                &link_name,
+                area.area_id,
+                (m.prefix, cost),
+            );
+            continue;
+        }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
@@ -335,6 +351,8 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         watched,
         next_down,
         next_degraded,
+        next_passive,
+        desired_loopback_prefixes,
         desired_links,
         bfd_wants,
         ..
@@ -363,7 +381,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
         let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
-        let running = if attach.has_address {
+        let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
             None
@@ -392,6 +410,17 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        if profile.passive {
+            advertise_passive(
+                state,
+                next_passive,
+                desired_loopback_prefixes,
+                &link_name,
+                area.area_id,
+                (m.prefix, cost),
+            );
+            continue;
+        }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
@@ -467,6 +496,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         state,
     };
     let mut wanted = Wanted {
+        next_passive: HashSet::new(),
         watched,
         next_down,
         next_degraded,
@@ -535,6 +565,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         watched,
         next_down,
         next_degraded,
+        next_passive,
         desired_links,
         bfd_wants,
         desired_loopback_prefixes,
@@ -547,6 +578,28 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     state.watched = watched;
     state.down = next_down;
     state.degraded = next_degraded;
+    state.passive = next_passive;
+}
+
+/// A passive attach point: no `LinkConfig`, only its prefix advertised like a
+/// loopback's (Intra-Area-Prefix-LSA, no Router-LSA link). Logs on first
+/// appearance.
+fn advertise_passive(
+    state: &State,
+    next: &mut HashSet<String>,
+    prefixes: &mut HashMap<std::net::Ipv4Addr, Vec<(Ipv6Net, u16)>>,
+    link: &str,
+    area_id: std::net::Ipv4Addr,
+    (prefix, cost): (Ipv6Net, u16),
+) {
+    if !state.passive.contains(link) {
+        info!(attach_point = %link, "ospfv3 passive interface advertised");
+    }
+    next.insert(link.to_string());
+    prefixes
+        .entry(area_id)
+        .or_default()
+        .push((prefix.trunc(), cost));
 }
 
 /// The named BFD profile (validation guarantees it exists).

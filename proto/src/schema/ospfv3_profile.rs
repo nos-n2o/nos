@@ -96,6 +96,15 @@ pub struct Ospfv3Profile {
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileInstanceId)]
     pub instance_id: Option<u8>,
+
+    /// Passive interface: the attach point's prefixes are advertised in the
+    /// Intra-Area-Prefix-LSA but no Hello is sent and no adjacency forms.
+    /// Excludes `auth` and `bfd` (nothing to authenticate or monitor);
+    /// checked in `valid_profile_timers`, since it needs the siblings.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfilePassive, words = "passive enable", alias = "passive")]
+    pub passive: bool,
 }
 
 fn valid_instance_id(id: Option<u8>) -> garde::Result {
@@ -141,6 +150,9 @@ fn unique_name(name: &str, ctx: &Config) -> garde::Result {
 /// Mirrors `ospf_profile::valid_profile_timers` exactly.
 pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result {
     for p in profiles {
+        if p.passive && (p.auth.is_some() || p.bfd.is_some()) {
+            return Err(garde::Error::new("passive excludes auth and bfd"));
+        }
         if p.network_type == Some(NetworkType::PointToMultipoint) {
             return Err(garde::Error::new(
                 "point-to-multipoint is not supported for OSPFv3",
@@ -180,6 +192,7 @@ mod tests {
             network_type: None,
             auth: None,
             instance_id: None,
+            passive: false,
         }
     }
 
@@ -267,6 +280,23 @@ mod tests {
     }
 
     #[test]
+    fn passive_excludes_auth_and_bfd() {
+        let check = |p: Ospfv3Profile| {
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let passive = || Ospfv3Profile {
+            passive: true,
+            ..profile("p")
+        };
+        assert!(check(passive()));
+        assert!(!check(Ospfv3Profile {
+            auth: Some(vec![crypto_key(1, OspfCryptoAlgorithm::HmacSha256, true)]),
+            ..passive()
+        }));
+    }
+
+    #[test]
     fn valid_profile_passes() {
         let cfg = config_with(vec![instance(
             "r1",
@@ -319,6 +349,7 @@ mod tests {
             network_type: None,
             auth: None,
             instance_id: None,
+            passive: false,
         }
     }
 
