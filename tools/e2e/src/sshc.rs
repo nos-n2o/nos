@@ -87,6 +87,24 @@ impl Ssh {
         Ok(Chan::new(ch))
     }
 
+    /// `ssh -L`/`-W`: a `direct-tcpip` channel; `Ok(false)` when the server refuses it.
+    pub async fn direct_tcpip(&self, host: &str, port: u32) -> anyhow::Result<bool> {
+        Ok(self
+            .handle
+            .channel_open_direct_tcpip(host, port, "127.0.0.1", 0)
+            .await
+            .is_ok())
+    }
+
+    /// A `direct-streamlocal@openssh.com` channel to a Unix socket; `Ok(false)` when refused.
+    pub async fn direct_streamlocal(&self, path: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .handle
+            .channel_open_direct_streamlocal(path)
+            .await
+            .is_ok())
+    }
+
     /// `ssh host <cmd>`: one exec request, no pty.
     pub async fn exec(&self, cmd: &str) -> anyhow::Result<Chan> {
         let ch = self.handle.channel_open_session().await?;
