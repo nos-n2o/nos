@@ -145,22 +145,20 @@ async fn run(
 /// — root's own local ifindex, per `spf::RouteEntry::interface_id`'s doc
 /// comment — kept `Option` only to match `OspfRoute`'s wire shape), its LFA
 /// backup with the backup's own ifindex, and the metric.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Pushed {
-    next_hop: IpAddr,
-    interface_id: Option<u32>,
+    /// Every equal-cost first hop (`spf::RouteEntry::next_hops`), sorted.
+    next_hops: Vec<(IpAddr, Option<u32>)>,
     backup_next_hop: Option<IpAddr>,
     backup_interface_id: Option<u32>,
     metric: u32,
 }
 
 impl Pushed {
-    fn route(self, prefix: IpNet) -> OspfRoute {
+    fn route(&self, prefix: IpNet) -> OspfRoute {
         OspfRoute {
             prefix,
-            // ponytail: one next hop — ospfv3's SPF is still single-path;
-            // the wire already carries a set for when it isn't.
-            next_hops: vec![(self.next_hop, self.interface_id)],
+            next_hops: self.next_hops.clone(),
             backup_next_hop: self.backup_next_hop,
             backup_interface_id: self.backup_interface_id,
             metric: self.metric,
@@ -205,8 +203,11 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Pushed> {
             (
                 IpNet::V6(e.prefix),
                 Pushed {
-                    next_hop: IpAddr::V6(e.next_hop),
-                    interface_id: Some(e.interface_id),
+                    next_hops: e
+                        .next_hops
+                        .iter()
+                        .map(|&(gw, ifid)| (IpAddr::V6(gw), Some(ifid)))
+                        .collect(),
                     backup_next_hop: e.backup_next_hop.map(IpAddr::V6),
                     backup_interface_id: e.backup_interface_id,
                     metric: e.metric,
@@ -224,7 +225,7 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 }
 
 fn to_routes(routes: &HashMap<IpNet, Pushed>) -> Vec<OspfRoute> {
-    routes.iter().map(|(&p, &r)| r.route(p)).collect()
+    routes.iter().map(|(&p, r)| r.route(p)).collect()
 }
 
 /// Mirrors `ospf::rib_push_client::diff_routes` exactly.
@@ -233,8 +234,8 @@ fn diff_routes(
     new_routes: &HashMap<IpNet, Pushed>,
 ) -> Vec<OspfRouteUpdate> {
     let mut updates = Vec::new();
-    for (&prefix, &pushed) in new_routes {
-        if last_sent.get(&prefix) != Some(&pushed) {
+    for (&prefix, pushed) in new_routes {
+        if last_sent.get(&prefix) != Some(pushed) {
             updates.push(OspfRouteUpdate::Add(pushed.route(prefix)));
         }
     }
@@ -257,8 +258,7 @@ mod tests {
                 (
                     p.parse().unwrap(),
                     Pushed {
-                        next_hop: gw.parse().unwrap(),
-                        interface_id: Some(1),
+                        next_hops: vec![(gw.parse().unwrap(), Some(1))],
                         backup_next_hop: None,
                         backup_interface_id: None,
                         metric: 10,
