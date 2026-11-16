@@ -11,7 +11,8 @@ use bollard::models::{
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, ListVolumesOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder, UploadToContainerOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder, RestartContainerOptionsBuilder,
+    UploadToContainerOptionsBuilder,
 };
 use bollard::{body_full, Docker};
 use futures::StreamExt;
@@ -560,6 +561,15 @@ impl Dock {
         }
         let code = self.docker.inspect_exec(&created.id).await?.exit_code;
         Ok((code.unwrap_or(-1), out))
+    }
+
+    /// Stops and starts the container (same volumes, new tmpfs): a full reboot of the router.
+    pub async fn restart(&self, container: &str) -> anyhow::Result<()> {
+        let opts = RestartContainerOptionsBuilder::default().t(15).build();
+        self.docker
+            .restart_container(&self.n(container), Some(opts))
+            .await
+            .with_context(|| format!("restarting {container}"))
     }
 
     /// SIGKILL: the process gets no chance to shut down cleanly.
