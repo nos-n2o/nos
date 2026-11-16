@@ -8,6 +8,8 @@ pub enum ApiError {
     /// No valid client certificate, or a login that failed.
     Unauthorized(String),
     NotFound(String),
+    /// The body's `Content-Type` is not one this endpoint accepts.
+    UnsupportedMediaType(String),
     /// A list key selector matches several elements and none exactly.
     Conflict(String),
     /// RFC 6585 §4: too many failed logins; try again in `retry_after_secs`.
@@ -74,6 +76,7 @@ impl IntoResponse for ApiError {
                 return resp;
             }
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::UnsupportedMediaType(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::TooManyRequests {
                 detail,

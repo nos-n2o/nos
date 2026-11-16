@@ -3204,6 +3204,41 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         .await?,
         "\"10.0.0.0/8\"",
     )?;
+    // PATCH (#1151): RFC 7396 merge-patch. The array is replaced, the sibling
+    // `name` is untouched, and a stale If-Match is a 412 that changes nothing.
+    let pl = format!("{tx}/prefix-list/rest-pl");
+    let (_, _, snap) = a
+        .rest_full(&a.rest.client().await?, Method::GET, &tx, None, None)
+        .await?;
+    let snap: serde_json::Value = serde_json::from_str(&snap)?;
+    let stale = format!("\"{}\"", snap["generation"].as_u64().unwrap_or(0) + 100);
+    let (status, ..) = a
+        .rest_full(
+            &a.rest.client().await?,
+            Method::PATCH,
+            &pl,
+            Some(r#"{"entries":[]}"#),
+            Some(("if-match", &stale)),
+        )
+        .await?;
+    if status != 412 {
+        bail!("router-a: PATCH with a stale If-Match -> {status}, want 412");
+    }
+    let patched = a
+        .rest_expect(
+            Method::PATCH,
+            &pl,
+            Some(
+                r#"{"entries":[{"cidr":"10.0.0.0/8","range":null},{"cidr":"172.16.0.0/12","range":null}]}"#,
+            ),
+            200,
+        )
+        .await?;
+    if !patched.contains("172.16.0.0/12") || !patched.contains("\"name\":\"rest-pl\"") {
+        bail!("router-a: PATCH reply lost the merge: {patched}");
+    }
+    a.wait(&format!("rest request user=\"{E2E_USER}\" method=PATCH"))
+        .await?;
     a.rest_expect(
         Method::PUT,
         &format!("{tx}/hostname"),
@@ -3232,7 +3267,10 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         "\"unsaved\":true",
     )?;
     let running = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
-    if !running.contains("\"rest-pl\"") || !running.contains("\"hostname\":\"rest-host\"") {
+    if !running.contains("\"rest-pl\"")
+        || !running.contains("172.16.0.0/12")
+        || !running.contains("\"hostname\":\"rest-host\"")
+    {
         bail!("committed transaction is not in the running config");
     }
     // The audit trail names the REST user, not just `restd`: configd's commit

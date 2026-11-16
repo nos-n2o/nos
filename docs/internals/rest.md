@@ -50,6 +50,7 @@ Auth (POST): `/login` (no certificate needed), `/renew`. Show (GET, the daemon's
 | `POST /transactions/<tx>?base=blank\|current` | open or resume (201 / 200) |
 | `GET` / `PUT` / `DELETE /transactions/<tx>` | whole in-progress config / set the whole config / discard |
 | `GET` / `PUT` / `DELETE /transactions/<tx>/<path>` | read / set / remove one subsection |
+| `PATCH /transactions/<tx>[/<path>]` | RFC 7396 merge-patch (`application/merge-patch+json`, else 415): `tx::patch` reads the subtree as GET shows it, `merge_patch::apply`, then the PUT path (`tx::edit`) with `if_match = [generation read]`, so a concurrent edit is 412 |
 | `GET /transactions/<tx>/diff`, `POST …/commit` | diff vs running; validate + commit (422 on a validation error, transaction kept; `ConfigError`s whose message starts `validation failed` also map to 422: no users left, bad syslog trust anchor, masked secret with nothing to keep, too many clear passwords, #675) |
 | `POST /config/save` | `Request::Save` — persist the running config (the CLI's `save`), 204; a failed write is 502 (`tx::save` remaps `from_config`'s 400, the client did nothing wrong). Never implied by a commit |
 | `ETag` / `If-Match` / `If-None-Match` | every transaction reply is tagged with its generation; `PUT`/`DELETE`/commit/`GET` with a stale or weak `If-Match`, or any `If-Match` on a missing transaction → 412; `GET` with a matching `If-None-Match` → 304 (see below) |

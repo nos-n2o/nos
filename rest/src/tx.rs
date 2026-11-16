@@ -26,7 +26,9 @@ use utoipa::ToSchema;
 
 use crate::error::{ApiError, ApiResult, ErrorBody};
 use crate::ipc::{unexpected, Daemons};
+use crate::merge_patch;
 
+const MERGE_PATCH: &str = "application/merge-patch+json";
 const PREFIX: &str = "/v1/transactions/";
 
 #[derive(serde::Serialize, ToSchema)]
@@ -340,9 +342,21 @@ pub async fn put(
 ) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
     let (if_match, sent) = if_match(&headers)?;
-    let position = position(&uri)?;
     let value = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("body is not UTF-8".to_string()))?;
+    edit(&d, name, path, value, if_match, sent, position(&uri)?).await
+}
+
+/// The `EditTransactionPath` round trip shared by PUT and PATCH, and its reply.
+async fn edit(
+    d: &Daemons,
+    name: String,
+    path: Vec<String>,
+    value: String,
+    if_match: Option<Vec<u64>>,
+    sent: bool,
+    position: Option<ListPosition>,
+) -> ApiResult<Response> {
     let (generation, dirty, value) = path_edit(missing_tx(
         d.config(Request::EditTransactionPath {
             name: name.clone(),
@@ -368,6 +382,61 @@ pub async fn put(
         });
     }
     Ok(([etag(generation)], Json(value)).into_response())
+}
+
+/// `PATCH /v1/transactions/<tx>[/<path>]` — RFC 7396 merge-patch of the
+/// addressed subtree: the current value (as GET shows it) is merged with the
+/// body and stored through the PUT path. A list is an array, so patching one
+/// replaces it; patch an element through its keyed URL.
+#[utoipa::path(patch, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Merge-patch the whole config (or one subsection)", description = "RFC 7396 JSON Merge Patch with `Content-Type: application/merge-patch+json` (415 otherwise): an object member sets or merges that key, `null` deletes it, anything else (arrays included) replaces. A list PATCH therefore equals a PUT; patch one element through its keyed URL (`.../peer/10.0.0.1`). Everything else (If-Match, validation, `<hidden>` secrets, 2 MiB limit) is as for PUT.", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), request_body(content = Value, content_type = "application/merge-patch+json"), responses((status = 200, body = TransactionSnapshot, description = "the stored value; `ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation"), (status = 413, body = ErrorBody, description = "body over 2 MiB"), (status = 415, body = ErrorBody, description = "Content-Type is not application/merge-patch+json"), (status = 422, body = ErrorBody, description = "semantic refusal, as for PUT")))]
+pub async fn patch(
+    State(d): State<Daemons>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let is_merge_patch = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case(MERGE_PATCH));
+    if !is_merge_patch {
+        return Err(ApiError::UnsupportedMediaType(format!(
+            "PATCH needs Content-Type: {MERGE_PATCH}"
+        )));
+    }
+    let delta: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::BadRequest(format!("body is not JSON: {e}")))?;
+    let (name, path) = split(&uri)?;
+    let (if_match, sent) = if_match(&headers)?;
+    let position = position(&uri)?;
+    let snap = snapshot(missing_tx(
+        d.config(Request::GetTransaction { name: name.clone() })
+            .await,
+        sent,
+    )?)?;
+    // The merge is only valid against the generation it was computed from:
+    // check the client's `If-Match` against it, then make the store enforce it.
+    if if_match
+        .as_ref()
+        .is_some_and(|tags| !tags.contains(&snap.generation))
+    {
+        return Err(ApiError::PreconditionFailed(format!(
+            "precondition failed: transaction generation is {}",
+            snap.generation
+        )));
+    }
+    let merged = merge_patch::apply(subsection(&snap, &path)?, delta);
+    edit(
+        &d,
+        name,
+        path,
+        merged.to_string(),
+        Some(vec![snap.generation]),
+        sent,
+        position,
+    )
+    .await
 }
 
 /// `(generation, dirty, subsection JSON)` of an `EditTransactionPath` reply.
