@@ -57,6 +57,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 - `Admin { keys: Vec<AdminKey> }`, `AdminKey { label, secret }`: a label (1-64 characters, the object-name charset, unique) and a secret (1-80 bytes, `#[cli(secret)]`, never the text `<hidden>`). It is the one place a secret lives; other sections store only the label (BGP MD5/TCP-AO and RPKI cache auth do since #508; OSPF since #509 and `BfdAuth.key` since #510).
 - `Config.admin` is last in `Config` and `#[serde(default)]`: a `config.yaml` saved before it loads with no keys.
 - `AdminOp::SetKey` upserts, `DeleteKey` fails with `OpError::AdminKeyNotFound`. Both `Debug` impls print `<hidden>`.
+- `User.role` (`UserRole`: `Admin` default, `Operator`, `ReadOnly`; `#[serde(default)]`) is enforced by `nos-configd`'s `authz::permitted`; `Config::masked()` is `redacted()` read back as a `Config` (what a non-admin shell user is sent).
 - `Config::key(label)` resolves a label for the daemons; `Config::redacted()` is the config as JSON with every `#[cli(secret)]` field (admin secrets and user password hashes) replaced by `<hidden>`, walked from `cli::root()`, so a new secret field is covered by declaring it `secret`.
 - `ConfigOp::kind()` is the variant name without payload; `nos-configd` logs that instead of `?op`.
 - The diff has an `admin` slot (`DiffScope::Admin`): a changed secret shows `<hidden>` then `<changed>`.

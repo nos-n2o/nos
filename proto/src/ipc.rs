@@ -20,7 +20,10 @@ pub enum Request {
     Unsubscribe,
     /// Persist the current running config to disk at the daemon's configured
     /// config-file path.
-    Save,
+    Save {
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
+    },
     /// Opens a named transaction, creating it from `base` if it doesn't
     /// already exist, or resuming its current in-progress config unchanged
     /// (ignoring `base`) if it does.
@@ -127,6 +130,8 @@ pub enum Request {
         /// replaces in place / appends. Postcard wire change (#539): every
         /// consumer must pass it.
         position: Option<crate::config_path::ListPosition>,
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
     },
     /// Cheap auth probe (#755): is there a user called `name` in the running
     /// config? Replies `Event::UserExists`, carrying no config data.
@@ -163,6 +168,8 @@ pub enum Request {
         if_match: Option<Vec<u64>>,
         /// As on `SetTransactionPath`.
         position: Option<crate::config_path::ListPosition>,
+        /// As on `OpenTransaction`.
+        actor: Option<String>,
     },
     /// `nos-sshd`-only set-if-absent (#1104): stores `seed` (base64 of a
     /// 32-byte ed25519 seed) as the admin key `ssh-host-key` in the running

@@ -124,6 +124,7 @@ fn populated() -> Config {
         users: vec![User {
             name: "alice".into(),
             password: "x".into(),
+            ..Default::default()
         }],
         ..Default::default()
     }

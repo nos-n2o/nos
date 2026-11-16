@@ -209,6 +209,7 @@ mod tests {
         User {
             name: n.into(),
             password: "$argon2id$v=19$secret".into(),
+            ..Default::default()
         }
     }
 

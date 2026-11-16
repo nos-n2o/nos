@@ -90,6 +90,7 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
 
     login_policy(w).await?;
     revoke_user(w).await?;
+    user_roles(w).await?;
     revoke_restarted_daemon(w).await
 }
 
@@ -287,6 +288,104 @@ async fn revoke_user(w: &World) -> anyhow::Result<()> {
         bail!("a deleted user's certificate still opens nos-configd");
     }
     login_burst(w).await
+}
+
+/// #1147: `User.role` is enforced by `nos-configd` per request. A read-only
+/// and an operator user read the config but get 403 on every edit and on
+/// `save`; after promoting the user, a fresh login edits.
+async fn user_roles(w: &World) -> anyhow::Result<()> {
+    use nos_proto::UserRole;
+    let a = w.a()?;
+    let users = [
+        ("ro-user", UserRole::ReadOnly),
+        ("op-user", UserRole::Operator),
+    ];
+    for (name, role) in users {
+        a.provision(&["--user", &format!("{name}=role-password")])
+            .await?;
+        a.edit(|config| {
+            let u = config.users.iter_mut().find(|u| u.name == name);
+            u.context("user was not created")?.role = role;
+            Ok(())
+        })
+        .await?;
+    }
+    let mut clients = Vec::new();
+    for (name, _) in users {
+        let Ok(id) = a.rest.login(name, "role-password").await? else {
+            bail!("{name} could not log in over REST");
+        };
+        clients.push((name, a.rest.with_identity(&id)?));
+    }
+    for (name, client) in &clients {
+        log(format!(
+            "{name} reads the config but cannot edit or save it"
+        ));
+        let get = |m: Method, path: &'static str, body: Option<&'static str>| {
+            let client = client.clone();
+            async move { a.rest_with(&client, m, path, body).await.map(|(s, _)| s) }
+        };
+        let tx = "/v1/transactions/roles";
+        if get(Method::GET, "/v1/config", None).await? != 200 {
+            bail!("{name} should read the config");
+        }
+        if get(Method::POST, "/v1/transactions/roles?base=current", None).await? != 201 {
+            bail!("{name} may open a transaction");
+        }
+        let put = get(
+            Method::PUT,
+            "/v1/transactions/roles/hostname",
+            Some("\"x\""),
+        )
+        .await?;
+        let save = get(Method::POST, "/v1/config/save", None).await?;
+        let _ = a.rest(Method::DELETE, tx, None).await;
+        if put != 403 || save != 403 {
+            bail!("{name}: edit -> {put}, save -> {save}, both should be 403");
+        }
+    }
+
+    log(
+        "promoting a user revokes its old certificate (the user record changed); a new login edits",
+    );
+    a.edit(|config| {
+        let u = config.users.iter_mut().find(|u| u.name == "ro-user");
+        u.context("ro-user vanished")?.role = UserRole::Admin;
+        Ok(())
+    })
+    .await?;
+    let Ok(id) = a.rest.login("ro-user", "role-password").await? else {
+        bail!("ro-user could not log in again");
+    };
+    let client = &a.rest.with_identity(&id)?;
+    let (s, _) = a
+        .rest_with(
+            client,
+            Method::POST,
+            "/v1/transactions/roles?base=current",
+            None,
+        )
+        .await?;
+    let (put, _) = a
+        .rest_with(
+            client,
+            Method::PUT,
+            "/v1/transactions/roles/hostname",
+            Some("\"x\""),
+        )
+        .await?;
+    let _ = a.rest(Method::DELETE, "/v1/transactions/roles", None).await;
+    if s != 201 || put == 403 {
+        bail!("a promoted user is still refused (open {s}, edit {put})");
+    }
+    a.edit(|config| {
+        config
+            .users
+            .retain(|u| u.name != "ro-user" && u.name != "op-user");
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
 /// #381: 200 unauthenticated logins on made-up usernames at once. Every reply

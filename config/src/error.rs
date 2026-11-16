@@ -10,6 +10,10 @@ pub enum ConfigError {
     // `nos-restd`'s `ApiError::from_config` maps it to 422 (#675).
     #[error("validation failed: it would remove every user and lock everyone out")]
     NoUsersLeft,
+    #[error(
+        "validation failed: it would remove every administrator and lock everyone out of editing"
+    )]
+    NoAdminLeft,
     #[error("validation failed: syslog server '{server}': tls trust-anchor is not a PEM certificate: {reason}")]
     SyslogTrustAnchor { server: String, reason: String },
     #[error(
@@ -27,6 +31,9 @@ pub enum ConfigError {
     HistoryOutOfRange { index: u32, have: usize },
     #[error("config history is not available on this daemon (no --config-file, or its directory is not writable)")]
     HistoryUnavailable,
+    /// The caller's `User.role` does not allow the request; `nos-restd` keys on the prefix (403).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
     /// An `if_match` precondition (RFC 9110 §13.1.1) named a generation the
@@ -91,6 +98,7 @@ mod tests {
     fn semantic_refusals_keep_the_422_prefix() {
         for e in [
             ConfigError::NoUsersLeft,
+            ConfigError::NoAdminLeft,
             ConfigError::SyslogTrustAnchor {
                 server: "s".into(),
                 reason: "r".into(),

@@ -337,6 +337,7 @@ pub async fn get(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiR
 #[utoipa::path(put, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Set the whole config (or one subsection)", description = "Also the way to push many items in few requests: `PUT /v1/transactions/{tx}/{path}` takes a whole subsection or list. A list PUT REPLACES the list, so one PUT must carry every element of that list; the body is limited to 2 MiB (about 25-30k IPv4 static routes), larger gets 413. Split a bigger set across several lists (e.g. several static routing instances).", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), request_body = Config, responses((status = 200, body = TransactionSnapshot, description = "`ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 422, body = ErrorBody, description = "semantic refusal: a `<hidden>` secret with no earlier value, or too many clear-text passwords in one edit"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation"), (status = 413, body = ErrorBody, description = "body over 2 MiB: split the list across several lists")))]
 pub async fn put(
     State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -345,10 +346,21 @@ pub async fn put(
     let (if_match, sent) = if_match(&headers)?;
     let value = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("body is not UTF-8".to_string()))?;
-    edit(&d, name, path, value, if_match, sent, position(&uri)?).await
+    edit(
+        &d,
+        name,
+        path,
+        value,
+        if_match,
+        sent,
+        position(&uri)?,
+        actor,
+    )
+    .await
 }
 
 /// The `EditTransactionPath` round trip shared by PUT and PATCH, and its reply.
+#[allow(clippy::too_many_arguments)]
 async fn edit(
     d: &Daemons,
     name: String,
@@ -357,6 +369,7 @@ async fn edit(
     if_match: Option<Vec<u64>>,
     sent: bool,
     position: Option<ListPosition>,
+    actor: Option<String>,
 ) -> ApiResult<Response> {
     let (generation, dirty, value) = path_edit(missing_tx(
         d.config(Request::EditTransactionPath {
@@ -365,6 +378,7 @@ async fn edit(
             value: Some(value),
             if_match,
             position,
+            actor,
         })
         .await,
         sent,
@@ -392,6 +406,7 @@ async fn edit(
 #[utoipa::path(patch, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Merge-patch the whole config (or one subsection)", description = "RFC 7396 JSON Merge Patch with `Content-Type: application/merge-patch+json` (415 otherwise): an object member sets or merges that key, `null` deletes it, anything else (arrays included) replaces. A list PATCH therefore equals a PUT; patch one element through its keyed URL (`.../peer/10.0.0.1`). Everything else (If-Match, validation, `<hidden>` secrets, 2 MiB limit) is as for PUT.", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), request_body(content = Value, content_type = "application/merge-patch+json"), responses((status = 200, body = TransactionSnapshot, description = "the stored value; `ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation"), (status = 413, body = ErrorBody, description = "body over 2 MiB"), (status = 415, body = ErrorBody, description = "Content-Type is not application/merge-patch+json"), (status = 422, body = ErrorBody, description = "semantic refusal, as for PUT")))]
 pub async fn patch(
     State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -436,6 +451,7 @@ pub async fn patch(
         Some(vec![snap.generation]),
         sent,
         position,
+        actor,
     )
     .await
 }
@@ -456,7 +472,12 @@ fn path_edit(ev: Event) -> ApiResult<(u64, bool, Option<String>)> {
 /// `DELETE /v1/transactions/<tx>/<path>` removes that subsection (the reply's
 /// `ETag` is the transaction's new generation).
 #[utoipa::path(delete, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Discard the transaction", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), responses((status = 204), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation")))]
-pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
+pub async fn delete(
+    State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
     let (if_match, sent) = if_match(&headers)?;
     if path.is_empty() {
@@ -476,6 +497,7 @@ pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> A
                 value: None,
                 if_match,
                 position: None,
+                actor,
             })
             .await,
             sent,
@@ -541,8 +563,11 @@ pub async fn status(State(d): State<Daemons>) -> ApiResult<Json<ConfigStatus>> {
 /// `POST /v1/config/save` — persist the running config to disk, like the
 /// CLI's `save`. A commit is live but not persisted until this is called.
 #[utoipa::path(post, path = "/v1/config/save", tag = "transactions", summary = "Save the running config to disk", responses((status = 204, description = "the running config was written to disk"), (status = 502, body = ErrorBody, description = "nos-configd has no config file, or could not write it")))]
-pub async fn save(State(d): State<Daemons>) -> ApiResult<StatusCode> {
-    match d.config(Request::Save).await {
+pub async fn save(
+    State(d): State<Daemons>,
+    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+) -> ApiResult<StatusCode> {
+    match d.config(Request::Save { actor }).await {
         Ok(Event::Saved) => Ok(StatusCode::NO_CONTENT),
         Ok(other) => Err(unexpected("nos-configd", &other)),
         // A failed save is nos-configd's fault (no --config-file, or a disk

@@ -7,6 +7,7 @@
 - Config edits made in the session are audited with the user as actor (`config commit audit ... actor="<user>"`).
 - A ticket lives 60 s and works once. A refused or unknown ticket makes `nos` fall back to its `login:` prompt.
 - The ticket sits in the shell's environment. `nos` is setgid, so the process is non-dumpable: `/proc/<pid>/environ` is unreadable for its owner too. Root in a container without `CAP_SYS_PTRACE` cannot read it either.
+- The user's `role` applies to the SSH shell as to any other (`read-only` and `operator` cannot edit or save), see `docs/architecture/auth.md`.
 - Deleting a user or changing its password revokes its certificates; a new login is refused at once. An already open shell dials each daemon per command, so its next command should fail the TLS handshake (not asserted by the e2e phase).
 - Not yet: restricting which users may log in over SSH and VRF-only reachability checks (#1001, #1002).
 - Verified by the `ssh-login-shell` e2e phase (`docs/e2e-phases.md`).

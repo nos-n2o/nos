@@ -37,7 +37,7 @@ fn fake_configd(path: &Path) {
         }
         vec![match req {
             Request::Get | Request::Subscribe => Event::Config(running.clone()),
-            Request::Save => Event::Saved,
+            Request::Save { .. } => Event::Saved,
             Request::ListHistory => Event::History(vec![nos_proto::HistoryEntry {
                 index: 1,
                 time: 1_700_000_000,

@@ -43,6 +43,8 @@ topics! {
     User,
     /// `User.password`
     UserPassword,
+    /// `User.role`
+    UserRole,
     /// `Config.lldp`
     Lldp,
     /// `LldpSettings.tx_interval_secs`

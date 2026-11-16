@@ -227,7 +227,7 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 ## Commit history and rollback
 
 - `GET /v1/history` lists the configs recent commits replaced, newest first: `[{"index":1,"time":<unix seconds>,"actor":"<user>","kind":"commit"|"rollback"}]`. `nos-configd` keeps the last 20 on disk next to its config file (`config.yaml.history/`, mode 0700, files 0600) and they survive a restart; without a config file it keeps none and answers `502`.
-- `POST /v1/rollback/{n}` restores the config as it was `n` commits ago (`1` undoes the latest commit) and replies like a commit (`{"committed":"rollback 1","warnings":[],"unsaved":true}`). It is a normal commit: `422` if the old config no longer validates or would leave no user, `404` if `n` is beyond the history, `n = 0` does nothing. The rollback is itself a history entry.
+- `POST /v1/rollback/{n}` restores the config as it was `n` commits ago (`1` undoes the latest commit) and replies like a commit (`{"committed":"rollback 1","warnings":[],"unsaved":true}`). Admin role only (`403` otherwise; listing is open to every role). It is a normal commit: `422` if the old config no longer validates or would leave no user or admin, `404` if `n` is beyond the history, `n = 0` does nothing. The rollback is itself a history entry.
 - Neither is a save: `POST /v1/config/save` still persists the result.
 
 ## The config tree as URLs
@@ -369,7 +369,7 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 - `405 Method Not Allowed`: the path exists, but not with this method. The `Allow` header lists what does.
 - `412 Precondition Failed`: `If-Match` did not match the transaction's generation, or named a transaction that does not exist.
 - `422 Unprocessable Entity`: validation refused the commit or the edit. The transaction stays open. Besides schema validation, three refusals map here:
-  - a commit that would remove every user;
+  - a commit that would remove every user, or every `admin` (`User.role`);
   - a commit with a syslog `tls trust-anchor` that is not a PEM certificate;
   - a `<hidden>` secret with no earlier value to keep, or more than 4 clear-text passwords in one edit (the `PUT`).
 - `429 Too Many Requests`: too many failed logins for this user, or 32 transactions already open. See `Retry-After`.

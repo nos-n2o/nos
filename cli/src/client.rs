@@ -88,7 +88,7 @@ pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientEr
 /// confirmation that the running config was persisted to disk.
 pub async fn save_running_config(socket_path: &Path) -> Result<(), ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;
-    writer.send(Request::Save).await?;
+    writer.send(Request::Save { actor: None }).await?;
 
     match reader.next().await {
         Some(Ok(Event::Saved)) => Ok(()),
@@ -154,6 +154,7 @@ pub async fn edit_transaction_path(
             value,
             if_match: None,
             position,
+            actor: None,
         })
         .await?;
     match reader.next().await {

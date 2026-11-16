@@ -87,6 +87,7 @@ mod tests {
             users: vec![User {
                 name: "u".into(),
                 password: pw.into(),
+                ..Default::default()
             }],
             ..Default::default()
         }

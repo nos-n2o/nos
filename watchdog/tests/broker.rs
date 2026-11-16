@@ -127,6 +127,7 @@ fn user(name: &str, password: &str) -> User {
     User {
         name: name.to_string(),
         password: nos_password::hash(password),
+        ..Default::default()
     }
 }
 
@@ -731,6 +732,7 @@ async fn a_weak_hash_is_upgraded_on_login_once() {
     let e = env(vec![User {
         name: "alice".into(),
         password: weak.clone(),
+        ..Default::default()
     }])
     .await;
     let mut conn = dial(&e.anonymous(), &e.broker).await;

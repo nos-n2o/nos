@@ -45,6 +45,8 @@ Error: too many failed login attempts
 
 If the router's login service cannot be reached, the shell refuses to start: nothing works without a login. On a freshly installed router the only user is `admin`, password `admin`. See [Concepts: Users and logging in](concepts.md#users-and-logging-in).
 
+**Roles (#1147).** `set user <name> role admin|operator|read-only` (default `admin`). A `read-only` or `operator` user sees the config with every secret as `<hidden>`, may open a transaction and change its own password (`set user <self> password ...`), and gets `forbidden: role ... may not do that` on any other edit, `commit` of other changes and `save`. A role change applies on the next command; the user's certificates are revoked by the change (as for a password change), so the shell needs a new login.
+
 ### Using `nos` as an SSH login shell
 
 - When `NOS_LOGIN_TICKET` is set (PAM puts it in the session environment of an ssh login), `nos` redeems that PAM login ticket for a certificate: no `login:`/`password:` prompt. Without the variable nothing changes.
@@ -207,7 +209,7 @@ In the transaction, `show this` shows your current object or the whole transacti
 
 `commit` validates the transaction and applies it. If it succeeds, you are back in operational mode. If it fails, the errors are printed and you stay in the transaction. `discard` (or `abort`) deletes the transaction without touching the running config.
 
-To undo commits, `show configuration history` lists the last 20 running configs a commit replaced (newest first: index, UTC time, `commit` or `rollback`, user) and `rollback <n>` (configuration mode) restores the config as it was `n` commits ago. `rollback 1` undoes the latest commit; `rollback 0` does nothing; an `n` beyond the list is an error. A rollback is a normal commit: validated (one that would leave no user is refused), applied by every daemon, and a new history entry, so it can be rolled back too. It is not saved until `save`.
+To undo commits, `show configuration history` lists the last 20 running configs a commit replaced (newest first: index, UTC time, `commit` or `rollback`, user) and `rollback <n>` (configuration mode) restores the config as it was `n` commits ago (admin role only). `rollback 1` undoes the latest commit; `rollback 0` does nothing; an `n` beyond the list is an error. A rollback is a normal commit: validated (one that would leave no user is refused), applied by every daemon, and a new history entry, so it can be rolled back too. It is not saved until `save`.
 
 Back in operational mode, `save` writes the running config to `/var/lib/nos/configd/config.yaml` so it survives a restart.
 

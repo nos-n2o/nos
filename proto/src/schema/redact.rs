@@ -228,6 +228,7 @@ mod tests {
         c.users = vec![User {
             name: "u".into(),
             password: "SECRET-user".into(),
+            ..Default::default()
         }];
         c.bgp_instances = vec![BgpInstance {
             peer_groups: vec![BgpPeerGroup {
