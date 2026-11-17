@@ -35,6 +35,11 @@ Two labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..1); l
 
   Measured with both labs running at once on the 31 GB, 24-core host. A lab is under 0.5 GB, far below the ~8 GB threshold at which `multi` would be kept to slot 0, so every group may run on either slot, and a third slot would fit memory-wise (the 2 GiB per-container cap is the limit, not the sum). The host's real consumers are the implementers' release builds (`CARGO_BUILD_JOBS=8` while two labs are up).
 
+## Build requirements (#1250)
+
+- `nos-e2e` links `ssh2` (libssh2) against the system OpenSSL: the host needs `libssl-dev` and `pkg-config` to build it (Debian/Ubuntu: `apt install libssl-dev pkg-config`; Fedora: `openssl-devel pkgconf`). `ci.yml` and `tools/ci/Dockerfile` install them.
+- Why not `russh`: its `russh-util` pulls `chrono` (RUSTSEC-2026-0543). libssh2 cannot open `direct-streamlocal`, so `ssh-login-shell` checks `sshd -T` for `allowstreamlocalforwarding no` instead.
+
 ## Host kernel modules
 
 A container cannot `modprobe`, so the docker host must have every module the lab uses; a missing one makes a phase fail like a product regression (`stp-mstp`, `ospf-graceful-restart`, `vpn` did on a host without `cls_fw act_skbedit act_sample psample mpls_router mpls_iptunnel`, #897). The per-phase table is in [e2e-phases.md](../e2e-phases.md#kernel-modules).

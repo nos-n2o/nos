@@ -44,7 +44,7 @@ nos-ospf-common    = { path = "ospf-common", version = "0.1.0" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reedline            = "0.51.0"
+reedline            = "0.53.0"
 crossterm           = "0.29"
 nix                 = { version = "0.30", default-features = false, features = ["signal", "process"] }
 async-trait         = "0.1"

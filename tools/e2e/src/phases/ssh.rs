@@ -213,10 +213,19 @@ pub async fn ssh_login_shell(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(&user_line("redeemed"), redeemed, 3).await?;
 
     log("ssh-login-shell: streamlocal and direct-tcpip forwarding are refused");
-    if ssh.direct_streamlocal("/run/nos/config.sock").await? {
-        bail!("a direct-streamlocal channel to the config socket must be refused");
+    // libssh2 cannot open `direct-streamlocal@openssh.com`, so the policy is read from the
+    // effective server config instead (#1250).
+    let (code, cfg) = w
+        .dock
+        .exec_root(
+            "router-a",
+            &["sshd", "-T", "-f", "/run/nos-sshd/rt1/sshd_config"],
+        )
+        .await?;
+    if code != 0 || !cfg.lines().any(|l| l == "allowstreamlocalforwarding no") {
+        bail!("sshd must run with allowstreamlocalforwarding no, got ({code}): {cfg:?}");
     }
-    if ssh.direct_tcpip("127.0.0.1", u32::from(SSH_PORT)).await? {
+    if ssh.direct_tcpip("127.0.0.1", SSH_PORT).await? {
         bail!("a direct-tcpip channel must be refused");
     }
     // `nos` is setgid (to reach /run/nos), which makes it non-dumpable: even its owner cannot
