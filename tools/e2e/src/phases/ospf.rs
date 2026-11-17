@@ -4874,6 +4874,72 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// RFC 5340 §4.2 point-to-multipoint (requires `ospfv3`): the shared profile's
+/// network type forced to `point-to-multipoint` on both routers. `eth0.0`
+/// must still reach `Full` with no DR election, and router-a must learn
+/// router-b's own address as a /128 host route (the stub is the address, not
+/// the /64); clearing the override restores point-to-point and drops it.
+pub async fn ospfv3_p2mp(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let full =
+        |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
+    let set = |addr: &str, rid: &str, kind: &str| {
+        let mut f = ospfv3(addr, rid);
+        f.extend(strings(&["--ospfv3-profile-network-type", kind]));
+        f
+    };
+    let host = format!(
+        "{}/128",
+        OSPFV3_ADDRESS_B.split('/').next().unwrap_or_default()
+    );
+    let (added, removed) = (
+        format!("added route prefix={host}.*source=Some(Ospf)"),
+        format!("removed route prefix={host}"),
+    );
+    let became_dr = "ospfv3 interface became dr link=eth0.0";
+    let (a_full, b_full, dr0, r0) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+        a.count(became_dr),
+        a.count(&removed),
+    );
+    let h0 = a.count(&added);
+    log("forcing network-type point-to-multipoint on both routers' shared profile");
+    a.provision_flags(&with_base(
+        A,
+        set(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID, "point-to-multipoint"),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        set(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B, "point-to-multipoint"),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 90).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 90).await?;
+    a.wait_new(&added, h0, 60).await?;
+    a.assert_quiet(became_dr, dr0, 6).await?;
+
+    log("clearing the network-type override: point-to-point again, the /128 is gone");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    a.provision_flags(&with_base(
+        A,
+        set(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID, "clear"),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        set(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B, "clear"),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 90).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 90).await?;
+    a.wait_new(&removed, r0, 60).await
+}
+
 /// RFC 2328 §16.1 ECMP over OSPFv3 (#1135, requires `ospfv3-dr`): router-b is
 /// reachable from router-a over both the p2p `eth0.0` and the shared bridge at
 /// the same cost, so its loopback is one `RTA_MULTIPATH` route (`next_hops=2`).
