@@ -465,3 +465,22 @@ async fn lr_dbd_holds_a_full_neighbor() {
         assert_eq!(deadline_of(&status).is_some(), held);
     }
 }
+
+/// #1213: after a §3.2 (c) topology exit the restarter is an ordinary
+/// neighbor again, so a cold (one-way) Hello tears the adjacency down.
+#[tokio::test(start_paused = true)]
+async fn after_a_topology_exit_a_one_way_hello_tears_the_adjacency_down() {
+    let cfg = link("eth0.0", 10);
+    let status = grace_status(Some(Instant::now() + Duration::from_secs(60)));
+    exit_grace_on_topology_change(&cfg, &status, &[Ipv4Addr::new(1, 1, 1, 1)]);
+    handle_hello(
+        &cfg,
+        Ipv4Addr::new(1, 1, 1, 1),
+        &status,
+        Ipv4Addr::new(10, 0, 0, 2),
+        &matching_hello(&cfg, Ipv4Addr::new(9, 9, 9, 10)),
+        false,
+        &mut nos_ospf_common::ratelimit::WarnLimiter::default(),
+    );
+    assert_eq!(state_of(&status), NeighborState::Init);
+}
