@@ -976,6 +976,27 @@ async fn micro_sessions_are(r: &Router, want: &[(&str, &str)], secs: u64) -> any
 /// socket is bound to the member, the bond's rx_handler re-targets the skb).
 /// Dropping UDP 6784 on router-a's eth2 takes that member out of the bond
 /// within the detection time, eth1 untouched; lifting it puts it back.
+/// #1064: on a micro-BFD "stay Up" failure, each router's recent bfd/enslave/
+/// link lines and the member rx counters (`/proc/net/dev`), to tell "no frames
+/// reached the enslaved member" from "frames arrived late" (CPU starvation).
+async fn dump_micro_bfd_state(w: &World) {
+    for r in [w.a(), w.b()].into_iter().flatten() {
+        let dev = w
+            .dock
+            .exec(r.name(), &["cat", "/proc/net/dev"])
+            .await
+            .map_or_else(|e| e.to_string(), |(_, out)| out);
+        log(format!("{}: member rx counters:", r.name()));
+        for l in dev.lines().filter(|l| l.contains("eth")) {
+            log(format!("  {l}"));
+        }
+        log(format!("{}: last bfd/enslave/link lines:", r.name()));
+        for l in r.logs.tail("bfd\\|enslav\\|link state", 60) {
+            log(format!("  {l}"));
+        }
+    }
+}
+
 pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let enslaved = |iface: &str| format!("enslaved interface to bond interface={iface} bond=bond");
@@ -1033,9 +1054,15 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
     log("enslaved members keep receiving: the sessions stay Up");
     let down = format!("bfd session down aggregate={MICRO_AGGREGATE}");
     let down_base = a.count(&down);
-    a.assert_quiet(&down, down_base, 5).await?;
-    micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
-    micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+    let stayed_up = async {
+        a.assert_quiet(&down, down_base, 5).await?;
+        micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
+        micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 10).await
+    };
+    if let Err(e) = stayed_up.await {
+        dump_micro_bfd_state(w).await;
+        return Err(e);
+    }
 
     log("dropping UDP 6784 on router-a's eth2: it leaves the bond, eth1 stays");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
