@@ -149,7 +149,7 @@ docker-build: docker-lint ## Lint, then build the nos lab image (every daemon + 
 
 docker-build-release: docker-lint ## Production image (--target runtime, no dev flags, no nos-rtr-stub); proves a release daemon refuses a dev flag
 	docker build --target runtime --build-arg CARGO_FEATURES="$(CARGO_FEATURES)" --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
-	docker run --rm --entrypoint nos-ribd $(IMAGE) --driver=noop 2>&1 | grep -q 'unexpected argument'
+	docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW --entrypoint nos-ribd $(IMAGE) --driver=noop 2>&1 | grep -q 'unexpected argument'
 	! docker run --rm --entrypoint test $(IMAGE) -e /usr/local/bin/nos-rtr-stub
 
 e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
