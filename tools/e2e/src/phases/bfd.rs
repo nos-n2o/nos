@@ -650,6 +650,7 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let aged = format!("bfd unsolicited session aged out peer={IP_B}");
     let (n_aged, n_created) = (a.count(&aged), a.count(&created(IP_B.s())));
+    let n_up_b0 = b.count(&up_b);
     tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
     let dropped = tc(
         &w.dock,
@@ -671,6 +672,9 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     log("filter lifted: router-b's next packet creates a fresh session");
     a.wait_new(&created(IP_B.s()), n_created, 30).await?;
     session_is(a, IP_B.s(), "Up", None, 30).await?;
+    // router-b's re-Up is an expected transition: await it so the quiet
+    // baseline below cannot precede it (#1255).
+    b.wait_new(&up_b, n_up_b0, 30).await?;
 
     log("bfd-unsolicited removed: session dropped, no answer, nothing created");
     let gone = format!("bfd unsolicited session removed: no longer configured peer={IP_B}");
@@ -678,7 +682,7 @@ pub async fn bfd_unsolicited(w: &mut World) -> anyhow::Result<()> {
     a.provision(&["--no-bfd-unsolicited"]).await?;
     a.wait_new(&gone, n_gone, 30).await?;
     a.assert_quiet(&created(IP_B.s()), n_created, 8).await?;
-    b.assert_quiet(&up_b, n_up_b, 0).await?;
+    b.assert_quiet(&up_b, n_up_b, 3).await?;
     let sessions = a
         .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
         .await?;

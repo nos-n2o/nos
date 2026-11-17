@@ -700,9 +700,12 @@ impl Router {
         if new.is_empty() {
             return Ok(());
         }
+        // The matches before the baseline show the transitions that preceded.
+        let mut before = self.logs.tail(pattern, new.len() + 3);
+        before.truncate(before.len().saturating_sub(new.len()));
         bail!(
             "{}",
-            quiet_failure(self.name(), pattern, secs, origin, &new)
+            quiet_failure(self.name(), pattern, secs, origin, &new, &before)
         )
     }
 }
@@ -715,6 +718,7 @@ fn quiet_failure(
     secs: u64,
     origin: u64,
     new: &[(u64, String)],
+    before: &[String],
 ) -> String {
     let mut s = format!(
         "{name}: {} unexpected new log line(s) matching '{pattern}' within a {secs}s window:",
@@ -725,6 +729,12 @@ fn quiet_failure(
     }
     if new.len() > 10 {
         let _ = write!(s, "\n  and {} more", new.len() - 10);
+    }
+    if !before.is_empty() {
+        s.push_str("\n  preceding matches:");
+        for l in before {
+            let _ = write!(s, "\n    {l}");
+        }
     }
     s
 }
@@ -795,13 +805,13 @@ mod tests {
     #[test]
     fn quiet_failure_lists_offsets_and_caps_at_ten() {
         let new: Vec<_> = (0..12u64).map(|i| (1000 + i, format!("l{i}"))).collect();
-        let s = quiet_failure("a", "p", 5, 990, &new);
+        let s = quiet_failure("a", "p", 5, 990, &new, &["old1".into()]);
         assert!(s.contains("12 unexpected"));
         assert!(s.contains("5s window"));
         assert!(s.contains("+10ms l0"));
         assert!(s.contains("+19ms l9"));
         assert!(!s.contains("l10"));
-        assert!(s.ends_with("and 2 more"));
+        assert!(s.contains("and 2 more\n  preceding matches:\n    old1"));
     }
 
     fn routes(n: usize) -> Vec<Value> {
