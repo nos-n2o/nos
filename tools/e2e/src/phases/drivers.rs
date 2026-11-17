@@ -1598,12 +1598,6 @@ fn last_value(r: &Router, pattern: &str, key: &str) -> Option<String> {
     line.rsplit(&format!("{key}=")).next().map(str::to_string)
 }
 
-/// The latest `port state changed` of `port`, only if one came after `base`.
-fn stp_port_state(r: &Router, port: &str, base: usize) -> Option<String> {
-    let p = format!("port state changed port={port} state=");
-    (r.count(&p) > base).then(|| last_value(r, &p, "state"))?
-}
-
 /// The last STP lines of `r`'s log, for failure messages (#1188).
 fn stp_log_tail(r: &Router) -> String {
     let p = r"port role changed\|port state changed\|root bridge changed\|port carrier\|topology change";
@@ -1632,26 +1626,27 @@ async fn stp_b_roles(b: &Router) -> anyhow::Result<(&'static str, &'static str)>
 }
 
 /// Polls until the four STP ports (both routers' `eth1`/`eth2`) hold exactly
-/// one `Discarding` and three `Forwarding` for three seconds in a row.
-async fn stp_settle(
-    routers: [&Router; 2],
-    base: &[[usize; 2]; 2],
-    secs: u64,
-) -> anyhow::Result<()> {
+/// one `Discarding` and three `Forwarding` for three seconds in a row. The
+/// states come from `GET /v1/spanning-tree`, not the last log line (#1251: a
+/// port that stays `Discarding` looked the same as one that never got its
+/// `Forwarding`).
+async fn stp_settle(routers: [&Router; 2], secs: u64) -> anyhow::Result<()> {
     let mut stable = 0;
     let mut last = String::new();
     for _ in 0..secs {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let states: Vec<Option<String>> = routers
-            .iter()
-            .zip(base)
-            .flat_map(|(r, b)| {
-                ["eth1", "eth2"]
-                    .into_iter()
-                    .zip(b)
-                    .map(|(p, b)| stp_port_state(r, p, *b))
-            })
-            .collect();
+        let mut states = Vec::new();
+        for r in routers {
+            let s = stp_summary(r).await?;
+            for p in ["eth1", "eth2"] {
+                states.push(
+                    s.ports
+                        .iter()
+                        .find(|x| x.name == p)
+                        .map(|x| format!("{:?}", x.state)),
+                );
+            }
+        }
         let n = |want: &str| states.iter().filter(|s| s.as_deref() == Some(want)).count();
         last = format!("{states:?}");
         if n("Discarding") == 1 && n("Forwarding") == 3 {
@@ -1663,7 +1658,13 @@ async fn stp_settle(
             stable = 0;
         }
     }
-    bail!("spanning tree did not settle on one blocking port in {secs}s: {last}")
+    let mut diag = Vec::new();
+    for r in routers {
+        let ports = stp_summary(r).await.map(|s| s.ports);
+        diag.push(format!("{ports:?}\n{}", stp_log_tail(r)));
+    }
+    let diag = diag.join("\n");
+    bail!("spanning tree did not settle on one blocking port in {secs}s: {last}\n{diag}")
 }
 
 /// #327: `nos-stpd` runs RSTP over the two parallel veth links of one
@@ -1673,7 +1674,6 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
     let state = |p: &str| format!("port state changed port={p} state=");
-    let base = routers.map(|r| ["eth1", "eth2"].map(|p| r.count(&state(p))));
 
     w.link_veths().await?;
     // One profile per link, both holding the same untagged domain. Every
@@ -1705,7 +1705,7 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("waiting for one root bridge and exactly one blocking port");
-    stp_settle(routers, &base, 60).await?;
+    stp_settle(routers, 60).await?;
     let root = "root bridge changed root=";
     let (ra, rb) = (last_value(a, root, "root"), last_value(b, root, "root"));
     if ra.is_none() || ra != rb || !ra.as_deref().is_some_and(|r| r.starts_with("1000.")) {
@@ -1812,7 +1812,7 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
 
     // The link comes back: reconverge to exactly one blocking port.
     w.set_link("router-b", root_if, true).await?;
-    stp_settle(routers, &base, 60).await?;
+    stp_settle(routers, 60).await?;
 
     stp_live_edit(w).await?;
 
@@ -1948,8 +1948,6 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
     const TO_RSTP: &str = "port migrated to RSTP";
     let (a, b) = (w.a()?, w.b()?);
     let routers = [a, b];
-    let state = |p: &str| format!("port state changed port={p} state=");
-    let base = routers.map(|r| ["eth1", "eth2"].map(|p| r.count(&state(p))));
     let a_stp = a.count(TO_STP);
 
     w.link_veths().await?;
@@ -2005,7 +2003,7 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("waiting for one root bridge and exactly one blocking port (legacy timers)");
-    stp_settle(routers, &base, 150).await?;
+    stp_settle(routers, 150).await?;
     let (sa, sb) = (stp_summary(a).await?, stp_summary(b).await?);
     let blocked = sa
         .ports
@@ -2579,11 +2577,28 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
             })
             .collect()
     };
-    let before = (
-        cist(&stp_summary(b).await?),
-        view(&mst_wait(b, 1, 30, |i| !i.ports.is_empty()).await?),
-        snapshot(),
-    );
+    let snap = || async {
+        anyhow::Ok((
+            cist(&stp_summary(b).await?),
+            view(&mst_wait(b, 1, 30, |i| !i.ports.is_empty()).await?),
+            snapshot(),
+        ))
+    };
+    // #1251: the snapshot must be steady, so wait for both routers' port
+    // states to stop changing first.
+    let (st, ms) = ("port state changed", "msti port state changed");
+    for _ in 0..12 {
+        let base = routers.map(|r| r.count(st) + r.count(ms));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        if routers
+            .iter()
+            .zip(base)
+            .all(|(r, n)| r.count(st) + r.count(ms) == n)
+        {
+            break;
+        }
+    }
+    let before = snap().await?;
     let rebuilt = b.count(REBUILT);
 
     log("router-b: MSTI 2 priority and MSTI 1 eth1 cost, applied in place");
@@ -2636,13 +2651,22 @@ pub async fn stp_mstp(w: &mut World) -> anyhow::Result<()> {
     }
 
     b.assert_quiet(REBUILT, rebuilt, 5).await?;
-    let after = (
-        cist(&stp_summary(b).await?),
-        view(&mst_wait(b, 1, 30, |i| !i.ports.is_empty()).await?),
-        snapshot(),
-    );
+    // The edits may re-elect for a moment: poll for the steady state to come
+    // back (20s: two hello periods plus the 10s re-apply tick).
+    let mut after = snap().await?;
+    for _ in 0..20 {
+        if before == after {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        after = snap().await?;
+    }
     if before != after {
-        bail!("router-b's CIST or MSTI 1 moved: {before:?} -> {after:?}");
+        let tail = b
+            .logs
+            .tail("bridge port state set\\|msti port state changed", 30)
+            .join("\n");
+        bail!("router-b's CIST or MSTI 1 moved: {before:?} -> {after:?}\n{tail}");
     }
     // Back to the base plan (also in place).
     mstp_provision(b, 1).await?;
