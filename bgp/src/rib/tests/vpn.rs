@@ -149,7 +149,7 @@ pub(super) fn advs(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<AdvertisedVpn
 fn held(rib: &BgpRib, family: AddressFamily) -> Vec<(IpAddr, VpnKey<IpNet>, Vec<u32>, bool)> {
     rib.vpn_routes(family)
         .into_iter()
-        .map(|(p, k, r, best)| (p, *k, r.labels.clone(), best))
+        .map(|(p, c, r, best)| (p, c.0, r.labels.clone(), best))
         .collect()
 }
 
@@ -174,7 +174,7 @@ fn vpn_keys_match_the_unpaged_order_filter_and_resolve() {
     let want: Vec<_> = rib
         .vpn_routes(v4)
         .into_iter()
-        .map(|(p, k, ..)| (p, k.0, k.1))
+        .map(|(p, c, ..)| (p, c.0 .0, c.0 .1))
         .collect();
     let got: Vec<_> = keys.iter().map(|c| (c.peer, c.rd, c.prefix)).collect();
     assert_eq!((got.len(), &got), (3, &want));
@@ -1218,6 +1218,7 @@ fn reevaluation_readmits_both_rds_and_a_withdrawal_drops_the_raw_copy() {
     );
     let communities: Vec<_> = rib.vpn_adj_rib_in[&src]
         .values()
+        .flat_map(|ids| ids.values())
         .map(|r| r.route.communities.clone())
         .collect();
     assert!(communities.iter().all(|c| *c == vec![(65000 << 16) | 9]));
@@ -1233,4 +1234,141 @@ fn reevaluation_readmits_both_rds_and_a_withdrawal_drops_the_raw_copy() {
         &nos_rpl::DENY_ALL,
     );
     assert_eq!(rib.retained_count(src), 1);
+}
+
+// ---- Add-Path receive side (#1133) ----
+
+fn nlri_id(rd: Rd, p: &str, label: u32, id: u32) -> VpnNlri {
+    VpnNlri {
+        path_id: Some(id),
+        ..nlri(rd, p, label)
+    }
+}
+
+fn withdraw_id(rd: Rd, p: &str, id: u32) -> UpdateMessage {
+    let mut w = nlri_id(rd, p, 0, id);
+    w.labels.clear();
+    unreach(vec![w])
+}
+
+/// (path id, labels) of the copies held from `SRC` for `(RD1, P)`.
+fn copies_of(rib: &BgpRib) -> Vec<(u32, Vec<u32>)> {
+    rib.vpn_routes(AddressFamily::Vpnv4Unicast)
+        .into_iter()
+        .filter(|(_, c, ..)| c.0 == key(RD1, P))
+        .map(|(_, c, r, _)| (c.1, r.labels.clone()))
+        .collect()
+}
+
+fn id_copy(label: u32, id: u32, rt: u64) -> UpdateMessage {
+    // One copy per Route Target: a batch carries one attribute set.
+    with_rts(
+        reach(SRC, vec![65001], vec![nlri_id(RD1, P, label, id)]),
+        vec![rt],
+    )
+}
+
+fn x_and_y(rib: &mut BgpRib) {
+    feed(rib, SRC, false, &id_copy(100, 1, RT));
+    feed(rib, SRC, false, &id_copy(200, 2, RT2));
+}
+
+#[test]
+fn copies_of_one_key_are_held_imported_and_withdrawn_each_by_its_id() {
+    let (mut rib, _rx) = setup();
+    let vrf = |table: &str, import: Vec<u64>| crate::vpn::Vrf {
+        table: table.to_string(),
+        rd: [0; 8],
+        import,
+        export: vec![],
+        soo: None,
+    };
+    rib.set_vpn_vrfs(crate::vpn::VrfSet(vec![
+        vrf("red", vec![RT]),
+        vrf("blue", vec![RT2]),
+    ]));
+    x_and_y(&mut rib);
+    assert_eq!(copies_of(&rib), [(1, vec![100]), (2, vec![200])]);
+    // Each VRF imports the copy carrying its own Route Target.
+    let got = imported(&rib);
+    let labels: Vec<_> = got.iter().map(|g| (g.0.as_str(), g.3.clone())).collect();
+    assert_eq!(labels, [("blue", vec![200]), ("red", vec![100])]);
+    // Exactly one copy is the selected one.
+    let selected = rib.vpn_routes(AddressFamily::Vpnv4Unicast);
+    assert_eq!(selected.iter().filter(|r| r.3).count(), 1);
+    // The same id replaces, another id's copy is untouched.
+    feed(&mut rib, SRC, false, &id_copy(111, 1, RT));
+    assert_eq!(copies_of(&rib), [(1, vec![111]), (2, vec![200])]);
+    // A withdraw names (key, id): the other copy stays; an unknown id is a no-op.
+    feed(&mut rib, SRC, false, &withdraw_id(RD1, P, 9));
+    assert_eq!(copies_of(&rib).len(), 2);
+    feed(&mut rib, SRC, false, &withdraw_id(RD1, P, 1));
+    assert_eq!(copies_of(&rib), [(2, vec![200])]);
+    assert_eq!(imported(&rib).len(), 1);
+    // The show cursors list one row per copy, and resolve to it.
+    x_and_y(&mut rib);
+    let cursors = rib.vpn_keys(AddressFamily::Vpnv4Unicast, None);
+    assert_eq!(
+        cursors.iter().map(|c| c.path_id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(rib.vpn_at(&cursors[1]).unwrap().1.labels, vec![200]);
+    // Session loss drops every copy.
+    rib.peer_disconnected(addr(SRC), crate::gr::Disconnect::Hard);
+    assert_eq!(copies_of(&rib), []);
+    assert_eq!(imported(&rib).len(), 0);
+}
+
+#[test]
+fn stale_copies_are_purged_each_and_max_prefix_counts_copies() {
+    let (mut rib, _rx) = setup();
+    x_and_y(&mut rib);
+    assert_eq!(rib.accepted_vpn(addr(SRC)), [2, 0]);
+    rib.begin_refresh_in(addr(SRC), AddressFamily::Vpnv4Unicast);
+    assert_eq!(rib.stale_count(addr(SRC)), 2);
+    // Re-announcing id 2 alone leaves id 1 stale: it is purged.
+    feed(&mut rib, SRC, false, &id_copy(200, 2, RT2));
+    assert_eq!(
+        rib.end_refresh_in(addr(SRC), AddressFamily::Vpnv4Unicast),
+        1
+    );
+    assert_eq!(copies_of(&rib), [(2, vec![200])]);
+}
+
+#[test]
+fn soft_reconfig_reevaluates_every_copy_of_a_key() {
+    let (mut rib, _rx) = setup();
+    let src = addr(SRC);
+    rib.set_peer_soft_reconfig(src, true);
+    for (label, id) in [(100, 1), (200, 2)] {
+        let u = reach(SRC, vec![65001], vec![nlri_id(RD1, P, label, id)]);
+        rib.handle_update(src, false, v4("2.2.2.2"), &u, &nos_rpl::DENY_ALL);
+    }
+    assert_eq!(copies_of(&rib), []);
+    assert_eq!(rib.retained_count(src), 2);
+    rib.reevaluate_peer(src, vpn_policies("accept\n"));
+    assert_eq!(copies_of(&rib), [(1, vec![100]), (2, vec![200])]);
+    // Withdrawing one drops only its raw copy.
+    rib.handle_update(
+        src,
+        false,
+        v4("2.2.2.2"),
+        &withdraw_id(RD1, P, 1),
+        &nos_rpl::DENY_ALL,
+    );
+    assert_eq!(rib.retained_count(src), 1);
+    assert_eq!(copies_of(&rib), [(2, vec![200])]);
+}
+
+#[test]
+fn import_ties_across_peers_are_ordered_by_peer_address() {
+    let (mut rib, _rx) = setup();
+    rib.set_vpn_vrfs(vrfs());
+    // Two iBGP peers, identical attributes: the lower peer address wins the
+    // tie whatever order the peers' tables are visited in.
+    learn(&mut rib, CLIENT_SRC, vec![], "10.9.0.2", RD1, 7);
+    learn(&mut rib, I1, vec![], "10.9.0.1", RD1, 8);
+    for _ in 0..8 {
+        assert_eq!(red_paths(&rib)[0].0, addr("10.9.0.2"));
+    }
 }

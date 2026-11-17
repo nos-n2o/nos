@@ -12,13 +12,13 @@ use super::adj_in::{
     PeerTable,
 };
 use super::flowspec_out::import_flow;
-use super::vpn_out::vpn_family;
+use super::vpn_out::{copies, get_copy, insert_copy, remove_copy, vpn_family, VpnTable};
 use super::{
     apply_policy, family_index, info, ov_state, warn, Arc, BgpRib, CompiledPolicy, EvpnNlri,
     EvpnRoute, FlowspecKey, FlowspecRoute, HashMap, HashSet, IpAddr, IpNet, PolicyPeer, RibRoute,
-    VpnFlowCopy, VpnRoute,
+    VpnCopy, VpnFlowCopy, VpnRoute,
 };
-use crate::vpn::{format_rd, VpnKey};
+use crate::vpn::format_rd;
 use nos_proto::{AddressFamily, FamilyReeval, ReevalFamily};
 
 /// Prefixes re-evaluated per RIB lock hold: keeps a hold in the low
@@ -41,7 +41,7 @@ pub(super) struct Retained {
     /// Flowspec rules as received: the policy rewrites the held copy.
     pub(super) flow: HashMap<IpAddr, HashMap<FlowspecKey, FlowspecRoute>>,
     /// VPN paths as received (the policy rewrites the held copy).
-    pub(super) vpn: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    pub(super) vpn: HashMap<IpAddr, VpnTable>,
     /// VPN Flowspec rules as received (#1085).
     pub(super) vpn_flow: HashMap<IpAddr, HashMap<VpnFlowCopy, FlowspecRoute>>,
 }
@@ -88,10 +88,7 @@ impl Retained {
         })
     }
 
-    pub(super) fn vpn_slot(
-        &mut self,
-        peer: IpAddr,
-    ) -> Option<&mut HashMap<VpnKey<IpNet>, VpnRoute>> {
+    pub(super) fn vpn_slot(&mut self, peer: IpAddr) -> Option<&mut VpnTable> {
         self.enabled
             .contains(&peer)
             .then(|| self.vpn.entry(peer).or_default())
@@ -124,9 +121,9 @@ impl Retained {
         }
     }
 
-    pub(super) fn take_vpn(&mut self, peer: IpAddr, k: &VpnKey<IpNet>) {
+    pub(super) fn take_vpn(&mut self, peer: IpAddr, c: &VpnCopy) {
         if let Some(t) = self.vpn.get_mut(&peer) {
-            t.remove(k);
+            super::vpn_out::remove_copy(t, c);
         }
     }
 
@@ -159,7 +156,7 @@ enum ReevalKey {
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
     VpnFlow(VpnFlowCopy),
-    Vpn(VpnKey<IpNet>),
+    Vpn(VpnCopy),
 }
 
 /// `(visited, accepted, changed)` of one family.
@@ -306,7 +303,7 @@ impl BgpRib {
             + n(self.evpn_adj_rib_in.get(&peer).map(HashMap::len))
             + n(self.retained.evpn.get(&peer).map(HashMap::len))
             + n(self.retained.flow.get(&peer).map(HashMap::len))
-            + n(self.retained.vpn.get(&peer).map(HashMap::len))
+            + n(self.retained.vpn.get(&peer).map(|t| copies(t).count()))
             + n(self.retained.vpn_flow.get(&peer).map(HashMap::len))
     }
 
@@ -382,9 +379,8 @@ impl BgpRib {
                 .vpn
                 .get(&peer)
                 .into_iter()
-                .flat_map(HashMap::keys)
-                .copied()
-                .map(ReevalKey::Vpn),
+                .flat_map(copies)
+                .map(|(c, _)| ReevalKey::Vpn(c)),
         );
         keys.extend(
             self.retained
@@ -458,7 +454,7 @@ impl BgpRib {
                 }
                 ReevalKey::Vpn(k) => {
                     if self.reeval_vpn(peer, k, &pass.policies.unicast, &mut pass.stats) {
-                        vpns.push(*k);
+                        vpns.push(k.0);
                     }
                 }
             }
@@ -473,6 +469,8 @@ impl BgpRib {
                 self.track_flow(peer, &k);
             }
         }
+        vpns.sort_unstable();
+        vpns.dedup();
         for k in vpns {
             self.select_vpn(&k);
         }
@@ -689,11 +687,18 @@ impl BgpRib {
     fn reeval_vpn(
         &mut self,
         peer: IpAddr,
-        k: &VpnKey<IpNet>,
+        c: &VpnCopy,
         policy: &CompiledPolicy,
         stats: &mut [Tally; 9],
     ) -> bool {
-        let Some(raw) = self.retained.vpn.get(&peer).and_then(|t| t.get(k)).cloned() else {
+        let k = &c.0;
+        let Some(raw) = self
+            .retained
+            .vpn
+            .get(&peer)
+            .and_then(|t| get_copy(t, c))
+            .cloned()
+        else {
             return false;
         };
         let peer_as = self.peer_asns.get(&peer).copied().unwrap_or(0);
@@ -708,7 +713,7 @@ impl BgpRib {
         let bmp = super::bmp_tap::tap(self.bmp.as_ref());
         let table = self.vpn_adj_rib_in.entry(peer).or_default();
         let changed = if let Some(mut route) = result {
-            if let Some(old) = table.get(k)
+            if let Some(old) = get_copy(table, c)
                 && old.labels == raw.labels
                 && (RibRoute {
                     received_at: old.route.received_at,
@@ -721,21 +726,25 @@ impl BgpRib {
                 labels: raw.labels,
                 route,
             };
-            let changed = table.get(k) != Some(&new);
+            let changed = get_copy(table, c) != Some(&new);
             if changed {
-                info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route learned");
-                if let Some(h) = bmp {
-                    h.vpn_post(peer, k, Some(&new));
+                if c.1 == 0 {
+                    info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route learned");
+                } else {
+                    info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, path_id = c.1, "vpn route learned");
                 }
-                table.insert(*k, new);
+                if let Some(h) = bmp {
+                    h.vpn_post(peer, c, Some(&new));
+                }
+                insert_copy(table, *c, new);
             }
             changed
         } else {
-            let removed = table.remove(k).is_some();
+            let removed = remove_copy(table, c).is_some();
             if removed {
                 warn!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route rejected by import policy");
                 if let Some(h) = bmp {
-                    h.vpn_post(peer, k, None);
+                    h.vpn_post(peer, c, None);
                 }
             }
             removed
