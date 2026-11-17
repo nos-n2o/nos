@@ -27,6 +27,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -144,6 +145,9 @@ const ATTR_AS4_AGGREGATOR: u8 = 18;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
+const ATTR_FLAG_OPTIONAL: u8 = 0x80;
+const ATTR_FLAG_TRANSITIVE: u8 = 0x40;
+const ATTR_FLAG_PARTIAL: u8 = 0x20;
 /// Well-known transitive, per RFC 4271 §5 — the flag value this
 /// implementation always encodes for `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`.
 const ATTR_FLAG_WELL_KNOWN_TRANSITIVE: u8 = 0x40;
@@ -179,6 +183,10 @@ pub enum WireError {
     InvalidNetworkField,
     #[error("malformed MP_REACH_NLRI / MP_UNREACH_NLRI attribute")]
     MalformedMpAttribute,
+    /// RFC 4271 section 6.3: an unrecognized attribute with the Optional bit
+    /// clear; carries the whole attribute (type, length, value) as NOTIFICATION data.
+    #[error("unrecognized well-known path attribute")]
+    UnrecognizedWellKnown(Bytes),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -235,6 +243,11 @@ impl WireError {
                 UpdateMessageSubcode::OptionalAttributeError as u8,
                 Bytes::new(),
             ),
+            WireError::UnrecognizedWellKnown(attr) => (
+                ErrorCode::UpdateMessage as u8,
+                UpdateMessageSubcode::UnrecognizedWellKnownAttribute as u8,
+                attr.clone(),
+            ),
             WireError::MalformedRouteRefresh(raw) => (
                 ErrorCode::RouteRefresh as u8,
                 RouteRefreshSubcode::InvalidMessageLength as u8,
@@ -272,6 +285,7 @@ pub enum OpenMessageSubcode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateMessageSubcode {
     MalformedAttributeList = 1,
+    UnrecognizedWellKnownAttribute = 2,
     OptionalAttributeError = 9,
     InvalidNetworkField = 10,
 }
@@ -526,7 +540,25 @@ pub struct PathAttributes {
     pub aggregator: Option<Aggregator>,
     /// RFC 9234 §4.1 `OTC` (Only to Customer): the ASN that marked the route.
     pub otc: Option<u32>,
+    /// RFC 4271 section 5: unrecognized optional transitive attributes,
+    /// retained for propagation (Partial bit added on encode), sorted by type.
+    pub unknown: Arc<[RawAttribute]>,
 }
+
+/// An unrecognized optional transitive path attribute kept verbatim.
+/// `flags` has the Extended-Length bit cleared and Partial as received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawAttribute {
+    pub flags: u8,
+    pub attr_type: u8,
+    pub value: Bytes,
+}
+
+/// Per-UPDATE budget (header + value, wire order) for retained unknown attributes.
+// ponytail: deliberate deviation from the RFC 4271 section 5 MUST to pass on
+// every unrecognized transitive attribute: the excess is dropped (with a
+// warn!) so a peer cannot inflate every route we hold; ceiling 1 KiB per UPDATE.
+const MAX_UNKNOWN_ATTR_BYTES: usize = 1024;
 
 /// The AS and router-id of the speaker that formed an aggregate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1626,6 +1658,9 @@ struct ParsedAttributes {
     atomic_aggregate: bool,
     aggregator: Option<Aggregator>,
     otc: Option<u32>,
+    unknown: Vec<RawAttribute>,
+    /// Wire bytes of `unknown` so far, against `MAX_UNKNOWN_ATTR_BYTES`.
+    unknown_bytes: usize,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
     /// RFC 7606 treat-as-withdraw: an attribute's content was malformed.
@@ -1676,6 +1711,7 @@ struct AttrAcc {
 /// `parse_path_attributes`, split out for length (#425). A malformed value
 /// sets `acc.out.withdraw` (RFC 7606); only MP_* decode failures are errors.
 fn parse_one_attribute(
+    flags: u8,
     attr_type: u8,
     value: &[u8],
     add_path_afis: &HashSet<(u16, u8)>,
@@ -1833,11 +1869,55 @@ fn parse_one_attribute(
             .out
             .mp_unreach
             .push(decode_mp_unreach(value, add_path_afis)?),
-        _ => {
-            // Unknown attribute type: skip by declared length, never an
-            // error — same philosophy as unrecognized OPEN capabilities.
-        }
+        _ => return parse_unknown_attribute(flags, attr_type, value, acc),
     }
+    Ok(())
+}
+
+/// RFC 4271 sections 5 and 6.3 for an unrecognized type: well-known (Optional
+/// clear) is an error, optional transitive is retained, optional
+/// non-transitive is quietly ignored.
+fn parse_unknown_attribute(
+    flags: u8,
+    attr_type: u8,
+    value: &[u8],
+    acc: &mut AttrAcc,
+) -> Result<(), WireError> {
+    // Extended-Length is a wire detail: stored and logged without it.
+    let flags = flags & !ATTR_FLAG_EXTENDED_LENGTH;
+    if flags & ATTR_FLAG_OPTIONAL == 0 {
+        let mut raw = Vec::new();
+        encode_attribute(&mut raw, flags, attr_type, value);
+        return Err(WireError::UnrecognizedWellKnown(raw.into()));
+    }
+    let len = value.len();
+    if flags & ATTR_FLAG_TRANSITIVE == 0 {
+        debug!(
+            attr_type,
+            flags, len, "dropping unrecognized optional non-transitive attribute"
+        );
+        return Ok(());
+    }
+    let wire = len + if len > 255 { 4 } else { 3 };
+    if acc.out.unknown_bytes + wire > MAX_UNKNOWN_ATTR_BYTES {
+        warn!(
+            attr_type,
+            len,
+            cap = MAX_UNKNOWN_ATTR_BYTES,
+            "dropping unrecognized optional transitive attribute over the per-route cap"
+        );
+        return Ok(());
+    }
+    acc.out.unknown_bytes += wire;
+    debug!(
+        attr_type,
+        flags, len, "retained unrecognized optional transitive attribute"
+    );
+    acc.out.unknown.push(RawAttribute {
+        flags,
+        attr_type,
+        value: Bytes::copy_from_slice(value),
+    });
     Ok(())
 }
 
@@ -1895,7 +1975,14 @@ fn parse_path_attributes(
                 debug!(attr_type, "discarding duplicate path attribute");
                 break 'attr;
             }
-            parse_one_attribute(attr_type, value, add_path_afis, two_octet_as, &mut acc)?;
+            parse_one_attribute(
+                flags,
+                attr_type,
+                value,
+                add_path_afis,
+                two_octet_as,
+                &mut acc,
+            )?;
         }
 
         data = &data[header_len + len..];
@@ -1906,6 +1993,7 @@ fn parse_path_attributes(
         as4_path,
         as4_aggregator,
     } = acc;
+    out.unknown.sort_by_key(|a| a.attr_type);
     // RFC 6793 §4.2.3, see `AsPath::merge_as4`.
     if let (Some(path), Some(as4)) = (out.as_path.as_mut(), as4_path) {
         path.merge_as4(&as4);
@@ -2478,6 +2566,7 @@ fn parse_update(
                     atomic_aggregate: parsed.atomic_aggregate,
                     aggregator: parsed.aggregator,
                     otc: parsed.otc,
+                    unknown: parsed.unknown.into(),
                 })
             }
             _ => None,
@@ -2666,6 +2755,10 @@ fn encode_path_attrs(
             ATTR_OTC,
             &otc.to_be_bytes(),
         );
+    }
+    // RFC 4271 section 5: pass unrecognized transitive attributes on with Partial set.
+    for a in attrs.unknown.iter() {
+        encode_attribute(out, a.flags | ATTR_FLAG_PARTIAL, a.attr_type, &a.value);
     }
     if let Some(local_pref) = attrs.local_pref {
         encode_attribute(
@@ -2915,6 +3008,7 @@ mod tests {
                 atomic_aggregate: false,
                 aggregator: None,
                 otc: None,
+                unknown: std::sync::Arc::default(),
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],
@@ -3701,6 +3795,7 @@ mod tests {
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],
@@ -4765,7 +4860,7 @@ mod tests {
     }
 
     #[test]
-    fn update_with_unknown_attribute_is_skipped_by_length() {
+    fn update_with_unknown_optional_non_transitive_attribute_is_dropped() {
         // withdrawn_routes length = 0
         let mut body = vec![0u8, 0u8];
         // path attributes: an unknown attribute (type 99) with 3 bytes of
@@ -4794,6 +4889,7 @@ mod tests {
                 atomic_aggregate: false,
                 aggregator: None,
                 otc: None,
+                unknown: std::sync::Arc::default(),
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],
@@ -4891,8 +4987,11 @@ mod tests {
         assert!(!ok.withdraw && ok.communities == vec![1]);
         let ok = body_attrs(&[0xD0, ATTR_COMMUNITY, 0, 4, 0, 0, 0, 1]).unwrap();
         assert!(!ok.withdraw && ok.communities == vec![1]);
-        // Unknown type with odd flags is still skipped.
-        assert!(!body_attrs(&[0x00, 99, 1, 7]).unwrap().withdraw);
+        // Unknown type, Optional clear: unrecognized well-known (RFC 4271 6.3).
+        assert!(matches!(
+            body_attrs(&[0x00, 99, 1, 7]),
+            Err(WireError::UnrecognizedWellKnown(_))
+        ));
         // MP_* with wrong flags: session reset.
         assert!(matches!(
             body_attrs(&[0x40, ATTR_MP_UNREACH_NLRI, 3, 0, 2, 1]),
@@ -5570,5 +5669,92 @@ mod shutdown_message_tests {
             })
             .sum();
         assert_eq!(total, 400);
+    }
+
+    fn raw(a: &ParsedAttributes) -> Vec<(u8, u8, usize)> {
+        a.unknown
+            .iter()
+            .map(|r| (r.flags, r.attr_type, r.value.len()))
+            .collect()
+    }
+
+    #[test]
+    fn unknown_transitive_is_retained_sorted_and_partial_kept() {
+        let a = attrs(&[0xc0, 200, 1, 9, 0xe0, 100, 2, 1, 2]).unwrap();
+        assert_eq!(raw(&a), [(0xe0, 100, 2), (0xc0, 200, 1)]);
+    }
+
+    #[test]
+    fn unknown_non_transitive_is_dropped() {
+        assert_eq!(attrs(&[0x80, 99, 1, 9]).unwrap().unknown.len(), 0);
+    }
+
+    #[test]
+    fn unknown_well_known_is_a_3_2_notification_with_the_attribute() {
+        let Err(e) = attrs(&[0x40, 98, 1, 7]) else {
+            panic!("must fail");
+        };
+        let (code, sub, data) = e.notification();
+        assert_eq!((code, sub, &data[..]), (3, 2, &[0x40, 98, 1, 7][..]));
+    }
+
+    #[test]
+    fn unknown_duplicate_type_keeps_first() {
+        let a = attrs(&[0xc0, 99, 1, 1, 0xc0, 99, 1, 2]).unwrap();
+        assert_eq!(a.unknown.len(), 1);
+        assert_eq!(&a.unknown[0].value[..], &[1]);
+    }
+
+    #[test]
+    fn unknown_extended_length_roundtrips_with_partial_added() {
+        let mut data = vec![0xd0, 99, 1, 44];
+        data.extend(std::iter::repeat_n(7u8, 300));
+        let a = attrs(&data).unwrap();
+        assert_eq!(raw(&a), [(0xc0, 99, 300)]);
+        let mut p = attrs_default();
+        p.unknown = a.unknown.into();
+        let mut out = Vec::new();
+        encode_path_attrs(&mut out, &p, true, false);
+        let again = parse_path_attributes(&out, &HashSet::new(), false).unwrap();
+        assert_eq!(raw(&again), [(0xe0, 99, 300)]);
+    }
+
+    fn attrs_default() -> PathAttributes {
+        PathAttributes {
+            origin: Origin::Igp,
+            as_path: vec![].into(),
+            next_hop: Ipv4Addr::new(10, 0, 0, 1),
+            local_pref: None,
+            med: None,
+            originator_id: None,
+            cluster_list: vec![],
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            ipv6_extended_communities: vec![],
+            pmsi: None,
+            atomic_aggregate: false,
+            aggregator: None,
+            otc: None,
+            unknown: std::sync::Arc::default(),
+        }
+    }
+
+    #[test]
+    fn unknown_cap_drops_overflow_keeps_later_smaller_and_exact_fit() {
+        let big = |t: u8, n: usize| {
+            let mut v = vec![0xd0, t];
+            v.extend(u16::try_from(n).unwrap().to_be_bytes());
+            v.extend(std::iter::repeat_n(0u8, n));
+            v
+        };
+        // 600+4 fits, a second 600+4 does not, a 1-byte (3+1) one does.
+        let mut d = big(100, 600);
+        d.extend(big(101, 600));
+        d.extend([0xc0, 102, 1, 0]);
+        assert_eq!(raw(&attrs(&d).unwrap()), [(0xc0, 100, 600), (0xc0, 102, 1)]);
+        // Exactly 1024 bytes on the wire (4 + 1020) is kept, one more is not.
+        assert_eq!(attrs(&big(100, 1020)).unwrap().unknown.len(), 1);
+        assert_eq!(attrs(&big(100, 1021)).unwrap().unknown.len(), 0);
     }
 }

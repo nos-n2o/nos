@@ -832,6 +832,7 @@ impl BgpRib {
             atomic_aggregate: attrs.atomic_aggregate,
             aggregator: attrs.aggregator,
             otc,
+            unknown: attrs.unknown.clone(),
             validation_state: nos_rpl::ValidationState::NotFound,
             received_ov,
         };

@@ -26,6 +26,7 @@ pub(super) fn redistributed_route() -> RibRoute {
         atomic_aggregate: false,
         aggregator: None,
         otc: None,
+        unknown: std::sync::Arc::default(),
         cluster_list: Vec::new().into(),
         communities: Vec::new(),
         extended_communities: Vec::new(),
@@ -540,6 +541,7 @@ pub(super) fn build_advertisement(
         atomic_aggregate: best.atomic_aggregate,
         aggregator: best.aggregator,
         otc: best.otc,
+        unknown: best.unknown.clone(),
         path_id: None,
     })
 }

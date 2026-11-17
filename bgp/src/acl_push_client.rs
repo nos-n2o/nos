@@ -392,6 +392,7 @@ mod tests {
                 atomic_aggregate: false,
                 aggregator: None,
                 otc: None,
+                unknown: std::sync::Arc::default(),
             },
             learned_via_ibgp: false,
             router_id: "2.2.2.2".parse().unwrap(),

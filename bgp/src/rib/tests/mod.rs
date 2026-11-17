@@ -37,6 +37,7 @@ mod retain;
 mod rpl_path;
 mod rtc;
 mod stats;
+mod unknown_attr;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {
@@ -203,6 +204,7 @@ fn ebgp_update(nlri: Vec<&str>, as_path: Vec<u32>, next_hop: &str) -> UpdateMess
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             cluster_list: vec![],
             communities: Vec::new(),
             extended_communities: Vec::new(),
@@ -292,6 +294,7 @@ fn update_with(
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             cluster_list: vec![],
             communities: Vec::new(),
             extended_communities: Vec::new(),

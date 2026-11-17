@@ -126,6 +126,7 @@ fn path_attrs(asn: u32) -> PathAttributes {
         atomic_aggregate: false,
         aggregator: None,
         otc: None,
+        unknown: std::sync::Arc::default(),
         cluster_list: vec![],
         communities: vec![],
         extended_communities: vec![],
@@ -403,6 +404,7 @@ fn route(prefix: &str, next_hop: &str, use_mp: bool, path_id: Option<u32>) -> Ad
         atomic_aggregate: true,
         aggregator: None,
         otc: Some(65009),
+        unknown: std::sync::Arc::default(),
         path_id,
     }
 }

@@ -74,6 +74,12 @@ pub const AS4_BAD_PREFIX: &str = "203.0.114.0/24";
 /// RFC 4271 §6.3: ExaBGP announces this with the class-E next hop `240.0.0.1`,
 /// which router-a must treat as a withdraw (session kept).
 pub const BAD_NEXT_HOP_PREFIX: &str = "203.0.130.0/24";
+/// `unknown-attribute` (#1035): ExaBGP's routes carrying an unrecognized
+/// optional transitive attribute (type 153), two 600-byte ones (the second is
+/// over the 1024-byte cap) and an unknown well-known attribute (type 152).
+pub const UNKNOWN_ATTR_PREFIX: &str = "203.0.131.0/24";
+pub const UNKNOWN_CAP_PREFIX: &str = "203.0.132.0/24";
+pub const UNKNOWN_WELL_KNOWN_PREFIX: &str = "203.0.133.0/24";
 /// `bgp-role`: the route ExaBGP, a customer of router-b, announces carrying an
 /// OTC attribute (RFC 9234 §5: a leak, since a customer never sets it).
 pub const OTC_LEAK_PREFIX: &str = "203.0.115.0/24";

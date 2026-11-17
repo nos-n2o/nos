@@ -2056,6 +2056,7 @@ mod tests {
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             cluster_list: vec![],
             communities: vec![],
             // RT:65000:1, and a non-RT (encap) that is not listed.
@@ -2208,6 +2209,7 @@ mod tests {
                 atomic_aggregate: false,
                 aggregator: None,
                 otc: None,
+                unknown: std::sync::Arc::default(),
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![0x0002_fde8_0000_2710],
