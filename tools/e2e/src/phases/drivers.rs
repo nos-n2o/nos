@@ -1053,8 +1053,13 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
     // must stay Up, i.e. frames still reach the member-bound packet sockets.
     log("enslaved members keep receiving: the sessions stay Up");
     let down = format!("bfd session down aggregate={MICRO_AGGREGATE}");
-    let down_base = a.count(&down);
     let stayed_up = async {
+        // #839: the last enslave can still cost one detection-time expiry (a
+        // `down` +87ms into the window); let both sides settle Up first, then
+        // baseline, so the quiet window judges only the steady state.
+        micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
+        micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
+        let down_base = a.count_fresh(&down).await;
         a.assert_quiet(&down, down_base, 5).await?;
         micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 10).await?;
         micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 10).await

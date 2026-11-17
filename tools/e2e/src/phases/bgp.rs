@@ -3113,18 +3113,28 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
         "learned route for {ADD_PATH_PREFIX} .*communities=\\[{}\\]",
         add_path_community(1)
     );
-    b.assert_quiet(&any_learned, 2, 10).await?;
-    b.assert_quiet(&path_1, 0, 0).await?;
+    // #839: baselines taken here, not 0: earlier phases log the same prefix.
+    let loc_gone = format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn");
+    let withdrew = format!("withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_A}");
+    let withdrew_2 = format!("{withdrew} path_id=2");
+    let n_withdrew_1 = b.count(&format!("{withdrew} path_id=1"));
+    let (n_learned, n_path_1) = (b.count(&any_learned), b.count(&path_1));
+    let (n_withdrew, n_loc_gone, n_withdrew_2) = (
+        b.count_fresh(&withdrew).await,
+        b.count(&loc_gone),
+        b.count(&withdrew_2),
+    );
+    b.assert_quiet(&any_learned, n_learned, 10).await?;
+    b.assert_quiet(&path_1, n_path_1, 0).await?;
 
     log("withdrawing path 2: path 1 takes id 1 in place, nothing withdrawn on router-b");
-    let withdrew = format!("withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_A}");
     exabgp_api(
         w,
         &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 2"),
     )
     .await?;
     b.wait(&learned(1, 1)).await?;
-    b.assert_quiet(&withdrew, 0, 10).await?;
+    b.assert_quiet(&withdrew, n_withdrew, 10).await?;
 
     log("withdrawing path 1: one path left, router-b sees id 1 withdrawn and keeps the prefix");
     exabgp_api(
@@ -3132,15 +3142,10 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
         &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 1"),
     )
     .await?;
-    b.wait(&format!("{withdrew} path_id=1")).await?;
-    b.assert_quiet(
-        &format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn"),
-        0,
-        10,
-    )
-    .await?;
-    b.assert_quiet(&format!("{withdrew} path_id=2"), 0, 0)
+    b.wait_new(&format!("{withdrew} path_id=1"), n_withdrew_1, 30)
         .await?;
+    b.assert_quiet(&loc_gone, n_loc_gone, 10).await?;
+    b.assert_quiet(&withdrew_2, n_withdrew_2, 0).await?;
     Ok(())
 }
 
