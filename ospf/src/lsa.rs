@@ -126,7 +126,12 @@ pub fn is_as_scope(lsa_type: u8) -> bool {
 /// LSA in a stub area or NSSA (`stub` is set for both), and a Type-7 only in
 /// an NSSA (RFC 3101 §2.4).
 pub fn in_area_scope(lsa_type: u8, stub: bool, nssa: bool) -> bool {
-    !(stub && is_as_scope(lsa_type)) && (nssa || lsa_type != LSA_TYPE_NSSA_EXTERNAL)
+    nos_ospf_common::areas::in_area_scope(
+        is_as_scope(lsa_type),
+        lsa_type == LSA_TYPE_NSSA_EXTERNAL,
+        stub,
+        nssa,
+    )
 }
 
 /// Type 9: held per link, never flooded past the link it arrived on.

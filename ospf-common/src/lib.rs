@@ -7,6 +7,7 @@
 //! daemons can depend on it without gaining any daemon-to-daemon coupling —
 //! see root `CLAUDE.md`'s dependency-graph section.
 
+pub mod areas;
 pub mod bfd;
 pub mod dbd_fault;
 pub mod drouters;

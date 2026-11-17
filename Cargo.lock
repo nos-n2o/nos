@@ -2647,6 +2647,7 @@ name = "nos-ospf-common"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "ipnet",
  "socket2",
  "tokio",
  "tracing",

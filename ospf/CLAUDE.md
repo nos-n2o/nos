@@ -52,7 +52,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - Every collector skips `advertising_router == root` (our own LSA must not route back through us). External collection runs after every Internal collector (forwarding address resolution).
 - ABR = 2+ areas and a `Full` area-0 neighbor or up virtual link (`is_backbone_abr`, RFC 3509, #1170), derived; no backbone, no B-bit/summaries (#610). §12.4.3: non-backbone `intra_area_routes` feed the backbone only; `backbone_view` (+ inter-area, Type-4 ASBRs) feeds the rest.
 - Link State IDs of Type-3/5/7 follow RFC 2328 Appendix E (`link::originate::assign_link_state_ids`, stateless, per area and type); `spf::net_from` truncates host bits on receive.
-- `lsa::in_area_scope(type, stub, nssa)` is the one scope rule (Type-5/11 out of stub/NSSA, Type-7 only in an NSSA); every path (DBD, LSR answer, LSU, flood, SPF) must use it.
+- `lsa::in_area_scope(type, stub, nssa)` (shared core) is the one scope rule (Type-5/11 out of stub/NSSA, Type-7 only in an NSSA); every path (DBD, LSR answer, LSU, flood, SPF) must use it.
 - Stub/NSSA, virtual links, LFA/remote LFA, prefix suppression, stub router, host router, opaque LSAs: see the internals page for each knob and its tests.
 
 ## Graceful restart

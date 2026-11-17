@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ipnet = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }

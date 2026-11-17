@@ -153,6 +153,7 @@ How to check by hand, in a throwaway namespace (`unshare -Urn`): `ip link add br
 
 - `Bridge::set_rstp_version(false)` is `forceVersion < 2`: PPM restarts with `sendRSTP` false, so PTX sends Config (Designated) or TCN (Root) and PRT/PST use `fdWhile` instead of the proposal handshake. `Plan::rstp_version` carries the config value, so a change rebuilds the bridge.
 - A port starts with `sendRSTP` true; PPM moves it with `rcvdSTP`/`rcvdRSTP`/`mcheck` and each real change emits `Event::ProtocolMigrated`, logged as `port migrated to STP` / `port migrated to RSTP` (field `port`; a forced bridge logs STP once per port at start).
+- A non-designated legacy (802.1D) port sends no Config BPDU, so after `mcheck` a port returns to STP only if the peer sends one: the e2e phase makes the legacy bridge the root.
 - `Bridge::mcheck(port)` sets the `mcheck` variable; `Engine::mcheck(None | Some(name))` applies it and returns the port count. The actor serves it from `StpRequest::Mcheck` (`StpEvent::Mcheck { ports }`, `User` and `Restd`).
 - Port states stay discarding/learning/forwarding: legacy Listening is `Discarding` (the kernel neither learns nor forwards in it).
 - Sim scenarios: a forced-STP bridge in a triangle, an all-legacy topology change (TCN, `FlushFdb`) and the `mcheck` round trip, in `stp/src/sim.rs`.
