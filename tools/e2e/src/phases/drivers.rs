@@ -1874,7 +1874,7 @@ async fn stp_live_edit(w: &World) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// #319: router-b is forced to 802.1D (`force-version stp`), router-a stays
+/// #319: router-b is the root, forced to 802.1D (`force-version stp`), router-a stays
 /// RSTP. Router-a's ports fall back to STP when they hear its Config BPDUs,
 /// the tree still settles on one blocking port (legacy Listening/Learning, so
 /// ~30 s), `mcheck` sends router-a back to RSTP and a legacy peer pulls it
@@ -1909,10 +1909,15 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
             "--stp-mode",
             "rstp",
         ]);
-        if r.name() == "router-a" {
-            on.extend(strings(&["--stp-priority", "4096"]));
-        } else {
-            on.extend(strings(&["--stp-force-version", "stp"]));
+        // Router-b (legacy) is the root: a non-designated 802.1D port sends
+        // no Config BPDU, so a root b is what keeps feeding router-a (#1229).
+        if r.name() == "router-b" {
+            on.extend(strings(&[
+                "--stp-priority",
+                "4096",
+                "--stp-force-version",
+                "stp",
+            ]));
         }
         r.provision(&on).await?;
     }
@@ -1940,8 +1945,8 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
         .chain(&sb.ports)
         .filter(|p| p.role == StpRole::Alternate && p.state == StpState::Discarding)
         .count();
-    if !sa.enabled || sa.root_id != sa.bridge_id || sa.root_id != sb.root_id || blocked != 1 {
-        bail!("legacy tree: router-a must be root with one alternate port: {sa:?} vs {sb:?}");
+    if !sb.enabled || sb.root_id != sb.bridge_id || sa.root_id != sb.root_id || blocked != 1 {
+        bail!("legacy tree: router-b must be root with one alternate port: {sa:?} vs {sb:?}");
     }
     for r in routers {
         for p in ["eth1", "eth2"] {
