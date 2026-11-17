@@ -162,7 +162,8 @@ impl Pushed {
             backup_next_hop: self.backup_next_hop,
             backup_interface_id: self.backup_interface_id,
             metric: self.metric,
-            discard: false,
+            // No next hop at all is an area range's discard route.
+            discard: self.next_hops.is_empty(),
             backup_tunnel: None,
         }
     }

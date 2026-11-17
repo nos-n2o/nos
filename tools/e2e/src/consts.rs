@@ -590,6 +590,11 @@ pub const OSPFV3_ASBR_GATEWAY: &str = "2001:db8:1::2";
 pub const OSPFV3_AREA_1: &str = "0.0.0.1";
 pub const OSPFV3_PROFILE_AREA1: &str = "ospfv3-profile-area1";
 pub const OSPFV3_ABR_LOOPBACK_ADDRESS: &str = "2001:db8:5::1/128";
+/// `ospfv3-area-range`: router-b's area-1 loopback (the daemon advertises
+/// only a loopback's first IPv6 address) and the RFC 5340 §4.4.3.3 range
+/// over it (prefixes no other phase uses).
+pub const OSPFV3_RANGE_LOOPBACK: &str = "2001:db8:6::1/128";
+pub const OSPFV3_RANGE: &str = "2001:db8:6::/48";
 /// `ospfv3-lsinfinity-asbr`: the area-1 link between router-b (the ABR) and
 /// router-c (the ASBR), a docker network of its own so the two areas sit on
 /// different L2 segments (docker names it `eth1` on both).

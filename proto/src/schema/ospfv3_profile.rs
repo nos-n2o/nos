@@ -245,6 +245,7 @@ mod tests {
         Ospfv3Area {
             area_id: area_id.parse().unwrap(),
             profiles,
+            ranges: Vec::new(),
         }
     }
 

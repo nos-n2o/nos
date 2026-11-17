@@ -3,6 +3,8 @@ use std::net::Ipv4Addr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
+use ipnet::Ipv6Net;
+
 use super::ospfv3_profile;
 use super::{Config, Ospfv3Profile};
 use nos_proto_derive::Cli;
@@ -29,6 +31,44 @@ pub struct Ospfv3Area {
     #[cli(topic = Ospfv3Profile)]
     /// Interface profiles declared in this area, referenced by an interface's `ospfv3` attachment.
     pub profiles: Vec<Ospfv3Profile>,
+
+    /// RFC 5340 §4.4.3.3 address ranges, applied by an ABR to this area's own
+    /// intra-area prefixes when summarizing them into its other areas: every
+    /// covered prefix is suppressed, and an advertised range with at least
+    /// one active component is sent as one Inter-Area-Prefix-LSA (metric =
+    /// the largest component cost) and installed as a discard route on the
+    /// ABR. Harmless on a router that is no ABR.
+    #[serde(default)]
+    #[garde(custom(|ranges, _ctx: &Config| valid_ranges(ranges)))]
+    #[cli(topic = OspfAreaRange)]
+    pub ranges: Vec<Ospfv3AreaRange>,
+}
+
+/// One RFC 5340 §4.4.3.3 area address range, keyed by `cidr`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub struct Ospfv3AreaRange {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    /// The summarised IPv6 prefix; the key.
+    pub cidr: Ipv6Net,
+    /// `DoNotAdvertise`: the covered prefixes are hidden from the other areas
+    /// entirely. `false` (the default) advertises the range.
+    #[serde(default)]
+    #[cli(topic = OspfAreaRangeAdvertise)]
+    pub not_advertise: bool,
+}
+
+/// Range cidrs are unique within an area (`ospf_area`'s rule).
+fn valid_ranges(ranges: &[Ospfv3AreaRange]) -> garde::Result {
+    for (i, r) in ranges.iter().enumerate() {
+        if ranges[..i].iter().any(|o| o.cidr.trunc() == r.cidr.trunc()) {
+            return Err(garde::Error::new(
+                "range cidrs must be unique within an area",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The placeholder a new `Ospfv3Area` starts from (`edit` on a missing one).
@@ -37,6 +77,7 @@ impl Default for Ospfv3Area {
         Ospfv3Area {
             area_id: Ipv4Addr::UNSPECIFIED,
             profiles: Vec::new(),
+            ranges: Vec::new(),
         }
     }
 }
@@ -47,12 +88,13 @@ mod tests {
 
     use crate::schema::{Config, Ospfv3Instance};
 
-    use super::Ospfv3Area;
+    use super::{Ospfv3Area, Ospfv3AreaRange};
 
     fn area(area_id: &str) -> Ospfv3Area {
         Ospfv3Area {
             area_id: area_id.parse().unwrap(),
             profiles: Vec::new(),
+            ranges: Vec::new(),
         }
     }
 
@@ -88,6 +130,21 @@ mod tests {
     #[test]
     fn duplicate_area_id_within_instance_fails() {
         let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0"), area("0.0.0.0")])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_range_cidr_fails() {
+        let range = |c: &str| Ospfv3AreaRange {
+            cidr: c.parse().unwrap(),
+            not_advertise: false,
+        };
+        let mut a = area("0.0.0.1");
+        a.ranges = vec![range("2001:db8::/32"), range("2001:db8:1::/48")];
+        let cfg = config_with(vec![instance("r1", vec![a.clone()])]);
+        cfg.validate_with(&cfg).unwrap();
+        a.ranges.push(range("2001:db8::/32"));
+        let cfg = config_with(vec![instance("r1", vec![a])]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
 

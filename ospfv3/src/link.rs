@@ -1907,6 +1907,12 @@ pub struct LinkManager {
     originate_lsinfinity: AtomicBool,
     /// The one-time no-backbone `warn!` was logged and the state still holds.
     no_backbone_warned: AtomicBool,
+    /// Each area's RFC 5340 §4.4.3.3 ranges `(cidr, advertise)`, replaced on
+    /// every resync (`set_area_ranges`).
+    area_ranges: std::sync::Mutex<HashMap<Ipv4Addr, Vec<(Ipv6Net, bool)>>>,
+    /// Active advertised ranges and their metric, rewritten by every
+    /// origination tick; `compute_routes` turns them into discard routes.
+    active_ranges: std::sync::Mutex<HashMap<Ipv6Net, u32>>,
     /// Test-only (`--router-lsa-max-links`): cap links per Router-LSA fragment
     /// so the e2e splits a small router; `0` = unset.
     router_lsa_max_links: AtomicUsize,
@@ -2037,6 +2043,12 @@ impl LinkManager {
     /// resync. Registrations follow; a link never restarts for it.
     pub fn set_bfd(&self, wanted: HashMap<String, BfdProfile>) {
         *self.bfd.lock().unwrap() = wanted;
+    }
+
+    /// Every area's address ranges `(cidr, advertise)`, replaced on every
+    /// resync; applied at the next origination tick.
+    pub fn set_area_ranges(&self, ranges: HashMap<Ipv4Addr, Vec<(Ipv6Net, bool)>>) {
+        *self.area_ranges.lock().unwrap() = ranges;
     }
 
     pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
@@ -2241,6 +2253,8 @@ impl LinkManager {
             extended_lsa: AtomicBool::new(false),
             originate_lsinfinity: AtomicBool::new(false),
             no_backbone_warned: AtomicBool::new(false),
+            area_ranges: std::sync::Mutex::new(HashMap::new()),
+            active_ranges: std::sync::Mutex::new(HashMap::new()),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             router_lsa_max_links: AtomicUsize::new(0),
             grace_period: AtomicU16::new(0),
@@ -2705,7 +2719,9 @@ impl LinkManager {
     /// intra-area. Run after the intra-area passes, so this tick's own
     /// prefixes are summarized. Without the backbone: no summaries, one
     /// `warn!` while that lasts.
-    /// `ponytail:` no area ranges, no up/down-bit loop prevention —
+    /// Area ranges (§4.4.3.3, `nos_ospf_common::areas::apply_ranges`) fold
+    /// a source area's intra-area prefixes into one LSA per range.
+    /// `ponytail:` no up/down-bit loop prevention —
     /// `docs/protocols/ospf-internals.md`'s ABR ceilings.
     async fn originate_inter_area_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
         let attached = self.attached_areas().await;
@@ -2716,8 +2732,11 @@ impl LinkManager {
             warn!("ospfv3 attached to 2+ areas without the backbone: not an ABR, no summaries");
         }
         if !abr {
+            self.active_ranges.lock().unwrap().clear();
             return;
         }
+        let ranges = self.area_ranges.lock().unwrap().clone();
+        let mut active_ranges = HashMap::new();
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
             .lock()
@@ -2731,19 +2750,26 @@ impl LinkManager {
         let mut views = Vec::new();
         for (area_id, lsdb) in &areas {
             let lsas = lsdb.lock().await.all();
+            let area_ranges = ranges.get(area_id).map_or(&[][..], |r| &r[..]);
             let (prefixes, asbrs, own) = if area_id.is_unspecified() {
                 let v = spf::backbone_view(local_router_id, &lsas);
-                let mut prefixes = v.intra.prefixes.clone();
+                let (mut prefixes, active) =
+                    nos_ospf_common::areas::apply_ranges(&v.intra.prefixes, area_ranges);
+                active_ranges.extend(active);
                 prefixes.extend(v.inter_prefixes);
                 let mut asbrs = v.intra.asbrs.clone();
                 asbrs.extend(v.inter_asbrs);
                 (prefixes, asbrs, v.intra)
             } else {
                 let v = spf::intra_area_routes(local_router_id, &lsas);
-                (v.prefixes.clone(), v.asbrs.clone(), v)
+                let (prefixes, active) =
+                    nos_ospf_common::areas::apply_ranges(&v.prefixes, area_ranges);
+                active_ranges.extend(active);
+                (prefixes, v.asbrs.clone(), v)
             };
             views.push((*area_id, prefixes, asbrs, own));
         }
+        *self.active_ranges.lock().unwrap() = active_ranges;
         let types = self.lsa_types();
         let infinity = self.originate_lsinfinity.load(Ordering::Relaxed);
         for (dest, lsdb) in &areas {
@@ -3134,6 +3160,13 @@ impl LinkManager {
                     })
                     .or_insert(entry);
             }
+        }
+        // RFC 5340 §4.4.3.3: a discard route per active advertised range,
+        // unless SPF has a real route for exactly it.
+        for (&range, &metric) in self.active_ranges.lock().unwrap().iter() {
+            merged
+                .entry(range)
+                .or_insert_with(|| spf::RouteEntry::discard(range, metric));
         }
         merged.into_values().collect()
     }

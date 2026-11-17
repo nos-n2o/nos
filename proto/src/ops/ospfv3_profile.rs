@@ -552,6 +552,7 @@ mod tests {
         Ospfv3Area {
             area_id: area_id(id),
             profiles,
+            ranges: Vec::new(),
         }
     }
 
