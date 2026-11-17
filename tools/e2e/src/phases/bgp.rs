@@ -2060,7 +2060,9 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
     );
     a.provision(&a_flags(&["--aggregate-as-set"])).await?;
     a.wait_new(&a_set, set_before, 30).await?;
-    b.wait_new(looped, loop_before, 30).await?;
+    // #839: the re-announcement waits out the MRAI (30 s, #629) like above, so
+    // 30 s here raced it: 60 (2x) with the same reason.
+    b.wait_new(looped, loop_before, 60).await?;
     b.wait_new(&withdrawn(AGGREGATE_PREFIX), wd_before, 30)
         .await?;
 
