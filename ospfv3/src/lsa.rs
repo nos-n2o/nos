@@ -83,6 +83,13 @@ pub fn is_as_scope(lsa_type: u16) -> bool {
     effective_scope(lsa_type) == SCOPE_AS
 }
 
+/// RFC 5340 §4.4.3 / RFC 2328 §3.6: whether an LSA of `lsa_type` belongs in
+/// an area of this kind: no AS-scope LSA (0x4005, 0xC025, ...) in a stub
+/// area. The one scope rule every path (DBD, LSR, LSU, flood, SPF) uses.
+pub fn in_area_scope(lsa_type: u16, stub: bool) -> bool {
+    nos_ospf_common::areas::in_area_scope(is_as_scope(lsa_type), false, stub, false)
+}
+
 /// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s effective scope is
 /// link-local — such an LSA lives in its link's own store and is never
 /// flooded past that link (`link.rs`'s per-link `Lsdb`). Includes

@@ -176,15 +176,18 @@ pub struct LinkConfig {
     /// RFC 3623 helper: the most seconds of a neighbor's grace period this
     /// link honours (`graceful-restart helper max-grace-period`).
     pub helper_max_grace_period: u32,
+    /// The link's area is a stub or totally-stubby area (RFC 5340 §4.4.3):
+    /// no E-bit, no AS-scope LSAs on this link.
+    pub stub: bool,
 }
 
 /// `helper_max_grace_period` when the instance sets none.
 pub const DEFAULT_HELPER_MAX_GRACE_PERIOD: u32 = 1800;
 
 /// The Options every self-originated LSA and packet carries: `V6`/`R`, and
-/// `E` since every area is a normal area (RFC 5340 §A.2 — no stub areas or
-/// NSSA in `OSPFv3` yet; an FRR neighbor treats a clear E-bit in a normal
-/// area as a mismatch).
+/// `E` outside a stub area (RFC 5340 §A.2; an FRR neighbor treats a clear
+/// E-bit in a normal area as a mismatch). `link_options` clears E on a stub
+/// link; no NSSA in `OSPFv3` yet.
 const OWN_OPTIONS: u32 = lsa::OPTION_V6 | lsa::OPTION_E | lsa::OPTION_R;
 
 /// Hello/DBD Options for this link — `OWN_OPTIONS`, plus RFC 7166 §2.1's
@@ -195,7 +198,16 @@ fn link_options(cfg: &LinkConfig) -> u32 {
     } else {
         0
     };
-    OWN_OPTIONS | at
+    own_options(cfg.stub) | at
+}
+
+/// `OWN_OPTIONS` for an area of this kind: no E-bit in a stub area.
+fn own_options(stub: bool) -> u32 {
+    if stub {
+        OWN_OPTIONS & !lsa::OPTION_E
+    } else {
+        OWN_OPTIONS
+    }
 }
 
 /// RFC 7166 §4.1's anti-replay check, mirroring
@@ -361,6 +373,7 @@ pub async fn run(
         area: &lsdb,
         link: &link_local_lsdb,
         as_scope: &as_lsdb,
+        stub: cfg.stub,
     };
     let dbd_max_headers =
         dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
@@ -529,6 +542,8 @@ struct Stores<'a> {
     area: &'a Mutex<Lsdb>,
     link: &'a Mutex<Lsdb>,
     as_scope: &'a Mutex<Lsdb>,
+    /// A stub area's link never reads the AS-scope store.
+    stub: bool,
 }
 
 impl Stores<'_> {
@@ -536,14 +551,18 @@ impl Stores<'_> {
     async fn all(&self) -> Vec<Arc<Lsa>> {
         let mut lsas = self.area.lock().await.all();
         lsas.extend(self.link.lock().await.all());
-        lsas.extend(self.as_scope.lock().await.all());
+        if !self.stub {
+            lsas.extend(self.as_scope.lock().await.all());
+        }
         lsas
     }
 
     async fn headers(&self) -> Vec<LsaHeader> {
         let mut headers = self.area.lock().await.headers();
         headers.extend(self.link.lock().await.headers());
-        headers.extend(self.as_scope.lock().await.headers());
+        if !self.stub {
+            headers.extend(self.as_scope.lock().await.headers());
+        }
         headers
     }
 }
@@ -633,6 +652,17 @@ fn handle_hello(
             limiter,
             link = %cfg.attach_point, area = %hello.area_id, expected = %cfg.area_id,
             "dropping ospfv3 hello with mismatched area"
+        );
+        return false;
+    }
+
+    // RFC 5340 §A.2 / RFC 2328 §10.5: the E-bit is clear exactly in a stub
+    // area, so both ends must agree on whether the area is one.
+    if (hello.options & lsa::OPTION_E != 0) == cfg.stub {
+        warn_limited!(
+            limiter,
+            link = %cfg.attach_point, neighbor = %hello.router_id,
+            "dropping ospfv3 hello with mismatched e-bit"
         );
         return false;
     }
@@ -834,7 +864,14 @@ async fn handle_dbd(
         dbd_options: link_options(cfg),
         peer_opaque_capable: false,
     };
-    let actions = exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
+    let actions = exchange::on_dbd_received(
+        &mut adj,
+        old_state,
+        &params,
+        dbd,
+        &local_lsdb_headers,
+        cfg.stub,
+    );
 
     Some(finish_neighbor_event(
         cfg,
@@ -868,7 +905,7 @@ async fn handle_lsr(
         let lsdb = stores.area.lock().await;
         let link_local_lsdb = stores.link.lock().await;
         let as_lsdb = stores.as_scope.lock().await;
-        exchange::on_lsr_received(&mut adj, &lsdb, &link_local_lsdb, &as_lsdb, lsr)
+        exchange::on_lsr_received(&mut adj, &lsdb, &link_local_lsdb, &as_lsdb, lsr, cfg.stub)
     };
 
     Some(finish_neighbor_event(
@@ -911,6 +948,7 @@ async fn handle_lsu(
             lsu,
             // tokio's clock, so paused-time tests see MinLSArrival pass.
             tokio::time::Instant::now().into_std(),
+            cfg.stub,
         );
         // A Grace-LSA is acted on at once and never held: a copy left in the
         // LSDB would be offered back to the restarted router and flooded to
@@ -1910,6 +1948,9 @@ pub struct LinkManager {
     /// Each area's RFC 5340 §4.4.3.3 ranges `(cidr, advertise)`, replaced on
     /// every resync (`set_area_ranges`).
     area_ranges: std::sync::Mutex<HashMap<Ipv4Addr, Vec<(Ipv6Net, bool)>>>,
+    /// Each stub area's `(import_summaries, default metric)` (`set_stub_areas`);
+    /// an area missing here is a normal one.
+    stub_areas: std::sync::Mutex<HashMap<Ipv4Addr, (bool, u32)>>,
     /// Active advertised ranges and their metric, rewritten by every
     /// origination tick; `compute_routes` turns them into discard routes.
     active_ranges: std::sync::Mutex<HashMap<Ipv6Net, u32>>,
@@ -2043,6 +2084,17 @@ impl LinkManager {
     /// resync. Registrations follow; a link never restarts for it.
     pub fn set_bfd(&self, wanted: HashMap<String, BfdProfile>) {
         *self.bfd.lock().unwrap() = wanted;
+    }
+
+    /// Every stub area's `(import_summaries, default metric)`, replaced on
+    /// every resync; applied at the next origination tick.
+    pub fn set_stub_areas(&self, stub: HashMap<Ipv4Addr, (bool, u32)>) {
+        *self.stub_areas.lock().unwrap() = stub;
+    }
+
+    #[cfg(test)]
+    pub fn stub_areas_for_test(&self) -> HashMap<Ipv4Addr, (bool, u32)> {
+        self.stub_areas.lock().unwrap().clone()
     }
 
     /// Every area's address ranges `(cidr, advertise)`, replaced on every
@@ -2254,6 +2306,7 @@ impl LinkManager {
             originate_lsinfinity: AtomicBool::new(false),
             no_backbone_warned: AtomicBool::new(false),
             area_ranges: std::sync::Mutex::new(HashMap::new()),
+            stub_areas: std::sync::Mutex::new(HashMap::new()),
             active_ranges: std::sync::Mutex::new(HashMap::new()),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             router_lsa_max_links: AtomicUsize::new(0),
@@ -2484,14 +2537,20 @@ impl LinkManager {
         if self.is_backbone_abr().await {
             flags |= lsa::ROUTER_FLAG_B;
         }
-        if !self.redistribute_filtered.lock().await.is_empty() {
-            flags |= lsa::ROUTER_FLAG_E;
-        }
+        let asbr = !self.redistribute_filtered.lock().await.is_empty();
+        let stub_areas = self.stub_areas.lock().unwrap().clone();
         let types = self.lsa_types();
         let max_metric = self.max_metric_tick();
         debug_assert!(!lsa::is_link_local_scope(types.router));
         debug_assert!(!lsa::is_link_local_scope(types.network));
         for area_id in area_ids {
+            let stub = stub_areas.contains_key(&area_id);
+            // No AS-External-LSA reaches a stub area, so no ASBR there.
+            let flags = if asbr && !stub {
+                flags | lsa::ROUTER_FLAG_E
+            } else {
+                flags
+            };
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
@@ -2534,7 +2593,7 @@ impl LinkManager {
                     id,
                     LsaBody::Router(RouterLsaBody {
                         flags,
-                        options: OWN_OPTIONS,
+                        options: own_options(stub),
                         links: router_links,
                     }),
                 ));
@@ -2564,7 +2623,7 @@ impl LinkManager {
                     types.network,
                     lsa::interface_id_key(cfg.interface_id),
                     LsaBody::Network(NetworkLsaBody {
-                        options: OWN_OPTIONS,
+                        options: own_options(stub),
                         attached_routers: attached,
                     }),
                 ));
@@ -2596,7 +2655,7 @@ impl LinkManager {
                 lsa::interface_id_key(cfg.interface_id),
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
-                    options: OWN_OPTIONS,
+                    options: own_options(cfg.stub),
                     link_local_address: cfg.link_local_address,
                     prefixes: vec![LinkPrefixEntry {
                         options: 0,
@@ -2772,7 +2831,12 @@ impl LinkManager {
         *self.active_ranges.lock().unwrap() = active_ranges;
         let types = self.lsa_types();
         let infinity = self.originate_lsinfinity.load(Ordering::Relaxed);
+        let stub_areas = self.stub_areas.lock().unwrap().clone();
         for (dest, lsdb) in &areas {
+            // RFC 5340 §4.4.3 / RFC 2328 §12.4.3.1: a stub area gets no
+            // Inter-Area-Router-LSA, a totally stubby one no other
+            // Inter-Area-Prefix-LSA than the default.
+            let stub = stub_areas.get(dest).copied();
             // Cheapest over every source area; 24-bit metrics (LSInfinity
             // excluded).
             let mut prefixes: HashMap<Ipv6Net, u32> = HashMap::new();
@@ -2782,6 +2846,9 @@ impl LinkManager {
                 // The backbone feeds every area, a non-backbone area only
                 // the backbone.
                 if src == dest || (!src.is_unspecified() && !dest.is_unspecified()) {
+                    continue;
+                }
+                if stub.is_some_and(|(import, _)| !import) {
                     continue;
                 }
                 for &(prefix, cost) in src_prefixes {
@@ -2800,6 +2867,12 @@ impl LinkManager {
                         *e = (cost, options);
                     }
                 }
+            }
+            if stub.is_some() {
+                asbrs.clear();
+            }
+            if let Some((_, cost)) = stub {
+                prefixes.insert(Ipv6Net::default(), cost);
             }
             let mut desired = Vec::new();
             for (prefix, metric) in prefixes.into_iter().filter(|(_, m)| *m < 0x00FF_FFFF) {
@@ -2860,6 +2933,16 @@ impl LinkManager {
         } else {
             spf::EXTERNAL_METRIC
         };
+        // The AS-scope store only floods on non-stub links: a router whose
+        // every area is stub is no ASBR.
+        let stub_areas = self.stub_areas.lock().unwrap().clone();
+        let attached = self.attached_areas().await;
+        let prefixes =
+            if !attached.is_empty() && attached.iter().all(|a| stub_areas.contains_key(a)) {
+                Vec::new()
+            } else {
+                prefixes
+            };
         for prefix in prefixes {
             let lsid = self.lsid(lsa::LSA_TYPE_AS_EXTERNAL, prefix).await;
             done.as_scope.insert(install_self_originated(
@@ -3148,7 +3231,10 @@ impl LinkManager {
             // AS-External-LSAs are routed from every area (through an
             // intra-area ASBR or an Inter-Area-Router-LSA there); the cheapest
             // wins in the merge below.
-            lsas.extend(self.as_lsdb.lock().await.all());
+            // (never a stub area's: RFC 5340 §4.4.3, its default is the route).
+            if !self.stub_areas.lock().unwrap().contains_key(&area_id) {
+                lsas.extend(self.as_lsdb.lock().await.all());
+            }
             let skip = backbone_abr && !area_id.is_unspecified();
             for entry in spf::compute_in(router_id, &lsas, skip) {
                 merged
@@ -3606,6 +3692,7 @@ pub(crate) mod tests {
             auth: None,
             instance_id: 0,
             helper_max_grace_period: 1800,
+            stub: false,
         }
     }
 
@@ -3768,7 +3855,7 @@ pub(crate) mod tests {
             area_id: cfg.area_id,
             interface_id: 4,
             router_priority: 1,
-            options: 0,
+            options: lsa::OPTION_E,
             hello_interval: cfg.hello_interval,
             dead_interval: cfg.dead_interval,
             designated_router: Ipv4Addr::UNSPECIFIED,
@@ -3818,7 +3905,7 @@ pub(crate) mod tests {
             area_id: cfg.area_id,
             interface_id: 4,
             router_priority: 1,
-            options: 0,
+            options: lsa::OPTION_E,
             hello_interval: hi,
             dead_interval: di,
             designated_router: Ipv4Addr::UNSPECIFIED,
@@ -3847,6 +3934,49 @@ pub(crate) mod tests {
         assert_eq!(status.borrow().neighbors.len(), 1);
         // Burst of 5 warnings, the other two drops were rate limited.
         assert_eq!(limiter.take_suppressed(), 2);
+    }
+
+    /// RFC 5340 §A.2: the Hello's E bit must match the area's kind.
+    #[tokio::test(start_paused = true)]
+    async fn handle_hello_drops_mismatched_e_bit() {
+        use nos_ospf_common::ratelimit::WarnLimiter;
+        let hello = |cfg: &LinkConfig, options: u32| packet::HelloPacket {
+            router_id: Ipv4Addr::new(2, 2, 2, 2),
+            area_id: cfg.area_id,
+            interface_id: 4,
+            router_priority: 1,
+            options,
+            hello_interval: cfg.hello_interval,
+            dead_interval: cfg.dead_interval,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        };
+        for (stub, options, accepted) in [
+            (true, lsa::OPTION_E, false),
+            (true, 0, true),
+            (false, 0, false),
+            (false, lsa::OPTION_E, true),
+        ] {
+            let cfg = LinkConfig {
+                stub,
+                ..link("eth0.0", 10)
+            };
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            handle_hello(
+                &mem_socket(&cfg),
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv6Addr::from(0xfe80_0000_0000_0000_0000_0000_0000_0001_u128),
+                &hello(&cfg, options),
+                false,
+                &mut WarnLimiter::default(),
+            );
+            assert_eq!(status.borrow().neighbors.len(), usize::from(accepted));
+            // A stub link's own Hello/DBD options carry no E bit.
+            assert_eq!(link_options(&cfg) & lsa::OPTION_E == 0, stub);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -3942,7 +4072,7 @@ pub(crate) mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_id: 4,
             router_priority: 1,
-            options: 0,
+            options: lsa::OPTION_E,
             hello_interval: 10,
             dead_interval: 40,
             designated_router: Ipv4Addr::UNSPECIFIED,
@@ -4299,6 +4429,7 @@ pub(crate) mod tests {
             area: &area,
             link: &link_store,
             as_scope: &as_scope,
+            stub: false,
         };
         area.lock()
             .await
@@ -4903,7 +5034,7 @@ pub(crate) mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_id: 4,
             router_priority: 1,
-            options: 0,
+            options: lsa::OPTION_E,
             hello_interval: 10,
             dead_interval: 40,
             designated_router: Ipv4Addr::UNSPECIFIED,
@@ -4983,7 +5114,7 @@ pub(crate) mod tests {
             area_id: cfg.area_id,
             interface_id: 4,
             router_priority: 1,
-            options: 0,
+            options: lsa::OPTION_E,
             hello_interval: cfg.hello_interval,
             dead_interval: cfg.dead_interval,
             designated_router: Ipv4Addr::UNSPECIFIED,
@@ -5818,6 +5949,84 @@ pub(crate) mod tests {
         assert_eq!(router_flags(&b, area1, id(3)).await, Some(0));
     }
 
+    /// RFC 5340 §4.4.3: a (area 0, ASBR) — b (ABR) — c (area 1, stub). c
+    /// learns the default (b's `stub_default_cost`) and a's loopback but no
+    /// external; totally stubby it learns the default only. A stub/normal
+    /// E-bit mismatch keeps the adjacency down.
+    #[tokio::test(start_paused = true)]
+    async fn stub_area_gets_default_and_no_externals() {
+        let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+        let loopback: Ipv6Net = "2001:db8:ff::1/128".parse().unwrap();
+        let external: Ipv6Net = "2001:db8:e::/48".parse().unwrap();
+        let default = Ipv6Net::default();
+        let ext_update = RedistributeUpdate::Full(vec![nos_proto::RedistributedRoute {
+            prefix: IpNet::V6(external),
+            gateway: "2001:db8:1::99".parse().unwrap(),
+        }]);
+        for (import, c_stub) in [(true, true), (false, true), (true, false)] {
+            let wire = Arc::new(wire::Wire::default());
+            let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+            let seg = |n: u8, net: u8, area_id: Ipv4Addr, stub: bool| LinkConfig {
+                area_id,
+                stub,
+                prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+                ..wired_link(n, NetworkType::PointToPoint)
+            };
+            a.reconcile(
+                vec![seg(1, 1, area0, false)],
+                HashMap::from([(area0, vec![(loopback, 1)])]),
+                id(1),
+            )
+            .await;
+            a.apply_redistribute_update(ext_update.clone()).await;
+            for m in [&b, &c] {
+                m.set_stub_areas(HashMap::from([(area1, (import, 7))]));
+            }
+            b.reconcile(
+                vec![seg(2, 1, area0, false), seg(3, 2, area1, true)],
+                HashMap::new(),
+                id(2),
+            )
+            .await;
+            c.reconcile(vec![seg(4, 2, area1, c_stub)], HashMap::new(), id(3))
+                .await;
+            settle(90).await;
+
+            let routes = c.compute_routes().await;
+            let has = |p: Ipv6Net| routes.iter().any(|r| r.prefix == p);
+            if !c_stub {
+                assert!(routes.is_empty(), "e-bit mismatch: {routes:?}");
+                continue;
+            }
+            let d = routes
+                .iter()
+                .find(|r| r.prefix == default)
+                .unwrap_or_else(|| panic!("{routes:?}"));
+            assert_eq!(d.metric, 8, "link cost 1 + stub-default-cost 7");
+            assert!(!has(external), "{routes:?}");
+            assert_eq!(has(loopback), import, "{routes:?}");
+            // The stub area's databases hold no AS-scope LSA at all.
+            let db = c.database_summaries().await;
+            assert!(db.iter().all(|l| !lsa::is_as_scope(l.lsa_type)), "{db:?}");
+            // Back to a normal area: the default goes, the external arrives.
+            for m in [&b, &c] {
+                m.set_stub_areas(HashMap::new());
+            }
+            b.reconcile(
+                vec![seg(2, 1, area0, false), seg(3, 2, area1, false)],
+                HashMap::new(),
+                id(2),
+            )
+            .await;
+            c.reconcile(vec![seg(4, 2, area1, false)], HashMap::new(), id(3))
+                .await;
+            settle(90).await;
+            let routes = c.compute_routes().await;
+            assert!(routes.iter().any(|r| r.prefix == external), "{routes:?}");
+            assert!(routes.iter().all(|r| r.prefix != default), "{routes:?}");
+        }
+    }
+
     /// #610: a (area 1, ASBR) — b (ABR) — c (ABR, area 0 between) — d
     /// (area 2): c passes b's backbone Inter-Area-Prefix/Router-LSAs on into
     /// area 2, so d routes to a's loopback and external prefix; a router in
@@ -6279,6 +6488,7 @@ pub(crate) mod tests {
             area: &area,
             link: &link_store,
             as_scope: &as_scope,
+            stub: false,
         };
         let header = LsaHeader {
             age: 0,
@@ -6513,6 +6723,7 @@ pub(crate) mod tests {
             area: &a,
             link: &l,
             as_scope: &s,
+            stub: false,
         };
         let mut last = None;
         flood_full_neighbors(&socket, &cfg, id(1), &stores, &status, &mut last).await;

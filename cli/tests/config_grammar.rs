@@ -49,6 +49,8 @@ fn populated() -> Config {
             ..Default::default()
         }],
         ranges: Vec::new(),
+        area_type: nos_proto::OspfAreaType::Normal,
+        stub_default_cost: None,
     };
     let iface = |name: &str| Interface {
         name: name.into(),

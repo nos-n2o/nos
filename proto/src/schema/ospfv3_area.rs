@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use ipnet::Ipv6Net;
 
 use super::ospfv3_profile;
-use super::{Config, Ospfv3Profile};
+use super::{Config, OspfAreaType, Ospfv3Profile};
 use nos_proto_derive::Cli;
 
 /// One `OSPFv3` area within an `Ospfv3Instance`, keyed by its dotted-quad area
@@ -42,6 +42,43 @@ pub struct Ospfv3Area {
     #[garde(custom(|ranges, _ctx: &Config| valid_ranges(ranges)))]
     #[cli(topic = OspfAreaRange)]
     pub ranges: Vec<Ospfv3AreaRange>,
+
+    /// RFC 5340 §4.4.3 / RFC 2328 §3.6 stub area (no AS-External-LSAs, E-bit
+    /// clear) or totally stubby (an ABR also sends no Inter-Area-Prefix-LSA
+    /// but its default). Every router on the area's links must agree, or
+    /// their Hellos are dropped. The backbone can't be one; `Nssa` is not
+    /// built for `OSPFv3` yet. Checked by `valid_area_settings`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfAreaType)]
+    pub area_type: OspfAreaType,
+
+    /// The metric of the `::/0` default an ABR originates into a stub area
+    /// (`None` means 1); only allowed on a stub area.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfAreaStubDefaultCost)]
+    pub stub_default_cost: Option<u16>,
+}
+
+/// `area_type`/`stub_default_cost` checks, run from the owning instance's
+/// `areas` validator since the backbone rule is about the key.
+pub(crate) fn valid_area_settings(area: &Ospfv3Area) -> garde::Result {
+    if area.area_type.is_nssa() {
+        return Err(garde::Error::new("nssa is not supported for ospfv3 yet"));
+    }
+    if area.area_type.is_stub() && area.area_id.is_unspecified() {
+        return Err(garde::Error::new(
+            "the backbone (0.0.0.0) can't be a stub area",
+        ));
+    }
+    match area.stub_default_cost {
+        Some(_) if !area.area_type.is_stub() => Err(garde::Error::new(
+            "stub-default-cost is only allowed on a stub area",
+        )),
+        Some(0) => Err(garde::Error::new("stub-default-cost must be 1 or more")),
+        _ => Ok(()),
+    }
 }
 
 /// One RFC 5340 §4.4.3.3 area address range, keyed by `cidr`.
@@ -78,6 +115,8 @@ impl Default for Ospfv3Area {
             area_id: Ipv4Addr::UNSPECIFIED,
             profiles: Vec::new(),
             ranges: Vec::new(),
+            area_type: OspfAreaType::Normal,
+            stub_default_cost: None,
         }
     }
 }
@@ -93,8 +132,7 @@ mod tests {
     fn area(area_id: &str) -> Ospfv3Area {
         Ospfv3Area {
             area_id: area_id.parse().unwrap(),
-            profiles: Vec::new(),
-            ranges: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -146,6 +184,30 @@ mod tests {
         a.ranges.push(range("2001:db8::/32"));
         let cfg = config_with(vec![instance("r1", vec![a])]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn stub_settings_are_checked() {
+        use crate::schema::OspfAreaType;
+        let check = |a: Ospfv3Area| {
+            let cfg = config_with(vec![instance("r1", vec![a])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let mut a = area("0.0.0.1");
+        a.area_type = OspfAreaType::TotallyStubby;
+        a.stub_default_cost = Some(5);
+        assert!(check(a.clone()));
+        a.stub_default_cost = Some(0);
+        assert!(!check(a.clone()));
+        a.stub_default_cost = None;
+        a.area_type = OspfAreaType::Nssa;
+        assert!(!check(a.clone()));
+        let mut b = area("0.0.0.0");
+        b.area_type = OspfAreaType::Stub;
+        assert!(!check(b));
+        let mut c = area("0.0.0.1");
+        c.stub_default_cost = Some(5);
+        assert!(!check(c));
     }
 
     #[test]

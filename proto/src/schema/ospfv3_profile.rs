@@ -246,6 +246,8 @@ mod tests {
             area_id: area_id.parse().unwrap(),
             profiles,
             ranges: Vec::new(),
+            area_type: crate::schema::OspfAreaType::Normal,
+            stub_default_cost: None,
         }
     }
 

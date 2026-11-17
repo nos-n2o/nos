@@ -296,6 +296,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
+            stub: area.area_type.is_stub(),
         });
     }
 }
@@ -442,10 +443,15 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             auth: pc.auth.clone(),
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
+            stub: area.area_type.is_stub(),
         });
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one resync pass; the steps are the logic"
+)]
 async fn resync(ctx: &mut Ctx, state: &mut State) {
     let Ctx {
         config_socket,
@@ -579,6 +585,21 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         desired_loopback_prefixes,
     } = wanted;
     links.set_bfd(bfd_wants);
+    links.set_stub_areas(
+        own.areas
+            .iter()
+            .filter(|a| a.area_type.is_stub())
+            .map(|a| {
+                (
+                    a.area_id,
+                    (
+                        a.area_type.import_summaries(),
+                        u32::from(a.stub_default_cost.unwrap_or(1)),
+                    ),
+                )
+            })
+            .collect(),
+    );
     links.set_area_ranges(
         own.areas
             .iter()
@@ -1313,6 +1334,7 @@ mod tests {
             auth: None,
             instance_id: 0,
             helper_max_grace_period: 1800,
+            stub: false,
         }
     }
 

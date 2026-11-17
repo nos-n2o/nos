@@ -27,8 +27,9 @@ pub fn mtu_based_max_headers(mtu: u16) -> usize {
     common::mtu_based_max_headers(mtu, 40 + 16 + 12)
 }
 
-/// `nos_ospf_common::exchange::on_dbd_received` for v3: no stub/NSSA scope
-/// (RFC 5340 §3.4 deprecated it) and no opaque LSAs. `p.dbd_options` is
+/// `nos_ospf_common::exchange::on_dbd_received` for v3: `stub` keeps
+/// AS-scope LSAs out of a stub area (RFC 5340 §4.4.3, no NSSA) and there are
+/// no opaque LSAs. `p.dbd_options` is
 /// `link::link_options`, so every DBD carries the link's Options (RFC 5340
 /// A.3.3), the AT-bit included.
 pub fn on_dbd_received(
@@ -37,8 +38,17 @@ pub fn on_dbd_received(
     p: &Params,
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
+    stub: bool,
 ) -> Vec<Action> {
-    common::on_dbd_received(adj, state, p, dbd, local_lsdb_headers, |_| true, |_| false)
+    common::on_dbd_received(
+        adj,
+        state,
+        p,
+        dbd,
+        local_lsdb_headers,
+        |h| lsa::in_area_scope(h.lsa_type, stub),
+        |_| false,
+    )
 }
 
 /// `nos_ospf_common::exchange::on_lsr_received` over v3's stores: the
@@ -50,7 +60,12 @@ pub fn on_lsr_received(
     link_local_lsdb: &Lsdb,
     as_lsdb: &Lsdb,
     lsr: &LsrPacket,
+    stub: bool,
 ) -> Vec<Action> {
+    // A stub area's link never answers for an AS-scope LSA.
+    if stub {
+        return common::on_lsr_received(adj, &[area_lsdb, link_local_lsdb], &lsr.requests);
+    }
     common::on_lsr_received(adj, &[area_lsdb, link_local_lsdb, as_lsdb], &lsr.requests)
 }
 
@@ -67,6 +82,7 @@ pub fn on_lsu_received(
     as_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
     now: Instant,
+    stub: bool,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut stores = common::Stores {
         area: area_lsdb,
@@ -87,7 +103,8 @@ pub fn on_lsu_received(
                 common::Scope::Area
             }
         },
-        |h| lsa::is_reserved_scope(h.lsa_type),
+        // §13 step 3: reserved scope, or AS-scope in a stub area.
+        |h| lsa::is_reserved_scope(h.lsa_type) || !lsa::in_area_scope(h.lsa_type, stub),
         |h| h.lsa_type == lsa::LSA_TYPE_GRACE,
     )
 }
@@ -127,7 +144,7 @@ mod tests {
             lsa_headers: vec![header("1.1.1.1", 1)],
         };
         let mut adj = AdjacencyData::default();
-        let actions = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &poll, &[]);
+        let actions = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &poll, &[], false);
         assert!(
             matches!(&actions[0], Action::SendDbd(reply) if reply.options == 0x0413),
             "{actions:?}"
@@ -188,11 +205,11 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![router.header.key(), link.header.key()],
         };
-        let actions = on_lsr_received(&mut adj, &area, &link_local, &Lsdb::new(), &lsr);
+        let actions = on_lsr_received(&mut adj, &area, &link_local, &Lsdb::new(), &lsr, false);
         assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 2));
         // A Link-LSA held only by a *different* link's store is not servable
         // here — that is exactly the RFC 5340 §4.5.1 leak this guards.
-        let actions = on_lsr_received(&mut adj, &area, &Lsdb::new(), &Lsdb::new(), &lsr);
+        let actions = on_lsr_received(&mut adj, &area, &Lsdb::new(), &Lsdb::new(), &lsr, false);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
@@ -225,6 +242,7 @@ mod tests {
             &mut as_scope,
             &lsu,
             Instant::now(),
+            false,
         );
         assert_eq!(newly_installed.len(), 3);
         assert!(as_scope.get(&external.header.key()).is_some());
@@ -269,6 +287,7 @@ mod tests {
             &mut as_scope,
             &lsu,
             Instant::now(),
+            false,
         );
         assert_eq!(installed.len(), 4);
         assert!(area.get(&u_area.header.key()).is_some());
@@ -309,8 +328,65 @@ mod tests {
             &mut Lsdb::new(),
             &lsu,
             Instant::now(),
+            false,
         );
         assert_eq!(installed, vec![grace.header]);
         assert_eq!(adj.pending_acks.len(), 2);
+    }
+
+    /// RFC 5340 §4.4.3: a stub area's link drops an AS-scope LSU entry
+    /// unacked, lists none in a DBD, and answers no LSR for one.
+    #[test]
+    fn stub_link_keeps_as_scope_lsas_out() {
+        let mut external = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        external.header.lsa_type = lsa::LSA_TYPE_AS_EXTERNAL;
+        let router = full_lsa("1.1.1.2", 0x8000_0001u32.cast_signed());
+        let lsu = LsuPacket {
+            discarded: 0,
+            last_error: None,
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![external.clone(), router.clone()],
+        };
+        let mut adj = AdjacencyData::default();
+        let mut as_scope = Lsdb::new();
+        let (_, installed) = on_lsu_received(
+            &mut adj,
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &mut as_scope,
+            &lsu,
+            Instant::now(),
+            true,
+        );
+        assert_eq!(installed, vec![router.header]);
+        assert_eq!(as_scope.all().len(), 0);
+        assert_eq!(adj.pending_acks, vec![router.header]);
+
+        // A DBD listing one is a sequence mismatch.
+        let p = Params {
+            local_router_id: router_id("9.9.9.9"),
+            max_headers: 100,
+            mtu: 1500,
+            dbd_options: 0x13,
+            peer_opaque_capable: false,
+        };
+        let dbd = DbdPacket {
+            lls: None,
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            options: 0x13,
+            interface_mtu: 1500,
+            init: false,
+            more: false,
+            master: true,
+            dd_sequence_number: 7,
+            lsa_headers: vec![external.header],
+        };
+        let mut adj = AdjacencyData::default();
+        let a = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &dbd, &[], true);
+        assert!(matches!(&a[..], [Action::NeighborEvent(_)]), "{a:?}");
+        let a = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &dbd, &[], false);
+        assert!(!matches!(&a[..], [Action::NeighborEvent(_)]), "{a:?}");
     }
 }

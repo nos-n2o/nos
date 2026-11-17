@@ -595,6 +595,8 @@ pub const OSPFV3_ABR_LOOPBACK_ADDRESS: &str = "2001:db8:5::1/128";
 /// over it (prefixes no other phase uses).
 pub const OSPFV3_RANGE_LOOPBACK: &str = "2001:db8:6::1/128";
 pub const OSPFV3_RANGE: &str = "2001:db8:6::/48";
+/// `ospfv3-stub`: router-b's area-0 loopback (a prefix no other phase uses).
+pub const OSPFV3_STUB_LOOPBACK: &str = "2001:db8:7::1/128";
 /// `ospfv3-lsinfinity-asbr`: the area-1 link between router-b (the ABR) and
 /// router-c (the ASBR), a docker network of its own so the two areas sit on
 /// different L2 segments (docker names it `eth1` on both).

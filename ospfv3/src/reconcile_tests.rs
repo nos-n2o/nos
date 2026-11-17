@@ -99,6 +99,8 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
         area_id: id.parse().unwrap(),
         profiles,
         ranges: Vec::new(),
+        area_type: nos_proto::OspfAreaType::Normal,
+        stub_default_cost: None,
     }
 }
 
@@ -382,6 +384,24 @@ async fn resync_profile_knobs_override_the_defaults() {
         auth.keys,
         [(9, P::HmacSha256, b"k9".to_vec())],
         "the md5 key is not representable and is dropped"
+    );
+}
+
+#[tokio::test]
+async fn resync_stub_area_marks_the_link_and_feeds_the_manager() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].areas = vec![Ospfv3Area {
+        area_type: nos_proto::OspfAreaType::TotallyStubby,
+        stub_default_cost: Some(3),
+        ..area("0.0.0.1", vec![profile("p1")])
+    }];
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    let l = e.running("nostst0.0").await.expect("link built");
+    assert!(l.stub, "the link's area is a stub");
+    assert_eq!(
+        e.links.stub_areas_for_test(),
+        std::collections::HashMap::from([(Ipv4Addr::new(0, 0, 0, 1), (false, 3))])
     );
 }
 
