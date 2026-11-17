@@ -224,11 +224,16 @@ async fn drop_udp_and_recover(w: &World, port: &str) -> anyhow::Result<()> {
     let est = "bgp session established";
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     let closing = format!("bgp: bfd session down, closing peer={IP_B}");
-    let sent = format!("sent cease notification peer={IP_B} .*subcode=10 hard_reset=true");
-    // Router-b's own BFD goes Down a moment later (the peer signals it), so
-    // both close at once and neither reads the other's NOTIFICATION.
+    // Either side may lose the race: when the peer's Hard Reset arrives before
+    // its own BFD Down reaches bgpd, the session is already closed and it logs
+    // `received notification ... hard_reset_subcode=10` instead of sending (#1252).
+    let sent = format!(
+        "sent cease notification peer={IP_B} .*subcode=10 hard_reset=true\\|received notification peer={IP_B} .*hard_reset_subcode=10"
+    );
     let closing_b = format!("bgp: bfd session down, closing peer={IP_A}");
-    let sent_b = format!("sent cease notification peer={IP_A} .*subcode=10 hard_reset=true");
+    let sent_b = format!(
+        "sent cease notification peer={IP_A} .*subcode=10 hard_reset=true\\|received notification peer={IP_A} .*hard_reset_subcode=10"
+    );
     let (n_closing, n_sent, n_closing_b, n_sent_b, est_a, est_b) = (
         a.count(&closing),
         a.count(&sent),

@@ -814,7 +814,7 @@ The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` 
 - When a session goes `up` then `down`, an `Established` peer is closed with Cease subcode 10 (BFD Down, RFC 9384). The router logs `bgp: bfd session down, closing peer=<ip>`.
 - `init` and `admin-down` do nothing: BGP has its own keepalive liveness (RFC 5882 section 3.2). A session that was never `up` does nothing either.
 - Graceful restart (RFC 5882 section 4.3): what happens depends on the C bit (BFD independent of the control plane), which must be set at both ends.
-  - Both set: BFD is a real forwarding verdict. With N exchanged the Cease/10 is wrapped in a Hard Reset so the peer flushes our routes (`sent cease notification … subcode=10 hard_reset=true`, the peer logs `hard_reset_subcode=10`), and routes already stale from a restart of the peer are purged at once.
+  - Both set: BFD is a real forwarding verdict. With N exchanged the Cease/10 is wrapped in a Hard Reset so the peer flushes our routes (`sent cease notification … subcode=10 hard_reset=true`, the peer logs `hard_reset_subcode=10`; if the peer's own BFD Down was processed first it already closed and sends nothing), and routes already stale from a restart of the peer are purged at once.
   - Either clear: BFD fails along with a restart, so stale routes are kept and the Cease/10 is graceful.
   - `nos-bfdd` always sets C.
 - Without `nos-bfdd` BGP works as before; sessions are registered again after it comes back.
