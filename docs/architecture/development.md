@@ -55,6 +55,8 @@ The Dockerfile's last stage, `lab`, is `runtime` plus `pamtester` (what `nos-e2e
 
 `watchdog` and `cli` share the same image and an `nos-run` volume mounted at `/run/nos`, so `cli` reaches the daemon over the same Unix socket path both binaries default to. `watchdog` also gets an `nos-data` volume at `/var/lib/nos` (one `0700` directory per daemon role, made by the watchdog) so `save`d config survives container restarts. `docker compose exec watchdog nos` still works too — it just runs the shell inside the watchdog's own container instead of a separate one.
 
+**Dev-only `nos` flags**: `--watchdog-socket`/`--pki-ca` exist only with `--features nos-cli/dev-args` (`make docker-build CARGO_FEATURES=nos-cli/dev-args`); a release `nos` rejects them (`cli/tests/login_shell.rs`), as it is setgid and must not let its caller choose the trust anchor. `make clippy`/`make test` also build and run `nos-cli` with the feature.
+
 **Memory profiling**: `docker build --build-arg CARGO_FEATURES=nos-bgp/dhat-heap -t nos .` builds `nos-bgpd` with `dhat` heap profiling (see `docs/protocols/bgp-internals.md`'s "Memory profiling"); run it via `docker compose run --rm watchdog --bgpd-arg --profile-memory-out=/var/lib/nos/bgpd/dhat-heap.json` (`--bgpd-arg` is `nos-watchdogd`'s existing opaque pass-through to every spawned `nos-bgpd` instance — no watchdog code involved) and load the resulting report from the `nos-data` volume at https://nnethercote.github.io/dh_view/dh_view.html. `nos-configd` and `nos-restd` have the same feature: see "Memory profiling" in [config-protocol.md](config-protocol.md).
 
 Or run the underlying commands directly:

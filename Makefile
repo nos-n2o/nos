@@ -56,6 +56,7 @@ fmt-fix: toolchain-check ## Apply formatting
 
 clippy: toolchain-check ## Lint the whole workspace, warnings deny (matches CI)
 	$(RUN) cargo clippy --workspace --all-targets
+	$(RUN) cargo clippy -p nos-cli --all-targets --features dev-args
 
 clippy-fix: toolchain-check ## Apply clippy's auto-fixable suggestions, then re-check
 	$(RUN) cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
@@ -65,6 +66,7 @@ fix: fmt-fix clippy-fix ## Autofix everything that has an autofix (fmt + clippy 
 
 test: toolchain-check ## Run tests via nextest (matches CI)
 	$(RUN) cargo nextest run --workspace
+	$(RUN) cargo nextest run -p nos-cli --features dev-args
 
 test-plain: toolchain-check ## Run tests via plain `cargo test` (no extra tool needed)
 	$(RUN) cargo test --workspace
