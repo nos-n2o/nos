@@ -588,7 +588,7 @@
         "type": "string"
       },
       "BgpAddPath": {
-        "description": "RFC 7911 ADD-PATH direction for a peer-group's unicast and VPN Flowspec families: whether\nthis side offers to receive several paths per prefix, send them, or both.\nWhat is actually used per family is negotiated against the peer's own\ncapability (RFC 7911 §5).",
+        "description": "RFC 7911 ADD-PATH direction for a peer-group's unicast, VPN unicast and VPN Flowspec families: whether\nthis side offers to receive several paths per prefix, send them, or both.\nWhat is actually used per family is negotiated against the peer's own\ncapability (RFC 7911 §5).",
         "enum": [
           "Receive",
           "Send",
@@ -1122,7 +1122,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/BgpAddPath",
-                "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                "description": "RFC 7911 ADD-PATH for this group's unicast, VPN unicast and VPN Flowspec\nfamilies (`ipv4`/`ipv6`/`vpnv4`/`vpnv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
               },
               {
                 "type": "null"
@@ -24752,7 +24752,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast, VPN unicast and VPN Flowspec\nfamilies (`ipv4`/`ipv6`/`vpnv4`/`vpnv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },
@@ -24831,7 +24831,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast, VPN unicast and VPN Flowspec\nfamilies (`ipv4`/`ipv6`/`vpnv4`/`vpnv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },
@@ -24877,7 +24877,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BgpAddPath",
-                "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                "description": "RFC 7911 ADD-PATH for this group's unicast, VPN unicast and VPN Flowspec\nfamilies (`ipv4`/`ipv6`/`vpnv4`/`vpnv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
               }
             }
           },
@@ -24889,7 +24889,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BgpAddPath",
-                  "description": "RFC 7911 ADD-PATH for this group's unicast and VPN Flowspec families\n(`ipv4`/`ipv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
+                  "description": "RFC 7911 ADD-PATH for this group's unicast, VPN unicast and VPN Flowspec\nfamilies (`ipv4`/`ipv6`/`vpnv4`/`vpnv6`/`vpnv4-flowspec`/`vpnv6-flowspec`; never EVPN). `None` is `Both` for a `route_server_client` group and off\notherwise. Carried in the OPEN, so a change restarts the sessions."
                 }
               }
             },

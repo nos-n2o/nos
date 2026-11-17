@@ -22,8 +22,9 @@ use nos_rpl::CompiledPolicy;
 use nos_proto::{VpnPrefix, VpnPrefixUpdate};
 
 use super::{
-    apply_policy, best_path, build_advertisement, decision, info, message, warn, AdvertisedRoute,
-    BgpRib, Candidate, OutboundUpdate, PolicyPeer, RibRoute, RouteOrigin, VpnRoute,
+    apply_policy, best_path, build_advertisement, debug, decision, info, message, warn,
+    AdvertisedRoute, BgpRib, Candidate, OutboundUpdate, PolicyPeer, RibRoute, RouteOrigin,
+    VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
 
@@ -65,6 +66,13 @@ fn learn_batch(
     for n in &mp.vpn {
         let k = (n.rd, n.prefix);
         keys.push(k);
+        // ponytail: one copy per (peer, key) until #1133; a later path id
+        // replaces the held one (ids are not stored, so only the new one is named).
+        if let Some(id) = n.path_id
+            && table.contains_key(&k)
+        {
+            debug!(peer = %from, rd = %format_rd(&n.rd), prefix = %n.prefix, path_id = id, "vpn path replaces the held copy of the same key");
+        }
         let candidate = RibRoute {
             next_hop: Some(mp.next_hop),
             ..base.clone()
@@ -112,7 +120,7 @@ fn learn_batch(
             if let Some(h) = bmp {
                 h.vpn_post(from, &k, Some(&new));
             }
-            info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, "vpn route learned");
+            info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, path_id = ?n.path_id, "vpn route learned");
         }
     }
     keys

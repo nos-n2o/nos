@@ -18,6 +18,7 @@ pub(super) const P: &str = "10.10.0.0/24";
 
 pub(super) fn nlri(rd: Rd, p: &str, label: u32) -> VpnNlri {
     VpnNlri {
+        path_id: None,
         labels: vec![label],
         rd,
         prefix: prefix(p),

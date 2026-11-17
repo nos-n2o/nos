@@ -2083,6 +2083,7 @@ mod tests {
                 rtc: vec![],
                 vpn: [1, 2]
                     .map(|n| crate::vpn::VpnNlri {
+                        path_id: None,
                         labels: vec![100 * u32::from(n)],
                         rd: rd(n),
                         prefix: "10.10.0.0/24".parse().unwrap(),
