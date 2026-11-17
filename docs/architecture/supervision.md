@@ -49,3 +49,5 @@ In every family's pass-through flags (`--bgpd-arg`, `--restd-arg`, `--sshd-arg`,
 - A child that never beats (`nos-sshd`, a daemon still starting) is exempt; each spawn forgets the previous beat.
 - Debugging a daemon under a debugger: start `nos-watchdogd --no-heartbeat-kill`.
 - Only the runtime is observed; one wedged sub-task in a live runtime is not (see the `ponytail:` note in `daemon/src/liveness.rs`).
+
+Spawn hardening (#1210): `supervise_one` runs a `pre_exec` hook that sets `PR_SET_MDWE` (refuse W+X and W-to-X mappings, inherited, irrevocable) on every child. It fails closed: on a kernel older than 6.3 (`EINVAL`) `spawn()` errors (`failed to spawn ... hint="PR_SET_MDWE needs Linux >= 6.3"`) and the usual backoff retries, so nothing runs without it. The host kernel must be >= 6.3 (container hosts too: the kernel is shared; `e2e-preflight.sh` checks). A successful spawn logs `spawned process=<name> pid=<n> mdwe=true`. See "W^X for daemons" in IPC security.

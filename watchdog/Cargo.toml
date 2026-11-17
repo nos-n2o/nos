@@ -23,6 +23,7 @@ nos-pki            = { workspace = true }
 nos-password       = { workspace = true }
 getrandom          = { workspace = true }
 sha2               = { workspace = true }
+libc               = { workspace = true }
 
 [[bin]]
 name = "nos-watchdogd"

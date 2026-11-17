@@ -150,6 +150,47 @@ fn allowed_env(
         .collect()
 }
 
+// Linux `include/uapi/linux/prctl.h` (6.3); newer than the `libc` release pinned.
+const PR_SET_MDWE: libc::c_int = 65;
+const PR_GET_MDWE: libc::c_int = 66;
+const PR_MDWE_REFUSE_EXEC_GAIN: libc::c_ulong = 1;
+
+/// Memory-Deny-Write-Execute for the calling process, inherited across fork
+/// and exec and irrevocable: no W+X mapping, no `mprotect` to X of a writable
+/// one (#1210). Runs between fork and exec: raw prctls only, no allocation.
+/// Fails on kernels < 6.3 (`EINVAL`): nothing may run without it.
+fn set_mdwe() -> std::io::Result<()> {
+    // SAFETY: plain prctl syscalls with integer arguments.
+    #[allow(unsafe_code, reason = "two prctl syscalls, integer args only (#1210)")]
+    unsafe {
+        if libc::prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let got = libc::prctl(PR_GET_MDWE, 0, 0, 0, 0);
+        if got < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if got as libc::c_ulong & PR_MDWE_REFUSE_EXEC_GAIN == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+    }
+    Ok(())
+}
+
+/// Runs `hook` in the child between fork and exec; its error fails `spawn()`.
+/// The hook is a parameter so a test can make it fail.
+#[allow(clippy::disallowed_types, reason = "supervisor spawn path (#228)")]
+fn harden(command: &mut Command, hook: fn() -> std::io::Result<()>) {
+    // SAFETY: the hook only makes async-signal-safe syscalls.
+    #[allow(
+        unsafe_code,
+        reason = "one async-signal-safe prctl between fork and exec (#1210)"
+    )]
+    unsafe {
+        command.pre_exec(hook);
+    }
+}
+
 /// Consecutive rapid crashes at which (and every 10th after) an alarm is logged.
 const CRASH_LOOP_ALARM: u32 = 5;
 
@@ -185,13 +226,23 @@ pub async fn supervise_one(
         if let Some((uid, gid)) = spec.uid {
             command.uid(uid).gid(gid);
         }
+        harden(&mut command, set_mdwe);
         if spec.identity.is_some() {
             command.stdin(Stdio::piped());
         }
         let mut child = match command.spawn() {
-            Ok(child) => child,
+            Ok(child) => {
+                // Spawn Ok proves the pre_exec hook (MDWE) succeeded.
+                info!(process = %spec.name, pid = child.id(), mdwe = true, "spawned");
+                child
+            }
             Err(e) => {
-                error!(process = %spec.name, error = %e, "failed to spawn");
+                let hint = if e.raw_os_error() == Some(libc::EINVAL) {
+                    "PR_SET_MDWE needs Linux >= 6.3"
+                } else {
+                    ""
+                };
+                error!(process = %spec.name, error = %e, hint, "failed to spawn");
                 if wait_or_shutdown(delay, &mut shutdown).await {
                     return;
                 }
@@ -488,6 +539,69 @@ mod backoff_tests {
         // No identity, no role, no uid.
         let bare = ProcessSpec::new("x", "/bin/true", vec![]);
         assert_eq!(bare.with_role_uid(Some(992)).uid, None);
+    }
+
+    #[tokio::test]
+    async fn harden_with_failing_hook_does_not_spawn() {
+        let mut c = Command::new("/bin/true");
+        harden(&mut c, || {
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        });
+        let e = c.spawn().unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EINVAL));
+    }
+
+    /// Child side of `a_hardened_child_cannot_gain_exec`; a no-op otherwise.
+    #[test]
+    #[allow(unsafe_code, reason = "raw mmap/mprotect probe (#1210)")]
+    fn mdwe_probe() {
+        if std::env::var_os("NOS_MDWE_PROBE").is_none() {
+            return;
+        }
+        let map = |prot| unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        let rwx = map(libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        assert_eq!(rwx, libc::MAP_FAILED, "RWX mapping must be refused");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let w = map(libc::PROT_READ | libc::PROT_WRITE);
+        assert_ne!(w, libc::MAP_FAILED);
+        let r = unsafe { libc::mprotect(w, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+        assert_eq!(r, -1, "W then X must be refused");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hardened_child_cannot_gain_exec() {
+        let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
+        let mut it = rel.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
+        if (it.next().unwrap_or(0), it.next().unwrap_or(0)) < (6, 3) {
+            eprintln!("kernel {rel} < 6.3: skipping");
+            return;
+        }
+        let mut c = Command::new(std::env::current_exe().unwrap());
+        c.args(["--exact", "backoff_tests::mdwe_probe", "--nocapture"])
+            .env("NOS_MDWE_PROBE", "1");
+        harden(&mut c, set_mdwe);
+        let out = c.output().await.unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A child spawned with our own uid/gid still runs (an unprivileged

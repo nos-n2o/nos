@@ -35,6 +35,7 @@ pub async fn ssh_hostkey(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(FP, before, 60).await?;
     a.wait("ssh listening").await?;
+    a.wait("spawned process=nos-sshd.* mdwe=true").await?; // #1210
     let f1 = fingerprint(a)?;
 
     log("ssh-hostkey: hidden from REST and logs");
