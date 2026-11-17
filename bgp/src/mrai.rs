@@ -119,6 +119,7 @@ mod tests {
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],

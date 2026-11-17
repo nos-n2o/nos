@@ -552,6 +552,8 @@ pub struct RibRoute {
     pub aggregator: Option<message::Aggregator>,
     /// RFC 9234 Only to Customer ASN (`message::PathAttributes::otc`).
     pub otc: Option<u32>,
+    /// Unrecognized optional transitive attributes passed through (RFC 4271 section 5).
+    pub unknown: Arc<[message::RawAttribute]>,
     /// RFC 6811 origin validation against the instance's current VRP set,
     /// computed before import policy runs (`this.bgp.validation_state`).
     pub validation_state: nos_rpl::ValidationState,
@@ -670,6 +672,8 @@ pub struct AdvertisedRoute {
     pub aggregator: Option<message::Aggregator>,
     /// RFC 9234 Only to Customer ASN (`message::PathAttributes::otc`).
     pub otc: Option<u32>,
+    /// Unrecognized optional transitive attributes passed through (RFC 4271 section 5).
+    pub unknown: Arc<[message::RawAttribute]>,
     /// RFC 7911 ADD-PATH identifier — `Some` exactly toward a peer we send
     /// ADD-PATH to for this family (`BgpRib::propagate_add_path`). `None`
     /// without ADD-PATH.

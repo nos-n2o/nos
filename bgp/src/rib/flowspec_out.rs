@@ -77,6 +77,7 @@ pub(super) fn flow_rib_route(peer: IpAddr, r: &FlowspecRoute, confed: bool) -> R
         atomic_aggregate: a.atomic_aggregate,
         aggregator: a.aggregator,
         otc: a.otc,
+        unknown: std::sync::Arc::default(),
         validation_state: nos_rpl::ValidationState::NotFound,
         received_ov: None,
     }

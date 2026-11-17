@@ -61,6 +61,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "bgp-multipath" => bgp::bgp_multipath(w).await,
         "as4" => bgp::as4(w).await,
         "malformed-update" => bgp::malformed_update(w).await,
+        "unknown-attribute" => bgp::unknown_attribute(w).await,
         "maximum-prefix" => bgp::maximum_prefix(w).await,
         "add-path" => bgp::add_path(w).await,
         "route-refresh-stale" => bgp::route_refresh_stale(w).await,
@@ -304,6 +305,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         "multi" => &[
             "as4",
             "malformed-update",
+            "unknown-attribute",
             "maximum-prefix",
             "add-path",
             "route-refresh-stale",
@@ -442,6 +444,7 @@ pub const ALL: &[&str] = &[
     "bfd-unsolicited",
     "as4",
     "malformed-update",
+    "unknown-attribute",
     "maximum-prefix",
     "add-path",
     "route-refresh-stale",

@@ -59,6 +59,7 @@ fn attributes_of(r: &RibRoute, next_hop: Ipv4Addr) -> PathAttributes {
         atomic_aggregate: r.atomic_aggregate,
         aggregator: r.aggregator,
         otc: r.otc,
+        unknown: std::sync::Arc::default(),
     }
 }
 
@@ -120,6 +121,7 @@ pub fn evpn_to_update(r: &EvpnRoute) -> UpdateMessage {
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
         }),
         mp_reach: vec![mp],
         ..Default::default()
@@ -436,6 +438,7 @@ mod tests {
             atomic_aggregate: false,
             aggregator: None,
             otc: None,
+            unknown: std::sync::Arc::default(),
             validation_state: nos_rpl::ValidationState::NotFound,
             received_ov: None,
         }

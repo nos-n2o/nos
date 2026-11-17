@@ -358,6 +358,12 @@ Every OPEN advertises these capabilities, with no option to turn them off:
 
 A malformed attribute in a received UPDATE does not reset the session: the routes in that UPDATE are treated as withdrawn and logged (RFC 7606). Attributes whose flags conflict with their type are treated the same way; a repeated attribute keeps its first occurrence (a repeated multiprotocol attribute resets the session). Only a message that cannot be parsed at all closes the session.
 
+Unrecognized path attributes (RFC 4271 sections 5 and 6.3):
+- Optional transitive: kept with the route and passed to every peer (iBGP, eBGP, route-reflector client, route-server client, confederation) with the Partial bit set; an already-set Partial bit stays set. Policies cannot see or strip them, and aggregates and locally originated routes carry none.
+- Optional non-transitive: quietly ignored.
+- Well-known (Optional bit clear): the session is reset with NOTIFICATION UPDATE Message Error / Unrecognized Well-known Attribute (3/2), whose data is the whole attribute.
+- Deviation from the RFC 4271 MUST to keep every transitive attribute: at most 1024 wire bytes of them are kept per UPDATE, in wire order; a larger one is dropped with a warning and a later one that still fits is kept. The kept attributes are re-sent sorted by type, not in the received order.
+
 - A message NOS cannot decode closes the session with the RFC 4271 §6 NOTIFICATION that names the fault, data included: unknown message type (Header Error / Bad Message Type, data = the type), bad length (data = the length), bad NLRI (UPDATE / Invalid Network Field), bad `MP_REACH_NLRI` (UPDATE / Optional Attribute Error), a ROUTE-REFRESH that is not 4 octets long (code 7, RFC 7313). Details: [internals](bgp-internals.md).
 
 - A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
