@@ -2706,14 +2706,26 @@ impl LinkManager {
             let mut router_prefixes: Vec<IntraAreaPrefixEntry> = links
                 .iter()
                 .filter(|(cfg, status)| {
-                    cfg.network_type == NetworkType::PointToPoint
+                    cfg.network_type != NetworkType::Broadcast
                         || (cfg.network_type == NetworkType::Broadcast
                             && !network_prefix_originated(status))
                 })
-                .map(|(cfg, _)| IntraAreaPrefixEntry {
-                    options: 0,
-                    metric: cfg.cost,
-                    prefix: cfg.prefix,
+                .map(|(cfg, _)| {
+                    if cfg.network_type == NetworkType::PointToMultipoint {
+                        // RFC 5340 §4.4.3.9: the router's own address as a
+                        // /128 host prefix (LA), not the subnet.
+                        IntraAreaPrefixEntry {
+                            options: lsa::PREFIX_OPT_LA,
+                            metric: cfg.cost,
+                            prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
+                        }
+                    } else {
+                        IntraAreaPrefixEntry {
+                            options: 0,
+                            metric: cfg.cost,
+                            prefix: cfg.prefix,
+                        }
+                    }
                 })
                 .collect();
             for (prefix, cost) in loopback_prefixes.get(&area_id).into_iter().flatten() {
@@ -3424,12 +3436,18 @@ fn router_lsa_links(
                 // RFC 5340 §4.4.3.2: only a fully adjacent neighbor (a
                 // neighbor back in Init after a BFD kill must drop out, #463).
                 // Lowest router ID: never depend on HashMap order (#957).
-                if let Some((neighbor_id, info)) = status
+                // Point-to-multipoint (RFC 2328 §12.4.1.4 equivalent) lists
+                // every such neighbor, point-to-point only the first.
+                let mut full: Vec<_> = status
                     .neighbors
                     .iter()
                     .filter(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
-                    .min_by_key(|(id, _)| **id)
-                {
+                    .collect();
+                full.sort_by_key(|(id, _)| **id);
+                if cfg.network_type == NetworkType::PointToPoint {
+                    full.truncate(1);
+                }
+                for (neighbor_id, info) in full {
                     result.push(RouterLsaLink {
                         link_type: LINK_TYPE_POINT_TO_POINT,
                         metric: metric_of(cfg),
@@ -4165,6 +4183,69 @@ pub(crate) mod tests {
         assert_eq!(links[0].neighbor_router_id, neighbor_id);
         assert_eq!(links[0].neighbor_interface_id, 7);
         assert_eq!(links[0].interface_id, cfg.interface_id);
+    }
+
+    /// Point-to-multipoint lists every `Full` neighbor (not `Init`), point-to-point
+    /// only the lowest router ID.
+    #[test]
+    fn router_lsa_links_p2mp_lists_every_full_neighbor() {
+        let mut cfg = link("eth0.0", 10);
+        let mut status = LinkStatus::new(NetworkType::PointToMultipoint);
+        for (i, state) in [
+            (12, NeighborState::Full),
+            (10, NeighborState::Full),
+            (11, NeighborState::Init),
+        ] {
+            status.neighbors.insert(
+                Ipv4Addr::new(9, 9, 9, i),
+                neighbor_info(state, "fe80::2".parse().unwrap(), u32::from(i)),
+            );
+        }
+        let me = Ipv4Addr::new(1, 1, 1, 1);
+        cfg.network_type = NetworkType::PointToMultipoint;
+        let ids: Vec<_> = router_lsa_links(me, &[(cfg.clone(), status.clone())], false)
+            .iter()
+            .map(|l| l.neighbor_router_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(9, 9, 9, 12)]
+        );
+        cfg.network_type = NetworkType::PointToPoint;
+        assert_eq!(router_lsa_links(me, &[(cfg, status)], false).len(), 1);
+    }
+
+    /// RFC 5340 §4.4.3.9: a point-to-multipoint link advertises its own
+    /// address as a /128 with LA, not the subnet.
+    #[tokio::test]
+    async fn p2mp_link_advertises_its_address_as_a_host_prefix() {
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = NetworkType::PointToMultipoint;
+        cfg.prefix = "2001:db8::1/64".parse().unwrap();
+        manager
+            .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
+            .await;
+        manager.originate_all(router_id).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: router_id,
+        };
+        let installed = manager
+            .lsdb_for(cfg.area_id)
+            .await
+            .lock()
+            .await
+            .get(&key)
+            .unwrap();
+        let LsaBody::IntraAreaPrefix(body) = &installed.body else {
+            panic!("expected intra-area-prefix lsa")
+        };
+        assert_eq!(body.prefixes.len(), 1);
+        assert_eq!(body.prefixes[0].prefix, "2001:db8::1/128".parse().unwrap());
+        assert_eq!(body.prefixes[0].options, lsa::PREFIX_OPT_LA);
     }
 
     /// RFC 6987 §2: a stub router advertises every link at `MaxLinkMetric`.

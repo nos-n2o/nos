@@ -204,6 +204,7 @@ pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
         r.route.next_hop.unwrap_or(unspecified),
     );
     mp.vpn = vec![VpnNlri {
+        path_id: None,
         labels: r.labels.clone(),
         rd: k.0,
         prefix: k.1,
@@ -219,6 +220,7 @@ pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
 pub fn vpn_withdraw_to_update(k: &VpnKey<IpNet>) -> UpdateMessage {
     let mut mp = unreach(afi_of(k.1), SAFI_VPN);
     mp.vpn = vec![VpnNlri {
+        path_id: None,
         labels: Vec::new(),
         rd: k.0,
         prefix: k.1,
@@ -730,6 +732,7 @@ mod tests {
             assert_eq!(
                 got.mp_reach[0].vpn,
                 vec![VpnNlri {
+                    path_id: None,
                     labels: vec![100],
                     rd,
                     prefix
