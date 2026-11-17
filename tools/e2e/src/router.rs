@@ -570,7 +570,6 @@ impl Router {
 
     /// `count` after the log store has gone quiet (#884): use for baselines so
     /// lines still in flight from a previous step are not counted as new.
-    #[allow(dead_code, reason = "consumed by the #885-#887 baseline fixes")]
     pub async fn count_fresh(&self, pattern: &str) -> usize {
         self.logs.barrier().await;
         self.count(pattern)

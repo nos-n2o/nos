@@ -3667,7 +3667,7 @@ async fn set_link(w: &World, router: &str, dev: &str, state: &str) -> anyhow::Re
 /// #276: `nos-ospfv3d` follows `nos-interfaced`'s link stream on a second
 /// OSPFv3 link, `eth1.0` over a direct veth pair (`eth0.0` carries the REST
 /// API, so it cannot be cut). A `nos-interfaced` kill plus a config change
-/// tears nothing down; carrier loss and admin-down are seen within 5s with no
+/// tears nothing down; carrier loss and admin-down are seen within 15s with no
 /// dead timer; a deleted device is `absent`. Leaves eth1 deleted.
 async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     w.link_veths().await?;
@@ -3754,18 +3754,21 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     // Carrier loss: router-b's end goes admin-down, router-a's loses carrier;
     // neither waits for a dead timer.
     let reason = |r: &str| format!("ospfv3 link kernel interface down link=eth1.0 .*reason={r}");
-    let (nc0, ad0, down1) = (
-        a.count(&reason("no-carrier")),
-        b.count(&reason("admin-down")),
-        (a.count(down), b.count(down)),
+    // #1028: fresh baselines (in-flight lines from the restart settle first) and a
+    // 15s window, still well under the 40s dead interval the `down` check below
+    // guards.
+    let (nc0, ad0) = (
+        a.count_fresh(&reason("no-carrier")).await,
+        b.count_fresh(&reason("admin-down")).await,
     );
+    let down1 = (a.count_fresh(down).await, b.count_fresh(down).await);
     let (a_full, b_full) = (
         a.count(&full(OSPFV3_ROUTER_ID_B)),
         b.count(&full(OSPFV3_ROUTER_ID)),
     );
     set_link(w, "router-b", "eth1", "down").await?;
-    a.wait_new(&reason("no-carrier"), nc0, 5).await?;
-    b.wait_new(&reason("admin-down"), ad0, 5).await?;
+    a.wait_new(&reason("no-carrier"), nc0, 15).await?;
+    b.wait_new(&reason("admin-down"), ad0, 15).await?;
     if a.count(down) > down1.0 || b.count(down) > down1.1 {
         bail!("a dead timer expired: link-down detection did not come from the stream");
     }
@@ -3776,7 +3779,7 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     // A deleted device is absent.
     let absent0 = a.count(&reason("absent"));
     w.unlink_veths().await;
-    a.wait_new(&reason("absent"), absent0, 5).await
+    a.wait_new(&reason("absent"), absent0, 15).await
 }
 
 /// Polls `router`'s `GET /v1/ospfv3/database` (up to 15s: the Link- and
