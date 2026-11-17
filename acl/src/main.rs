@@ -18,10 +18,26 @@ use tracing::{info, warn};
 /// One fixed instance, like `nos-stpd`.
 const DEFAULT_LISTEN_SOCKET: &str = "/run/nos/acl.sock";
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, clap::ValueEnum, Default)]
+#[cfg_attr(not(feature = "dev-args"), allow(dead_code))]
 enum DriverKind {
     Noop,
+    #[default]
     Linux,
+}
+
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// `linux` programs tc; `noop` leaves the kernel alone.
+    #[cfg_attr(feature = "dev-args", arg(long, value_enum, default_value_t = DriverKind::Linux))]
+    driver: DriverKind,
+
+    /// Test hook: a JSON flowspec snapshot applied as if `nos-bgpd` pushed
+    /// it, re-read when it changes (`docs/architecture/linux-drivers.md`).
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    flowspec_file: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -40,14 +56,9 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
     listen_socket: PathBuf,
 
-    /// `linux` programs tc; `noop` leaves the kernel alone.
-    #[arg(long, value_enum, default_value_t = DriverKind::Linux)]
-    driver: DriverKind,
-
-    /// Test hook: a JSON flowspec snapshot applied as if `nos-bgpd` pushed
-    /// it, re-read when it changes (`docs/architecture/linux-drivers.md`).
-    #[arg(long, hide = true)]
-    flowspec_file: Option<PathBuf>,
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
@@ -62,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
     nos_daemon::liveness::start(args.watchdog_socket.clone());
-    info!(driver = ?args.driver, "nos-acld starting");
-    match args.driver {
+    info!(driver = ?args.dev.driver, "nos-acld starting");
+    match args.dev.driver {
         DriverKind::Linux => {
             serve(args, LinuxDriver, true, identity, shutdown_tx, shutdown_rx).await
         }
@@ -113,6 +124,7 @@ async fn serve<D: Driver>(
         .inspect_err(|e| tracing::error!(error = %e, "failed to start acl IPC server"))
         .context("starting acl IPC server")?;
     let file_task = args
+        .dev
         .flowspec_file
         .clone()
         .map(|p| tokio::spawn(flowspec_file::run(p, engine.clone(), shutdown_rx.clone())));
@@ -174,12 +186,17 @@ mod tests {
     fn args_parse() {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-acld"]).unwrap();
-        assert!(matches!(args.driver, DriverKind::Linux));
+        assert!(matches!(args.dev.driver, DriverKind::Linux));
         assert_eq!(args.listen_socket, PathBuf::from(DEFAULT_LISTEN_SOCKET));
+        assert_eq!(args.dev.flowspec_file, None);
+    }
+
+    #[cfg(feature = "dev-args")]
+    #[test]
+    fn dev_args_parse() {
         let args = Args::try_parse_from(["nos-acld", "--driver", "noop"]).unwrap();
-        assert!(matches!(args.driver, DriverKind::Noop));
-        assert_eq!(args.flowspec_file, None);
+        assert!(matches!(args.dev.driver, DriverKind::Noop));
         let args = Args::try_parse_from(["nos-acld", "--flowspec-file", "/x.json"]).unwrap();
-        assert_eq!(args.flowspec_file, Some(PathBuf::from("/x.json")));
+        assert_eq!(args.dev.flowspec_file, Some(PathBuf::from("/x.json")));
     }
 }

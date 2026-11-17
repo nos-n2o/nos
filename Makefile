@@ -5,12 +5,13 @@ IMAGE ?= nos:local
 # e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see docs/architecture/development.md's
 # "Memory profiling" note. Empty by default: no behavior change.
 CARGO_FEATURES ?=
+comma := ,
 # Line-coverage floor for `make coverage` (and CI, which runs it) — 90%
 # since #131 (measured 91.7%); raise it as tests land, never lower it.
 COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image prune-merged toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build \
+        deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build docker-build-release \
         e2e-preflight e2e-soak docs-fix claude-md-size
 
 help: ## Show this help
@@ -40,6 +41,11 @@ ci-image: ## Build the nos-ci toolchain image if this host needs it and it is mi
 	  docker build --build-arg RUST_TOOLCHAIN=$(PIN) --build-arg MIRI_TOOLCHAIN=$(MIRI_TOOLCHAIN) \
 	    -t $(CI_IMAGE) tools/ci
 
+# Test-only flags/env of the daemons (#1214): absent from a release build; the e2e image, the
+# system test and `make test` build with them. The list lives in tools/ci/dev-features.txt
+# (CI's e2e image build reads it too): one entry per crate that has the feature.
+DEV_FEATURES ?= $(shell cat tools/ci/dev-features.txt)
+
 toolchain-check: ci-image ## Fail unless rust-toolchain.toml == ci.yml's RUST_TOOLCHAIN; say where cargo runs
 	@ci=$$(sed -n 's/^ *RUST_TOOLCHAIN: *"\(.*\)"/\1/p' .github/workflows/ci.yml); \
 	[ "$(PIN)" = "$$ci" ] || { echo "rust-toolchain.toml ($(PIN)) != ci.yml RUST_TOOLCHAIN ($$ci)"; exit 1; }; \
@@ -56,7 +62,7 @@ fmt-fix: toolchain-check ## Apply formatting
 
 clippy: toolchain-check ## Lint the whole workspace, warnings deny (matches CI)
 	$(RUN) cargo clippy --workspace --all-targets
-	$(RUN) cargo clippy -p nos-cli --all-targets --features dev-args
+	$(RUN) cargo clippy --workspace --all-targets --features $(DEV_FEATURES)
 
 clippy-fix: toolchain-check ## Apply clippy's auto-fixable suggestions, then re-check
 	$(RUN) cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
@@ -66,10 +72,11 @@ fix: fmt-fix clippy-fix ## Autofix everything that has an autofix (fmt + clippy 
 
 test: toolchain-check ## Run tests via nextest (matches CI)
 	$(RUN) cargo nextest run --workspace
-	$(RUN) cargo nextest run -p nos-cli --features dev-args
+	$(RUN) cargo nextest run --workspace --features $(DEV_FEATURES)
 
 test-plain: toolchain-check ## Run tests via plain `cargo test` (no extra tool needed)
 	$(RUN) cargo test --workspace
+	$(RUN) cargo test --workspace --features $(DEV_FEATURES)
 
 deny: toolchain-check ## Check license/ban/source policy (matches CI)
 	$(RUN) cargo deny check
@@ -84,7 +91,7 @@ miri: toolchain-check ## Run miri UB checks on the pure-logic crates on ci.yml's
 	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" $(RUN) cargo +$(MIRI_TOOLCHAIN) miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
 coverage: toolchain-check ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
-	$(RUN) cargo llvm-cov --workspace --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
+	$(RUN) cargo llvm-cov --workspace --features $(DEV_FEATURES) --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
 		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
 MUTANTS_JOBS ?= 2
@@ -138,7 +145,12 @@ docker-lint: ## Lint the Dockerfile with hadolint
 	hadolint Dockerfile
 
 docker-build: docker-lint ## Lint, then build the nos lab image (every daemon + nos shell + pamtester; production: --target runtime)
-	docker build --build-arg CARGO_FEATURES="$(CARGO_FEATURES)" --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
+	docker build --build-arg CARGO_FEATURES="$(DEV_FEATURES)$(if $(CARGO_FEATURES),$(comma)$(CARGO_FEATURES))" --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
+
+docker-build-release: docker-lint ## Production image (--target runtime, no dev flags, no nos-rtr-stub); proves a release daemon refuses a dev flag
+	docker build --target runtime --build-arg CARGO_FEATURES="$(CARGO_FEATURES)" --build-arg NOS_BUILD_REV=$$(git rev-parse --short HEAD) -t $(IMAGE) .
+	docker run --rm --entrypoint nos-ribd $(IMAGE) --driver=noop 2>&1 | grep -q 'unexpected argument'
+	! docker run --rm --entrypoint test $(IMAGE) -e /usr/local/bin/nos-rtr-stub
 
 e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
 	IMAGE=$(IMAGE) tools/ci/e2e-preflight.sh

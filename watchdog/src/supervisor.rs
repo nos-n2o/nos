@@ -140,7 +140,11 @@ impl BackoffPolicy {
 
 /// Environment variables a child inherits; everything else (`LD_PRELOAD`,
 /// proxies, secrets) is dropped. Identity goes through stdin, not the env.
-const CHILD_ENV: [&str; 4] = ["RUST_LOG", "PATH", "TZ", "NOS_LACP_CHURN_SECS"];
+/// `NOS_LACP_CHURN_SECS` (the e2e's short LACP churn timer) only in a `dev-args` build (#1214).
+#[cfg(feature = "dev-args")]
+const CHILD_ENV: &[&str] = &["RUST_LOG", "PATH", "TZ", "NOS_LACP_CHURN_SECS"];
+#[cfg(not(feature = "dev-args"))]
+const CHILD_ENV: &[&str] = &["RUST_LOG", "PATH", "TZ"];
 
 /// Keeps only the `CHILD_ENV` entries of `vars`.
 fn allowed_env(

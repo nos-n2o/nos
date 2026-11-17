@@ -23,6 +23,16 @@ use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Never restart a daemon whose heartbeat stopped (debugging a hang with a
+    /// debugger attached; see `docs/architecture/supervision.md`).
+    #[cfg_attr(feature = "dev-args", arg(long))]
+    no_heartbeat_kill: bool,
+}
+
 #[derive(Parser)]
 #[command(name = "nos-watchdogd", about = "NOS process supervisor")]
 struct Args {
@@ -224,11 +234,6 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_SOCKET)]
     config_socket: PathBuf,
 
-    /// Never restart a daemon whose heartbeat stopped (debugging a hang with a
-    /// debugger attached; see `docs/architecture/supervision.md`).
-    #[arg(long)]
-    no_heartbeat_kill: bool,
-
     /// Directory the per-instance daemon sockets (`bgp-<name>.sock`,
     /// `rib-<name>.sock`, …) are created in. The fixed sockets have their
     /// own flags.
@@ -289,6 +294,10 @@ struct Args {
     /// certificate renewals; after that the client logs in with its password.
     #[arg(long, default_value_t = 24 * 3600)]
     pki_ipc_session_max: u64,
+
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
@@ -332,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
         "ipc certificate authority ready"
     );
     let mut policy = BackoffPolicy::default();
-    if args.no_heartbeat_kill {
+    if args.dev.no_heartbeat_kill {
         policy.liveness_timeout = None;
     }
     let registry = EndpointRegistry::default();

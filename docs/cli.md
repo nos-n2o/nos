@@ -22,7 +22,7 @@ docker compose run --rm cli          # the shell in its own container, sharing t
 docker exec -it nos-watchdog nos     # or: run it inside the router's own container
 ```
 
-`nos` takes no options and always uses `/run/nos/watchdog.sock` and `/run/nos/pki/ca.crt`. A developer build (`cargo run -p nos-cli --features dev-args -- --watchdog-socket <path> --pki-ca <path>`, or `make docker-build CARGO_FEATURES=nos-cli/dev-args`) adds those two flags for relocated files; a release `nos` rejects them (exit 2).
+`nos` takes no options and always uses `/run/nos/watchdog.sock` and `/run/nos/pki/ca.crt`. A developer build (`cargo run -p nos-cli --features dev-args -- --watchdog-socket <path> --pki-ca <path>`, or the lab image from `make docker-build`) adds those two flags for relocated files; a release `nos` rejects them (exit 2).
 
 The shell first asks for a user name and password:
 
@@ -374,7 +374,7 @@ Audited against `cli/src`, every `tools/e2e` phase, `tools/nos-provision`, `cli/
 | every other interactive command (the command table below: `show ...`, `clear ...`, `set`/`delete`, `edit`, `diff`, `save`, `exit`, ...) | interactive | operator; in-process tests in `cli/tests` (grammar corpus, actions, per-daemon clients) | kept |
 
 - **What e2e does not use:** `nos` is never run with a flag in e2e. Every other phase provisions and queries through `nos-provision` and the REST API (`nos-restd`), not through `nos`. No phase uses `--watchdog-socket` or `--pki-ca`. `tools/nos-provision` has its own `--watchdog-socket`/`--pki-ca` (a different binary, untouched). `tools/bench-bgp.sh` runs only `nos-provision`.
-- **Other binaries:** see [binaries.md](binaries.md).
+- **Other binaries:** every flag and env var of the daemons and tools, with gated vs kept: [binaries.md](binaries.md).
 - **Other harnesses:** `docker-compose.yml`'s `cli` service runs bare `nos` as an interactive container.
 
 ## Command table (developer reference)

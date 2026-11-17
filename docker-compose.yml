@@ -2,6 +2,7 @@ x-nos-image: &nos-image
   build:
     context: .
     dockerfile: Dockerfile
+    target: runtime
   image: nos:local
 
 services:
