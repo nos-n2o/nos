@@ -1069,7 +1069,12 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
     ]));
     w.start(A, Some(hub("pg-b", ASN_B, IP_B.s())), &[]).await?;
     w.start(B, Some(b_flags.clone()), &[]).await?;
-    w.start(C, None, &[]).await?;
+    // #839: a route server does not prepend its own AS (RFC 7947 §2.2.2), so
+    // its client must not enforce first-AS (#392) or it treats every
+    // reflected route as a withdraw and never learns the prefix.
+    let mut c_flags = C.base_flags();
+    c_flags.extend(strings(&["--no-enforce-first-as"]));
+    w.start(C, Some(c_flags), &[]).await?;
     w.a()?
         .provision_flags(&hub("pg-c", ASN_C, IP_C.s()))
         .await?;
