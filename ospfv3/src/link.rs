@@ -2092,6 +2092,11 @@ impl LinkManager {
         *self.stub_areas.lock().unwrap() = stub;
     }
 
+    #[cfg(test)]
+    pub fn stub_areas_for_test(&self) -> HashMap<Ipv4Addr, (bool, u32)> {
+        self.stub_areas.lock().unwrap().clone()
+    }
+
     /// Every area's address ranges `(cidr, advertise)`, replaced on every
     /// resync; applied at the next origination tick.
     pub fn set_area_ranges(&self, ranges: HashMap<Ipv4Addr, Vec<(Ipv6Net, bool)>>) {
@@ -3929,6 +3934,49 @@ pub(crate) mod tests {
         assert_eq!(status.borrow().neighbors.len(), 1);
         // Burst of 5 warnings, the other two drops were rate limited.
         assert_eq!(limiter.take_suppressed(), 2);
+    }
+
+    /// RFC 5340 §A.2: the Hello's E bit must match the area's kind.
+    #[tokio::test(start_paused = true)]
+    async fn handle_hello_drops_mismatched_e_bit() {
+        use nos_ospf_common::ratelimit::WarnLimiter;
+        let hello = |cfg: &LinkConfig, options: u32| packet::HelloPacket {
+            router_id: Ipv4Addr::new(2, 2, 2, 2),
+            area_id: cfg.area_id,
+            interface_id: 4,
+            router_priority: 1,
+            options,
+            hello_interval: cfg.hello_interval,
+            dead_interval: cfg.dead_interval,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        };
+        for (stub, options, accepted) in [
+            (true, lsa::OPTION_E, false),
+            (true, 0, true),
+            (false, 0, false),
+            (false, lsa::OPTION_E, true),
+        ] {
+            let cfg = LinkConfig {
+                stub,
+                ..link("eth0.0", 10)
+            };
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            handle_hello(
+                &mem_socket(&cfg),
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv6Addr::from(0xfe80_0000_0000_0000_0000_0000_0000_0001_u128),
+                &hello(&cfg, options),
+                false,
+                &mut WarnLimiter::default(),
+            );
+            assert_eq!(status.borrow().neighbors.len(), usize::from(accepted));
+            // A stub link's own Hello/DBD options carry no E bit.
+            assert_eq!(link_options(&cfg) & lsa::OPTION_E == 0, stub);
+        }
     }
 
     #[tokio::test(start_paused = true)]

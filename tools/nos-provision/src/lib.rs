@@ -5008,6 +5008,60 @@ mod tests {
     }
 
     #[test]
+    fn ospfv3_area_type_and_stub_default_cost_flags() {
+        let set = ops(&[
+            "--ospfv3-instance",
+            "o",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-area",
+            "0.0.0.1",
+            "--ospfv3-area-type",
+            "totally-stubby",
+            "--ospfv3-stub-default-cost",
+            "5",
+        ])
+        .unwrap();
+        let area_id: Ipv4Addr = "0.0.0.1".parse().unwrap();
+        has(
+            &set,
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetAreaType {
+                instance: "o".into(),
+                area_id,
+                area_type: OspfAreaType::TotallyStubby,
+            }),
+        );
+        has(
+            &set,
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetStubDefaultCost {
+                instance: "o".into(),
+                area_id,
+                cost: Some(5),
+            }),
+        );
+        let cleared = ops(&[
+            "--ospfv3-instance",
+            "o",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-area",
+            "0.0.0.1",
+            "--ospfv3-stub-default-cost",
+            "0",
+        ])
+        .unwrap();
+        has(
+            &cleared,
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetStubDefaultCost {
+                instance: "o".into(),
+                area_id,
+                cost: None,
+            }),
+        );
+        assert!(err(&["--ospfv3-area-type", "stub"]).contains("--ospfv3-area"));
+    }
+
+    #[test]
     fn ospf_virtual_link_flag() {
         let set = ops(&[
             "--ospf-instance",

@@ -270,6 +270,46 @@ mod tests {
     }
 
     #[test]
+    fn set_area_type_and_stub_default_cost() {
+        let mut cfg = Config {
+            ospfv3_instances: vec![instance(
+                "o1",
+                vec![Ospfv3Area {
+                    area_id: area_id("0.0.0.1"),
+                    ..Default::default()
+                }],
+            )],
+            ..Default::default()
+        };
+        let (instance, area) = ("o1".to_string(), area_id("0.0.0.1"));
+        Ospfv3AreaOp::SetAreaType {
+            instance: instance.clone(),
+            area_id: area,
+            area_type: OspfAreaType::TotallyStubby,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        Ospfv3AreaOp::SetStubDefaultCost {
+            instance: instance.clone(),
+            area_id: area,
+            cost: Some(7),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let a = &cfg.ospfv3_instances[0].areas[0];
+        assert_eq!(a.area_type, OspfAreaType::TotallyStubby);
+        assert_eq!(a.stub_default_cost, Some(7));
+        let err = Ospfv3AreaOp::SetAreaType {
+            instance,
+            area_id: area_id("0.0.0.9"),
+            area_type: OspfAreaType::Stub,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::Ospfv3AreaNotFound { .. }));
+    }
+
+    #[test]
     fn set_range_upserts_and_remove_range_errors_when_missing() {
         let mut cfg = Config {
             ospfv3_instances: vec![instance(
