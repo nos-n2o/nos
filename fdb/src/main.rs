@@ -10,9 +10,11 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum, Default)]
+#[cfg_attr(not(feature = "dev-args"), allow(dead_code))]
 enum DriverKind {
     Noop,
+    #[default]
     Linux,
 }
 
@@ -25,13 +27,14 @@ impl std::fmt::Display for DriverKind {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Linux
-}
-#[cfg(not(target_os = "linux"))]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Noop
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Which backend programs the kernel: `linux` (real `rtnetlink` calls,
+    /// the default on Linux) or `noop` (log-only).
+    #[cfg_attr(feature = "dev-args", arg(long, value_enum, default_value_t = DriverKind::default()))]
+    driver: DriverKind,
 }
 
 #[derive(Parser)]
@@ -56,11 +59,6 @@ struct Args {
     #[arg(long)]
     listen_socket: Option<PathBuf>,
 
-    /// Which backend programs the kernel: `linux` (real `rtnetlink` calls,
-    /// the default on Linux) or `noop` (log-only).
-    #[arg(long, value_enum, default_value_t = default_driver_kind())]
-    driver: DriverKind,
-
     /// Seconds a newly attached Ethernet Segment port stays blocked before the
     /// Designated Forwarder election is applied (RFC 7432 §8.5 step 3, whose
     /// default is 3), so a PE that has just come up doesn't double-deliver BUM.
@@ -70,6 +68,10 @@ struct Args {
     /// Unix socket to forward this process's log events to.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
@@ -84,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
     nos_daemon::liveness::start(args.watchdog_socket.clone());
-    info!(domain = %args.domain, peer = ?identity.peer(), driver = %args.driver, "nos-fdbd starting");
+    info!(domain = %args.domain, peer = ?identity.peer(), driver = %args.dev.driver, "nos-fdbd starting");
 
     let listen_socket = args
         .listen_socket
@@ -101,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let driver: Arc<dyn FdbDriver> = match args.driver {
+    let driver: Arc<dyn FdbDriver> = match args.dev.driver {
         DriverKind::Noop => Arc::new(NoopFdbDriver),
         DriverKind::Linux => Arc::new(
             LinuxFdbDriver::new()

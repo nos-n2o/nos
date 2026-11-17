@@ -22,7 +22,7 @@ docker compose run --rm cli          # the shell in its own container, sharing t
 docker exec -it nos-watchdog nos     # or: run it inside the router's own container
 ```
 
-`nos` needs no options on a standard router. It has two, `--watchdog-socket` (default `/run/nos/watchdog.sock`) and `--pki-ca` (default `/run/nos/pki/ca.crt`), for the case where those files have been moved.
+`nos` takes no options and always uses `/run/nos/watchdog.sock` and `/run/nos/pki/ca.crt`. A developer build (`cargo run -p nos-cli --features dev-args -- --watchdog-socket <path> --pki-ca <path>`, or the lab image from `make docker-build`) adds those two flags for relocated files; a release `nos` rejects them (exit 2).
 
 The shell first asks for a user name and password:
 
@@ -357,6 +357,26 @@ If one instance cannot answer, for example because it was just deleted, the shel
 - `error: '…' is not a valid edit here (press ? to see what fits)`: no field or object matches these words, or a value has the wrong type, at your position or from the top of the tree. Type the start of the line and press `?`.
 - `error: nos-configd reported an error: validation failed: …`: the commit was refused. Each line gives the place in the tree and the reason. The transaction is still open.
 
+## Input inventory of `nos` (#1214)
+
+Audited against `cli/src`, every `tools/e2e` phase, `tools/nos-provision`, `cli/tests`, `docker-compose.yml`. "dev-args" means the input exists only in a `--features dev-args` build; a release `nos` rejects it.
+
+| Input | Kind | Used by | Status |
+|---|---|---|---|
+| `--watchdog-socket <path>` | flag | dev tests (`cli/tests/login_shell.rs`, `ticket_with_no_watchdog_fails_closed...`, built with `dev-args`); documented for a relocated `--listen-socket`. No e2e phase, no operator | gated (dev-args) |
+| `--pki-ca <path>` | flag | same test; documented for a relocated `--pki-dir` (`docs/protocols/system.md`). No e2e phase, no operator | gated (dev-args) |
+| `-c <cmd>` | hidden flag | `ssh-login-shell` (e2e): `ssh host "show config"` makes sshd run `nos -c`, asserts the refusal text and a non-zero exit; dev test `dash_c_is_refused_with_exit_2` | kept, refusal trap (exit 2) |
+| `--help`, `--version` | clap built-ins | operator | kept |
+| env `NOS_LOGIN_TICKET` | env var | operator path (sshd/PAM, #991); e2e `ssh-login-shell` (real ticket through PAM, plus a bogus one run as `NOS_LOGIN_TICKET=... /usr/bin/nos`); `pam` phase checks only that the passwd shell is `/usr/bin/nos`, it never runs `nos` | kept |
+| env `NO_COLOR` | env var | operator; no e2e phase, no test | kept |
+| login prompt on stdin (`login:`/`password:`) | interactive | operator (`docker compose run --rm cli`, `docker exec -it ... nos`); e2e never runs the password prompt (its SSH client logs in through PAM and gets the ticket path) | kept |
+| interactive commands `configure ssh-login`, `set hostname <name>`, `commit`, `show config` | interactive, over SSH | `ssh-login-shell` (e2e) via a pty shell; `show config` is also sent after the user is deleted to see `CertificateRevoked` | kept |
+| every other interactive command (the command table below: `show ...`, `clear ...`, `set`/`delete`, `edit`, `diff`, `save`, `exit`, ...) | interactive | operator; in-process tests in `cli/tests` (grammar corpus, actions, per-daemon clients) | kept |
+
+- **What e2e does not use:** `nos` is never run with a flag in e2e. Every other phase provisions and queries through `nos-provision` and the REST API (`nos-restd`), not through `nos`. No phase uses `--watchdog-socket` or `--pki-ca`. `tools/nos-provision` has its own `--watchdog-socket`/`--pki-ca` (a different binary, untouched). `tools/bench-bgp.sh` runs only `nos-provision`.
+- **Other binaries:** every flag and env var of the daemons and tools, with gated vs kept: [binaries.md](binaries.md).
+- **Other harnesses:** `docker-compose.yml`'s `cli` service runs bare `nos` as an interactive container.
+
 ## Command table (developer reference)
 
 Moved from `cli/CLAUDE.md` (#263). Every `edit`/`set`/`delete` row below is generated from the schema tree (`nos_proto::cli`, `cli/src/config_grammar.rs`); `tests/config_grammar.rs` pins them. The `show` and shell rows are `cmd!` rows in `cli/src/spec.rs`. How the commands are used is described above; the OSPF, interface, LACP, LLDP and EVPN rows also belong to the matching pages under `protocols/`.
@@ -503,7 +523,7 @@ Each command dials the daemon fresh (`UnixStream::connect` → split → `Framed
 
 The other exception: at shell startup, `main.rs` spawns a background task (`subscribe_hostname_task`) that opens exactly one long-lived `Request::Subscribe` connection (via `client::subscribe`) purely to keep the prompt's hostname live. It loops on `Event::Config` for the shell's whole lifetime, updates a shared `Arc<Mutex<String>>`, and — only when the value actually changes — triggers an in-place prompt repaint via `reedline::Reedline::repaint_signal()`'s handle, so the prompt updates even while the shell is sitting idle with no keystroke. `RepaintSignal` itself isn't reachable outside the `reedline` crate in this version (its type lives in a private module despite the constructor method being public), so the handle is captured in a `move || ...` closure rather than named directly. On disconnect or error the task retries after a fixed 1s delay — no backoff — since it's the shell's only long-lived connection and a daemon restart shouldn't permanently freeze the prompt. The initial hostname is still seeded from a one-shot `fetch_running_config` at startup, and shell startup never blocks or fails if the daemon is briefly unreachable. Every other command still dials one-shot as before.
 
-`nos-configd`'s address is no longer a fixed default: it's resolved once at startup via `nos-watchdogd`'s broker socket (`--watchdog-socket <path>`, default `/run/nos/watchdog.sock`) and reused for the whole session. If the broker is unreachable or reports `nos-configd` unavailable, the shell warns and falls back to the conventional `/run/nos/config.sock` rather than failing startup. `show route`'s `nos-ribd` resolution and `show interface`'s `nos-interfaced` resolution both happen fresh per command instead — routing-table instances come and go during a session, and while there's only ever one `nos-interfaced`, dialing fresh keeps the same resolve-then-query shape as `show route`.
+`nos-configd`'s address is no longer a fixed default: it's resolved once at startup via `nos-watchdogd`'s broker socket (`/run/nos/watchdog.sock`; `--watchdog-socket <path>` in a `dev-args` build) and reused for the whole session. If the broker is unreachable or reports `nos-configd` unavailable, the shell warns and falls back to the conventional `/run/nos/config.sock` rather than failing startup. `show route`'s `nos-ribd` resolution and `show interface`'s `nos-interfaced` resolution both happen fresh per command instead — routing-table instances come and go during a session, and while there's only ever one `nos-interfaced`, dialing fresh keeps the same resolve-then-query shape as `show route`.
 
 ### Source modules
 
@@ -511,7 +531,7 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 
 | Module | Role |
 |--------|------|
-| `main.rs` | Arg parsing (`--watchdog-socket`), login (stdin/`rpassword`) and certificate renewal, the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, and the stdin commit/discard/leave question on `exit` — only the interactive glue |
+| `main.rs` | Arg parsing (`--watchdog-socket` only with `dev-args`), login (stdin/`rpassword`) and certificate renewal, the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, and the stdin commit/discard/leave question on `exit` — only the interactive glue |
 | `actions.rs` | What every `session::Resolved` action does (`handle_action`): each `show`, the transaction flow, policy-source editing, `help`, plus `resolve_config_socket` (broker lookup with the default-socket fallback), `subscribe_hostname_task` and `DocCache`/`doc_for`/`doc_for_blocking`. `handle_action` takes the exit question as a `fn(&str) -> LeaveChoice`, so `tests/actions.rs` drives every action against fake daemons (#131) |
 | `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness. Show/shell commands are parsed by `spec::parse` over the `cmd!` rows; any other `edit`/`set`/`delete` line becomes `Command::Config(line)`, resolved later by `config_grammar` (it needs the position and the config) |
 | `config_grammar.rs` | The config half of the grammar (#109), generated from the schema's CLI tree (`nos_proto::cli`, `#[derive(Cli)]` with a mandatory `#[cli(...)]` per field): `parse(line, context, config_json) -> Option<ConfigEdit>` resolves an `edit`/`set`/`delete` line at the current position first, then from the root, into `Request::EditTransactionPath` writes (plus, for `edit` and a bare `delete`, where to navigate); `complete` gives Tab/`?` their next words (canonical `words` spelling, list keys from the transaction, enum options); `usages` gives `help` every edit reachable from the position, in tree order. Knows no object or field by name. `tests/config_grammar.rs` pins its output on every line the old hand-written parser was tested with and one per old help row (`config_corpus.jsonl`, recorded while both parsers existed and agreed on the resulting `Config`) |

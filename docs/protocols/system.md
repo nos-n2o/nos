@@ -259,7 +259,7 @@ services:
 - `--pki-ipc-session-max=<seconds>` (default 86400, 24 hours): how long renewals can keep one `nos`/`nos-provision` login alive. Past it, renewal is refused (`session expired`) and the user logs in again with the password.
 - `--pki-user-lifetime=<seconds>` (default 28800, 8 hours): how long a user certificate is valid, for the shell and for REST clients alike. Clients renew at half this time.
 - `--pki-leaf-lifetime=<seconds>` (default 86400) and `--pki-rotate-every=<seconds>` (default 28800): lifetime of the certificates the router's own services use between themselves, and how often they are renewed. The second must be shorter than the first. When a service stops or restarts (a crash, or its object removed from the configuration), its certificates are revoked at once rather than left valid until they expire.
-- `--pki-dir=<dir>` (default `/run/nos/pki`): where `ca.crt` and `rest-ca.crt` are published. If you change it, start the shell with `nos --pki-ca <dir>/ca.crt`.
+- `--pki-dir=<dir>` (default `/run/nos/pki`): where `ca.crt` and `rest-ca.crt` are published. If you change it, the shell must be a `dev-args` build (`nos --pki-ca <dir>/ca.crt`); a release `nos` only reads the default path.
 - `--fdbd-arg=--df-wait=<seconds>` (default 3): how long a router waits after joining an EVPN Ethernet Segment before applying the designated-forwarder election (see [EVPN and VXLAN](evpn-vxlan.md#the-designated-forwarder)).
 - `--logd-arg=--capacity=<entries>` (default 10000): how many log entries are kept.
 - `RUST_LOG` (environment variable): how much is logged (see [Logs](#logs)).

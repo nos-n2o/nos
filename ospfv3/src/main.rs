@@ -11,6 +11,51 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
 
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Multiplies the per-second LSA-age-clock increment (default 1 = real
+    /// time). Test/debug only — mirrors `nos-ospfd`'s identical flag,
+    /// reachable only via `nos-watchdogd`'s opaque `--ospfv3d-arg`
+    /// pass-through. Do not wire this into `Ospfv3Profile`/`nos-cli`.
+    #[cfg_attr(feature = "dev-args", arg(long, default_value_t = 1))]
+    lsa_age_multiplier: u16,
+
+    /// Drop or duplicate the Nth outgoing exchange DBD, e.g. `drop:2,dup:3`
+    /// (#607). Test-only, via `--ospfv3d-arg`; never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    dbd_fault: Option<String>,
+
+    /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
+    /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfv3d-arg`
+    /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
+    /// cannot reach a supervised daemon); never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    push_chunk: Option<usize>,
+
+    /// Originate every summary/external LSA at `LSInfinity` (`ospfv3-lsinfinity`
+    /// e2e). Test-only, via `--ospfv3d-arg`; never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    originate_lsinfinity: bool,
+
+    /// Cap on links per Router-LSA fragment (`ospfv3-router-lsa-split` e2e).
+    /// Test-only, via `--ospfv3d-arg`; never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    router_lsa_max_links: Option<usize>,
+}
+
+impl Default for DevArgs {
+    fn default() -> Self {
+        Self {
+            lsa_age_multiplier: 1,
+            dbd_fault: None,
+            push_chunk: None,
+            originate_lsinfinity: false,
+            router_lsa_max_links: None,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "nos-ospfv3d", about = "NOS OSPFv3 (RFC 5340) daemon")]
 struct Args {
@@ -36,28 +81,11 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
-    /// Multiplies the per-second LSA-age-clock increment (default 1 = real
-    /// time). Test/debug only — mirrors `nos-ospfd`'s identical flag,
-    /// reachable only via `nos-watchdogd`'s opaque `--ospfv3d-arg`
-    /// pass-through. Do not wire this into `Ospfv3Profile`/`nos-cli`.
-    #[arg(long, default_value_t = 1)]
-    lsa_age_multiplier: u16,
-
     /// RFC 2328 §10.8's per-DBD-packet LSA-header budget override
     /// (unchanged by RFC 5340), test/debug only — when unset each link
     /// derives it from its own MTU (`exchange::mtu_based_max_headers`).
     #[arg(long)]
     dbd_max_headers: Option<usize>,
-
-    /// Drop or duplicate the Nth outgoing exchange DBD, e.g. `drop:2,dup:3`
-    /// (#607). Test-only, via `--ospfv3d-arg`; never a config field.
-    #[arg(long, hide = true)]
-    dbd_fault: Option<String>,
-
-    /// Originate every summary/external LSA at `LSInfinity` (`ospfv3-lsinfinity`
-    /// e2e). Test-only, via `--ospfv3d-arg`; never a config field.
-    #[arg(long, hide = true)]
-    originate_lsinfinity: bool,
 
     /// Directory for this daemon's persisted state: the RFC 5187
     /// graceful-restart marker (`<instance>.gr`, consumed at start; it skips
@@ -65,24 +93,16 @@ struct Args {
     #[arg(long, default_value = "/var/lib/nos/ospfv3d")]
     state_dir: PathBuf,
 
-    /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
-    /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfv3d-arg`
-    /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
-    /// cannot reach a supervised daemon); never a config field.
-    #[arg(long, hide = true)]
-    push_chunk: Option<usize>,
-
-    /// Cap on links per Router-LSA fragment (`ospfv3-router-lsa-split` e2e).
-    /// Test-only, via `--ospfv3d-arg`; never a config field.
-    #[arg(long, hide = true)]
-    router_lsa_max_links: Option<usize>,
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let identity = bootstrap::identity()?;
-    if let Some(spec) = &args.dbd_fault {
+    if let Some(spec) = &args.dev.dbd_fault {
         nos_ospf_common::dbd_fault::install(spec).map_err(anyhow::Error::msg)?;
     }
 
@@ -112,11 +132,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospfv3-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
+    let links = LinkManager::new(args.dev.lsa_age_multiplier, args.dbd_max_headers);
     let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
     links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()));
-    links.set_originate_lsinfinity(args.originate_lsinfinity);
-    links.set_router_lsa_max_links(args.router_lsa_max_links);
+    links.set_originate_lsinfinity(args.dev.originate_lsinfinity);
+    links.set_router_lsa_max_links(args.dev.router_lsa_max_links);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
     let link_task = tokio::spawn(nos_ospfv3::link_client::run(
         args.watchdog_socket.clone(),
@@ -143,7 +163,8 @@ async fn main() -> anyhow::Result<()> {
         links.clone(),
         routing_table_rx,
         shutdown_rx,
-        args.push_chunk
+        args.dev
+            .push_chunk
             .filter(|&n| n > 0)
             .unwrap_or_else(nos_proto::rib::ospf_push_chunk),
     );
@@ -226,20 +247,26 @@ mod tests {
     fn args_parse() {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-ospfv3d", "--instance", "o1"]).unwrap();
-        assert_eq!((args.instance.as_str(), args.lsa_age_multiplier), ("o1", 1));
-        assert!(!args.originate_lsinfinity);
-        let on =
-            Args::try_parse_from(["nos-ospfv3d", "--instance", "o1", "--originate-lsinfinity"])
-                .unwrap();
-        assert!(on.originate_lsinfinity);
-        let cap = Args::try_parse_from([
-            "nos-ospfv3d",
-            "--instance",
-            "o1",
-            "--router-lsa-max-links",
-            "2",
-        ])
-        .unwrap();
-        assert_eq!(cap.router_lsa_max_links, Some(2));
+        assert_eq!(
+            (args.instance.as_str(), args.dev.lsa_age_multiplier),
+            ("o1", 1)
+        );
+        assert!(!args.dev.originate_lsinfinity);
+        #[cfg(feature = "dev-args")]
+        {
+            let on =
+                Args::try_parse_from(["nos-ospfv3d", "--instance", "o1", "--originate-lsinfinity"])
+                    .unwrap();
+            assert!(on.dev.originate_lsinfinity);
+            let cap = Args::try_parse_from([
+                "nos-ospfv3d",
+                "--instance",
+                "o1",
+                "--router-lsa-max-links",
+                "2",
+            ])
+            .unwrap();
+            assert_eq!(cap.dev.router_lsa_max_links, Some(2));
+        }
     }
 }

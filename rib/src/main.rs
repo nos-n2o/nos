@@ -19,9 +19,11 @@ use tracing::{info, warn};
 /// (`RibRequest::GetVrfName`).
 const DEFAULT_TABLE_REGISTRY_PATH: &str = "/var/lib/nos/ribd/table-ids.yaml";
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum, Default)]
+#[cfg_attr(not(feature = "dev-args"), allow(dead_code))]
 enum DriverKind {
     Noop,
+    #[default]
     Linux,
 }
 
@@ -34,13 +36,24 @@ impl std::fmt::Display for DriverKind {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Linux
-}
-#[cfg(not(target_os = "linux"))]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Noop
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Which backend actually applies routes to the OS: `linux` (real
+    /// `rtnetlink` calls, the default on Linux) or `noop` (log-only, no OS
+    /// effect — the default off-Linux, and useful for tests/dev).
+    #[cfg_attr(feature = "dev-args", arg(long, value_enum, default_value_t = DriverKind::default()))]
+    driver: DriverKind,
+
+    /// Routes per `RedistributeRoutes` frame of the `Full` sent to
+    /// `nos-bgpd`/`nos-ospfd`/`nos-ospfv3d` (`RedistributeUpdate::split_with`).
+    /// Unset: `nos_proto::bgp::redistribute_chunk()`. Test-only, via
+    /// `--ribd-arg` (the watchdog clears its children's environment, so
+    /// `NOS_REDISTRIBUTE_CHUNK` cannot reach a supervised daemon); never a
+    /// config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    redistribute_chunk: Option<usize>,
 }
 
 #[derive(Parser)]
@@ -63,12 +76,6 @@ struct Args {
     #[arg(long)]
     listen_socket: Option<PathBuf>,
 
-    /// Which backend actually applies routes to the OS: `linux` (real
-    /// `rtnetlink` calls, the default on Linux) or `noop` (log-only, no OS
-    /// effect — the default off-Linux, and useful for tests/dev).
-    #[arg(long, value_enum, default_value_t = default_driver_kind())]
-    driver: DriverKind,
-
     /// Where this instance persists its table-id↔VRF-name allocation
     /// (`--driver linux` only) and its VPN label, for restart survival.
     #[arg(long, default_value = DEFAULT_TABLE_REGISTRY_PATH)]
@@ -79,19 +86,9 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
-    /// Routes per `RedistributeRoutes` frame of the `Full` sent to
-    /// `nos-bgpd`/`nos-ospfd`/`nos-ospfv3d` (`RedistributeUpdate::split_with`).
-    /// Unset: `nos_proto::bgp::redistribute_chunk()`. Test-only, via
-    /// `--ribd-arg` (the watchdog clears its children's environment, so
-    /// `NOS_REDISTRIBUTE_CHUNK` cannot reach a supervised daemon); never a
-    /// config field.
-    #[arg(long, hide = true)]
-    redistribute_chunk: Option<usize>,
-
-    /// Seconds the startup hold keeps a crashed predecessor's kernel routes
-    /// (#654). Unset: 120. Test-only, via `--ribd-arg`; never a config field.
-    #[arg(long, hide = true)]
-    startup_hold: Option<u64>,
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
@@ -124,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let driver: Arc<dyn RibDriver> = match args.driver {
+    let driver: Arc<dyn RibDriver> = match args.dev.driver {
         DriverKind::Noop => Arc::new(NoopRibDriver::default()),
         DriverKind::Linux => Arc::new(
             LinuxRibDriver::new(args.table_registry_path.clone())
@@ -136,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let chunk = args
+        .dev
         .redistribute_chunk
         .filter(|&n| n > 0)
         .unwrap_or_else(nos_proto::bgp::redistribute_chunk);
@@ -180,10 +178,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let rib = Arc::new(RwLock::new(Rib::new()));
-    let gate = Arc::new(reconcile::KernelGate::new(
-        args.startup_hold
-            .map_or(reconcile::STARTUP_HOLD, std::time::Duration::from_secs),
-    ));
+    let gate = Arc::new(reconcile::KernelGate::new(reconcile::STARTUP_HOLD));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),

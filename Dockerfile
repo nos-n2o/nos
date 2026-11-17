@@ -80,9 +80,6 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
 # and for operators who want to provision without the interactive shell.
 COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provision
-# A test-only RTR cache (`nos-e2e`'s `rpki` phase, #498): it signs its TCP session
-# with TCP-MD5, which StayRTR cannot, and so needs CAP_NET_ADMIN.
-COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-stub
 
 # nos-ribd/nos-interfaced's Linux drivers need CAP_NET_ADMIN/CAP_NET_RAW to
 # program the kernel (VRF devices, addresses, routes) via rtnetlink, even
@@ -131,7 +128,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bfdd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
-    && setcap 'cap_net_admin=ep' /usr/local/bin/nos-rtr-stub \
     && setcap 'cap_setuid,cap_setgid,cap_chown,cap_kill=ep' /usr/local/bin/nos-watchdogd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
@@ -185,13 +181,18 @@ USER nos-wd
 ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]
 
 # The lab image (`make docker-build`, nos-e2e): the runtime plus `pamtester`, which
-# drives the PAM stack without sshd (`nos-e2e`'s `pam` phase). A production build uses
-# `--target runtime`.
+# drives the PAM stack without sshd (`nos-e2e`'s `pam` phase), and a test-only RTR cache
+# (`rpki` phase, #498; it signs its TCP session with TCP-MD5, which StayRTR cannot, so
+# it needs CAP_NET_ADMIN). `make docker-build` builds it with the `dev-args` features
+# (tools/ci/dev-features.txt); a production build is `--target runtime` with none (#1214).
 FROM runtime AS lab
 USER root
+COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-stub
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pamtester \
+        pamtester libcap2-bin \
+    && setcap 'cap_net_admin=ep' /usr/local/bin/nos-rtr-stub \
+    && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 USER nos-wd
 ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]

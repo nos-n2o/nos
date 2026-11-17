@@ -33,12 +33,15 @@ const PUSH_COALESCE: Duration = Duration::from_secs(1);
 pub const DEFAULT_PRIORITY: u16 = 32768;
 
 /// `NOS_LACP_CHURN_SECS` shortens 802.1AX's 60s `Churn_Detection_Time` so the
-/// e2e harness doesn't wait a minute; unset in production.
+/// e2e harness doesn't wait a minute; read only in a `dev-args` build (#1214).
 fn churn_time() -> std::time::Duration {
-    std::env::var("NOS_LACP_CHURN_SECS")
+    #[cfg(feature = "dev-args")]
+    return std::env::var("NOS_LACP_CHURN_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .map_or(CHURN_DETECTION_TIME, std::time::Duration::from_secs)
+        .map_or(CHURN_DETECTION_TIME, std::time::Duration::from_secs);
+    #[cfg(not(feature = "dev-args"))]
+    CHURN_DETECTION_TIME
 }
 
 /// Daemon-wide 802.1AX §6.3.4 Port Number allocator: the system ID is shared
