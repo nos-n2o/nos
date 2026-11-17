@@ -284,21 +284,24 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(COMPILED_2, compiled, 30).await?;
     // The kernel samples one packet in 100 (#699): the session's few retries
     // would rarely log, so router-b opens 800 TCP connections to router-a
-    // (each a denied SYN; P(none sampled) = 0.99^800, under 0.04%). The new
-    // chain lands a moment after `compiled`: repeat until a line shows.
+    // (each a denied SYN; P(none sampled) = 0.99^800, under 0.04%). Router-b's
+    // address sits in its VRF, so a plain `/dev/tcp` connect from the default
+    // netns is "Network is unreachable" and sends nothing (#933): perl binds
+    // each socket to the VRF device (SO_BINDTODEVICE = 25; root: `CAP_NET_RAW`). The new chain
+    // lands a moment after `compiled`: repeat until a line shows.
+    let script = format!(
+        "use Socket; use Fcntl; my @s; for (1..800) {{ \
+         socket(my $f, AF_INET, SOCK_STREAM, 0) or next; \
+         setsockopt($f, SOL_SOCKET, 25, \"{RLFA_VRF}\") or die \"bind: $!\"; \
+         fcntl($f, F_SETFL, O_NONBLOCK); \
+         connect($f, sockaddr_in(179, inet_aton(\"{IP_A}\"))); push @s, $f }} sleep 2"
+    );
     for _ in 0..6 {
-        w.dock
-            .exec(
-                "router-b",
-                &[
-                    "bash",
-                    "-c",
-                    &format!(
-                        "for i in $(seq 800); do (echo > /dev/tcp/{IP_A}/179) 2>/dev/null & done; sleep 2"
-                    ),
-                ],
-            )
+        let (code, out) = w
+            .dock
+            .exec_root("router-b", &["perl", "-e", &script])
             .await?;
+        anyhow::ensure!(code == 0, "router-b SYN burst failed ({code}): {out}");
         if a.count(&logged_line()) > logged {
             break;
         }
