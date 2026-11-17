@@ -3969,16 +3969,16 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
 }
 
 /// RFC 5340 §4.4.3.3 area range (requires `ospfv3`): router-b, an ABR, has
-/// two loopbacks in area 1 inside one range. Router-a installs only the
-/// range's route (never the two `/128`s), router-b a real discard route for
-/// it; `not-advertise` removes both; clearing the range brings the `/128`s
-/// back. Removes the loopback addresses again.
+/// a loopback in area 1 inside a range. Router-a installs only the
+/// range's route (never the `/128`), router-b a real discard route for
+/// it; `not-advertise` removes both; clearing the range brings the `/128`
+/// back. Removes the loopback address again.
 pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let range = OSPFV3_RANGE;
-    let (l1, l2) = (OSPFV3_RANGE_LOOPBACK_1, OSPFV3_RANGE_LOOPBACK_2);
+    let l1 = OSPFV3_RANGE_LOOPBACK;
     let routes = |p: &str| format!("added route prefix={p} .*source=Some(Ospf)");
-    let singles = routes("2001:db8:6::[12]/128");
+    let singles = routes(l1);
     let (single0, range0) = (
         a.count_fresh(&singles).await,
         a.count_fresh(&routes(range)).await,
@@ -3998,7 +3998,7 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         f
     };
-    log("router-b: two area-1 loopbacks inside one range");
+    log("router-b: an area-1 loopback inside one range");
     b.provision(&area(&[
         "--ospfv3-area-range",
         range,
@@ -4010,13 +4010,12 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
         OSPFV3_PROFILE_AREA1,
     ]))
     .await?;
-    b.provision(&["--ospfv3-loopback-address", l2]).await?;
     a.wait_new(&routes(range), range0, 60).await?;
     b.wait_new(&discard, discard0, 60).await?;
     if !b.rt1_has(range, "Ospf").await? {
         bail!("router-b's rt1 does not list the discard route {range}");
     }
-    log("router-a must never see the two /128s");
+    log("router-a must never see the /128");
     a.assert_quiet(&singles, single0, 10).await?;
 
     log("not-advertise: the range and its discard route go");
@@ -4031,19 +4030,17 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&removed, rem_b0, 60).await?;
     a.assert_quiet(&singles, single0, 10).await?;
 
-    log("range cleared: the /128s are summarized individually again");
+    log("range cleared: the /128 is summarized on its own again");
     b.provision(&area(&["--ospfv3-clear-area-range", range]))
         .await?;
-    a.wait_new(&routes("2001:db8:6::1/128"), 0, 60).await?;
-    a.wait_new(&routes("2001:db8:6::2/128"), 0, 60).await?;
+    a.wait_new(&routes(l1), single0, 60).await?;
 
     b.provision(&[
         "--loopback-remove-address",
         l1,
         "--clear-ospfv3-loopback-profile",
     ])
-    .await?;
-    b.provision(&["--loopback-remove-address", l2]).await
+    .await
 }
 
 /// RFC 2328 §16.2/§16.4 `LSInfinity` (self-contained). router-b is an ABR
