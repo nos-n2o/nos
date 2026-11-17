@@ -3591,10 +3591,24 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     // router-a's loopback: a destination with no neighbor of its own, so
     // router-b can only learn it via its own RFC 5340 §16 SPF computation.
     let route_pat = format!("added route prefix={OSPFV3_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
-    let route_before = b.count(&route_pat);
-    let lsa_installed = b.count(&format!(
-        "ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"
-    ));
+    // #1247: the bound times the route push, not LSA origination pacing. Let
+    // both routers' LSA churn settle for longer than MinLSInterval (5 s) so
+    // the loopback's Intra-Area-Prefix-LSA is not held back by the pacing of
+    // its previous instance, and anchor on that very LSA (0x2009 = 8201).
+    let churn = "ospfv3 lsa installed\\|ospfv3 lsa originated";
+    for _ in 0..10 {
+        let n = (b.count_fresh(churn).await, a.count_fresh(churn).await);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        if (b.count_fresh(churn).await, a.count_fresh(churn).await) == n {
+            break;
+        }
+    }
+    let prefix_lsa = format!(
+        "ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}.*lsa_type=8201.*advertising_router={OSPFV3_ROUTER_ID}"
+    );
+    let route_before = b.count_fresh(&route_pat).await;
+    let lsa_installed = b.count_fresh(&prefix_lsa).await;
+    let (mark_a, mark_b) = (a.log_mark(), b.log_mark());
     a.provision(&[
         "--ospfv3-loopback-address",
         OSPFV3_LOOPBACK_ADDRESS,
@@ -3603,29 +3617,27 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     ])
     .await?;
     a.wait("ospfv3 lsa originated").await?;
-    // (The old script's baseline of 1 here was a fixed guess at the install
-    // count; a live baseline is exact.)
-    b.wait_new(
-        &format!("ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"),
-        lsa_installed,
-        60,
-    )
-    .await?;
-    b.wait_new(
-        &format!("added route prefix={OSPFV3_LOOPBACK_ADDRESS}.*source=Some(Ospf)"),
-        route_before,
-        60,
-    )
-    .await?;
+    b.wait_new(&prefix_lsa, lsa_installed, 60).await?;
+    b.wait_new(&route_pat, route_before, 60).await?;
     // #190: pushed on the LSDB change, not on the next 2s poll.
-    b.assert_delay_under(
-        (
-            &format!("ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"),
-            lsa_installed,
-        ),
+    if let Err(e) = b.assert_delay_under(
+        (&prefix_lsa, lsa_installed),
         (&route_pat, route_before),
         1000,
-    )?;
+    ) {
+        let mut entries = b
+            .timeline_since(
+                &format!("ospfv3 lsa installed\\|{route_pat}\\|ospfv3 spf"),
+                mark_b,
+            )
+            .await;
+        entries.extend(a.timeline_since("ospfv3 lsa originated", mark_a).await);
+        let lines = format_timeline(entries, 60);
+        for l in &lines {
+            log(l);
+        }
+        bail!("{e}; timeline since provisioning:\n{}", lines.join("\n"));
+    }
 
     // RFC 8362 Full mode on both routers: adjacency survives (mixed or not,
     // E-LSAs are known types), each originates E-LSAs, and the peer decodes
