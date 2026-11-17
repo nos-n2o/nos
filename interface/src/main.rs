@@ -22,19 +22,21 @@ const DEFAULT_LISTEN_SOCKET: &str = "/run/nos/interface.sock";
 /// `rtnetlink`-backed implementation. Deliberately not shared with
 /// `nos-ribd`'s own `DriverKind` — each crate defines its own, per the
 /// star-dependency rule.
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Clone, Copy, clap::ValueEnum, Default)]
+#[cfg_attr(not(feature = "dev-args"), allow(dead_code))]
 enum DriverKind {
     Noop,
+    #[default]
     Linux,
 }
 
-#[cfg(target_os = "linux")]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Linux
-}
-#[cfg(not(target_os = "linux"))]
-fn default_driver_kind() -> DriverKind {
-    DriverKind::Noop
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Which backend applies desired interface state to the OS.
+    #[cfg_attr(feature = "dev-args", arg(long, value_enum, default_value_t = DriverKind::default()))]
+    driver: DriverKind,
 }
 
 #[derive(Parser)]
@@ -51,10 +53,6 @@ struct Args {
     /// interface`).
     #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
     listen_socket: PathBuf,
-
-    /// Which backend applies desired interface state to the OS.
-    #[arg(long, value_enum, default_value_t = default_driver_kind())]
-    driver: DriverKind,
 
     /// Path to this driver's own private persisted broadcast-domain-name ->
     /// bridge-id map (`--driver linux` only) — mirrors `nos-ribd`'s
@@ -77,6 +75,10 @@ struct Args {
     /// by nos-watchdog to every process it spawns (see `docs/architecture/supervision.md`), the same way `--config-socket` is.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
@@ -105,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let driver: Arc<dyn InterfaceDriver> = match args.driver {
+    let driver: Arc<dyn InterfaceDriver> = match args.dev.driver {
         DriverKind::Noop => {
             info!("using noop interface driver (no OS effect)");
             Arc::new(NoopInterfaceDriver)

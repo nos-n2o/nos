@@ -29,18 +29,39 @@ struct Args {
     /// Path to nos-watchdogd's broker socket, used to resolve nos-configd's
     /// current address and, for `show route`, a specific nos-ribd
     /// instance's address — rather than assuming a hardcoded default.
+    #[cfg(feature = "dev-args")]
     #[arg(long, default_value = nos_proto::DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
 
     /// The public CA certificate `nos-watchdogd` publishes — the trust anchor
     /// every daemon connection is checked against. It authenticates the
     /// watchdog to this shell and grants nothing.
+    #[cfg(feature = "dev-args")]
     #[arg(long, default_value = nos_proto::DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
 
     /// Refused: sshd runs `ssh host cmd` as `<shell> -c cmd`; use the REST API.
     #[arg(short = 'c', hide = true)]
     command: Option<String>,
+}
+
+// The two path flags exist only in a `dev-args` build (#1214): a setgid login
+// shell must not let its caller pick the broker it trusts or the trust anchor.
+#[cfg_attr(not(feature = "dev-args"), allow(clippy::unused_self))]
+impl Args {
+    fn watchdog_socket(&self) -> PathBuf {
+        #[cfg(feature = "dev-args")]
+        return self.watchdog_socket.clone();
+        #[cfg(not(feature = "dev-args"))]
+        PathBuf::from(nos_proto::DEFAULT_WATCHDOG_SOCKET)
+    }
+
+    fn pki_ca(&self) -> PathBuf {
+        #[cfg(feature = "dev-args")]
+        return self.pki_ca.clone();
+        #[cfg(not(feature = "dev-args"))]
+        PathBuf::from(nos_proto::DEFAULT_PKI_CA)
+    }
 }
 
 /// `nos -c <cmd>` is refused in every mode (checked before any watchdog contact).
@@ -194,16 +215,18 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
 
     // Trust the watchdog's CA, log in through it (it checks the password and
     // certifies a key we generate here), and only then talk to any daemon.
-    let ca = std::fs::read(&args.pki_ca).with_context(|| {
+    let pki_ca = args.pki_ca();
+    let watchdog_socket = args.watchdog_socket();
+    let ca = std::fs::read(&pki_ca).with_context(|| {
         format!(
             "cannot read the ipc trust anchor {} — is nos-watchdogd running, with its /run/nos shared with this shell?",
-            args.pki_ca.display()
+            pki_ca.display()
         )
     })?;
     let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
     nos_pki::install(identity.clone());
-    login(&args.watchdog_socket, &identity, ticket).await?;
-    let config_socket = resolve_config_socket(&args.watchdog_socket).await;
+    login(&watchdog_socket, &identity, ticket).await?;
+    let config_socket = resolve_config_socket(&watchdog_socket).await;
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
     let mut line_editor = Reedline::create()
@@ -246,7 +269,7 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
                     action,
                     mode,
                     &config_socket,
-                    &args.watchdog_socket,
+                    &watchdog_socket,
                     &doc_cache,
                     prompt_leave_choice,
                 )
@@ -449,7 +472,7 @@ mod tests {
     fn args_parse_with_defaults() {
         let args = Args::try_parse_from(["nos"]).unwrap();
         assert_eq!(
-            args.watchdog_socket,
+            args.watchdog_socket(),
             PathBuf::from(nos_proto::DEFAULT_WATCHDOG_SOCKET)
         );
         let _ = keybindings();

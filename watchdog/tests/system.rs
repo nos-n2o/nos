@@ -2,6 +2,8 @@
     clippy::disallowed_types,
     reason = "test code spawns the built binaries (#228)"
 )]
+//! Built only with `--features dev-args` (it passes `--driver=noop`, a dev flag, #1214).
+//!
 //! The whole stack, unprivileged (#131): the real `nos-watchdogd` supervising
 //! every real daemon (Linux drivers swapped for `noop`, every path under a
 //! temp dir), provisioned by the real `nos-provision` through a real login,
@@ -12,6 +14,8 @@
 //! Needs the sibling binaries in the same target directory, which
 //! `cargo test --workspace` (and `make test`/`make coverage`) builds; a
 //! single-package run without them skips with a note.
+
+#![cfg(feature = "dev-args")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

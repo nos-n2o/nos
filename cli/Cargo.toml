@@ -27,6 +27,10 @@ rpassword  = { workspace = true }
 crossterm  = { workspace = true }
 zeroize    = { workspace = true }
 
+[features]
+# Re-adds `--watchdog-socket`/`--pki-ca` (relocated runtime dir, hermetic tests). Never in a release build (#1214).
+dev-args = []
+
 [[bin]]
 name = "nos"
 path = "src/main.rs"

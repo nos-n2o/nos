@@ -8,7 +8,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 ## Login
 
-`main.rs::login` reads the watchdog's public `ca.crt` (`--pki-ca`, default `/run/nos/pki/ca.crt`), prompts `login:`/`password:` (no echo, `rpassword`), sends `WatchdogRequest::Login` with a fresh CSR (`watchdog_client::login`; 3 attempts, then exit 1). The certificate lives in memory only (`nos_pki::Identity::set_certificate`); `keep_certificate_fresh` renews it at half-life via `RenewCert`. It **fails closed**: no reachable watchdog, no shell. `nos-cli` never sees password hashes: `set user <name> password <clear>` edits the users, `show config` prints `<hidden>` (a `#[cli(secret)]` field) and `diff` `<hidden>`/`<changed>`; the `admin` keystore section is left out of `show config` and printed by `show config admin`. Flow: `docs/architecture/auth.md`.
+`main.rs::login` reads the watchdog's public `ca.crt` (`/run/nos/pki/ca.crt`; `--pki-ca` only with the `dev-args` feature, #1214), prompts `login:`/`password:` (no echo, `rpassword`), sends `WatchdogRequest::Login` with a fresh CSR (`watchdog_client::login`; 3 attempts, then exit 1). The certificate lives in memory only (`nos_pki::Identity::set_certificate`); `keep_certificate_fresh` renews it at half-life via `RenewCert`. It **fails closed**: no reachable watchdog, no shell. `nos-cli` never sees password hashes: `set user <name> password <clear>` edits the users, `show config` prints `<hidden>` (a `#[cli(secret)]` field) and `diff` `<hidden>`/`<changed>`; the `admin` keystore section is left out of `show config` and printed by `show config admin`. Flow: `docs/architecture/auth.md`.
 
 **SSH login-shell mode (#991).** When `NOS_LOGIN_TICKET` is set, `main` decodes it into a `Zeroizing` buffer and `login::redeem_ticket` trades it (`watchdog_client::redeem`) before any prompt. `Denied` falls back to the prompt; any other error fails closed. The ticket is never printed and the variable is not unset (no `unsafe` in this crate). `nos -c <cmd>` is refused (exit 2) in every mode. Docs: `docs/cli.md`.
 
@@ -16,7 +16,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 | Module | Role |
 |--------|------|
-| `main.rs` | Arg parsing (`--watchdog-socket`), login, the reedline REPL (completer, menus, keybindings), mode-aware prompt, the stdin commit/discard/leave question on `exit` — only interactive glue |
+| `main.rs` | Arg parsing (`--watchdog-socket`/`--pki-ca` only with `dev-args`), login, the reedline REPL (completer, menus, keybindings), mode-aware prompt, the stdin commit/discard/leave question on `exit` — only interactive glue |
 | `actions.rs` | What every `session::Resolved` action does (`handle_action`), `resolve_config_socket` (broker lookup, default-socket fallback), `subscribe_hostname_task`, `DocCache`/`doc_for`/`doc_for_blocking`. `handle_action` takes the exit question as `fn(&str) -> LeaveChoice`, so `tests/actions.rs` drives every action against fake daemons (#131) and `tests/actions_unhappy.rs` every not-running/error/populated arm (#345, own binary: one test sets `EDITOR`, process-global; fakes in `tests/common/`) |
 | `editor.rs` | Built-in modeless editor for `edit source` (#1000): pure `Buffer::handle(&Event) -> Step`, `edit()` is the crossterm I/O. **Never add a command line / `:` prompt / file or exec binding** (a test pins no `fs`/`process` use) |
 | `command.rs` | `Command::parse` — pure, no I/O, no mode. Show/shell commands go through `spec::parse`; any other `edit`/`set`/`delete`/`move` line becomes `Command::Config(line)` |
@@ -45,6 +45,8 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 - `Mode` is client-side UI state only; transactions live in `nos-configd`, so an abnormal exit never loses one.
 - Each command dials the daemon fresh. Two long-lived exceptions: `show log --follow` (foreground, not reconnected) and the hostname subscription task (`Request::Subscribe`, retry every 1s, repaints the prompt).
-- `nos-configd` is resolved once through the broker (`--watchdog-socket`, default `/run/nos/watchdog.sock`); unreachable, it warns and falls back to `/run/nos/config.sock`. Other daemons are resolved per command.
+- `nos-configd` is resolved once through the broker (`/run/nos/watchdog.sock`, `--watchdog-socket` in a `dev-args` build); unreachable, it warns and falls back to `/run/nos/config.sock`. Other daemons are resolved per command.
 
 Details: [CLI guide, command table and internals](../docs/cli.md#command-table-developer-reference).
+
+Every input of the binary (flags, env, hidden `-c`, commands), who uses it (operator, e2e phase, tests) and its `dev-args` status: `docs/cli.md` "Input inventory of `nos`". Update it when an input is added or removed.

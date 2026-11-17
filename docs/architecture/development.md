@@ -32,7 +32,7 @@ The release `Dockerfile` builds on `rust:<channel>-slim-trixie` (digest-pinned, 
 - File capabilities are `=ep` (the inheritable bit is dead weight for a non-root exec).
 - `watchdog` and `cli` run with `read_only: true` and a `/tmp` tmpfs; state lives in the `/run/nos` and `/var/lib/nos` volumes. `nos-e2e` mirrors this in `Dock::start` (it does not use compose).
 
-`watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); a single-package run without them skips.
+`watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, a `dev-args` flag; every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); the test itself is built only with the dev features (`make test` does).
 
 **Fake IPC servers for tests** (`nos-test-support`, #347):
 
@@ -54,6 +54,12 @@ docker compose run --rm cli              # interactive shell, as its own contain
 The Dockerfile's last stage, `lab`, is `runtime` plus `pamtester` (what `nos-e2e`'s `pam` phase drives); it is the default build target, and a production image is `docker build --target runtime .`.
 
 `watchdog` and `cli` share the same image and an `nos-run` volume mounted at `/run/nos`, so `cli` reaches the daemon over the same Unix socket path both binaries default to. `watchdog` also gets an `nos-data` volume at `/var/lib/nos` (one `0700` directory per daemon role, made by the watchdog) so `save`d config survives container restarts. `docker compose exec watchdog nos` still works too — it just runs the shell inside the watchdog's own container instead of a separate one.
+
+**Dev-only flags (`dev-args`, #1214)**: flags and env vars that only tests, the e2e harness or a developer use exist only with the per-crate cargo feature `dev-args` (`nos-cli`, `nos-ospf`, `nos-ospfv3`, `nos-rib`, `nos-interface`, `nos-fdb`, `nos-acl`, `nos-lacp`, `nos-watchdog`, `nos-provision`); a release binary rejects them with clap's `unexpected argument` (exit 2), one `tests/bin_flags.rs` per crate. The full list, with who uses each: [binaries.md](../binaries.md).
+- The feature list is one line in `tools/ci/dev-features.txt`; `make clippy`/`make test`/`make coverage` build the workspace with it (`DEV_FEATURES`), `make test` also runs the default build for the rejection tests.
+- `make docker-build` (the lab image, `--target lab`, also CI's e2e build) passes it as `CARGO_FEATURES` and ships `nos-rtr-stub`; `make docker-build-release` builds `--target runtime` (no dev flags, no `nos-rtr-stub`) and checks a release `nos-ribd` refuses `--driver=noop`. `docker-compose.yml` uses `runtime`.
+- Run a dev flag locally: `cargo run -p nos-cli --features dev-args -- --pki-ca ...`.
+- A new test-only flag goes in the crate's `DevArgs` struct (`#[command(flatten)]` only with the feature), and the list in `docs/binaries.md`.
 
 **Memory profiling**: `docker build --build-arg CARGO_FEATURES=nos-bgp/dhat-heap -t nos .` builds `nos-bgpd` with `dhat` heap profiling (see `docs/protocols/bgp-internals.md`'s "Memory profiling"); run it via `docker compose run --rm watchdog --bgpd-arg --profile-memory-out=/var/lib/nos/bgpd/dhat-heap.json` (`--bgpd-arg` is `nos-watchdogd`'s existing opaque pass-through to every spawned `nos-bgpd` instance — no watchdog code involved) and load the resulting report from the `nos-data` volume at https://nnethercote.github.io/dh_view/dh_view.html. `nos-configd` and `nos-restd` have the same feature: see "Memory profiling" in [config-protocol.md](config-protocol.md).
 

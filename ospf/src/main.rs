@@ -12,6 +12,40 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
 
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Multiplies the per-second LSA-age-clock increment (default 1 = real
+    /// time). Test/debug only — never set by nos-watchdogd's normal config-
+    /// driven spawn path, only reachable via its opaque `--ospfd-arg` pass-
+    /// through (see root `CLAUDE.md`'s "Memory profiling" for the identical
+    /// pattern). Do not wire this into OspfProfile/nos-cli.
+    #[cfg_attr(feature = "dev-args", arg(long, default_value_t = 1))]
+    lsa_age_multiplier: u16,
+
+    /// Drop or duplicate the Nth outgoing exchange DBD, e.g. `drop:2,dup:3`
+    /// (#607). Test-only, via `--ospfd-arg`; never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    dbd_fault: Option<String>,
+
+    /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
+    /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfd-arg`
+    /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
+    /// cannot reach a supervised daemon); never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    push_chunk: Option<usize>,
+}
+
+impl Default for DevArgs {
+    fn default() -> Self {
+        Self {
+            lsa_age_multiplier: 1,
+            dbd_fault: None,
+            push_chunk: None,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "nos-ospfd", about = "NOS OSPF daemon")]
 struct Args {
@@ -37,14 +71,6 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
-    /// Multiplies the per-second LSA-age-clock increment (default 1 = real
-    /// time). Test/debug only — never set by nos-watchdogd's normal config-
-    /// driven spawn path, only reachable via its opaque `--ospfd-arg` pass-
-    /// through (see root `CLAUDE.md`'s "Memory profiling" for the identical
-    /// pattern). Do not wire this into OspfProfile/nos-cli.
-    #[arg(long, default_value_t = 1)]
-    lsa_age_multiplier: u16,
-
     /// RFC 2328 §10.8's per-DBD-packet LSA-header budget override. Left
     /// unset (the real production default), each link derives its own
     /// budget from its effective MTU (`OspfProfile.mtu` if set, else the
@@ -56,30 +82,22 @@ struct Args {
     #[arg(long)]
     dbd_max_headers: Option<usize>,
 
-    /// Drop or duplicate the Nth outgoing exchange DBD, e.g. `drop:2,dup:3`
-    /// (#607). Test-only, via `--ospfd-arg`; never a config field.
-    #[arg(long, hide = true)]
-    dbd_fault: Option<String>,
-
     /// Directory for this daemon's persisted state: the RFC 7474 boot count
     /// (`<instance>.boot`), which must survive restarts, and the RFC 3623
     /// graceful-restart marker (`<instance>.gr`, consumed at start).
     #[arg(long, default_value = "/var/lib/nos/ospfd")]
     state_dir: PathBuf,
 
-    /// Weight budget per `PushOspfRoutes` frame (`OspfRouteUpdate::frames_with`).
-    /// Unset: `nos_proto::rib::ospf_push_chunk()`. Test-only, via `--ospfd-arg`
-    /// (the watchdog clears its children's environment, so `NOS_OSPF_PUSH_CHUNK`
-    /// cannot reach a supervised daemon); never a config field.
-    #[arg(long, hide = true)]
-    push_chunk: Option<usize>,
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let identity = bootstrap::identity()?;
-    if let Some(spec) = &args.dbd_fault {
+    if let Some(spec) = &args.dev.dbd_fault {
         nos_ospf_common::dbd_fault::install(spec).map_err(anyhow::Error::msg)?;
     }
 
@@ -115,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(
-        args.lsa_age_multiplier,
+        args.dev.lsa_age_multiplier,
         args.dbd_max_headers,
         BootCounter::persistent(args.state_dir.join(format!("{}.boot", args.instance))),
     );
@@ -147,7 +165,8 @@ async fn main() -> anyhow::Result<()> {
         links.clone(),
         routing_table_rx,
         shutdown_rx,
-        args.push_chunk
+        args.dev
+            .push_chunk
             .filter(|&n| n > 0)
             .unwrap_or_else(nos_proto::rib::ospf_push_chunk),
     );
@@ -226,6 +245,9 @@ mod tests {
     fn args_parse() {
         Args::command().debug_assert();
         let args = Args::try_parse_from(["nos-ospfd", "--instance", "o1"]).unwrap();
-        assert_eq!((args.instance.as_str(), args.lsa_age_multiplier), ("o1", 1));
+        assert_eq!(
+            (args.instance.as_str(), args.dev.lsa_age_multiplier),
+            ("o1", 1)
+        );
     }
 }

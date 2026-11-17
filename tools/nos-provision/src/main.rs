@@ -26,6 +26,28 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 type Stream = nos_pki::Stream;
 
 /// `nos-provision`'s own flags, alongside the shared config-building ones.
+/// Test-only inputs (#1214): the flags exist only in a `dev-args` build.
+#[derive(Default)]
+#[cfg_attr(feature = "dev-args", derive(clap::Args))]
+struct DevArgs {
+    /// Test fixture: after logging in, also write the certificate and its
+    /// private key here (`nos-e2e pki` reuses them after a revocation).
+    #[cfg_attr(feature = "dev-args", arg(long))]
+    pki_cert_out: Option<PathBuf>,
+
+    /// Test fixture: skip login and present the certificate `--pki-cert-out`
+    /// wrote instead.
+    #[cfg_attr(feature = "dev-args", arg(long, conflicts_with = "pki_cert_out"))]
+    pki_cert_in: Option<PathBuf>,
+
+    /// Test fixture (`nos-e2e pki-rotation`, #637): present the
+    /// `--pki-cert-in` certificate to the watchdog's `RenewCert`, overwrite
+    /// that file with the renewed certificate and exit, without touching
+    /// `nos-configd`. A refusal exits non-zero and prints its reason.
+    #[cfg_attr(feature = "dev-args", arg(long, requires = "pki_cert_in"))]
+    renew_probe: bool,
+}
+
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
@@ -33,7 +55,11 @@ struct Cli {
 
     /// User to log in as (a local NOS user; a fresh router has `admin`).
     /// Required unless `--pki-cert-in` supplies a certificate instead.
-    #[arg(long, required_unless_present = "pki_cert_in")]
+    #[cfg_attr(
+        feature = "dev-args",
+        arg(long, required_unless_present = "pki_cert_in")
+    )]
+    #[cfg_attr(not(feature = "dev-args"), arg(long, required = true))]
     login_user: Option<String>,
 
     /// That user's password. Falls back to `NOS_LOGIN_PASSWORD`, which keeps
@@ -49,29 +75,17 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
 
-    /// Test fixture: after logging in, also write the certificate and its
-    /// private key here (`nos-e2e pki` reuses them after a revocation).
-    #[arg(long)]
-    pki_cert_out: Option<PathBuf>,
-
-    /// Test fixture: skip login and present the certificate `--pki-cert-out`
-    /// wrote instead.
-    #[arg(long, conflicts_with = "pki_cert_out")]
-    pki_cert_in: Option<PathBuf>,
-
     /// Test fixture (`nos-e2e pki-crl`, #677): log in N times as
     /// `--login-user`, discarding every certificate, then exit without
     /// touching `nos-configd`. Each login is a certificate the watchdog must
     /// list in the CRL when the user's password changes.
-    #[arg(long, requires = "login_user", conflicts_with_all = ["pki_cert_in", "pki_cert_out"])]
+    #[cfg_attr(feature = "dev-args", arg(long, requires = "login_user", conflicts_with_all = ["pki_cert_in", "pki_cert_out"]))]
+    #[cfg_attr(not(feature = "dev-args"), arg(long, requires = "login_user"))]
     login_burst: Option<usize>,
 
-    /// Test fixture (`nos-e2e pki-rotation`, #637): present the
-    /// `--pki-cert-in` certificate to the watchdog's `RenewCert`, overwrite
-    /// that file with the renewed certificate and exit, without touching
-    /// `nos-configd`. A refusal exits non-zero and prints its reason.
-    #[arg(long, requires = "pki_cert_in")]
-    renew_probe: bool,
+    #[cfg_attr(feature = "dev-args", command(flatten))]
+    #[cfg_attr(not(feature = "dev-args"), arg(skip))]
+    dev: DevArgs,
 }
 
 /// Logins in flight at once: the broker verifies two passwords at a time
@@ -129,7 +143,7 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
         .with_context(|| format!("reading the ipc trust anchor {}", cli.pki_ca.display()))?;
     let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
     nos_pki::install(identity.clone());
-    if let Some(path) = &cli.pki_cert_in {
+    if let Some(path) = &cli.dev.pki_cert_in {
         let saved = Bundle::read_from(&mut std::fs::read(path)?.as_slice())?
             .context("empty certificate file")?;
         identity.set_certificate(saved.cert, saved.key)?;
@@ -159,7 +173,7 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
         .context("sending login")?;
     match reader.next().await {
         Some(Ok(WatchdogEvent::Issued { cert_der, .. })) => {
-            if let Some(path) = &cli.pki_cert_out {
+            if let Some(path) = &cli.dev.pki_cert_out {
                 let saved = Bundle {
                     ca: Vec::new(),
                     cert: cert_der.clone(),
@@ -179,7 +193,7 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
 /// One `RenewCert` over a connection that presents the saved certificate.
 async fn renew_probe(cli: &Cli) -> anyhow::Result<()> {
     log_in(cli).await?;
-    let path = cli.pki_cert_in.as_ref().context("--pki-cert-in")?;
+    let path = cli.dev.pki_cert_in.as_ref().context("--pki-cert-in")?;
     let (csr, key) = nos_pki::generate_csr()?;
     let stream = nos_pki::connect(&cli.watchdog_socket, Role::Watchdog, "").await?;
     let (r, w) = tokio::io::split(stream);
@@ -211,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(n) = cli.login_burst {
         return burst(&cli, n).await;
     }
-    if cli.renew_probe {
+    if cli.dev.renew_probe {
         return renew_probe(&cli).await;
     }
     let args = &cli.args;

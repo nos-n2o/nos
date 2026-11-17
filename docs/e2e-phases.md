@@ -1,5 +1,7 @@
 # nos-e2e phases
 
+The e2e image is the lab target built with the `dev-args` features (`make docker-build`; CI passes `tools/ci/dev-features.txt`): phases that pass test-only flags (`--*-arg=--dbd-fault`, `--push-chunk`, `--originate-lsinfinity`, `--router-lsa-max-links`, `--lsa-age-multiplier`, `--redistribute-chunk`, `--flowspec-file`, `NOS_LACP_CHURN_SECS`, `nos-provision --pki-cert-in/out`) need it (#1214).
+
 Developer reference for the `nos-e2e` harness (`tools/e2e`): every phase, what it needs and what it proves against real containers. The registry is `tools/e2e/src/phases/mod.rs`; a unit test (`cargo test -p nos-e2e`) fails when this table and `phases::ALL`/`phases::group` disagree.
 
 - Run one phase, a group or everything: `cargo run -p nos-e2e -- <phase|group|all>`. Also `logs [n]` (last n log lines of every running router, via REST) and `down` (tear down the current lab's containers, volumes and networks, by label; `NOS_E2E_LAB=<k>` picks the lab, see [e2e-harness.md](architecture/e2e-harness.md#parallel-labs-1049)).
