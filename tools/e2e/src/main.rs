@@ -27,8 +27,12 @@ use std::process::ExitCode;
 
 use world::World;
 
-async fn run_all(w: &mut World, names: &[&str]) -> anyhow::Result<()> {
+/// `phase_start` tracks the unix second the running phase began.
+async fn run_all(w: &mut World, names: &[&str], phase_start: &mut i32) -> anyhow::Result<()> {
     for name in names {
+        *phase_start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i32::try_from(d.as_secs()).unwrap_or(0));
         phases::run(name, w).await?;
     }
     Ok(())
@@ -44,11 +48,13 @@ async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
         "logs" => w.print_logs(n).await,
         "logd-mem" => logd_mem::run(&w).await,
         "mem-wave" => logd_mem::wave(&w).await,
-        "all" => run_all(&mut w, phases::ALL).await,
+        "all" => run_all(&mut w, phases::ALL, &mut 0).await,
         group if phases::group(group).is_some() => {
-            let result = run_all(&mut w, phases::group(group).unwrap_or_default()).await;
-            if result.is_err() {
-                w.dump_docker_logs(n).await;
+            let mut since = 0;
+            let result =
+                run_all(&mut w, phases::group(group).unwrap_or_default(), &mut since).await;
+            if let Err(e) = &result {
+                w.dump_docker_logs(n, &format!("{e:#}"), since).await;
             }
             // Tear down whether it passed or failed; VERIFY_E2E_KEEP=1 keeps
             // the containers for `nos-e2e logs` / manual inspection.
