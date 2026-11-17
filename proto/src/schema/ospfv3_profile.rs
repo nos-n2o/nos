@@ -153,11 +153,6 @@ pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result 
         if p.passive && (p.auth.is_some() || p.bfd.is_some()) {
             return Err(garde::Error::new("passive excludes auth and bfd"));
         }
-        if p.network_type == Some(NetworkType::PointToMultipoint) {
-            return Err(garde::Error::new(
-                "point-to-multipoint is not supported for OSPFv3",
-            ));
-        }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval)
             && dead <= hello
         {
@@ -403,19 +398,15 @@ mod tests {
 
     #[test]
     fn either_network_type_passes() {
-        for network_type in [NetworkType::PointToPoint, NetworkType::Broadcast] {
+        for network_type in [
+            NetworkType::PointToPoint,
+            NetworkType::Broadcast,
+            NetworkType::PointToMultipoint,
+        ] {
             let mut p = profile("p1");
             p.network_type = Some(network_type);
             let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
             cfg.validate_with(&cfg).unwrap();
         }
-    }
-
-    #[test]
-    fn point_to_multipoint_is_refused() {
-        let mut p = profile("p1");
-        p.network_type = Some(NetworkType::PointToMultipoint);
-        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
-        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

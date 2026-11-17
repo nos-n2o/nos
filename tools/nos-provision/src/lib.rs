@@ -1664,6 +1664,10 @@ pub struct Args {
     /// ID (`Ospfv3ProfileOp::SetInstanceId`); `0` clears it.
     #[arg(long)]
     pub ospfv3_instance_id: Option<u8>,
+    /// If set (requires `--ospfv3-profile`), the profile's network type:
+    /// `point-to-point`, `broadcast`, `point-to-multipoint`, or `clear`.
+    #[arg(long)]
+    pub ospfv3_profile_network_type: Option<String>,
     /// If set (requires `--ospfv3-profile`), configures a single RFC 7166
     /// authentication-trailer key on it (`Ospfv3ProfileOp::SetCryptoKey`,
     /// marked current) — `<key-id>:<algorithm>:<key>`, key-id 0-65535 (the
@@ -4530,6 +4534,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled,
                 }));
             }
+            if let Some(kind) = args.ospfv3_profile_network_type.as_deref() {
+                let (instance, name) = (instance.clone(), name.clone());
+                ops.push(ConfigOp::Ospfv3Profile(match kind {
+                    "clear" => Ospfv3ProfileOp::ClearNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                    },
+                    _ => Ospfv3ProfileOp::SetNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                        network_type: match kind {
+                            "point-to-point" => NetworkType::PointToPoint,
+                            "broadcast" => NetworkType::Broadcast,
+                            "point-to-multipoint" => NetworkType::PointToMultipoint,
+                            other => bail!("--ospfv3-profile-network-type: unknown {other:?}"),
+                        },
+                    },
+                }));
+            }
             if let Some(id) = args.ospfv3_instance_id {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
                     instance: instance.clone(),
@@ -4557,6 +4582,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             || args.ospfv3_passive.is_some()
             || args.ospfv3_crypto_key.is_some()
             || args.ospfv3_instance_id.is_some()
+            || args.ospfv3_profile_network_type.is_some()
         {
             bail!(
                 "--ospfv3-profile-mtu/--ospfv3-profile-hello-interval/--ospfv3-mtu-ignore/--ospfv3-passive/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
