@@ -139,12 +139,29 @@ impl World {
         BMP_COLLECTOR,
     ];
 
-    /// On a group failure: the last `n` `docker logs` lines of every container
-    /// that exists (running or not), so a router whose REST API never came up
-    /// still explains itself before `down` removes it.
-    pub async fn dump_docker_logs(&self, n: usize) {
+    /// The container `err` names (a failed assertion starts with its router's
+    /// name), if any.
+    pub fn failing_container(err: &str) -> Option<&'static str> {
+        Self::CONTAINERS.into_iter().find(|c| err.contains(c))
+    }
+
+    /// On a group failure: the last `n` `docker logs` lines of the container
+    /// the error names, from the start of the failing phase (`since`, unix
+    /// seconds) so the cause is not cut off; with no culprit, every container
+    /// that exists (running or not, so a router whose REST API never came up
+    /// still explains itself before `down` removes it).
+    pub async fn dump_docker_logs(&self, n: usize, err: &str, since: i32) {
+        let one = Self::failing_container(err);
+        let (n, since) = if one.is_some() {
+            (n * 10, since)
+        } else {
+            (n, 0)
+        };
         for name in Self::CONTAINERS {
-            let Ok(out) = self.dock.logs(name).await else {
+            if one.is_some_and(|o| o != name) {
+                continue;
+            }
+            let Ok(out) = self.dock.logs_since(name, since).await else {
                 continue;
             };
             println!("=== docker logs {name} ===");
@@ -288,5 +305,17 @@ impl World {
                 )
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::World;
+
+    #[test]
+    fn failing_container_picks_the_named_router() {
+        let e = "router-a: no new log line matching 'x' within 30s";
+        assert_eq!(World::failing_container(e), Some("router-a"));
+        assert_eq!(World::failing_container("boom"), None);
     }
 }
