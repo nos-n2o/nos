@@ -456,12 +456,13 @@ async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     a.wait(&bgp::learned()).await?;
     let revoked = "certificates revoked role=ribd name=rt1 ";
     let snapshot = "sent initial bgp route snapshot to nos-ribd";
-    let (revocations, updates, ribds, snapshots, kernel_routes) = (
+    let (revocations, updates, ribds, snapshots, released, removed) = (
         a.count(revoked),
         a.count("ipc crl updated entries="),
         a.count("nos-ribd starting"),
         a.count(snapshot),
-        a.count("added route"),
+        a.count(HOLD_RELEASED),
+        a.count("removed route"),
     );
     log("killing router-a's nos-ribd; its certificate must be revoked");
     w.dock
@@ -472,17 +473,19 @@ async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     a.wait_new("ipc crl updated entries=", updates, 30).await?;
     a.wait_new("nos-ribd starting", ribds, 30).await?;
     // #718: with no route change at all, nos-bgpd notices the closed push
-    // connection, reconnects, re-sends its snapshot and the route is
-    // reinstalled in the kernel.
+    // connection, reconnects and re-sends its snapshot; the startup hold
+    // (#654) kept the kernel route, so nothing is re-added, and the hold is
+    // released once the producer has re-pushed.
     a.wait_new(snapshot, snapshots, 30).await?;
-    a.wait_new("added route", kernel_routes, 30).await?;
+    a.wait_new(HOLD_RELEASED, released, 30).await?;
+    a.assert_quiet("removed route", removed, 3).await?;
     // nos-restd (holding the new CRL) dials the new nos-ribd: still trusted.
     // nos-restd lives in rt1's VRF, which the new nos-ribd recreates: its
     // listener may take a moment to come back, so a refused connect is retried.
     for _ in 0..60 {
         if matches!(
             a.rest(Method::GET, "/v1/routes/rt1", None).await,
-            Ok((200, _))
+            Ok((200, body)) if body.contains(crate::consts::REDISTRIBUTE_PREFIX)
         ) {
             return Ok(());
         }
@@ -490,6 +493,9 @@ async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     }
     bail!("the restarted nos-ribd never answered a route query")
 }
+
+/// #654: a restarted nos-ribd keeps the kernel routes until producers re-push.
+const HOLD_RELEASED: &str = "startup hold released table=rt1 reason=\"all sources re-pushed\"";
 
 /// #858: the watchdog's per-write line; `crl_bytes=0` is a rotation frame.
 const PUSHED_EMPTY: &str = "identity pushed process=[^ ]* crl_bytes=0";
@@ -534,9 +540,10 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
         a.count(PUSHED_EMPTY),
         a.count("ipc crl updated entries="),
     );
-    let (snapshots, kernel_routes, ribds) = (
+    let (snapshots, released, removed, ribds) = (
         a.count(snapshot),
-        a.count("added route"),
+        a.count(HOLD_RELEASED),
+        a.count("removed route"),
         a.count("nos-ribd starting"),
     );
     log("killing router-a's nos-ribd; the watchdog restarts it with a fresh identity");
@@ -554,10 +561,12 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
 
     // Router-a's long-lived nos-bgpd sees the old socket close, reconnects to
     // the new nos-ribd with its rotated identity, and the route lands in the
-    // kernel — the whole path, on rotated identities.
+    // kernel (kept by the startup hold, released on the re-push) — the whole
+    // path, on rotated identities.
     let a = w.a()?;
     a.wait_new(snapshot, snapshots, 60).await?;
-    a.wait_new("added route", kernel_routes, 60).await
+    a.wait_new(HOLD_RELEASED, released, 60).await?;
+    a.assert_quiet("removed route", removed, 3).await
 }
 
 /// Where the cap check keeps the shell user's certificate.
