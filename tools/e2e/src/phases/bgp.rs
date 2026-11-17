@@ -3230,8 +3230,15 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
 
     log("a shutdown and un-shutdown releases it too");
     let (est_before, ceases) = (a.count(est), a.count(cease1));
+    let shut = "rejecting inbound tcp connection from administratively shut peer";
+    let shut_before = a.count(shut);
     a.provision_flags(&with(&["--shutdown-peer-group", ""]))
         .await?;
+    // #839: back-to-back shut/no-shut can coalesce into "no change" in
+    // nos-bgpd, leaving the maximum-prefix hold in place (a shut slot is a new
+    // slot; an unchanged one keeps the hold). Wait until the shutdown took
+    // effect (ExaBGP's retry is refused) before lifting it.
+    a.wait_new(shut, shut_before, 30).await?;
     a.provision_flags(&with(&["--unshutdown-peer-group"]))
         .await?;
     a.wait_new(est, est_before, 30).await?;
