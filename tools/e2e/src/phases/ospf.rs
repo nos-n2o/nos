@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use reqwest::Method;
 
 use super::bgp::no_leak;
@@ -1408,13 +1408,14 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     };
     let full_again0 = b.count(&full_p2p(OSPF_ROUTER_ID));
     let full_again_a0 = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    let cap60 = "ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)";
+    let cap60_0 = b.count_fresh(cap60).await;
     b.provision_flags(&helper_cap(&[
         "--ospf-graceful-restart-helper-max-grace-period",
         "60",
     ]))
     .await?;
-    b.wait("ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)")
-        .await?;
+    b.wait_new(cap60, cap60_0, 60).await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
         .await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_again_a0, 60)
@@ -1537,7 +1538,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
 /// router-a, SIGTERM on router-a's `nos-ospfd` makes its last Hello carry the
 /// RS bit. Router-b must log the signal, keep the eth0.0 adjacency and
 /// router-a's loopback route through the restart, and see it `Full` again.
-/// Restores `lls` off and no graceful restart at the end.
+/// Router-b gets an explicit helper cap of 60 so the phase does not depend on
+/// what an earlier phase left (#1236); restores `lls` off, no graceful restart
+/// and the default cap (`None`: nos-provision maps 0 to it) at the end.
 pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let flags = |rid: &str, extra: &[&str]| {
@@ -1562,8 +1565,19 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         ),
     ))
     .await?;
-    b.provision_flags(&with_base(B, flags(OSPF_ROUTER_ID_B, &[])))
-        .await?;
+    let cap = |v: &str| {
+        format!("ospf instance config resolved.*graceful_restart_helper_max_grace_period={v}")
+    };
+    let cap60_0 = b.count_fresh(&cap("Some(60)")).await;
+    b.provision_flags(&with_base(
+        B,
+        flags(
+            OSPF_ROUTER_ID_B,
+            &["--ospf-graceful-restart-helper-max-grace-period", "60"],
+        ),
+    ))
+    .await?;
+    b.wait_new(&cap("Some(60)"), cap60_0, 60).await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
     b.wait(&format!(
         "added route prefix={OSPF_GR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
@@ -1589,7 +1603,15 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         .signal_process("router-a", "nos-ospfd", "-TERM")
         .await?;
     let restart = async {
-        b.wait_new(&signal, signal0, 30).await?;
+        b.wait_new(&signal, signal0, 30).await.with_context(|| {
+            format!(
+                "router-b helper cap was set to 60 (RS is ignored when the cap is 0); last config: {}; last lls/grace lines: {:?}",
+                b.logs
+                    .last("ospf instance config resolved")
+                    .unwrap_or_default(),
+                b.logs.tail("ospf lls\\|ospf helper", 3)
+            )
+        })?;
         b.wait_new(&full_on_b, full_b0, 90).await?;
         a.wait_new(&full_on_a, full_a0, 90).await?;
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1633,6 +1655,21 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         ]),
     ))
     .await?;
+    // Back to the default cap (a 0 clears it to None).
+    let cap_none0 = b.count_fresh(&cap("None")).await;
+    b.provision_flags(&with_base(
+        B,
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID_B,
+            "--ospf-graceful-restart-helper-max-grace-period",
+            "0",
+        ]),
+    ))
+    .await?;
+    b.wait_new(&cap("None"), cap_none0, 60).await?;
     b.wait_ospf_route_gone(OSPF_GR_LOOPBACK_ADDRESS, 30).await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
     both_full_p2p(a, b).await
