@@ -16,6 +16,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Prefix options**: a received NU prefix is skipped by SPF and `intra_area_routes`; a loopback `/128` is originated with LA; P/DN are never set.
 - **Link State IDs** of prefix-keyed LSAs are opaque: `LinkManager::lsid` allocates per `(type, prefix)` from a never-reused counter and `originate_all` prunes entries no longer originated (a restart or re-advertise's new IDs make `withdraw_undesired` flush the old ones); an Inter-Area-Router-LSA's ID is the ASBR's router ID.
 - **SPF**: skips LSInfinity (`0xFFFFFF`) inter-area, external and ASBR-distance metrics; test-only `--originate-lsinfinity` makes the ABR/ASBR originate them (`ospfv3-lsinfinity`). Next hops from Link-LSAs, never the neighbor table; `run_dijkstra(.., links: None)` is distance-only (next-hop derivation would drop vertices from a non-root viewpoint). The external metric is the LSA's own (v2 adds a constant); own LSAs never route.
+- **Area ranges** (#1152): `RouteEntry::discard` (empty `next_hops`) is the pushed discard route.
 - **ECMP** (#1135): `RouteEntry::next_hops` is the sorted set (`next_hop` = first); see the internals page.
 - `run_dijkstra` checks `back_link` on every edge, `links: None` runs included (#959). Parallel p2p links to one neighbor: the first hop leaves over the cheapest (`p2p_next_hop`, #618).
 - **Instance ID** is header byte 14, after the kernel-filled checksum at 12 (stamping 12 corrupts it). The socket (`OspfSocket::signed`) stamps it with `packet::set_instance_id` before signing, and `link::run` drops a mismatch **before** `verify_trailer`, so another instance's packets never count as auth failures.
@@ -31,8 +32,8 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Redistribution**: `Ospfv3Request::RedistributeRoutes` is `ribd`'s only (`server::allowed`); `reconcile::resolve_redistribute_policy` is a `ponytail:` copy of v2's.
 - **Receive hardening** (#394): mismatched hello/dead interval dropped (#650); non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2. Dead timers are the 1s `sweep_dead_neighbors` on every network type (no p2p deadline); it removes idle `Down` entries and `handle_hello` evicts a same-address entry under a new router ID on p2p/p2mp (#957).
 - Own LSA flooded back newer (§13.4, #731): same `mark_reflected`/`reoriginate`/`origination_pass` mechanism as `nos-ospfd`.
-- **Not built**: stub areas/NSSA, area ranges, virtual links, RFC 5838 multi-AF, RFC 8362 sparse mode; list in `docs/protocols/ospfv3.md`.
+- **Not built**: see `docs/protocols/ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager`; attach points use `nostst0`, a device no host has (the "not present yet" branch). The `cfg(test)` getters on `LinkManager` are its read side.
-- Verify kernel, IPC or wire changes with the matching `nos-e2e` phase (`ospfv3*`, `docs/e2e-phases.md`); `link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.
+- Verify kernel, IPC or wire changes with the matching `nos-e2e` phase (`ospfv3*`, `docs/e2e-phases.md`); `link::tests::abr_and_asbr_reach_across_areas` runs three routers on the in-memory wire.
 - **Multicast flood** (#879): as `ospf/CLAUDE.md`: `flood_full_neighbors`/`flush_pending_acks` use `flood_dest` and `LinkSocket::send_flood` (`ff02::5`/`ff02::6`, one signed packet per chunk); unicast fallback on error; retransmissions, DBD/LSR, Grace stay unicast.
 - **AllDRouters** (#854): `run_election` joins/leaves `ff02::6` (DR/Backup only, never p2p) via `OspfSocket::set_all_drouters`; logged on change, `ospfv3-dr` e2e asserts it.

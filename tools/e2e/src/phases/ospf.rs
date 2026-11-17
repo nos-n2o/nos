@@ -3667,7 +3667,7 @@ async fn set_link(w: &World, router: &str, dev: &str, state: &str) -> anyhow::Re
 /// #276: `nos-ospfv3d` follows `nos-interfaced`'s link stream on a second
 /// OSPFv3 link, `eth1.0` over a direct veth pair (`eth0.0` carries the REST
 /// API, so it cannot be cut). A `nos-interfaced` kill plus a config change
-/// tears nothing down; carrier loss and admin-down are seen within 5s with no
+/// tears nothing down; carrier loss and admin-down are seen within 15s with no
 /// dead timer; a deleted device is `absent`. Leaves eth1 deleted.
 async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     w.link_veths().await?;
@@ -3754,18 +3754,21 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     // Carrier loss: router-b's end goes admin-down, router-a's loses carrier;
     // neither waits for a dead timer.
     let reason = |r: &str| format!("ospfv3 link kernel interface down link=eth1.0 .*reason={r}");
-    let (nc0, ad0, down1) = (
-        a.count(&reason("no-carrier")),
-        b.count(&reason("admin-down")),
-        (a.count(down), b.count(down)),
+    // #1028: fresh baselines (in-flight lines from the restart settle first) and a
+    // 15s window, still well under the 40s dead interval the `down` check below
+    // guards.
+    let (nc0, ad0) = (
+        a.count_fresh(&reason("no-carrier")).await,
+        b.count_fresh(&reason("admin-down")).await,
     );
+    let down1 = (a.count_fresh(down).await, b.count_fresh(down).await);
     let (a_full, b_full) = (
         a.count(&full(OSPFV3_ROUTER_ID_B)),
         b.count(&full(OSPFV3_ROUTER_ID)),
     );
     set_link(w, "router-b", "eth1", "down").await?;
-    a.wait_new(&reason("no-carrier"), nc0, 5).await?;
-    b.wait_new(&reason("admin-down"), ad0, 5).await?;
+    a.wait_new(&reason("no-carrier"), nc0, 15).await?;
+    b.wait_new(&reason("admin-down"), ad0, 15).await?;
     if a.count(down) > down1.0 || b.count(down) > down1.1 {
         bail!("a dead timer expired: link-down detection did not come from the stream");
     }
@@ -3776,7 +3779,7 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
     // A deleted device is absent.
     let absent0 = a.count(&reason("absent"));
     w.unlink_veths().await;
-    a.wait_new(&reason("absent"), absent0, 5).await
+    a.wait_new(&reason("absent"), absent0, 15).await
 }
 
 /// Polls `router`'s `GET /v1/ospfv3/database` (up to 15s: the Link- and
@@ -3966,6 +3969,81 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&aged, aged0, 30).await?;
     a.wait_new(&flushed, flushed0, 30).await?;
     a.wait_new(&removed, removed0, 30).await
+}
+
+/// RFC 5340 §4.4.3.3 area range (requires `ospfv3`): router-b, an ABR, has
+/// a loopback in area 1 inside a range. Router-a installs only the
+/// range's route (never the `/128`), router-b a real discard route for
+/// it; `not-advertise` removes both; clearing the range brings the `/128`
+/// back. Removes the loopback address again.
+pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let range = OSPFV3_RANGE;
+    let l1 = OSPFV3_RANGE_LOOPBACK;
+    let routes = |p: &str| format!("added route prefix={p} .*source=Some(Ospf)");
+    let singles = routes(l1);
+    let (single0, range0) = (
+        a.count_fresh(&singles).await,
+        a.count_fresh(&routes(range)).await,
+    );
+    let discard =
+        format!("added route prefix={range} .*source=Some(Ospf) backup=false discard=true");
+    let discard0 = b.count_fresh(&discard).await;
+    let area = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            OSPFV3_ROUTER_ID_B,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    log("router-b: an area-1 loopback inside one range");
+    b.provision(&area(&[
+        "--ospfv3-area-range",
+        range,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE_AREA1,
+        "--ospfv3-loopback-address",
+        l1,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
+    ]))
+    .await?;
+    a.wait_new(&routes(range), range0, 60).await?;
+    b.wait_new(&discard, discard0, 60).await?;
+    if !b.rt1_has(range, "Ospf").await? {
+        bail!("router-b's rt1 does not list the discard route {range}");
+    }
+    log("router-a must never see the /128");
+    a.assert_quiet(&singles, single0, 10).await?;
+
+    log("not-advertise: the range and its discard route go");
+    let removed = format!("removed route prefix={range}");
+    let (rem_a0, rem_b0) = (a.count(&removed), b.count(&removed));
+    b.provision(&area(&[
+        "--ospfv3-area-range",
+        &format!("{range}:not-advertise"),
+    ]))
+    .await?;
+    a.wait_new(&removed, rem_a0, 60).await?;
+    b.wait_new(&removed, rem_b0, 60).await?;
+    a.assert_quiet(&singles, single0, 10).await?;
+
+    log("range cleared: the /128 is summarized on its own again");
+    b.provision(&area(&["--ospfv3-clear-area-range", range]))
+        .await?;
+    a.wait_new(&routes(l1), single0, 60).await?;
+
+    b.provision(&[
+        "--loopback-remove-address",
+        l1,
+        "--clear-ospfv3-loopback-profile",
+    ])
+    .await
 }
 
 /// RFC 2328 §16.2/§16.4 `LSInfinity` (self-contained). router-b is an ABR

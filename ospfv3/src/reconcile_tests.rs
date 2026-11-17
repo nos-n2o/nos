@@ -98,6 +98,7 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
     Ospfv3Area {
         area_id: id.parse().unwrap(),
         profiles,
+        ranges: Vec::new(),
     }
 }
 
