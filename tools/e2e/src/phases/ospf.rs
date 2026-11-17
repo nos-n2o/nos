@@ -592,9 +592,8 @@ async fn p2p_replaced(
 /// (ECMP) — then withdraw it.
 pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let before = a.count(&format!(
-        "ospf lsa installed.*advertising_router={OSPF_ROUTER_ID_B}"
-    ));
+    let installed = format!("ospf lsa installed.*advertising_router={OSPF_ROUTER_ID_B}");
+    let before = a.count(&installed);
     b.provision(&[
         "--loopback-address",
         OSPF_SPF_LOOPBACK_ADDRESS,
@@ -624,19 +623,81 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
 
     let removed = format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}");
     let removed0 = a.count(&removed);
+    // #1212: the SPF throttle (ospf-common `Timers::default`) stays in
+    // `long_wait` (5 s) until `holddown` (10 s) passes without a change, so
+    // after the churn above the removal would be delayed 5 s by design, not
+    // by the event-driven push. Let it fall back to `quiet` first.
+    for _ in 0..6 {
+        let spf = a.count_fresh("ospf spf scheduled").await;
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        if a.count("ospf spf scheduled") == spf {
+            break;
+        }
+    }
+    // Time from the first install after this point, not the newest one
+    // before the removal.
+    let installed0 = a.count_fresh(&installed).await;
     b.provision(&["--clear-ospf-loopback-profile"]).await?;
     a.wait_new(&removed, removed0, 60).await?;
     // #190: the route push is event-driven, so once router-b's new Router-LSA
     // is installed the route leaves the kernel table well inside the old 2s
     // poll (the LSA's own arrival is still bounded by origination/flooding).
-    a.assert_delay_under(
-        &format!("ospf lsa installed.*advertising_router={OSPF_ROUTER_ID_B}"),
-        &removed,
-        removed0,
-        1000,
-    )?;
+    a.assert_delay_under((&installed, installed0), (&removed, removed0), 1000)?;
     // `next-hop-reachability` needs the loopback unreachable from its start.
     a.wait_ospf_route_gone(OSPF_SPF_LOOPBACK_ADDRESS, 15).await
+}
+
+/// router-b's RIB must hold the OSPF route to router-a's loopback at every
+/// 500 ms sample (strict, #1209). On a loss it first prints a timeline of the
+/// daemon events since SIGTERM (`marks` = each router's last log stamp just
+/// before it) so the next flake names its cause (#1212).
+async fn route_held(a: &Router, b: &Router, marks: (u64, u64)) -> anyhow::Result<()> {
+    let started = tokio::time::Instant::now();
+    loop {
+        if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
+            // The sample clock (this host's `started`) and the daemons'
+            // log stamps are different clocks; only the offsets since SIGTERM
+            // within the dump are comparable.
+            let lost_after = started.elapsed().as_millis();
+            let lo = OSPF_GR_LOOPBACK_ADDRESS;
+            let mut entries = b
+                .timeline_since(
+                    &format!(
+                        "removed route prefix={lo}\\|added route prefix={lo}\\|ospf lsa installed.*advertising_router={OSPF_ROUTER_ID}\\|ospf neighbor\\|ospf spf\\|ospf graceful\\|ospf helper"
+                    ),
+                    marks.1,
+                )
+                .await;
+            entries.extend(
+                a.timeline_since(
+                    "ospf lsa originated\\|ospf neighbor reached full\\|ospf graceful",
+                    marks.0,
+                )
+                .await,
+            );
+            let lines = format_timeline(entries, 80);
+            for l in &lines {
+                log(l);
+            }
+            bail!(
+                "router-b lost its ospf route to {lo} during the restart (sample {lost_after}ms after SIGTERM, own clock); daemon timeline (first 20 of {}):\n{}",
+                lines.len(),
+                lines.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Sorts `(ms since SIGTERM, "<router> <line>")` entries and renders
+/// `t+<ms> <line>`, at most `cap` of them.
+fn format_timeline(mut entries: Vec<(i64, String)>, cap: usize) -> Vec<String> {
+    entries.sort();
+    entries
+        .into_iter()
+        .take(cap)
+        .map(|(t, l)| format!("t+{t}ms {l}"))
+        .collect()
 }
 
 /// RFC 5286 loop-free alternate: with router-c also on the broadcast segment,
@@ -1385,6 +1446,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let marker = "ospf graceful restart marker written";
     let skipped = "ospf stub router on-startup skipped after graceful restart";
     let (mm0, marker0, skipped0) = (a.count(max_metric_on), a.count(marker), a.count(skipped));
+    let marks = (a.log_mark(), b.log_mark());
     log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
     w.dock
         .signal_process("router-a", "nos-ospfd", "-TERM")
@@ -1429,16 +1491,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // (Its next hops may still change — the bridge adjacency, not covered by
     // this phase, can come up meanwhile — which the kernel driver logs as a
     // remove + add, so the kernel log alone can't tell a drop from that.)
-    let route_held = async {
-        loop {
-            if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
-                bail!(
-                    "router-b lost its ospf route to {OSPF_GR_LOOPBACK_ADDRESS} during the restart"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    };
+    let route_held = route_held(a, b, marks);
     tokio::select! {
         r = restart => r?,
         r = route_held => r?,
@@ -1530,6 +1583,7 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
     let (signal0, torn0) = (b.count(&signal), b.count_fresh(&torn).await);
     let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
     let (full_b0, full_a0) = (b.count(&full_on_b), a.count(&full_on_a));
+    let marks = (a.log_mark(), b.log_mark());
     log("sending SIGTERM to router-a's nos-ospfd; its last Hello carries RS");
     w.dock
         .signal_process("router-a", "nos-ospfd", "-TERM")
@@ -1541,16 +1595,7 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(5)).await;
         anyhow::Ok(())
     };
-    let route_held = async {
-        loop {
-            if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
-                bail!(
-                    "router-b lost its ospf route to {OSPF_GR_LOOPBACK_ADDRESS} during the restart"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    };
+    let route_held = route_held(a, b, marks);
     tokio::select! {
         r = restart => r?,
         r = route_held => r?,
@@ -3297,7 +3342,13 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&advertised, adv0, 60).await?;
     b.wait_new(&route, route0, 60).await?;
-    let events = format!("link={link}");
+    // #1212: "no link starts, no OSPF event names it". Not bare `link={link}`:
+    // that also matches `kernel interface down ... reason=absent`, logged
+    // while nos-interfaced has not yet created the device (`GET /v1/interfaces`
+    // is config-derived, so it cannot tell when the device exists).
+    let events = format!(
+        "ospfv3 link driver started link={link}\\|ospfv3 link stopped link={link}\\|ospfv3 neighbor .*link={link}\\|ospfv3 hello.*link={link}"
+    );
     a.assert_quiet(&events, a.count(&events), 15).await?;
 
     log("clearing passive: the link starts in place");
@@ -3531,9 +3582,11 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     .await?;
     // #190: pushed on the LSDB change, not on the next 2s poll.
     b.assert_delay_under(
-        &format!("ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"),
-        &route_pat,
-        route_before,
+        (
+            &format!("ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"),
+            lsa_installed,
+        ),
+        (&route_pat, route_before),
         1000,
     )?;
 
@@ -5012,7 +5065,13 @@ pub async fn ospf_passive(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&advertised, adv0, 60).await?;
     b.wait_new(&route, route0, 60).await?;
-    let events = format!("link={link}");
+    // #1212: "no link starts, no OSPF event names it". Not bare `link={link}`:
+    // that also matches `kernel interface down ... reason=absent`, logged
+    // while nos-interfaced has not yet created the device (`GET /v1/interfaces`
+    // is config-derived, so it cannot tell when the device exists).
+    let events = format!(
+        "ospf link driver started link={link}\\|ospf link stopped link={link}\\|ospf neighbor .*link={link}\\|ospf hello.*link={link}"
+    );
     a.assert_quiet(&events, a.count(&events), 15).await?;
 
     log("clearing passive: the link starts in place");
@@ -5548,7 +5607,7 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     let result = async {
         a.wait_new(&down, n_down, 10).await?;
         a.wait_new(&killing, n_kill, 5).await?;
-        a.assert_delay_under(&down, &killing, n_kill, 1000)?;
+        a.assert_delay_under((&down, n_down), (&killing, n_kill), 1000)?;
         a.wait_new(&removed, n_removed, 15).await
     }
     .await;
@@ -6020,4 +6079,22 @@ pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&cfg).await?;
     a.provision(&["--clear-redistribute-to-ospf"]).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::format_timeline;
+
+    #[test]
+    fn timeline_sorted_offset_and_capped() {
+        let e = vec![
+            (30, "b y".to_string()),
+            (-2, "a x".into()),
+            (10, "b z".into()),
+        ];
+        assert_eq!(
+            format_timeline(e, 2),
+            vec!["t+-2ms a x".to_string(), "t+10ms b z".into()]
+        );
+    }
 }

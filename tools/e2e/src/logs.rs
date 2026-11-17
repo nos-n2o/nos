@@ -163,27 +163,28 @@ impl Logs {
             .count()
     }
 
-    /// Milliseconds (the daemons' own log timestamps) from the latest
-    /// `before` match not after it, to the first `after` match past the first
-    /// `after_baseline` matches. `None` if either is missing.
-    pub fn delay_ms(&self, before: &str, after: &str, after_baseline: usize) -> Option<u64> {
-        let (b, a) = (bre(before), bre(after));
-        let st = self.store.lock().unwrap();
-        let t_after = st
-            .lines
-            .iter()
-            .zip(&st.stamps)
-            .filter(|(l, _)| a.is_match(l))
-            .nth(after_baseline)
-            .map(|(_, t)| *t)?;
-        let t_before = st
-            .lines
-            .iter()
-            .zip(&st.stamps)
-            .filter(|(l, t)| b.is_match(l) && **t <= t_after)
-            .map(|(_, t)| *t)
-            .max()?;
-        Some(t_after - t_before)
+    /// Milliseconds (the daemons' own log timestamps) from the first
+    /// `before` match past `before_baseline` to the first `after` match past
+    /// `after_baseline`. `None` if either is missing or the install came
+    /// after the removal.
+    pub fn delay_ms(
+        &self,
+        before: &str,
+        before_baseline: usize,
+        after: &str,
+        after_baseline: usize,
+    ) -> Option<u64> {
+        let stamp = |p: &str, n: usize| self.stamp_of(p, Some(n));
+        let t_after = stamp(after, after_baseline)?;
+        let t_before = stamp(before, before_baseline)?;
+        t_after.checked_sub(t_before)
+    }
+
+    /// `(timestamp_ms, line)` of every match stamped at or after `t0`.
+    pub fn matches_from(&self, pattern: &str, t0: u64) -> Vec<(u64, String)> {
+        let mut v = self.matches_since(pattern, 0);
+        v.retain(|(t, _)| *t >= t0);
+        v
     }
 
     /// The most recent line matching `pattern`.
@@ -320,6 +321,31 @@ mod tests {
         assert_eq!(l.matches_since("up", 3).len(), 0);
         assert_eq!(l.stamp_of("up", Some(1)), Some(30));
         assert_eq!(l.stamp_of("up", None), Some(45));
+    }
+
+    #[tokio::test]
+    async fn delay_ms_uses_first_install_past_baseline() {
+        let l = logs_with(&[
+            (100, "inst"),
+            (5000, "inst"),
+            (5400, "gone"),
+            (9000, "inst"),
+        ]);
+        // baseline 1: the install at 5000, a stale earlier one is ignored
+        assert_eq!(l.delay_ms("inst", 1, "gone", 0), Some(400));
+        // baseline 0 would pick the stale one
+        assert_eq!(l.delay_ms("inst", 0, "gone", 0), Some(5300));
+        // no install past the baseline
+        assert_eq!(l.delay_ms("inst", 3, "gone", 0), None);
+        // install after the removal
+        assert_eq!(l.delay_ms("inst", 2, "gone", 0), None);
+    }
+
+    #[tokio::test]
+    async fn matches_from_filters_by_stamp() {
+        let l = logs_with(&[(10, "up a"), (30, "up b"), (45, "up c")]);
+        assert_eq!(l.matches_from("up", 30).len(), 2);
+        assert_eq!(l.matches_from("up", 46).len(), 0);
     }
 
     #[tokio::test(start_paused = true)]
