@@ -1462,6 +1462,8 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
             "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1 effective_grace=60"
         ))
         .await?;
+        a.wait_new(marker, marker0, 30).await?;
+        a.wait_new(skipped, skipped0, 90).await?;
         // The watchdog respawns router-a; the fresh process resynchronizes
         // with the neighbor that held it Full the whole time.
         b.wait_new(&full_on_b, full_b0, 90).await?;
