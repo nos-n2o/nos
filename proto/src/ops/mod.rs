@@ -522,6 +522,16 @@ pub enum OpError {
         /// Range prefix that was looked up.
         cidr: ipnet::Ipv4Net,
     },
+    /// No `OSPFv3` area range matches the key (`instance`, `area_id`, `cidr`).
+    #[error("range '{cidr}' not found in area '{area_id}' of ospfv3 instance '{instance}'")]
+    Ospfv3AreaRangeNotFound {
+        /// Name of the owning instance that was looked up.
+        instance: String,
+        /// Area ID that was looked up.
+        area_id: Ipv4Addr,
+        /// Range prefix that was looked up.
+        cidr: ipnet::Ipv6Net,
+    },
     #[error(
         "virtual link to '{router_id}' not found in area '{area_id}' of ospf instance '{instance}'"
     )]

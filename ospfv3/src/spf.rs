@@ -116,6 +116,23 @@ impl RouteEntry {
     }
 }
 
+impl RouteEntry {
+    /// An ABR's discard route for one of its active advertised area ranges
+    /// (RFC 5340 §4.4.3.3): no next hop, so `nos-ribd` installs a blackhole.
+    pub fn discard(prefix: Ipv6Net, metric: u32) -> Self {
+        RouteEntry {
+            prefix,
+            next_hops: Vec::new(),
+            next_hop: Ipv6Addr::UNSPECIFIED,
+            interface_id: 0,
+            metric,
+            backup_next_hop: None,
+            backup_interface_id: None,
+            egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
 /// One computed destination, ready to push to `nos-ribd`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEntry {

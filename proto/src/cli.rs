@@ -173,6 +173,7 @@ leaf! {
     std::net::IpAddr => Kind::IpAddr,
     ipnet::IpNet => Kind::IpNet,
     ipnet::Ipv4Net => Kind::IpNet,
+    ipnet::Ipv6Net => Kind::IpNet,
     (u8, u8) => Kind::Tuple(&[<u8 as CliValue>::kind, <u8 as CliValue>::kind]),
 }
 

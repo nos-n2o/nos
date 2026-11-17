@@ -48,6 +48,7 @@ fn populated() -> Config {
             name: "p1".into(),
             ..Default::default()
         }],
+        ranges: Vec::new(),
     };
     let iface = |name: &str| Interface {
         name: name.into(),

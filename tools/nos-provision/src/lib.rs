@@ -19,7 +19,7 @@ pub use acl::{any as acl_flags, apply_acl};
 use anyhow::{bail, Context};
 use clap::Parser;
 
-use ipnet::{IpNet, Ipv4Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use nos_proto::{
     AddressFamily, AdminOp, BfdProfileOp, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp,
     BgpPeerOp, BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination,
@@ -1620,6 +1620,13 @@ pub struct Args {
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_area: Option<Ipv4Addr>,
+    /// `<cidr>[:not-advertise]`: an RFC 5340 §4.4.3.3 range on `--ospfv3-area`
+    /// (`Ospfv3AreaOp::SetRange`, upserted).
+    #[arg(long, requires = "ospfv3_area")]
+    pub ospfv3_area_range: Option<String>,
+    /// Removes that range from `--ospfv3-area` (`Ospfv3AreaOp::RemoveRange`).
+    #[arg(long, requires = "ospfv3_area")]
+    pub ospfv3_clear_area_range: Option<Ipv6Net>,
     /// Same shape as `--ospf-profile` (requires `--ospfv3-area`).
     #[arg(long)]
     pub ospfv3_profile: Option<String>,
@@ -4434,6 +4441,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: instance.clone(),
             area_id,
         }));
+        if let Some(spec) = &args.ospfv3_area_range {
+            let (cidr, not_advertise) = match spec.strip_suffix(":not-advertise") {
+                Some(cidr) => (cidr, true),
+                None => (spec.as_str(), false),
+            };
+            ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetRange {
+                instance: instance.clone(),
+                area_id,
+                cidr: cidr
+                    .parse()
+                    .with_context(|| format!("--ospfv3-area-range: bad cidr {cidr:?}"))?,
+                not_advertise,
+            }));
+        }
+        if let Some(cidr) = args.ospfv3_clear_area_range {
+            ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::RemoveRange {
+                instance: instance.clone(),
+                area_id,
+                cidr,
+            }));
+        }
         if let Some(name) = args.ospfv3_profile.clone() {
             ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
                 instance: instance.clone(),

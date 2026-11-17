@@ -579,6 +579,20 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         desired_loopback_prefixes,
     } = wanted;
     links.set_bfd(bfd_wants);
+    links.set_area_ranges(
+        own.areas
+            .iter()
+            .map(|a| {
+                (
+                    a.area_id,
+                    a.ranges
+                        .iter()
+                        .map(|r| (r.cidr, !r.not_advertise))
+                        .collect(),
+                )
+            })
+            .collect(),
+    );
     links
         .reconcile(desired_links, desired_loopback_prefixes, own.router_id)
         .await;
