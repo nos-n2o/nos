@@ -1469,6 +1469,7 @@ async fn clear_bgp(
 /// Whether to emit ANSI color/highlight codes for `diff`: only when stdout
 /// is an actual terminal, and never when `NO_COLOR` is set (the informal
 /// but widely-honored convention — <https://no-color.org>).
+#[allow(clippy::disallowed_methods, reason = "NO_COLOR convention")]
 fn use_color() -> bool {
     io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }

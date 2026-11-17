@@ -46,3 +46,30 @@ fn dev_flags_are_rejected_in_release() {
         assert!(!err.contains(SECRET));
     }
 }
+
+/// `-c` ignores `PAGER`/`EDITOR`/`SHELL`/`HOME`/`VISUAL`: refused, nothing run or created (#1215).
+#[test]
+fn dash_c_ignores_shell_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("marker");
+    let prog = format!("touch {}", marker.display());
+    for no_color in [false, true] {
+        let mut c = nos();
+        c.args(["-c", "show version"])
+            .env("PAGER", &prog)
+            .env("EDITOR", &prog)
+            .env("VISUAL", &prog)
+            .env("SHELL", &prog)
+            .env("HOME", tmp.path());
+        if no_color {
+            c.env("NO_COLOR", "1");
+        }
+        let out = c.output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("not supported"), "{err}");
+        assert!(!err.contains("touch") && !err.contains(SECRET));
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+}
