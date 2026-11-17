@@ -38,6 +38,23 @@ async fn run_all(w: &mut World, names: &[&str], phase_start: &mut i32) -> anyhow
     Ok(())
 }
 
+/// The groups `nos-e2e all` runs (CI's matrix minus the slow `pki-crl`, own job).
+const ALL_GROUPS: &[&str] = &["base", "drivers", "rpl", "ospf-suite", "multi", "pki-suite"];
+
+/// One self-contained group: dump the failing router's logs on error, tear down
+/// either way (`VERIFY_E2E_KEEP=1` keeps the containers for `nos-e2e logs`).
+async fn run_group(w: &mut World, group: &str, n: usize) -> anyhow::Result<()> {
+    let mut since = 0;
+    let result = run_all(w, phases::group(group).unwrap_or_default(), &mut since).await;
+    if let Err(e) = &result {
+        w.dump_docker_logs(n, &format!("{e:#}"), since).await;
+    }
+    if std::env::var("VERIFY_E2E_KEEP").as_deref() != Ok("1") {
+        w.down().await;
+    }
+    result
+}
+
 async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
     let mut w = World::new().await?;
     match cmd {
@@ -48,21 +65,15 @@ async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
         "logs" => w.print_logs(n).await,
         "logd-mem" => logd_mem::run(&w).await,
         "mem-wave" => logd_mem::wave(&w).await,
-        "all" => run_all(&mut w, phases::ALL, &mut 0).await,
-        group if phases::group(group).is_some() => {
-            let mut since = 0;
-            let result =
-                run_all(&mut w, phases::group(group).unwrap_or_default(), &mut since).await;
-            if let Err(e) = &result {
-                w.dump_docker_logs(n, &format!("{e:#}"), since).await;
+        // #887: `all` = the CI groups in sequence, each on a fresh `up` (what CI
+        // proves); one shared lab across every phase piles up stale log lines.
+        "all" => {
+            for g in ALL_GROUPS {
+                run_group(&mut w, g, n).await?;
             }
-            // Tear down whether it passed or failed; VERIFY_E2E_KEEP=1 keeps
-            // the containers for `nos-e2e logs` / manual inspection.
-            if std::env::var("VERIFY_E2E_KEEP").as_deref() != Ok("1") {
-                w.down().await;
-            }
-            result
+            Ok(())
         }
+        group if phases::group(group).is_some() => run_group(&mut w, group, n).await,
         phase => phases::run(phase, &mut w).await,
     }
 }
