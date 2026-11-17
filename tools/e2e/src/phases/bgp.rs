@@ -1704,9 +1704,10 @@ async fn as_set_export_policy(w: &mut World) -> anyhow::Result<()> {
 
     log("restoring the baseline");
     a.provision(&redistribute()).await?;
-    let mut restore = redistribute();
-    restore.extend(["--remove-static-route", AGGREGATE_CONTRIBUTOR_B]);
-    b.provision(&restore).await
+    // #1063: no `redistribute()` for router-b, or it would keep originating
+    // REDISTRIBUTE_PREFIX for the rest of the group.
+    b.provision(&["--remove-static-route", AGGREGATE_CONTRIBUTOR_B])
+        .await
 }
 
 /// A policy on router-a's own `redistribute` rule: filtering must happen at the
@@ -2256,11 +2257,6 @@ pub async fn blackhole(w: &mut World) -> anyhow::Result<()> {
 /// survive encoding, the real session, and decoding into router-b's loc-rib.
 pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    // Router-b must not originate the prefix itself, or its own copy outranks
-    // the tagged one below. `as-set-export-policy` leaves that static route
-    // behind; a session restart used to hide it (#629).
-    b.provision(&["--remove-static-route", REDISTRIBUTE_PREFIX])
-        .await?;
     let (est_a, est_b) = (
         a.count("bgp session established"),
         b.count("bgp session established"),
