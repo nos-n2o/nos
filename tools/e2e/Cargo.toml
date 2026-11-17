@@ -28,8 +28,10 @@ tar           = { workspace = true }
 bytes         = { workspace = true }
 rcgen         = { workspace = true }
 sha2          = { workspace = true }
-# SSH client for `ssh-login-shell` (#992): password auth, pty, shell/exec; no `ssh` CLI in the harness.
-russh         = { version = "0.65", default-features = false, features = ["ring"] }
+# SSH client for `ssh-login-shell` (#992): keyboard-interactive auth, pty, shell/exec; no `ssh` CLI
+# in the harness. libssh2 over the system OpenSSL (`libssl-dev` + `pkg-config`); russh pulled chrono
+# through russh-util (#1250).
+ssh2          = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

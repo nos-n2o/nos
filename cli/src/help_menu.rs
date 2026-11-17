@@ -13,7 +13,9 @@
 //! buffer — `replace_in_buffer` is a no-op — it exists purely to display
 //! information sourced from the same `Completer` Tab-completion uses.
 
-use reedline::{Completer, CompletionResult, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
+use reedline::{
+    Completer, CompletionResult, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion,
+};
 
 /// Cap on how many candidates are ever shown at once.
 const MAX_VISIBLE: usize = 8;
