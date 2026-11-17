@@ -4432,7 +4432,7 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     .await?;
     // Only the SAFI 134 tuple is common: SAFI 1 stays unframed.
     a.wait(&format!(
-        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
+        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4=\"none\" vpnv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
     ))
     .await?;
     flowspec_vpn_propagation(w).await?;
@@ -4631,6 +4631,81 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `vpn-add-path` (#1132): a scripted speaker (`vpn_add_path.py`, router-g)
+/// negotiates RFC 7911 on AFI 1 / SAFI 128 only and sends router-a a plain
+/// unicast route (no id), then path 1 (label 100) and path 2 (label 200) of
+/// one VPNv4 key (RD `65001:1`, `10.10.0.0/24`, RT `65000:1`), then withdraws
+/// path 2. router-a keeps one copy per key (the later id replaces), imports
+/// it into `vrf-red`, and drops it on the withdrawal.
+pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
+    let mut flags = vpn_flags("65000:1");
+    flags.extend(strings(&["--add-path", "both"]));
+    w.start(A, Some(flags), &[]).await?;
+    w.dock
+        .ensure_image(
+            PY_SPEAKER_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENTRYPOINT [\"python3\", \"-u\"]\n"
+            ),
+        )
+        .await?;
+    let script = include_str!("vpn_add_path.py")
+        .replace("@IP_A@", IP_A.s())
+        .replace("@IP_G@", IP_G.s())
+        .replace("@ASN@", &ASN_G.to_string())
+        .replace("@RID@", RID_G)
+        .replace("@WITHDRAW_AFTER@", "30");
+    w.dock
+        .start_plain(
+            "router-g",
+            PY_SPEAKER_IMAGE,
+            NET,
+            IP_G.s(),
+            &["/etc/vpn_add_path.py"],
+            ("/etc", "vpn_add_path.py", script.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    a.established().await?;
+    a.wait(&format!(
+        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4=\"both\" vpnv6=\"none\" vpnv4_flowspec=\"none\" vpnv6_flowspec=\"none\""
+    ))
+    .await?;
+
+    log("ipv4 unicast framing is untouched: the id-less NLRI is learned");
+    a.wait(&format!(
+        "learned route for 10.99.0.0/24 into adj-rib-in peer={IP_G}"
+    ))
+    .await?;
+
+    log("VPN paths carry ids before the length octet: both decode, the later replaces the earlier");
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[100\\] .*path_id=Some(1)"
+    ))
+    .await?;
+    a.wait(&format!(
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[200\\] .*path_id=Some(2)"
+    ))
+    .await?;
+    a.wait(&format!(
+        "vpn path replaces the held copy of the same key peer={IP_G} rd=65001:1 prefix=10.10.0.0/24 path_id=2"
+    ))
+    .await?;
+    a.wait(&format!(
+        "vpn route imported table={VPN_TABLE} prefix=10.10.0.0/24 labels=\\[[12]00\\]"
+    ))
+    .await?;
+
+    log("withdrawing by id drops the copy");
+    a.wait(&format!(
+        "vpn route withdrawn peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24"
+    ))
+    .await?;
+    a.wait("vpn route unimported").await?;
+    Ok(())
+}
+
 /// `flowspec-vpn-add-path` (#1126): a scripted speaker (`vpnflow_add_path.py`,
 /// router-g) sends router-a two RFC 7911 paths of one VPN Flowspec rule (RD
 /// `65001:5`): path 1 under RT `65000:1`, path 2 under RT `65000:2`, with one
@@ -4681,7 +4756,7 @@ pub async fn flowspec_vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.established().await?;
     a.wait(&format!(
-        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
+        "add-path negotiated peer={IP_G} ipv4=\"none\" ipv6=\"none\" vpnv4=\"none\" vpnv6=\"none\" vpnv4_flowspec=\"both\" vpnv6_flowspec=\"none\""
     ))
     .await?;
 

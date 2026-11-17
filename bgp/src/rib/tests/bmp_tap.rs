@@ -343,6 +343,7 @@ async fn vpn_announce_withdraw_and_policy_rejection() {
     let mut w = empty_update();
     w.mp_unreach = vec![message::MpUnreachNlri {
         vpn: vec![crate::vpn::VpnNlri {
+            path_id: None,
             labels: vec![],
             ..vpn_nlri(1)
         }],

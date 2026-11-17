@@ -162,7 +162,7 @@ fn remote(enhanced: bool, route_refresh: bool) -> RemoteInfo {
         negotiated_vpn: [false; 2],
         negotiated_flowspec_vpn: [false; 2],
         negotiated_rtc: false,
-        add_path: [AddPathDir::default(); 4],
+        add_path: [AddPathDir::default(); 6],
         four_octet_as: true,
         extended_message: false,
         enhanced_refresh: enhanced,
@@ -570,6 +570,7 @@ fn vpn_encodes_as_safi_128_with_its_label_rd_and_next_hop() {
     assert_eq!(
         mp.vpn,
         [crate::vpn::VpnNlri {
+            path_id: None,
             labels: vec![100],
             rd,
             prefix

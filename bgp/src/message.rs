@@ -598,7 +598,7 @@ pub struct MpReachNlri {
     /// RFC 8955 section 4: the next hop is empty on the wire and ignored.
     pub flowspec_vpn: Vec<FlowSpecVpn>,
     /// AFI 1|2 / SAFI 128 routes (one label each); `nlri` is empty for such
-    /// a batch. Never carries a Path Identifier.
+    /// a batch. Each route carries its Path Identifier when negotiated (RFC 7911).
     pub vpn: Vec<VpnNlri>,
     /// AFI 1 / SAFI 132 membership (RFC 4684); `nlri` is empty for such a batch.
     pub rtc: Vec<RtcNlri>,
@@ -781,6 +781,30 @@ impl BgpCodec {
         }
     }
 
+    /// Same for SAFI 128: a batch without ids gets id 0 until the sender
+    /// allocates real ones (#1133).
+    fn fill_vpn_ids(&self, update: &mut UpdateMessage) {
+        let on = |afi| self.add_path_afis.contains(&(afi, SAFI_VPN));
+        for m in update
+            .mp_reach
+            .iter_mut()
+            .filter(|m| m.safi == SAFI_VPN && on(m.afi))
+        {
+            m.vpn
+                .iter_mut()
+                .for_each(|n| _ = n.path_id.get_or_insert(0));
+        }
+        for m in update
+            .mp_unreach
+            .iter_mut()
+            .filter(|m| m.safi == SAFI_VPN && on(m.afi))
+        {
+            m.vpn
+                .iter_mut()
+                .for_each(|n| _ = n.path_id.get_or_insert(0));
+        }
+    }
+
     fn max_len(&self, message_type: u8) -> usize {
         // RFC 8654 §4: OPEN and KEEPALIVE stay at 4096 even when negotiated.
         if self.extended && message_type != TYPE_OPEN && message_type != TYPE_KEEPALIVE {
@@ -857,6 +881,7 @@ impl Encoder<BgpMessage> for BgpCodec {
             BgpMessage::Open(open) => (TYPE_OPEN, encode_open(&open)),
             BgpMessage::Update(mut update) => {
                 self.fill_flowspec_vpn_ids(&mut update);
+                self.fill_vpn_ids(&mut update);
                 // One UPDATE too big for this session's limit is split into
                 // several (RFC 4271 §4.3 / RFC 8654): halve its largest NLRI
                 // list until every piece fits.
@@ -2222,7 +2247,6 @@ fn decode_mp_reach(
             rtc: Vec::new(),
         });
     }
-    // No ADD-PATH for SAFI 128 (#1130): never read ids for it.
     if safi == SAFI_VPN {
         return Ok(MpReachNlri {
             afi,
@@ -2233,7 +2257,7 @@ fn decode_mp_reach(
             evpn: Vec::new(),
             flowspec: Vec::new(),
             flowspec_vpn: Vec::new(),
-            vpn: vpn::decode_vpn_reach(afi, &data[pos..])?,
+            vpn: vpn::decode_vpn_reach(afi, &data[pos..], add_path_afis.contains(&(afi, safi)))?,
             rtc: Vec::new(),
         });
     }
@@ -2328,7 +2352,7 @@ fn decode_mp_unreach(
             evpn: Vec::new(),
             flowspec: Vec::new(),
             flowspec_vpn: Vec::new(),
-            vpn: vpn::decode_vpn_unreach(afi, &data[3..])?,
+            vpn: vpn::decode_vpn_unreach(afi, &data[3..], add_path_afis.contains(&(afi, safi)))?,
             rtc: Vec::new(),
         });
     }
@@ -2622,6 +2646,7 @@ fn parse_update(
                     .vpn
                     .into_iter()
                     .map(|n| VpnNlri {
+                        path_id: None,
                         labels: vec![],
                         ..n
                     })
@@ -4599,6 +4624,7 @@ mod tests {
     fn vpn_routes(n: u8) -> Vec<VpnNlri> {
         (0..n)
             .map(|i| VpnNlri {
+                path_id: None,
                 labels: vec![1000 + u32::from(i)],
                 rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
                 prefix: format!("10.{i}.0.0/16").parse().unwrap(),
@@ -4622,8 +4648,58 @@ mod tests {
     }
 
     #[test]
+    fn vpn_path_ids_follow_the_negotiated_set_and_leave_other_safis_alone() {
+        let mut vpn = vpn_routes(2);
+        vpn[0].path_id = Some(1);
+        vpn[1].path_id = Some(2);
+        let nh: IpAddr = "192.0.2.1".parse().unwrap();
+        let mp = vpn_reach(AFI_IPV4, nh, vpn);
+        let wire = encode_mp_reach(&mp);
+        let on: HashSet<(u16, u8)> = [(AFI_IPV4, SAFI_VPN)].into();
+        assert_eq!(decode_mp_reach(&wire, &on).unwrap(), mp);
+        // Only SAFI 1 negotiated: the VPN batch is read without ids.
+        let uni: HashSet<(u16, u8)> = [(AFI_IPV4, 1)].into();
+        assert!(decode_mp_reach(&wire, &uni).is_err());
+        let mut plain = mp.clone();
+        plain.vpn.iter_mut().for_each(|n| n.path_id = None);
+        let wire = encode_mp_reach(&plain);
+        assert_eq!(decode_mp_reach(&wire, &uni).unwrap(), plain);
+    }
+
+    #[test]
+    fn a_negotiated_vpn_send_set_fills_missing_ids_with_zero() {
+        let update = UpdateMessage {
+            mp_unreach: vec![MpUnreachNlri {
+                afi: AFI_IPV4,
+                safi: SAFI_VPN,
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn: vec![],
+                flowspec: vec![],
+                flowspec_vpn: vec![],
+                rtc: vec![],
+                vpn: vpn_routes(1),
+            }],
+            ..Default::default()
+        };
+        let mut codec = BgpCodec::default();
+        codec.add_path_afis.insert((AFI_IPV4, SAFI_VPN));
+        let mut buf = BytesMut::new();
+        codec
+            .encode(BgpMessage::Update(update.clone()), &mut buf)
+            .unwrap();
+        let mut rx = BgpCodec::default();
+        rx.add_path_afis.insert((AFI_IPV4, SAFI_VPN));
+        let Some(BgpMessage::Update(got)) = rx.decode(&mut buf).unwrap() else {
+            panic!("not an update")
+        };
+        assert_eq!(got.mp_unreach[0].vpn[0].path_id, Some(0));
+    }
+
+    #[test]
     fn vpn_reach_and_unreach_roundtrip_for_both_afis() {
         let v6 = |i: u8| VpnNlri {
+            path_id: None,
             labels: vec![7],
             rd: [0, 1, 10, 0, 0, 1, 0, i],
             prefix: format!("2001:db8:{i}::/48").parse().unwrap(),
@@ -4640,6 +4716,7 @@ mod tests {
             vpn: vpn
                 .into_iter()
                 .map(|n| VpnNlri {
+                    path_id: None,
                     labels: vec![],
                     ..n
                 })
@@ -4756,6 +4833,7 @@ mod tests {
         let want: Vec<VpnNlri> = vpn_routes(2)
             .into_iter()
             .map(|n| VpnNlri {
+                path_id: None,
                 labels: vec![],
                 ..n
             })
@@ -4767,6 +4845,7 @@ mod tests {
     fn oversized_vpn_batches_split_to_fit() {
         let routes: Vec<VpnNlri> = (0..400u16)
             .map(|i| VpnNlri {
+                path_id: None,
                 labels: vec![u32::from(i) + 16],
                 rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
                 prefix: format!("10.{}.{}.0/24", i / 256, i % 256).parse().unwrap(),
@@ -4791,6 +4870,7 @@ mod tests {
                 vpn: routes
                     .iter()
                     .map(|n| VpnNlri {
+                        path_id: None,
                         labels: vec![],
                         ..n.clone()
                     })
