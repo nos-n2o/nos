@@ -48,3 +48,5 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 - `nos-configd` is resolved once through the broker (`/run/nos/watchdog.sock`, `--watchdog-socket` in a `dev-args` build); unreachable, it warns and falls back to `/run/nos/config.sock`. Other daemons are resolved per command.
 
 Details: [CLI guide, command table and internals](../docs/cli.md#command-table-developer-reference).
+
+Every input of the binary (flags, env, hidden `-c`, commands), who uses it (operator, e2e phase, tests) and its `dev-args` status: `docs/cli.md` "Input inventory of `nos`". Update it when an input is added or removed.

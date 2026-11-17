@@ -357,6 +357,26 @@ If one instance cannot answer, for example because it was just deleted, the shel
 - `error: '…' is not a valid edit here (press ? to see what fits)`: no field or object matches these words, or a value has the wrong type, at your position or from the top of the tree. Type the start of the line and press `?`.
 - `error: nos-configd reported an error: validation failed: …`: the commit was refused. Each line gives the place in the tree and the reason. The transaction is still open.
 
+## Input inventory of `nos` (#1214)
+
+Audited against `cli/src`, every `tools/e2e` phase, `tools/nos-provision`, `cli/tests`, `docker-compose.yml`. "dev-args" means the input exists only in a `--features dev-args` build; a release `nos` rejects it.
+
+| Input | Kind | Used by | Status |
+|---|---|---|---|
+| `--watchdog-socket <path>` | flag | dev tests (`cli/tests/login_shell.rs`, `ticket_with_no_watchdog_fails_closed...`, built with `dev-args`); documented for a relocated `--listen-socket`. No e2e phase, no operator | gated (dev-args) |
+| `--pki-ca <path>` | flag | same test; documented for a relocated `--pki-dir` (`docs/protocols/system.md`). No e2e phase, no operator | gated (dev-args) |
+| `-c <cmd>` | hidden flag | `ssh-login-shell` (e2e): `ssh host "show config"` makes sshd run `nos -c`, asserts the refusal text and a non-zero exit; dev test `dash_c_is_refused_with_exit_2` | kept, refusal trap (exit 2) |
+| `--help`, `--version` | clap built-ins | operator | kept |
+| env `NOS_LOGIN_TICKET` | env var | operator path (sshd/PAM, #991); e2e `ssh-login-shell` (real ticket through PAM, plus a bogus one run as `NOS_LOGIN_TICKET=... /usr/bin/nos`); `pam` phase checks only that the passwd shell is `/usr/bin/nos`, it never runs `nos` | kept |
+| env `NO_COLOR` | env var | operator; no e2e phase, no test | kept |
+| login prompt on stdin (`login:`/`password:`) | interactive | operator (`docker compose run --rm cli`, `docker exec -it ... nos`); e2e never runs the password prompt (its SSH client logs in through PAM and gets the ticket path) | kept |
+| interactive commands `configure ssh-login`, `set hostname <name>`, `commit`, `show config` | interactive, over SSH | `ssh-login-shell` (e2e) via a pty shell; `show config` is also sent after the user is deleted to see `CertificateRevoked` | kept |
+| every other interactive command (the command table below: `show ...`, `clear ...`, `set`/`delete`, `edit`, `diff`, `save`, `exit`, ...) | interactive | operator; in-process tests in `cli/tests` (grammar corpus, actions, per-daemon clients) | kept |
+
+- **What e2e does not use:** `nos` is never run with a flag in e2e. Every other phase provisions and queries through `nos-provision` and the REST API (`nos-restd`), not through `nos`. No phase uses `--watchdog-socket` or `--pki-ca`. `tools/nos-provision` has its own `--watchdog-socket`/`--pki-ca` (a different binary, untouched). `tools/bench-bgp.sh` runs only `nos-provision`.
+- **Other binaries:** see [binaries.md](binaries.md).
+- **Other harnesses:** `docker-compose.yml`'s `cli` service runs bare `nos` as an interactive container.
+
 ## Command table (developer reference)
 
 Moved from `cli/CLAUDE.md` (#263). Every `edit`/`set`/`delete` row below is generated from the schema tree (`nos_proto::cli`, `cli/src/config_grammar.rs`); `tests/config_grammar.rs` pins them. The `show` and shell rows are `cmd!` rows in `cli/src/spec.rs`. How the commands are used is described above; the OSPF, interface, LACP, LLDP and EVPN rows also belong to the matching pages under `protocols/`.
