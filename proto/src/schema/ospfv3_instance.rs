@@ -142,6 +142,7 @@ fn unique_area_ids(areas: &[Ospfv3Area]) -> garde::Result {
             ));
         }
         seen.push(a.area_id);
+        super::ospfv3_area::valid_area_settings(a)?;
     }
     Ok(())
 }

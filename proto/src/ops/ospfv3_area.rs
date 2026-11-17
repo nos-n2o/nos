@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Ospfv3Area, Ospfv3AreaRange};
+use crate::schema::{Config, OspfAreaType, Ospfv3Area, Ospfv3AreaRange};
 
 use super::ospfv3_instance::find_instance_mut;
 use super::OpError;
@@ -47,6 +47,24 @@ pub enum Ospfv3AreaOp {
         area_id: Ipv4Addr,
         /// The range's prefix.
         cidr: Ipv6Net,
+    },
+    /// Sets the area type (normal, stub, totally-stubby).
+    SetAreaType {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Area type.
+        area_type: OspfAreaType,
+    },
+    /// Sets the metric of the default an ABR sends into a stub area.
+    SetStubDefaultCost {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Metric; `None` is 1.
+        cost: Option<u16>,
     },
 }
 
@@ -108,6 +126,22 @@ impl Ospfv3AreaOp {
                         cidr: *cidr,
                     });
                 }
+                Ok(())
+            }
+            Ospfv3AreaOp::SetAreaType {
+                instance,
+                area_id,
+                area_type,
+            } => {
+                find_area_mut(config, instance, *area_id)?.area_type = *area_type;
+                Ok(())
+            }
+            Ospfv3AreaOp::SetStubDefaultCost {
+                instance,
+                area_id,
+                cost,
+            } => {
+                find_area_mut(config, instance, *area_id)?.stub_default_cost = *cost;
                 Ok(())
             }
         }
@@ -192,11 +226,15 @@ mod tests {
                         area_id: area_id("0.0.0.0"),
                         profiles: Vec::new(),
                         ranges: Vec::new(),
+                        area_type: crate::schema::OspfAreaType::Normal,
+                        stub_default_cost: None,
                     },
                     Ospfv3Area {
                         area_id: area_id("0.0.0.1"),
                         profiles: Vec::new(),
                         ranges: Vec::new(),
+                        area_type: crate::schema::OspfAreaType::Normal,
+                        stub_default_cost: None,
                     },
                 ],
             )],

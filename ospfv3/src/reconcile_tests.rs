@@ -99,6 +99,8 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
         area_id: id.parse().unwrap(),
         profiles,
         ranges: Vec::new(),
+        area_type: nos_proto::OspfAreaType::Normal,
+        stub_default_cost: None,
     }
 }
 

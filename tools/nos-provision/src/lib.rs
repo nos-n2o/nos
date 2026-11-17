@@ -1620,6 +1620,14 @@ pub struct Args {
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_area: Option<Ipv4Addr>,
+    /// `normal`, `stub` or `totally-stubby` for `--ospfv3-area`
+    /// (`Ospfv3AreaOp::SetAreaType`).
+    #[arg(long, requires = "ospfv3_area", value_parser = parse_ospf_area_type)]
+    pub ospfv3_area_type: Option<OspfAreaType>,
+    /// The default's metric into a stub `--ospfv3-area`
+    /// (`Ospfv3AreaOp::SetStubDefaultCost`); `0` clears it.
+    #[arg(long, requires = "ospfv3_area")]
+    pub ospfv3_stub_default_cost: Option<u16>,
     /// `<cidr>[:not-advertise]`: an RFC 5340 §4.4.3.3 range on `--ospfv3-area`
     /// (`Ospfv3AreaOp::SetRange`, upserted).
     #[arg(long, requires = "ospfv3_area")]
@@ -4441,6 +4449,20 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: instance.clone(),
             area_id,
         }));
+        if let Some(area_type) = args.ospfv3_area_type {
+            ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetAreaType {
+                instance: instance.clone(),
+                area_id,
+                area_type,
+            }));
+        }
+        if let Some(cost) = args.ospfv3_stub_default_cost {
+            ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetStubDefaultCost {
+                instance: instance.clone(),
+                area_id,
+                cost: (cost != 0).then_some(cost),
+            }));
+        }
         if let Some(spec) = &args.ospfv3_area_range {
             let (cidr, not_advertise) = match spec.strip_suffix(":not-advertise") {
                 Some(cidr) => (cidr, true),

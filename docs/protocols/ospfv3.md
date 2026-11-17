@@ -302,6 +302,21 @@ commit
 - `set range <cidr> not-advertise` hides the covered prefixes from the other areas entirely and removes the discard route; `delete range <cidr>` restores them.
 - Intra-area prefixes only; a prefix covered by two ranges counts towards the most specific. On a router that is no ABR a range does nothing.
 
+### Make an area a stub
+
+A stub area carries no AS-external LSA (RFC 5340 §4.4.3, RFC 2328 §3.6); its ABR sends a default route instead, as in [OSPF](ospf.md#make-an-area-a-stub-and-summarize-it-with-ranges). Set the same type on every router of the area:
+
+```
+set ospfv3 instance v3 area 0.0.0.1 area-type stub
+set ospfv3 instance v3 area 0.0.0.1 stub-default-cost 10
+commit
+```
+
+- The routers clear the E option bit in the area's Hellos and LSAs. A Hello whose E bit disagrees is dropped (`dropping ospfv3 hello with mismatched e-bit`), so a router with the wrong type never gets past `Down`.
+- The ABR originates a `::/0` inter-area prefix LSA into the area at `stub-default-cost` (1 unless set); the routers inside install `::/0` through it. No AS-external LSA (`0x4005`, `0xc025`) is sent, requested, accepted or routed in the area, and one already held ages out when the area turns stub.
+- `area-type totally-stubby` on the ABR's area also stops the other inter-area prefix and router LSAs, leaving the default as the only summary. The routers inside may use `stub` or `totally-stubby`: they are the same for them.
+- The backbone cannot be a stub area, and `nssa` is refused for OSPFv3 at commit.
+
 ## Features and behaviour
 
 Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU override and database exchange, LSA ageing and withdrawal, and loop-free alternates behave as in [OSPF](ospf.md#features-and-behaviour). The differences:
@@ -312,7 +327,7 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
 - **Unknown LSA types** (RFC 5340 §2.9) are accepted, not refused. With the U bit set they are stored and flooded by their S2/S1 scope (area, AS or link-local); with it clear they are kept link-local and never sent past the link they arrived on. They are never used for routing. An LSA with the reserved scope `11` is silently dropped (not acknowledged).
-- **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Every area is a normal area, so Hellos and LSAs set the E option bit.
+- **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Hellos and LSAs set the E option bit, except in a stub area.
 - **Link failure.** A lost local link (interface deleted, set down, or carrier lost) drops its neighbours within about a second: `nos-ospfv3d` follows the link state `nos-interfaced` streams and logs `ospfv3 link kernel interface down link=eth0.0 reason=absent|admin-down|no-carrier`, then `ospfv3 link kernel interface up` when it returns (a recreated device gets a fresh socket). The LSAs of the dropped link are withdrawn on the next origination tick. A failure beyond the local link (a dead remote end, a switch in between) still takes the dead interval (BFD is #190). A restarting `nos-interfaced` or `nos-ribd` tears no link down: the link keeps its running address, VRF and bridge (`ospfv3 link resolution failed, keeping running link`) while the configuration still demands it. With `--driver noop` nothing is gated.
 - **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
@@ -322,7 +337,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types (point-to-multipoint is refused at commit).
+Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types (point-to-multipoint is refused at commit).
 
 ## Configuration reference
 
@@ -335,6 +350,8 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
+| area type | `set ospfv3 instance <name> area <area-id> area-type normal\|stub\|totally-stubby`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0`; no `nssa` | stub: no AS-external LSA, E bit clear, a `::/0` from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospfv3 database`, `show route <table>` |
+| stub default cost | `set ospfv3 instance <name> area <area-id> stub-default-cost <metric>`; `delete … stub-default-cost` | `…/area/<area-id>/stub-default-cost` | 1 or more; 1 when unset | only on a stub area | metric of the ABR's `::/0` | `show ospfv3 database` |
 | max-metric administrative | `set ospfv3 instance <name> max-metric router-lsa administrative`; `delete ospfv3 instance <name> max-metric router-lsa administrative` | `ospfv3-instance/<name>/max-metric-administrative` | bool; off by default | | RFC 6987 stub router until removed | `ospfv3 stub router max-metric changed` |
 | max-metric on-startup | `set ospfv3 instance <name> max-metric router-lsa on-startup <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router for this long after the next start | `reason="on-startup"` |
 | max-metric on-shutdown | `set ospfv3 instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router for this long before the process exits | `reason="on-shutdown"` |

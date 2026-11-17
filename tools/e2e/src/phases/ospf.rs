@@ -4046,6 +4046,129 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
     .await
 }
 
+/// RFC 5340 §4.4.3 stub areas (self-contained). eth0 is area 1; router-b is
+/// the ABR (a loopback in area 0) and an ASBR (an IPv6 static redistributed
+/// into `ospfv3`). Area 1 a stub on router-a only is refused on both ends
+/// (`mismatched e-bit`, never Init); stub on both reaches `Full`, router-a
+/// installs router-b's `::/0` and the loopback's summary but never the
+/// external; totally-stubby on the ABR leaves the default as the only
+/// summary.
+pub async fn ospfv3_stub(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let loopback = OSPFV3_STUB_LOOPBACK;
+    let on_eth0 = |address: &str, router_id: &str, area_type: &str| {
+        let mut f = strings(&["--address6", address]);
+        f.extend(strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-area-type",
+            area_type,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ]));
+        f
+    };
+    let route = |p: &str| format!("added route prefix={p} .*source=Some(Ospf)");
+    let default_route = route("::/0");
+    let loopback_route = route(loopback);
+    let external_route = route(OSPFV3_ASBR_PREFIX);
+    let gateway = OSPFV3_ADDRESS_A.trim_end_matches("/64");
+
+    // Area 1 a stub on router-a only: the Hello E-bits disagree.
+    let mismatch = "dropping ospfv3 hello with mismatched e-bit";
+    let init_b =
+        format!("ospfv3 neighbor state changed to init link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}");
+    let (init0, external0) = (
+        a.count_fresh(&init_b).await,
+        a.count_fresh(&external_route).await,
+    );
+    a.provision_flags(&with_base(
+        A,
+        on_eth0(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID, "stub"),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        on_eth0(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B, "normal"),
+    ))
+    .await?;
+    b.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE,
+        "--ospfv3-loopback-address",
+        loopback,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+        "--static-route",
+        OSPFV3_ASBR_PREFIX,
+        "--static-gateway",
+        gateway,
+        "--redistribute-to-ospfv3",
+    ])
+    .await?;
+    a.wait(mismatch).await?;
+    b.wait(mismatch).await?;
+    log("confirming the e-bit mismatch never reaches init");
+    a.assert_quiet(&init_b, init0, 8).await?;
+
+    // Stub on both: Full; router-a installs the default and the loopback's
+    // summary, never the external.
+    b.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA_1,
+        "--ospfv3-area-type",
+        "stub",
+    ])
+    .await?;
+    a.wait("ospfv3 neighbor reached full").await?;
+    b.wait("ospfv3 neighbor reached full").await?;
+    a.wait(&default_route).await?;
+    a.wait(&loopback_route).await?;
+    log("confirming no external route reaches the stub area");
+    a.assert_quiet(&external_route, external0, 10).await?;
+
+    // Totally stubby on the ABR: the loopback summary goes, the default stays.
+    let removed = format!("removed route prefix={loopback}");
+    let removed0 = a.count(&removed);
+    let default_removed = "removed route prefix=::/0";
+    let default0 = a.count_fresh(default_removed).await;
+    b.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA_1,
+        "--ospfv3-area-type",
+        "totally-stubby",
+    ])
+    .await?;
+    a.wait_new(&removed, removed0, 60).await?;
+    log("confirming the default route stays in the totally-stubby area");
+    a.assert_quiet(default_removed, default0, 10).await?;
+    if !a.rt1_has("::/0", "Ospf").await? {
+        bail!("router-a lost its default route in the totally-stubby area");
+    }
+    Ok(())
+}
+
 /// RFC 2328 §16.2/§16.4 `LSInfinity` (self-contained). router-b is an ABR
 /// (area-1 loopback) and an ASBR (IPv6 static redistributed into `ospfv3`).
 /// A control run installs both routes on router-a; a second run, with
