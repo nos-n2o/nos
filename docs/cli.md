@@ -55,6 +55,15 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - A renewal that is denied later (user deleted, password changed, certificate cap) behaves as in a normal session: commands start failing; there is no re-prompt.
 - `nos` does not unset the variable (the kernel's `/proc/<pid>/environ` would still show it); see [auth](architecture/auth.md#login-ticket-990).
 
+### Escape surface
+
+- No command takes a path or runs a program; there is no pager, editor spawn or `!cmd`; `;`, `|`, `>`, backticks and `$(...)` are plain unknown input. The built-in editor (`edit source`) runs in-process.
+- `nos -c <cmd>` is refused; `PAGER`, `EDITOR`, `VISUAL`, `SHELL` and `HOME` are never read.
+- The only environment reads are `NOS_LOGIN_TICKET` and `NO_COLOR`.
+- The only file read is the CA certificate (`--pki-ca`); `--pki-ca` and `--watchdog-socket` exist only in a `dev-args` build (#1214).
+- Three guards enforce it: `cli/tests/escape_surface.rs` (source scan with self-tests, plus parse tests), `cli/clippy.toml` (`disallowed-methods` on `std::env::var*`/`args_os`, per-crate: workspace-wide it would hit ~25 daemon and test sites), and the `cli_parser` fuzz target.
+- A new command must not break these rules; if one needs an exception, change the guards and this section in the same PR.
+
 ## The two modes
 
 The shell is always in one of two modes, and the prompt shows which.
