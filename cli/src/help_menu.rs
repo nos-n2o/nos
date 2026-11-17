@@ -13,12 +13,13 @@
 //! buffer — `replace_in_buffer` is a no-op — it exists purely to display
 //! information sourced from the same `Completer` Tab-completion uses.
 
-use reedline::{Completer, CompletionResult, Editor, Menu, MenuEvent, Painter, Suggestion};
+use reedline::{Completer, CompletionResult, Editor, Menu, MenuEvent, MenuSettings, Painter, Suggestion};
 
 /// Cap on how many candidates are ever shown at once.
 const MAX_VISIBLE: usize = 8;
 
 pub struct HelpMenu {
+    settings: MenuSettings,
     active: bool,
     values: Vec<Suggestion>,
     /// Brief (summary) vs detailed (fuller explanation) rendering.
@@ -30,6 +31,9 @@ pub struct HelpMenu {
 impl Default for HelpMenu {
     fn default() -> Self {
         Self {
+            settings: MenuSettings::default()
+                .with_name("nos_help")
+                .with_marker("? "),
             active: false,
             values: Vec::new(),
             detail: false,
@@ -77,12 +81,8 @@ impl HelpMenu {
 }
 
 impl Menu for HelpMenu {
-    fn name(&self) -> &'static str {
-        "nos_help"
-    }
-
-    fn indicator(&self) -> &'static str {
-        "? "
+    fn settings(&self) -> &MenuSettings {
+        &self.settings
     }
 
     fn is_active(&self) -> bool {

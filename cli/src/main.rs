@@ -261,7 +261,7 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
                     &mode,
                 ));
             }
-            Ok(Signal::CtrlC | Signal::CtrlD) => {
+            Ok(Signal::CtrlC(_) | Signal::CtrlD) => {
                 if let Mode::Configuration { transaction, .. } = &mode {
                     println!(
                         "transaction '{transaction}' left open on the daemon — resume with 'configure {transaction}'"
