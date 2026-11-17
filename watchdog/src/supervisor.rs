@@ -162,6 +162,7 @@ const PR_MDWE_REFUSE_EXEC_GAIN: libc::c_ulong = 1;
 fn set_mdwe() -> std::io::Result<()> {
     // SAFETY: plain prctl syscalls with integer arguments.
     #[allow(unsafe_code, reason = "two prctl syscalls, integer args only (#1210)")]
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- integer-arg prctls
     unsafe {
         if libc::prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0 {
             return Err(std::io::Error::last_os_error());
@@ -170,7 +171,7 @@ fn set_mdwe() -> std::io::Result<()> {
         if got < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if got as libc::c_ulong & PR_MDWE_REFUSE_EXEC_GAIN == 0 {
+        if got & 1 == 0 {
             return Err(std::io::Error::from_raw_os_error(libc::EPERM));
         }
     }
@@ -186,6 +187,7 @@ fn harden(command: &mut Command, hook: fn() -> std::io::Result<()>) {
         unsafe_code,
         reason = "one async-signal-safe prctl between fork and exec (#1210)"
     )]
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- pre_exec hook is async-signal-safe
     unsafe {
         command.pre_exec(hook);
     }
@@ -542,6 +544,7 @@ mod backoff_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_types, reason = "runs a test child (#228)")]
     async fn harden_with_failing_hook_does_not_spawn() {
         let mut c = Command::new("/bin/true");
         harden(&mut c, || {
@@ -558,6 +561,7 @@ mod backoff_tests {
         if std::env::var_os("NOS_MDWE_PROBE").is_none() {
             return;
         }
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only mmap probe
         let map = |prot| unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -576,6 +580,7 @@ mod backoff_tests {
         );
         let w = map(libc::PROT_READ | libc::PROT_WRITE);
         assert_ne!(w, libc::MAP_FAILED);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only mprotect probe
         let r = unsafe { libc::mprotect(w, 4096, libc::PROT_READ | libc::PROT_EXEC) };
         assert_eq!(r, -1, "W then X must be refused");
         assert_eq!(
@@ -585,6 +590,7 @@ mod backoff_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_types, reason = "runs a test child (#228)")]
     async fn a_hardened_child_cannot_gain_exec() {
         let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
         let mut it = rel.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
@@ -592,6 +598,7 @@ mod backoff_tests {
             eprintln!("kernel {rel} < 6.3: skipping");
             return;
         }
+        // nosemgrep: rust.lang.security.current-exe.current-exe -- test re-execs itself, nothing security-relevant
         let mut c = Command::new(std::env::current_exe().unwrap());
         c.args(["--exact", "backoff_tests::mdwe_probe", "--nocapture"])
             .env("NOS_MDWE_PROBE", "1");
