@@ -2,7 +2,7 @@
 
 Research output of #890 (parent #865). Input for #892 (knobs), #893 (codec), #894 (machines), #895 (masks). Companion to [`lacp.md`](lacp.md) (the v1 implementation).
 
-**Status (#893):** the codec and pure model are implemented in `lacp/src/packet.rs` and `lacp/src/conversation.rs` from the UNVERIFIED table below, by owner decision, with no golden bytes. Nothing sends v2 (#894 and #895 stay parked); the assumed layout is pinned by `assumed_v2_layout` and must change if a real capture disagrees.
+**Status (#893):** the codec and pure model are implemented in `lacp/src/packet.rs` and `lacp/src/conversation.rs` from the UNVERIFIED table below, by owner decision, with no golden bytes. #894 sends v2 only with an explicit `lacp-version 2` (default 1, #890 owner rule; adaptive downgrade on a v1 partner, see `lacp.md`); #895 stays parked. The assumed layout is pinned by `assumed_v2_layout` and must change if a real capture disagrees.
 
 **Owner review required.** The byte tables and the VERIFIED/UNVERIFIED split below need owner sign-off before #893/#894/#895 get `ready-for-claude-implem`.
 

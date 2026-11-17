@@ -187,7 +187,7 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             None
         }
         InterfaceRequest::PushLacpConversations(msg) => {
-            // #892: accepted and dropped; the steering lands with #895.
+            // #894: validated and logged, no state, no driver call; the steering lands with #895.
             if msg
                 .links
                 .iter()
@@ -195,7 +195,7 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             {
                 warn!(aggregate = %msg.aggregate, "lacp conversations push has a malformed mask, dropped");
             } else {
-                debug!(aggregate = %msg.aggregate, links = msg.links.len(), "lacp conversations push ignored");
+                info!(aggregate = %msg.aggregate, links = msg.links.len(), "lacp conversations push received, not applied yet");
             }
             None
         }

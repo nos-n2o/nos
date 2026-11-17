@@ -11,12 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{DiffScope, Event, LacpAggregateMembers, PortAggregateMode};
+use nos_proto::{DiffScope, Event, PortAggregateMode};
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::aggregate::{AggregateManager, PortNumbers, DEFAULT_PRIORITY};
+use crate::cscd::V2Cfg;
+use crate::interface_client::LacpPush;
 
 /// Every currently-configured `Lacp`-mode aggregate's manager, shared with
 /// `server.rs` so `show lacp` can read live state.
@@ -32,7 +34,7 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 pub async fn run(
     config_socket: PathBuf,
     aggregates: SharedAggregates,
-    push_tx: mpsc::Sender<LacpAggregateMembers>,
+    push_tx: mpsc::Sender<LacpPush>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let scopes = vec![DiffScope::Interfaces, DiffScope::PortAggregates];
@@ -94,7 +96,7 @@ async fn resync(
     config_socket: &Path,
     aggregates: &SharedAggregates,
     next_key: &mut u16,
-    push_tx: &mpsc::Sender<LacpAggregateMembers>,
+    push_tx: &mpsc::Sender<LacpPush>,
     port_numbers: &PortNumbers,
 ) {
     let cfg = match nos_daemon::config::fetch_config(config_socket).await {
@@ -155,12 +157,28 @@ async fn resync(
             .as_deref()
             .and_then(nos_proto::evpn_id::parse_mac);
         let member_count = members.len();
-        manager.reconcile(
+        let v2 = V2Cfg {
+            version: agg_cfg.lacp_version,
+            algorithm: agg_cfg.lacp_port_algorithm,
+            map: agg_cfg
+                .lacp_conversation_map
+                .iter()
+                .map(|r| (r.first, r.last, r.member.clone()))
+                .collect(),
+            link_numbers: cfg
+                .interfaces
+                .iter()
+                .filter(|i| i.port_aggregate.as_deref() == Some(name))
+                .filter_map(|i| Some((i.name.clone(), i.lacp_link_number?)))
+                .collect(),
+        };
+        manager.reconcile_v2(
             members,
             agg_cfg.lacp_rate,
             system_id,
             agg_cfg.lacp_system_priority.unwrap_or(DEFAULT_PRIORITY),
             agg_cfg.min_links,
+            &v2,
         );
         if usize::from(agg_cfg.min_links) > member_count {
             warn!(

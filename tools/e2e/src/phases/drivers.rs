@@ -649,12 +649,15 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
+    lacp_v2(a, b, &both).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
     off.push("--delete-port-aggregate".into());
+    // router-b's aggregate is deleted inside `lacp_linux_peer`, which then
+    // plays a kernel 802.3ad bond on its veth against router-a's v2 config.
+    lacp_linux_peer(w, a, b, &off).await?;
     a.provision(&off).await?;
-    b.provision(&off).await?;
     let deleted = format!("deleted port aggregate bond port_aggregate={LACP_AGGREGATE} bond=");
     a.wait(&deleted).await?;
     b.wait(&deleted).await?;
@@ -872,6 +875,210 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     .await?;
 
     a.provision(&min_links("1")).await
+}
+
+/// `show lacp` of `LACP_AGGREGATE` on `r`.
+async fn lacp_aggregate(r: &Router) -> anyhow::Result<serde_json::Value> {
+    let body = r
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    let summary: serde_json::Value = serde_json::from_str(&body)?;
+    summary
+        .as_array()
+        .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+        .cloned()
+        .with_context(|| format!("no {LACP_AGGREGATE} in show lacp: {body}"))
+}
+
+/// Polls the aggregate summary on `r` until `want` holds (40s).
+async fn wait_lacp_aggregate(
+    r: &Router,
+    what: &str,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..40 {
+        last = lacp_aggregate(r).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("{}: {what} never held: {last}", r.name())
+}
+
+/// #894 (LACP v2): `lacp-version 2` is an explicit opt-in (the default is 1, so
+/// a v1-only partner never sees a v2 PDU). Two NOS routers agree on a map;
+/// `unspecified` advertises only the algorithm; a v1 partner makes a v2 router
+/// downgrade; and a different map digest is a mismatch with plain hashing.
+async fn lacp_v2(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+    let flags = |version: &str, algorithm: &str, map: Option<&str>| {
+        let mut f = lacp_flags(&[
+            "--lacp-rate",
+            "fast",
+            "--lacp-version",
+            version,
+            "--lacp-port-algorithm",
+            algorithm,
+            "--lacp-link-number",
+            "1",
+        ]);
+        f.extend(strings(both));
+        if let Some(m) = map {
+            f.extend(strings(&["--lacp-conversation-map", m]));
+        }
+        f
+    };
+    let state = |r: &Router, s: &str| {
+        let p = format!("lacp conversation agreement aggregate={LACP_AGGREGATE} state={s}");
+        let base = r.count(&p);
+        (p, base)
+    };
+    let agreement_is = |want: &'static str| {
+        move |s: &serde_json::Value| {
+            s["agreement"] == want
+                && s["ports"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().all(|p| p["mux_state"] == "Distributing"))
+        }
+    };
+
+    log("lacp-version 2 + c-vlan on both routers: the maps agree and are split 2048/2048");
+    let (pa, ba) = state(a, "Agreed");
+    let (pb, bb) = state(b, "Agreed");
+    a.provision(&flags("2", "c-vlan", None)).await?;
+    b.provision(&flags("2", "c-vlan", None)).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    b.wait_new(&pb, bb, 90).await?;
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "agreement Agreed", agreement_is("Agreed")).await?;
+        let s = lacp_aggregate(r).await?;
+        if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]])
+            || s["ports"].as_array().is_none_or(|p| {
+                p.iter()
+                    .any(|p| p["partner_version"] != 2 || p["partner_port_algorithm"] != "CVlan")
+            })
+        {
+            bail!("{}: unexpected v2 summary: {s}", r.name());
+        }
+    }
+    a.wait(&format!(
+        "lacp conversations pushed aggregate={LACP_AGGREGATE} links=2"
+    ))
+    .await?;
+
+    log(
+        "unspecified algorithm: v2 stays on the wire, agreement is not requested, no conversations",
+    );
+    let (pa, ba) = state(a, "NotRequested");
+    let empty = format!("lacp conversations pushed aggregate={LACP_AGGREGATE} links=0");
+    let push_base = a.count(&empty);
+    a.provision(&flags("2", "unspecified", None)).await?;
+    b.provision(&flags("2", "unspecified", None)).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    a.wait_new(&empty, push_base, 30).await?;
+    wait_lacp_aggregate(a, "v2 partner, no agreement", |s| {
+        s["agreement"] == "NotApplicable"
+            && s["ports"].as_array().is_some_and(|p| {
+                p.iter().all(|p| {
+                    p["partner_version"] == 2 && p["partner_port_algorithm"] == "Unspecified"
+                })
+            })
+    })
+    .await?;
+
+    log("router-b stays on version 1: router-a downgrades to v1 and the ports still bundle");
+    let down = "lacp sent version changed interface=eth1 version=1";
+    let down_base = a.count(down);
+    let (pa, ba) = state(a, "PartnerV1");
+    a.provision(&flags("2", "c-vlan", None)).await?;
+    b.provision(&flags("1", "unspecified", None)).await?;
+    a.wait_new(down, down_base, 90).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    wait_lacp_aggregate(a, "V1Partner and Distributing", agreement_is("V1Partner")).await?;
+    let s = lacp_aggregate(a).await?;
+    if s["conversations_per_link"] != serde_json::json!([]) {
+        bail!("conversations pushed towards a v1 partner: {s}");
+    }
+
+    log("router-b back on v2 with a different explicit map: digest mismatch, plain hashing");
+    let up = "lacp sent version changed interface=eth1 version=2";
+    let up_base = a.count(up);
+    let (pa, ba) = state(a, "Mismatch reason=digest");
+    b.provision(&flags("2", "c-vlan", Some("0-99:eth1,100-4095:eth2")))
+        .await?;
+    a.wait_new(up, up_base, 90).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    wait_lacp_aggregate(a, "Mismatch and Distributing", agreement_is("Mismatch")).await?;
+    let s = lacp_aggregate(a).await?;
+    if s["conversations_per_link"] != serde_json::json!([]) {
+        bail!("conversations pushed on a digest mismatch: {s}");
+    }
+    Ok(())
+}
+
+/// #894 / #865: a real kernel 802.3ad bond (v1 only) as the peer of a
+/// `lacp-version 2` router-a on eth1: router-a downgrades to v1, the port
+/// bundles, no conversations are pushed. router-b's NOS aggregate is deleted
+/// first; the helper image creates `bond0` in its namespace.
+async fn lacp_linux_peer(w: &World, a: &Router, b: &Router, off: &[String]) -> anyhow::Result<()> {
+    log("a kernel 802.3ad bond as router-a's peer on eth1: v1 only, tolerated");
+    let down = "lacp sent version changed interface=eth1 version=1";
+    let down_base = a.count(down);
+    b.provision(off).await?;
+    b.wait(&format!(
+        "deleted port aggregate bond port_aggregate={LACP_AGGREGATE} bond="
+    ))
+    .await?;
+    // One shell in one container: nos-interfaced on router-b keeps eth1 up
+    // between separate `ip` calls, and a slave must be down when enslaved.
+    let script = "ip link add bond0 type bond mode 802.3ad lacp_rate fast && \
+        for i in 1 2 3 4 5 6 7 8; do \
+        ip link set eth1 down && ip link set eth1 master bond0 && break; sleep 0.2; done && \
+        ip link set bond0 up && ip link set eth1 up";
+    w.dock
+        .in_netns(NETNS_HELPER_IMAGE, "router-b", &["sh", "-c", script])
+        .await?;
+    let result = async {
+        wait_lacp_ports_named(a, "eth1", "Distributing against the kernel bond", |p| {
+            p["mux_state"] == "Distributing" && p["partner_version"] == 1
+        })
+        .await?;
+        a.wait_new(down, down_base, 60).await?;
+        let s = lacp_aggregate(a).await?;
+        if s["agreement"] != "V1Partner" || s["conversations_per_link"] != serde_json::json!([]) {
+            bail!("a kernel v1 bond must leave plain hashing: {s}");
+        }
+        Ok(())
+    }
+    .await;
+    let _ = w
+        .dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-b",
+            &["ip", "link", "del", "bond0"],
+        )
+        .await;
+    result
+}
+
+/// Like `wait_lacp_ports` for the one port `name`.
+async fn wait_lacp_ports_named(
+    r: &Router,
+    name: &str,
+    what: &str,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..60 {
+        last = lacp_port(r, name).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("{}: {what} never held: {last}", r.name())
 }
 
 /// `lacp-mode` (802.1AX LACP_Activity, NO_PERIODIC): passive against active
