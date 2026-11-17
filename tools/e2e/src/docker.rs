@@ -641,10 +641,20 @@ impl Dock {
         self.logs_raw(&self.n(container)).await
     }
 
+    /// `logs` limited to lines since unix time `since` (0 = everything).
+    pub async fn logs_since(&self, container: &str, since: i32) -> anyhow::Result<String> {
+        self.logs_raw_since(&self.n(container), since).await
+    }
+
     async fn logs_raw(&self, container: &str) -> anyhow::Result<String> {
+        self.logs_raw_since(container, 0).await
+    }
+
+    async fn logs_raw_since(&self, container: &str, since: i32) -> anyhow::Result<String> {
         let opts = LogsOptionsBuilder::default()
             .stdout(true)
             .stderr(true)
+            .since(since)
             .build();
         let mut stream = self.docker.logs(container, Some(opts));
         let mut out = String::new();
