@@ -451,9 +451,10 @@ async fn login_burst(w: &World) -> anyhow::Result<()> {
 /// a fresh certificate — is trusted as before.
 async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
     // A learned route, so the restarted nos-ribd has something to be re-told.
-    w.b()?.provision(&bgp::redistribute()).await?;
     let a = w.a()?;
-    a.wait(&bgp::learned()).await?;
+    let learned_before = a.count(&bgp::learned());
+    w.b()?.provision(&bgp::redistribute()).await?;
+    a.wait_new(&bgp::learned(), learned_before, 60).await?;
     let revoked = "certificates revoked role=ribd name=rt1 ";
     let snapshot = "sent initial bgp route snapshot to nos-ribd";
     let (revocations, updates, ribds, snapshots, released, removed) = (
@@ -531,8 +532,11 @@ pub async fn pki_rotation(w: &mut World) -> anyhow::Result<()> {
     // uses whatever certificate it holds now — which is only valid if the
     // rotation reached it. Router-b advertises a prefix to router-a first;
     // after the kill nos-bgpd notices the closed push connection by itself.
+    // #839: `wait` (baseline 0) matched the earlier `pki` phase's learn of the
+    // same prefix, so the kill raced the real learn; take a baseline first.
+    let learned_before = w.a()?.count(&bgp::learned());
     w.b()?.provision(&bgp::redistribute()).await?;
-    w.a()?.wait(&bgp::learned()).await?;
+    w.a()?.wait_new(&bgp::learned(), learned_before, 60).await?;
     let a = w.a()?;
     let snapshot = "sent initial bgp route snapshot to nos-ribd";
     let (pushed, empty, updates) = (

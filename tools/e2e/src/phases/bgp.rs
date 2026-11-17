@@ -1069,7 +1069,12 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
     ]));
     w.start(A, Some(hub("pg-b", ASN_B, IP_B.s())), &[]).await?;
     w.start(B, Some(b_flags.clone()), &[]).await?;
-    w.start(C, None, &[]).await?;
+    // #839: a route server does not prepend its own AS (RFC 7947 §2.2.2), so
+    // its client must not enforce first-AS (#392) or it treats every
+    // reflected route as a withdraw and never learns the prefix.
+    let mut c_flags = C.base_flags();
+    c_flags.extend(strings(&["--no-enforce-first-as"]));
+    w.start(C, Some(c_flags), &[]).await?;
     w.a()?
         .provision_flags(&hub("pg-c", ASN_C, IP_C.s()))
         .await?;
@@ -2060,7 +2065,9 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
     );
     a.provision(&a_flags(&["--aggregate-as-set"])).await?;
     a.wait_new(&a_set, set_before, 30).await?;
-    b.wait_new(looped, loop_before, 30).await?;
+    // #839: the re-announcement waits out the MRAI (30 s, #629) like above, so
+    // 30 s here raced it: 60 (2x) with the same reason.
+    b.wait_new(looped, loop_before, 60).await?;
     b.wait_new(&withdrawn(AGGREGATE_PREFIX), wd_before, 30)
         .await?;
 
@@ -3111,18 +3118,28 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
         "learned route for {ADD_PATH_PREFIX} .*communities=\\[{}\\]",
         add_path_community(1)
     );
-    b.assert_quiet(&any_learned, 2, 10).await?;
-    b.assert_quiet(&path_1, 0, 0).await?;
+    // #839: baselines taken here, not 0: earlier phases log the same prefix.
+    let loc_gone = format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn");
+    let withdrew = format!("withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_A}");
+    let withdrew_2 = format!("{withdrew} path_id=2");
+    let n_withdrew_1 = b.count(&format!("{withdrew} path_id=1"));
+    let (n_learned, n_path_1) = (b.count(&any_learned), b.count(&path_1));
+    let (n_withdrew, n_loc_gone, n_withdrew_2) = (
+        b.count_fresh(&withdrew).await,
+        b.count(&loc_gone),
+        b.count(&withdrew_2),
+    );
+    b.assert_quiet(&any_learned, n_learned, 10).await?;
+    b.assert_quiet(&path_1, n_path_1, 0).await?;
 
     log("withdrawing path 2: path 1 takes id 1 in place, nothing withdrawn on router-b");
-    let withdrew = format!("withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_A}");
     exabgp_api(
         w,
         &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 2"),
     )
     .await?;
     b.wait(&learned(1, 1)).await?;
-    b.assert_quiet(&withdrew, 0, 10).await?;
+    b.assert_quiet(&withdrew, n_withdrew, 10).await?;
 
     log("withdrawing path 1: one path left, router-b sees id 1 withdrawn and keeps the prefix");
     exabgp_api(
@@ -3130,15 +3147,10 @@ async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
         &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 1"),
     )
     .await?;
-    b.wait(&format!("{withdrew} path_id=1")).await?;
-    b.assert_quiet(
-        &format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn"),
-        0,
-        10,
-    )
-    .await?;
-    b.assert_quiet(&format!("{withdrew} path_id=2"), 0, 0)
+    b.wait_new(&format!("{withdrew} path_id=1"), n_withdrew_1, 30)
         .await?;
+    b.assert_quiet(&loc_gone, n_loc_gone, 10).await?;
+    b.assert_quiet(&withdrew_2, n_withdrew_2, 0).await?;
     Ok(())
 }
 
@@ -3230,8 +3242,15 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
 
     log("a shutdown and un-shutdown releases it too");
     let (est_before, ceases) = (a.count(est), a.count(cease1));
+    let shut = "rejecting inbound tcp connection from administratively shut peer";
+    let shut_before = a.count(shut);
     a.provision_flags(&with(&["--shutdown-peer-group", ""]))
         .await?;
+    // #839: back-to-back shut/no-shut can coalesce into "no change" in
+    // nos-bgpd, leaving the maximum-prefix hold in place (a shut slot is a new
+    // slot; an unchanged one keeps the hold). Wait until the shutdown took
+    // effect (ExaBGP's retry is refused) before lifting it.
+    a.wait_new(shut, shut_before, 30).await?;
     a.provision_flags(&with(&["--unshutdown-peer-group"]))
         .await?;
     a.wait_new(est, est_before, 30).await?;
@@ -4574,8 +4593,9 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     log("withdrawing the covering VPN route invalidates the rule in the VRF");
     let invalid = changed("invalid:no-covering-unicast-route");
     let base = a.count(&invalid);
-    gobgp_owned(w, route("del")).await?;
+    // #839: before the trigger, or a fast `rules=0` is already in the baseline.
     let cleared = a.count(&applied(0));
+    gobgp_owned(w, route("del")).await?;
     a.wait_new(&invalid, base, 30).await?;
     a.wait_new(&applied(0), cleared, 30).await?;
     let body = show(&format!("?vrf={VPN_TABLE}")).await?;

@@ -100,6 +100,12 @@ impl World {
     /// is new, so the old client and log follower are dropped. Waits for the REST API.
     pub async fn restart(&mut self, id: Id) -> anyhow::Result<()> {
         self.routers.remove(id.name);
+        // #839: /run/nos is a kept volume, so the old boot's rest-ca.crt would
+        // still be there until the new watchdog republishes it; `attach` could
+        // read it and fail the TLS handshake with BadSignature.
+        self.dock
+            .exec_root(id.name, &["rm", "-f", crate::consts::REST_CA_PATH])
+            .await?;
         self.dock.restart(id.name).await?;
         let router = Router::attach(&self.dock, id).await?;
         router.wait_ready().await?;
