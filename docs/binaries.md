@@ -44,7 +44,7 @@ Status: `kept`, or `proposed gate` (not implemented; the owner decides, see the 
 | `nos-acld` | `--driver` | dev | system test | kept |
 | | `--flowspec-file` (hidden) | e2e/dev | every router in e2e (`router.rs`), `acl` phase writes it | proposed gate |
 | `nos-logd` | `--log-store-path`, `--capacity` | operator | e2e `--logd-arg=--capacity=200000` on every router | kept |
-| `nos-ospfd` | `--lsa-age-multiplier`, `--dbd-max-headers`, `--state-dir` | operator/dev | e2e `ospf-lsa-age` (multiplier), `ospf-dbd-pagination` (headers) | kept (multiplier proposed gate) |
+| `nos-ospfd` | `--lsa-age-multiplier`, `--dbd-max-headers`, `--state-dir` | operator/dev | e2e `ospf-aging` (multiplier), `ospf-dbd-pagination` (headers) | kept (multiplier proposed gate) |
 | | `--dbd-fault`, `--push-chunk` (hidden) | e2e/dev | `ospf-dbd-pagination`, `ospf-push-chunked` | proposed gate |
 | `nos-ospfv3d` | `--lsa-age-multiplier`, `--dbd-max-headers`, `--state-dir` | operator/dev | as ospfd | kept (multiplier proposed gate) |
 | | `--dbd-fault`, `--push-chunk`, `--originate-lsinfinity`, `--router-lsa-max-links` (hidden) | e2e/dev | `ospfv3-mtu-pagination`, `ospfv3-lsinfinity*`, `ospfv3-router-lsa-split` | proposed gate |
