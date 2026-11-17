@@ -1,0 +1,18 @@
+# Clippy reads only the nearest clippy.toml, so the root settings are repeated here (keep in sync).
+excessive-nesting-threshold = 6
+too-many-lines-threshold = 150
+
+disallowed-types = [
+  { path = "std::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
+  { path = "tokio::process::Command", reason = "no external commands outside tools/e2e and tests; see CLAUDE.md" },
+]
+
+# `nos` is an SSH login shell: it reads only NOS_LOGIN_TICKET and NO_COLOR (#1185, #1215).
+# Workspace-wide this would hit ~25 sites in daemons and tests, so the ban lives in this crate only.
+disallowed-methods = [
+  { path = "std::env::var", reason = "the shell reads only NOS_LOGIN_TICKET and NO_COLOR (#1185); see docs/cli.md Escape surface" },
+  { path = "std::env::var_os", reason = "the shell reads only NOS_LOGIN_TICKET and NO_COLOR (#1185); see docs/cli.md Escape surface" },
+  { path = "std::env::vars", reason = "the shell reads only NOS_LOGIN_TICKET and NO_COLOR (#1185); see docs/cli.md Escape surface" },
+  { path = "std::env::vars_os", reason = "the shell reads only NOS_LOGIN_TICKET and NO_COLOR (#1185); see docs/cli.md Escape surface" },
+  { path = "std::env::args_os", reason = "the shell reads only NOS_LOGIN_TICKET and NO_COLOR (#1185); see docs/cli.md Escape surface" },
+]

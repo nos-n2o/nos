@@ -108,7 +108,7 @@ cargo fmt --all
 
 ## Fuzzing
 
-- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`. Property: no panic, abort or OOM.
+- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`, `cli_parser` (`nos` command parsing, resolution and completion over text; first byte picks the mode). Property: no panic, abort or OOM.
 - Install: `make tools` (adds `cargo-fuzz`); needs a nightly toolchain.
 - Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target passes `--target <rustc host>` (the CI cargo-fuzz binary is musl and otherwise builds for musl, which fails) and sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.
 - Longer run of one target: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=600`.

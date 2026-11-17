@@ -10632,3 +10632,107 @@ async fn rtc_graceful_restart(w: &World) -> anyhow::Result<()> {
     gobgp_vpn_until(w, "vpnv4", &in_gobgp, true).await?;
     Ok(())
 }
+
+/// RFC 4271 §5 / §6.3 (#1035): ExaBGP (router-g) -> router-a -> router-b.
+/// An unrecognized optional transitive attribute is retained and re-advertised
+/// with Partial set; the per-UPDATE 1024-byte cap drops the excess; an unknown
+/// well-known attribute resets the session with 3/2.
+pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
+    w.start(A, Some(A.base_flags()), &[]).await?;
+    w.start(B, Some(B.base_flags()), &[]).await?;
+    w.a()?
+        .provision_flags(&strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-g",
+            "--remote-as",
+            &ASN_G.to_string(),
+            "--peer",
+            IP_G.s(),
+        ]))
+        .await?;
+    ensure_exabgp(w).await?;
+    let big = "00".repeat(600);
+    let exabgp = |routes: &str| {
+        format!(
+            "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+             local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
+             static {{\n{routes}    }}\n}}\n"
+        )
+    };
+    let good = exabgp(&format!(
+        "        route {UNKNOWN_ATTR_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x99 0xc0 0x0102 ];\n        \
+         route {UNKNOWN_CAP_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x9a 0xc0 0x{big} ] attribute [ 0x9b 0xc0 0x{big} ];\n"
+    ));
+    let (a, b) = (w.a()?, w.b()?);
+    let baseline = (
+        a.count("retained unrecognized optional transitive"),
+        b.count("retained unrecognized optional transitive"),
+        a.count("over the per-route cap"),
+    );
+    start_exabgp(w, &good).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    let retained = |t: u8, flags: u8, len: usize| {
+        format!(
+            "retained unrecognized optional transitive attribute attr_type={t} flags={flags} len={len}"
+        )
+    };
+
+    log("router-a retains type 153 as received (0xc0), router-b sees Partial set (0xe0)");
+    a.wait_new(&retained(153, 0xc0, 2), baseline.0, 60).await?;
+    b.wait_new(&retained(153, 0xe0, 2), baseline.1, 60).await?;
+
+    log("the 1024-byte cap: the second 600-byte attribute is dropped, the first kept");
+    a.wait_new(
+        "dropping unrecognized optional transitive attribute over the per-route cap attr_type=155 len=600 cap=1024",
+        baseline.2,
+        30,
+    )
+    .await?;
+    a.wait(&retained(154, 0xc0, 600)).await?;
+    b.wait(&retained(154, 0xe0, 600)).await?;
+    anyhow::ensure!(
+        b.count("attr_type=155") == 0,
+        "router-b received the over-cap attribute"
+    );
+
+    log("unknown well-known attribute: NOTIFICATION 3/2 carrying the attribute, then recovery");
+    let sessions = a.count("bgp session established peer=");
+    let sent = a.count("sent notification.* code=3 subcode=2 data_len=4");
+    let bad = exabgp(&format!(
+        "        route {UNKNOWN_WELL_KNOWN_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x98 0x40 0x01 ];\n"
+    ));
+    start_exabgp(w, &bad).await?;
+    let a = w.a()?;
+    a.wait_new("sent notification.* code=3 subcode=2 data_len=4", sent, 60)
+        .await?;
+    start_exabgp(w, &good).await?;
+    let a = w.a()?;
+    a.wait_new("bgp session established peer=", sessions, 90)
+        .await?;
+    Ok(())
+}
+
+/// Replaces router-g with an ExaBGP running `conf`.
+async fn start_exabgp(w: &mut World, conf: &str) -> anyhow::Result<()> {
+    w.dock.container_remove("router-g").await;
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G.s(),
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await
+}

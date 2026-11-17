@@ -2228,6 +2228,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 atomic_aggregate: false,
                 aggregator: None,
                 otc: None,
+                unknown: std::sync::Arc::default(),
                 cluster_list: Vec::new(),
                 communities: route.communities,
                 extended_communities: route.extended_communities,
@@ -2309,6 +2310,7 @@ fn advertised_attributes(
         atomic_aggregate: route.atomic_aggregate,
         aggregator: route.aggregator,
         otc: route.otc,
+        unknown: route.unknown,
     }
 }
 

@@ -112,7 +112,7 @@ mutants: ## Run mutation testing, memory-capped (needs nightly; MUTANTS_JOBS/MUT
 FUZZ_SECS ?= 60
 FUZZ_RSS_MB ?= 2048
 FUZZ_CARGO ?= cargo +nightly
-FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet
+FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet cli_parser
 
 fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightly + cargo-fuzz; nightly CI job, not part of check)
 	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }

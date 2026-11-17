@@ -2,7 +2,7 @@
 
 BGP-4 implementation for NOS (binary `nos-bgpd`, one process per `BgpInstance`, dynamically spawned by `nos-watchdog` — see `docs/architecture/supervision.md`).
 
-Details: behaviour and config in `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; how it is built (log lines, `ponytail:` ceilings) in `docs/protocols/bgp-internals.md`; e2e phases in `docs/e2e-phases.md`. Only editing rules are kept here.
+Details: `docs/protocols/{bgp,evpn-vxlan,routing-policy}.md`; build notes (log lines, `ponytail:` ceilings) in `docs/protocols/bgp-internals.md`; e2e in `docs/e2e-phases.md`. Editing rules only.
 
 ## Scope
 
@@ -49,7 +49,7 @@ All in `rib/aggregate.rs`: runs before `fan_out` in `recompute_and_propagate`; t
 
 ## Malformed UPDATE (RFC 7606)
 
-`parse_update` resets only for framing errors; a bad attribute value or missing mandatory attribute is treat-as-withdraw, rewritten there (NLRI -> `withdrawn_routes`, `mp_reach` -> `mp_unreach`, `attributes = None`), so `BgpRib::handle_update` needs no special case.
+`parse_update` resets only for framing errors; a bad value or missing mandatory attribute is treat-as-withdraw, rewritten there (NLRI -> `withdrawn_routes`, `mp_reach` -> `mp_unreach`, `attributes = None`), so `handle_update` needs no special case. Unknown attributes (#1035): well-known 3/2, transitive kept in `unknown` (1 KiB cap).
 
 ## Damping
 
