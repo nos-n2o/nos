@@ -1462,8 +1462,16 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
             "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1 effective_grace=60"
         ))
         .await?;
-        // RFC 3623 §3.2 (c): a topology change (router-b's own Router-LSA
-        // gains a stub link) ends helping on router-a's neighbor at once.
+        a.wait_new(marker, marker0, 30).await?;
+        a.wait_new(skipped, skipped0, 90).await?;
+        // The watchdog respawns router-a; the fresh process resynchronizes
+        // with the neighbor that held it Full the whole time.
+        b.wait_new(&full_on_b, full_b0, 90).await?;
+        a.wait_new(&full_on_a, full_a0, 90).await?;
+        // Reaching Full ended the grace period. A topology change now (router-b's
+        // own Router-LSA gains a stub link) must find no grace to exit; the exit
+        // itself (RFC 3623 §3.2 (c)) is a unit test in `link/tests/grace.rs`, as
+        // provoking it mid-restart races router-a's return (#1213).
         let topology = format!(
             "ospf helper: topology change, exiting grace link=eth0.0 neighbor={OSPF_ROUTER_ID}"
         );
@@ -1475,15 +1483,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
             OSPF_PROFILE,
         ]))
         .await?;
-        b.wait_new(&topology, topology0, 30).await?;
-        a.wait_new(marker, marker0, 30).await?;
-        a.wait_new(skipped, skipped0, 90).await?;
-        // The watchdog respawns router-a; the fresh process resynchronizes
-        // with the neighbor that held it Full the whole time.
-        b.wait_new(&full_on_b, full_b0, 90).await?;
-        a.wait_new(&full_on_a, full_a0, 90).await?;
-        // The topology change already ended the grace period, so the reform
-        // is no longer logged as an early exit.
+        b.assert_quiet(&topology, topology0, 5).await?;
         tokio::time::sleep(Duration::from_secs(5)).await;
         anyhow::Ok(())
     };
