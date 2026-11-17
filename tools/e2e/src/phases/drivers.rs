@@ -1572,6 +1572,33 @@ fn stp_port_state(r: &Router, port: &str, base: usize) -> Option<String> {
     (r.count(&p) > base).then(|| last_value(r, &p, "state"))?
 }
 
+/// The last STP lines of `r`'s log, for failure messages (#1188).
+fn stp_log_tail(r: &Router) -> String {
+    let p = r"port role changed\|port state changed\|root bridge changed\|port carrier\|topology change";
+    format!("{} log tail:\n{}", r.name(), r.logs.tail(p, 30).join("\n"))
+}
+
+/// Router-b's (root, alternate) ports from its REST summary, polled up to
+/// 10s until it shows exactly one of each (#1188: not from the last role log
+/// line, which can be stale while the tree is still settling).
+async fn stp_b_roles(b: &Router) -> anyhow::Result<(&'static str, &'static str)> {
+    let mut last = String::new();
+    for _ in 0..40 {
+        let sb = stp_summary(b).await?;
+        let role = |p: &str| sb.ports.iter().find(|x| x.name == p).map(|x| x.role);
+        match (role("eth1"), role("eth2")) {
+            (Some(StpRole::Root), Some(StpRole::Alternate)) => return Ok(("eth1", "eth2")),
+            (Some(StpRole::Alternate), Some(StpRole::Root)) => return Ok(("eth2", "eth1")),
+            _ => last = format!("{:?}", sb.ports),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    bail!(
+        "router-b should have one root and one alternate port: {last}\n{}",
+        stp_log_tail(b)
+    )
+}
+
 /// Polls until the four STP ports (both routers' `eth1`/`eth2`) hold exactly
 /// one `Discarding` and three `Forwarding` for three seconds in a row.
 async fn stp_settle(
@@ -1688,16 +1715,7 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
 
     // Cut router-b's root port; its alternate must take over within 1s of
     // the carrier loss, both lines from router-b's own log.
-    let role = |p: &str| format!("port role changed port={p} role=");
-    let roles: Vec<_> = ["eth1", "eth2"]
-        .iter()
-        .map(|p| last_value(b, &role(p), "role"))
-        .collect();
-    let (root_if, alt_if) = match roles.iter().map(|r| r.as_deref()).collect::<Vec<_>>()[..] {
-        [Some("Root"), Some("Alternate")] => ("eth1", "eth2"),
-        [Some("Alternate"), Some("Root")] => ("eth2", "eth1"),
-        _ => bail!("router-b should have one root and one alternate port: {roles:?}"),
-    };
+    let (root_if, alt_if) = stp_b_roles(b).await?;
     let takeover = format!("{}Forwarding", state(alt_if));
     let base_takeover = b.count(&takeover);
     // #323: the change shows in the logs of both routers, and in the counters.
@@ -1708,6 +1726,8 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
     log(format!(
         "cutting router-b {root_if}; {alt_if} must take over"
     ));
+    let up = format!("port carrier up port={root_if}");
+    let base_up = b.count(&up);
     w.set_link("router-b", root_if, false).await?;
     b.wait_new(&takeover, base_takeover, 10).await?;
     b.assert_delay_under(
@@ -1716,12 +1736,24 @@ pub async fn stp(w: &mut World) -> anyhow::Result<()> {
         base_takeover,
         1000,
     )?;
+    // #1188: `nos-interfaced`'s 10s re-apply tick (#615) sets the cut link
+    // admin-up again, at a per-run phase offset. If it landed before this
+    // read, `root_if` is Root again and the summary can no longer show the
+    // takeover (a poll would not help); the Forwarding line proved it.
     let sb = stp_summary(b).await?;
     let took_over = sb.ports.iter().find(|p| p.name == alt_if);
-    if !took_over.is_some_and(|p| p.role == StpRole::Root && p.state == StpState::Forwarding)
-        || sb.root_port.as_deref() != Some(alt_if)
-    {
-        bail!("router-b's {alt_if} should be the forwarding root port: {sb:?}");
+    let ok = took_over.is_some_and(|p| p.role == StpRole::Root && p.state == StpState::Forwarding)
+        && sb.root_port.as_deref() == Some(alt_if);
+    if !ok {
+        if b.count(&up) <= base_up {
+            bail!(
+                "router-b's {alt_if} should be the forwarding root port: {sb:?}\n{}",
+                stp_log_tail(b)
+            );
+        }
+        log(format!(
+            "router-b: {root_if} re-upped before the summary read; takeover proven by the log"
+        ));
     }
 
     // #323: topology-change tracking, RFC 4318 counters and the REST paths.
