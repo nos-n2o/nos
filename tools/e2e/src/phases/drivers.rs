@@ -1977,6 +1977,10 @@ pub async fn stp_legacy(w: &mut World) -> anyhow::Result<()> {
                 "--stp-force-version",
                 "stp",
             ]));
+        } else {
+            // #839: the `stp` phase left router-a at 4096; an equal priority
+            // makes the root a coin flip on the random MACs.
+            on.extend(strings(&["--stp-priority", "32768"]));
         }
         r.provision(&on).await?;
     }
