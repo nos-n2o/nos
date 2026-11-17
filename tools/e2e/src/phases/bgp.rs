@@ -4583,8 +4583,9 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
     log("withdrawing the covering VPN route invalidates the rule in the VRF");
     let invalid = changed("invalid:no-covering-unicast-route");
     let base = a.count(&invalid);
-    gobgp_owned(w, route("del")).await?;
+    // #839: before the trigger, or a fast `rules=0` is already in the baseline.
     let cleared = a.count(&applied(0));
+    gobgp_owned(w, route("del")).await?;
     a.wait_new(&invalid, base, 30).await?;
     a.wait_new(&applied(0), cleared, 30).await?;
     let body = show(&format!("?vrf={VPN_TABLE}")).await?;
