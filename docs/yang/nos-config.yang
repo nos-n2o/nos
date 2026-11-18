@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-17 {
+  revision 2026-11-18 {
     description "Generated.";
   }
 
@@ -977,6 +977,10 @@ module nos-config {
       type boolean;
       description "Advertise this router as a stub router until removed (RFC 6987).";
     }
+    leaf max_lsa {
+      type uint32;
+      description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
+    }
     leaf host_router {
       type boolean;
       description "Make this router a host router that never carries transit traffic (RFC 8770).";
@@ -1150,6 +1154,10 @@ module nos-config {
     leaf max_metric_administrative {
       type boolean;
       description "Advertise this router as a stub router until removed (RFC 6987).";
+    }
+    leaf max_lsa {
+      type uint32;
+      description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
     }
   }
   list static_routing_instances {
