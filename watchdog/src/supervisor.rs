@@ -166,7 +166,7 @@ pub fn mdwe_active() -> bool {
     #[allow(unsafe_code, reason = "one prctl read, integer args only (#1210)")]
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- integer-arg prctl
     let got = unsafe { libc::prctl(PR_GET_MDWE, 0, 0, 0, 0) };
-    got >= 0 && (got as libc::c_ulong & PR_MDWE_REFUSE_EXEC_GAIN) != 0
+    got >= 0 && got & 1 != 0 // 1 = PR_MDWE_REFUSE_EXEC_GAIN
 }
 
 /// Memory-Deny-Write-Execute for this process (#1210): no W+X mapping, no
