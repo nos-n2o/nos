@@ -24,7 +24,7 @@ use self::rx::{
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -882,6 +882,8 @@ pub struct LinkManager {
     /// H-bit, with max-metric transit links. An atomic like
     /// `prefix_suppression`.
     host_router: AtomicBool,
+    /// `max-lsa`, shared with every store (`set_max_lsa`).
+    max_lsa: Arc<AtomicU32>,
     /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
     /// looks for a tunnel backup where there is no basic LFA.
     remote_lfa: AtomicBool,
@@ -1015,6 +1017,7 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
+            max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             remote_lfa: AtomicBool::new(false),
             spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
             host_bit_state: Mutex::new(HashMap::new()),
@@ -1061,6 +1064,26 @@ impl LinkManager {
 
     pub fn set_prefix_suppression(&self, on: bool) {
         self.prefix_suppression.store(on, Ordering::Relaxed);
+    }
+
+    /// An empty store wired to this manager's notifiers and, once the router
+    /// ID is known, the `max-lsa` limit (#1146).
+    async fn new_store(&self) -> Lsdb {
+        let mut db = Lsdb::with_notify(Arc::clone(&self.route_changed))
+            .with_reflect_notify(Arc::clone(&self.reoriginate));
+        if let Some(id) = *self.router_id.lock().await {
+            db.set_limit(id, Arc::clone(&self.max_lsa));
+        }
+        db
+    }
+
+    /// `max-lsa` (#1146), every resync; read per receive, so a link never
+    /// restarts for it.
+    pub fn set_max_lsa(&self, max_lsa: Option<u32>) {
+        self.max_lsa.store(
+            max_lsa.unwrap_or(nos_ospf_common::lsdb::DEFAULT_MAX_LSA),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn set_host_router(&self, on: bool) {
@@ -1197,12 +1220,16 @@ impl LinkManager {
 
     /// Gets or creates the shared LSDB for `area_id`.
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
-        Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
-            Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&self.route_changed))
-                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
-            ))
-        }))
+        let mut stores = self.lsdbs.lock().await;
+        if let Some(l) = stores.get(&area_id) {
+            return Arc::clone(l);
+        }
+        let db = self.new_store().await;
+        Arc::clone(
+            stores
+                .entry(area_id)
+                .or_insert_with(|| Arc::new(Mutex::new(db))),
+        )
     }
 
     /// RFC 2328 §14: ages every installed LSA, in every area, by one
@@ -1381,10 +1408,7 @@ impl LinkManager {
                 0
             };
             let (commands, commands_rx) = mpsc::unbounded_channel();
-            let link_local_lsdb = Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&self.route_changed))
-                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
-            ));
+            let link_local_lsdb = Arc::new(Mutex::new(self.new_store().await));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),

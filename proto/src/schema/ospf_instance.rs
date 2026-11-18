@@ -136,6 +136,16 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
     pub max_metric_administrative: bool,
 
+    /// LSDB overload limit (#1146): most LSAs not originated by this router
+    /// that one store (area, AS scope, or one link's Link-LSAs) holds, 1 to
+    /// 1000000. A new LSA past it is discarded and logged, never
+    /// acknowledged; own and `MaxAge` LSAs do not count and no neighbor is
+    /// reset. `None` means 100000.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 1_000_000))]
+    #[cli(topic = OspfInstanceMaxLsa, words = "max-lsa")]
+    pub max_lsa: Option<u32>,
+
     /// RFC 8770 host router: sets the H-bit in this router's Router-LSA so
     /// the rest of the area never routes transit traffic through it, and
     /// advertises its transit links at 65535 for routers that don't honour
@@ -227,6 +237,7 @@ impl Default for OspfInstance {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,
@@ -281,6 +292,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,

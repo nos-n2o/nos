@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1925,6 +1925,8 @@ pub struct LinkManager {
     /// another ID; the stateless `withdraw_undesired` flushes the old one.
     lsids: Mutex<Lsids>,
     router_id: Mutex<Option<Ipv4Addr>>,
+    /// `max-lsa`, shared with every store (`set_max_lsa`).
+    max_lsa: Arc<AtomicU32>,
     /// Loopback (`Interface.ospfv3_profile`) attach points' own prefixes,
     /// per area — no live `LinkConfig`/socket for these (see
     /// `reconcile.rs`'s "log-only" loopback handling), so threaded in
@@ -2299,6 +2301,7 @@ impl LinkManager {
             redistribute_policy: Mutex::new(Arc::new(nos_rpl::ACCEPT_ALL.clone())),
             lsids: Mutex::new(Lsids::default()),
             router_id: Mutex::new(None),
+            max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             loopback_prefixes: Mutex::new(HashMap::new()),
             age_multiplier,
             dbd_max_headers,
@@ -2335,26 +2338,48 @@ impl LinkManager {
     }
 
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
-        Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
-            Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&self.route_changed))
-                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
-            ))
-        }))
+        let mut stores = self.lsdbs.lock().await;
+        if let Some(l) = stores.get(&area_id) {
+            return Arc::clone(l);
+        }
+        let db = self.new_store().await;
+        Arc::clone(
+            stores
+                .entry(area_id)
+                .or_insert_with(|| Arc::new(Mutex::new(db))),
+        )
+    }
+
+    /// An empty store wired to this manager's notifiers and, once the router
+    /// ID is known, the `max-lsa` limit (#1146).
+    async fn new_store(&self) -> Lsdb {
+        let mut db = Lsdb::with_notify(Arc::clone(&self.route_changed))
+            .with_reflect_notify(Arc::clone(&self.reoriginate));
+        if let Some(id) = *self.router_id.lock().await {
+            db.set_limit(id, Arc::clone(&self.max_lsa));
+        }
+        db
+    }
+
+    /// `max-lsa` (#1146), every resync; read per receive, so a link never
+    /// restarts for it.
+    pub fn set_max_lsa(&self, max_lsa: Option<u32>) {
+        self.max_lsa.store(
+            max_lsa.unwrap_or(nos_ospf_common::lsdb::DEFAULT_MAX_LSA),
+            Ordering::Relaxed,
+        );
     }
 
     async fn link_local_lsdb_for(&self, attach_point: &str) -> Arc<Mutex<Lsdb>> {
+        let mut stores = self.link_local_lsdbs.lock().await;
+        if let Some(l) = stores.get(attach_point) {
+            return Arc::clone(l);
+        }
+        let db = self.new_store().await;
         Arc::clone(
-            self.link_local_lsdbs
-                .lock()
-                .await
+            stores
                 .entry(attach_point.to_string())
-                .or_insert_with(|| {
-                    Arc::new(Mutex::new(
-                        Lsdb::with_notify(Arc::clone(&self.route_changed))
-                            .with_reflect_notify(Arc::clone(&self.reoriginate)),
-                    ))
-                }),
+                .or_insert_with(|| Arc::new(Mutex::new(db))),
         )
     }
 
@@ -3110,6 +3135,10 @@ impl LinkManager {
         local_router_id: Ipv4Addr,
     ) {
         *self.router_id.lock().await = Some(local_router_id);
+        self.as_lsdb
+            .lock()
+            .await
+            .set_limit(local_router_id, Arc::clone(&self.max_lsa));
         *self.loopback_prefixes.lock().await = desired_loopback_prefixes;
 
         let mut links = self.links.lock().await;
@@ -4494,6 +4523,69 @@ pub(crate) mod tests {
         lsdb.mark_reflected(key);
         seq_after(&mut lsdb);
         assert_eq!(lsdb.get(&key).unwrap().header.age, lsa::MAX_AGE);
+    }
+
+    /// `max-lsa` (#1146): past the cap a new foreign LSA is neither held nor
+    /// acknowledged, while the held one stays updatable.
+    #[tokio::test(start_paused = true)]
+    async fn handle_lsu_refuses_foreign_lsas_past_max_lsa() {
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        let cfg = link("eth0.0", 10);
+        let mut db = Lsdb::new();
+        db.set_limit(Ipv4Addr::new(1, 1, 1, 1), Arc::new(AtomicU32::new(1)));
+        let area = Mutex::new(db);
+        let (link_store, as_scope) = (Mutex::new(Lsdb::new()), Mutex::new(Lsdb::new()));
+        let stores = Stores {
+            area: &area,
+            link: &link_store,
+            as_scope: &as_scope,
+            stub: false,
+        };
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            let mut info = neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 7);
+            info.adjacency = Some(AdjacencyData::default());
+            s.neighbors.insert(neighbor_id, info);
+        });
+        let lsu = |lsas| LsuPacket {
+            discarded: 0,
+            last_error: None,
+            router_id: neighbor_id,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas,
+        };
+        let from = |n: u8, seq| {
+            let mut l = own_router_lsa(seq);
+            l.header.advertising_router = Ipv4Addr::new(n, n, n, n);
+            l
+        };
+        let key = |n: u8| from(n, 0).header.key();
+        let seq = lsa::INITIAL_SEQUENCE_NUMBER;
+        handle_lsu(
+            &cfg,
+            Ipv4Addr::new(1, 1, 1, 1),
+            &status,
+            &stores,
+            &lsu(vec![from(2, seq), from(3, seq)]),
+        )
+        .await;
+        {
+            let db = area.lock().await;
+            assert!(db.get(&key(2)).is_some());
+            assert!(db.get(&key(3)).is_none());
+            assert_eq!(db.refused(), 1);
+        }
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        handle_lsu(
+            &cfg,
+            Ipv4Addr::new(1, 1, 1, 1),
+            &status,
+            &stores,
+            &lsu(vec![from(2, seq + 1)]),
+        )
+        .await;
+        let held = area.lock().await.get(&key(2)).unwrap();
+        assert_eq!(held.header.sequence_number, seq + 1);
     }
 
     /// A reflected own LSA is marked in the store it landed in and wakes the

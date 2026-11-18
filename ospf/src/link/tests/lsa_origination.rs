@@ -1741,6 +1741,65 @@ async fn handle_lsu_marks_a_reflected_own_lsa_and_wakes_the_originator() {
     assert!(n.notified().now_or_never().is_some());
 }
 
+/// `max-lsa` (#1146): past the cap a new foreign LSA is neither held nor
+/// acknowledged, while the held one stays updatable.
+#[tokio::test(start_paused = true)]
+async fn handle_lsu_refuses_foreign_lsas_past_max_lsa() {
+    let neighbor_id = id(9);
+    let cfg = link("eth0.0", 10);
+    let mut db = Lsdb::new();
+    db.set_limit(id(1), Arc::new(std::sync::atomic::AtomicU32::new(1)));
+    let lsdb = Mutex::new(db);
+    let link_local = Mutex::new(Lsdb::new());
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(AdjacencyData::default());
+        s.neighbors.insert(neighbor_id, info);
+    });
+    let lsu = |lsas| LsuPacket {
+        discarded: 0,
+        last_error: None,
+        router_id: neighbor_id,
+        area_id: Ipv4Addr::UNSPECIFIED,
+        lsas,
+    };
+    let from = |n: u8, seq| {
+        let mut l = own_router_lsa(seq, 0);
+        l.header.link_state_id = id(n);
+        l.header.advertising_router = id(n);
+        l
+    };
+    let seq = lsa::INITIAL_SEQUENCE_NUMBER;
+    rx::handle_lsu(
+        &cfg,
+        id(1),
+        &status,
+        &lsdb,
+        &link_local,
+        &lsu(vec![from(2, seq), from(3, seq)]),
+    )
+    .await;
+    {
+        let db = lsdb.lock().await;
+        assert!(db.get(&router_key(id(2))).is_some());
+        assert!(db.get(&router_key(id(3))).is_none());
+        assert_eq!(db.refused(), 1);
+    }
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    rx::handle_lsu(
+        &cfg,
+        id(1),
+        &status,
+        &lsdb,
+        &link_local,
+        &lsu(vec![from(2, seq + 1)]),
+    )
+    .await;
+    let held = lsdb.lock().await.get(&router_key(id(2))).unwrap();
+    assert_eq!(held.header.sequence_number, seq + 1);
+}
+
 /// §13.4: a Network-LSA of a stale router-id whose Link State ID is one of
 /// our addresses is flushed; one for another address is left alone.
 #[test]

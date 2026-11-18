@@ -1180,6 +1180,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Announce an RFC 3623 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
         ),
+        Topic::OspfInstanceMaxLsa | Topic::Ospfv3InstanceMaxLsa => (
+            "Cap the LSAs another router can make this router hold (LSDB overload limit).",
+            "Most LSAs not originated by this router that one store holds: each area, the AS scope, and each link's Link-LSAs (1-1000000, default 100000). A new LSA past it is discarded, not acknowledged, and logged `ospf lsdb limit reached`; LSAs already held can still be updated, this router's own and MaxAge LSAs never count, and no adjacency is reset. Takes effect without restarting links. `delete` restores the default.",
+        ),
         Topic::OspfInstanceGracefulRestartHelperMaxGracePeriod => (
             "Cap the grace period this router grants a restarting neighbor (RFC 3623 helper).",
             "A neighbor's Grace-LSA is honoured for its remaining grace period (grace period minus the LSA's age) but never longer than this many seconds (1-3600, default 1800). Helping also ends at once when another router's type 1-5 LSA changes (strict LSA checking). `delete` restores the default.",
