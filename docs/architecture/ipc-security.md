@@ -41,6 +41,12 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 - Adding a secret-bearing field: extend `for_role` and the sentinel fixture in `redact.rs` (the test cannot notice a field missing from the fixture). Adding a role: classify it in `visible()` (exhaustive `match`).
 - The negative side (a foreign role sees no keys) is covered by `config/tests/ipc.rs`; the e2e harness only has user-role REST access, so the existing auth phases (`auth`, `ao`, `ospf-auth`, `ospfv3-auth`, `bfd-auth`) prove the allowed side.
 
+## W^X for daemons (#1210)
+
+- `nos-watchdogd` sets `PR_SET_MDWE` (`PR_MDWE_REFUSE_EXEC_GAIN`) on itself at start and fails to start without it; every supervised process inherits it, `nos-sshd` included. The watchdog is under it too (no JIT in it).
+- The kernel then refuses a writable+executable mapping and `mprotect` of a writable mapping to executable; inherited across fork and exec, never liftable by the daemon.
+- `nos-sshd`'s children (`sshd -i`, login shells) inherit it too: JIT-based tools (node, JVM, PyPy) fail in an ssh session. Accepted (owner decision, #1210).
+
 ## uid model (#512, #513)
 
 - **Who runs as whom.** `nos-watchdogd` runs as `nos-wd` (uid 990); it starts each daemon as its role's own user `nos-<role>` (uids 10001+ in `Role` declaration order, table in `watchdog/src/uids.rs`: `role_uid`, an exhaustive `match`, so a new `Role` won't compile until it has a uid). The image's `ENTRYPOINT` passes `--child-gid` (group `nos`), which also turns per-role uids on; unset (tests, non-container runs) every child keeps the watchdog's uid. `nos` (uid 991) is the shared client user: the `nos` shell, `nos-provision`, `nos-e2e` execs. Everyone has primary group `nos`.

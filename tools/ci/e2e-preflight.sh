@@ -8,6 +8,14 @@
 set -eu
 
 IMAGE=${IMAGE:-nos:local}
+
+# nos-watchdogd sets MDWE (PR_SET_MDWE, #1210) on every child and fails closed;
+# containers share the host kernel.
+case $(uname -r) in
+    [0-5].* | 6.[0-2].* | 6.[0-2]-*)
+        echo "nos-watchdogd needs Linux >= 6.3 for MDWE (host runs $(uname -r))" >&2
+        exit 1 ;;
+esac
 SUDO=
 [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
