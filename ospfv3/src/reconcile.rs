@@ -151,6 +151,13 @@ pub async fn run(
 
 /// RFC 3623 helper cap on a neighbor's grace period, seconds
 /// (`graceful-restart helper max-grace-period`, default 1800).
+/// Whether `instance` runs RFC 5838's IPv4-unicast address family.
+fn is_ipv4_af(cfg: &nos_proto::Config, instance: &str) -> bool {
+    cfg.ospfv3_instances.iter().any(|i| {
+        i.name == instance && i.address_family == nos_proto::Ospfv3AddressFamily::Ipv4Unicast
+    })
+}
+
 fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
     cfg.ospfv3_instances
         .iter()
@@ -297,6 +304,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            ipv4_af: is_ipv4_af(cfg, instance),
             nssa: area.area_type.is_nssa(),
         });
     }
@@ -445,6 +453,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            ipv4_af: is_ipv4_af(cfg, instance),
             nssa: area.area_type.is_nssa(),
         });
     }
@@ -1353,6 +1362,7 @@ mod tests {
             instance_id: 0,
             helper_max_grace_period: 1800,
             stub: false,
+            ipv4_af: false,
             nssa: false,
         }
     }

@@ -45,6 +45,9 @@ pub const OPTION_R: u32 = 0x10;
 /// link carries an authentication trailer. Set only in Hello/DBD; LSR/LSU/
 /// `LSAck` have no Options field and inherit it from the link's config.
 pub const OPTION_AT: u32 = 0x00_0400;
+/// RFC 5838 §2.2: the router supports address families; an IPv4-unicast
+/// instance sets it in Hello/DBD/LSAs and discards Hellos without it.
+pub const OPTION_AF: u32 = 0x00_0100;
 
 /// S2/S1 scope bits (bits 14-13): `01` = area scope. The U-bit (bit 15,
 /// "flood even if unrecognized") is left clear on the RFC 5340 `LSA_TYPE_*`

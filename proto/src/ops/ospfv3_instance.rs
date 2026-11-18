@@ -45,6 +45,13 @@ pub enum Ospfv3InstanceOp {
         /// Most non-self LSAs per store; `None` restores the default.
         max_lsa: Option<u32>,
     },
+    /// Sets the RFC 5838 address family of the instance.
+    SetAddressFamily {
+        /// Name of the instance this op targets.
+        name: String,
+        /// The address family.
+        address_family: crate::schema::Ospfv3AddressFamily,
+    },
     /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
     SetGracefulRestartHelperMaxGracePeriod {
         /// Name of the instance this op targets.
@@ -99,6 +106,7 @@ impl Ospfv3InstanceOp {
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
                         max_lsa: None,
+                        address_family: crate::schema::Ospfv3AddressFamily::default(),
                     });
                 }
                 Ok(())
@@ -109,6 +117,13 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
                 find_instance_mut(config, name)?.extended_lsa = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetAddressFamily {
+                name,
+                address_family,
+            } => {
+                find_instance_mut(config, name)?.address_family = *address_family;
                 Ok(())
             }
             Ospfv3InstanceOp::SetMaxLsa { name, max_lsa } => {
@@ -177,6 +192,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
