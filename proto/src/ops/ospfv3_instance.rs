@@ -38,6 +38,13 @@ pub enum Ospfv3InstanceOp {
         /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
     },
+    /// Sets (`Some`) or clears (`None`) the LSDB overload limit (#1146).
+    SetMaxLsa {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Most non-self LSAs per store; `None` restores the default.
+        max_lsa: Option<u32>,
+    },
     /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
     SetGracefulRestartHelperMaxGracePeriod {
         /// Name of the instance this op targets.
@@ -91,6 +98,7 @@ impl Ospfv3InstanceOp {
                         max_metric_on_startup: None,
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
+                        max_lsa: None,
                     });
                 }
                 Ok(())
@@ -101,6 +109,10 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
                 find_instance_mut(config, name)?.extended_lsa = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetMaxLsa { name, max_lsa } => {
+                find_instance_mut(config, name)?.max_lsa = *max_lsa;
                 Ok(())
             }
             Ospfv3InstanceOp::SetGracefulRestartHelperMaxGracePeriod { name, seconds } => {
@@ -164,6 +176,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
         }
     }
 

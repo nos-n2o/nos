@@ -110,6 +110,16 @@ pub struct Ospfv3Instance {
     #[garde(skip)]
     #[cli(topic = Ospfv3InstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
     pub max_metric_administrative: bool,
+
+    /// LSDB overload limit (#1146): most LSAs not originated by this router
+    /// that one store (area, AS scope, or one link's Link-LSAs) holds, 1 to
+    /// 1000000. A new LSA past it is discarded and logged, never
+    /// acknowledged; own and `MaxAge` LSAs do not count and no neighbor is
+    /// reset. `None` means 100000.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 1_000_000))]
+    #[cli(topic = Ospfv3InstanceMaxLsa, words = "max-lsa")]
+    pub max_lsa: Option<u32>,
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -127,6 +137,7 @@ impl Default for Ospfv3Instance {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
         }
     }
 }
@@ -170,6 +181,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
         }
     }
 

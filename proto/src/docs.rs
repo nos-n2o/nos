@@ -267,6 +267,8 @@ topics! {
     OspfInstanceRouterId,
     /// `OspfInstance.graceful_restart_grace_period`
     OspfInstanceGracefulRestart,
+    /// `OspfInstance.max_lsa`
+    OspfInstanceMaxLsa,
     /// `OspfInstance.graceful_restart_helper_max_grace_period`
     OspfInstanceGracefulRestartHelperMaxGracePeriod,
     /// `OspfInstance.prefix_suppression`
@@ -331,6 +333,8 @@ topics! {
     Ospfv3InstanceExtendedLsa,
     /// `Ospfv3Instance.graceful_restart_grace_period`
     Ospfv3InstanceGracefulRestart,
+    /// `Ospfv3Instance.max_lsa`
+    Ospfv3InstanceMaxLsa,
     /// `Ospfv3Instance.graceful_restart_helper_max_grace_period`
     Ospfv3InstanceGracefulRestartHelperMaxGracePeriod,
     /// `Ospfv3Instance.max_metric_on_startup`

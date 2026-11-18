@@ -45,6 +45,7 @@ pub mod stp;
 /// Field validators shared by the config ops.
 pub mod validators;
 pub mod version;
+pub mod yang;
 pub use version::VersionInfo;
 
 pub use acl::{

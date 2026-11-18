@@ -216,6 +216,10 @@ pub struct VpnRouteSummary {
     /// The Site of Origin the path carries (RFC 4364 section 7), `65001:77`.
     #[serde(default)]
     pub site_of_origin: Option<String>,
+    /// The RFC 7911 path id of the copy, set only when non-zero: one peer
+    /// can send several copies of one (RD, prefix) (#1133).
+    #[serde(default)]
+    pub path_id: Option<u32>,
 }
 
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.
@@ -656,7 +660,7 @@ pub struct FlowspecRouteCursor {
     pub nlri: String,
 }
 
-/// Position in `show bgp vpnv4|vpnv6`: peer, RD (8 wire bytes), prefix.
+/// Position in `show bgp vpnv4|vpnv6`: peer, RD (8 wire bytes), prefix, path id.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VpnRouteCursor {
@@ -668,6 +672,9 @@ pub struct VpnRouteCursor {
     /// The customer prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    /// The RFC 7911 path id of the copy (0 without Add-Path).
+    #[serde(default)]
+    pub path_id: u32,
 }
 
 /// `Display`/`FromStr` of a cursor: its opaque text form.

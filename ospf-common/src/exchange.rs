@@ -716,7 +716,8 @@ where
         match store.install_received(l.clone(), now) {
             // §13 step 5a (`MinLSArrival`): neither acked nor answering a
             // request; the sender's retransmission brings it back.
-            InstallOutcome::TooSoon => continue,
+            // `max-lsa` (#1146): discarded unacked, like a bad checksum.
+            InstallOutcome::TooSoon | InstallOutcome::LimitReached => continue,
             InstallOutcome::Rejected => {}
             InstallOutcome::Installed | InstallOutcome::Superseded => newly_installed.push(h),
         }

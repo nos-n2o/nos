@@ -498,6 +498,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
     links.set_remote_lfa(own.remote_lfa);
+    links.set_max_lsa(own.max_lsa);
     links.set_spf_timers(spf_timers(&own.spf_throttle));
     links.set_max_metric(
         own.max_metric_on_startup,

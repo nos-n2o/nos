@@ -1331,9 +1331,11 @@ pub fn render_bgp_vpn_lines(routes: &[nos_proto::VpnRouteSummary]) -> String {
         .map(|r| {
             let labels: Vec<String> = r.labels.iter().map(u32::to_string).collect();
             let mut line = format!(
-                "  {} rd {} {} label {} next-hop {} from {} [{}]",
+                "  {} rd {} {}{} label {} next-hop {} from {} [{}]",
                 if r.best { ">" } else { " " },
                 r.rd,
+                r.path_id
+                    .map_or(String::new(), |id| format!("path-id {id} ")),
                 r.prefix,
                 labels.join("/"),
                 r.next_hop,
@@ -2568,6 +2570,7 @@ mod tests {
             local_pref: 100,
             best,
             site_of_origin: None,
+            path_id: None,
         };
         assert_eq!(
             render_bgp_vpn("r1", family, &[r(true, vec![100]), r(false, vec![16, 17])]),
@@ -2588,6 +2591,7 @@ mod tests {
             local_pref: 100,
             best: true,
             site_of_origin: Some("65001:77".into()),
+            path_id: None,
         };
         assert!(
             render_bgp_vpn("r1", nos_proto::AddressFamily::Vpnv4Unicast, &[r])

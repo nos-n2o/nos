@@ -118,8 +118,9 @@ fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightl
 	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }
 	cd fuzz && host=$$($(FUZZ_CARGO) -vV | sed -n 's/^host: //p') && for t in $(FUZZ_TARGETS); do RUSTFLAGS="--cap-lints allow" $(FUZZ_CARGO) fuzz run --target $$host $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=$(FUZZ_RSS_MB) || exit 1; done
 
-docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
+docs-fix: toolchain-check ## Regenerate docs/openapi.json and docs/yang/nos-config.yang
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
+	UPDATE_YANG_SNAPSHOT=1 $(RUN) cargo test -p nos-config --test yang_snapshot docs_yang_snapshot
 
 ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh, gh-plan-comment.sh)
 	tools/ci/coverage-compare-test.sh
