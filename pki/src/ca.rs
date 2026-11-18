@@ -228,6 +228,27 @@ impl Ca {
         self.sign_csr_with(csr_der, &leaf_params(peer, now - SKEW, now + lifetime)?)
     }
 
+    /// `sign_csr` for a user whose role came from an external backend: the
+    /// certificate also carries `nos://claim/<claim>`, a second URI SAN after
+    /// the identity one. Only the CA writes it (a CSR's own extensions are
+    /// ignored), so a client cannot grant itself a role.
+    pub fn sign_csr_claiming(
+        &self,
+        csr_der: &[u8],
+        peer: &PeerId,
+        claim: &str,
+        lifetime: Duration,
+    ) -> io::Result<Vec<u8>> {
+        let now = OffsetDateTime::now_utc();
+        let mut params = leaf_params(peer, now - SKEW, now + lifetime)?;
+        params.subject_alt_names.push(SanType::URI(
+            format!("nos://{}/{claim}", crate::peer::CLAIM_ROLE)
+                .try_into()
+                .map_err(err)?,
+        ));
+        self.sign_csr_with(csr_der, &params)
+    }
+
     /// `sign_csr` for a TLS *server* certificate valid for `addresses` (plus the
     /// fixed `nos.internal` name) — how `nos-restd` gets the certificate its
     /// listener presents. The addresses come from the caller, never the CSR.

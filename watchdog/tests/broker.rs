@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{generate_csr, generate_csr_for, Identity, KeyAlg, PeerId};
 use nos_proto::{
-    Config, Event, IpcCodec, Request, Role, ServiceRef, User, WatchdogEvent, WatchdogRequest,
+    Aaa, Admin, Config, Event, IpcCodec, Request, Role, ServiceRef, User, WatchdogEvent,
+    WatchdogRequest,
 };
 use nos_watchdog::broker::{self, Limits, Sockets};
 use nos_watchdog::{EndpointKind, EndpointRegistry, Pki};
@@ -17,6 +18,8 @@ struct Env {
     pki: Arc<Pki>,
     broker: PathBuf,
     users: Arc<Mutex<Vec<User>>>,
+    /// The `aaa` section and admin keystore the stand-in configd serves.
+    aaa: Arc<Mutex<(Aaa, Admin)>>,
 }
 
 /// A broker plus a stand-in `nos-configd` (a real TLS server holding the
@@ -35,15 +38,18 @@ async fn env_with_limits(users: Vec<User>, limits: Limits) -> Env {
     )
     .unwrap();
     let users = Arc::new(Mutex::new(users));
+    let aaa = Arc::new(Mutex::new((Aaa::default(), Admin::default())));
 
     let config_socket = tmp.path().join("config.sock");
     let configd = Identity::from_bundle(&pki.mint(Role::Configd, "").unwrap()).unwrap();
     let listener = configd.listen(&config_socket).unwrap();
     let served = users.clone();
+    let served_aaa = aaa.clone();
     tokio::spawn(async move {
         loop {
             let incoming = listener.accept().await.unwrap();
             let served = served.clone();
+            let served_aaa = served_aaa.clone();
             tokio::spawn(async move {
                 let Ok((stream, _)) = incoming.handshake().await else {
                     return;
@@ -52,7 +58,7 @@ async fn env_with_limits(users: Vec<User>, limits: Limits) -> Env {
                 let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
                 while let Some(Ok(request)) = reader.next().await {
-                    let Some(event) = stub_reply(&served, request) else {
+                    let Some(event) = stub_reply(&served, &served_aaa, request) else {
                         return;
                     };
                     writer.send(event).await.unwrap();
@@ -93,16 +99,26 @@ async fn env_with_limits(users: Vec<User>, limits: Limits) -> Env {
         pki,
         broker: broker_socket,
         users,
+        aaa,
     }
 }
 
 /// The stand-in `nos-configd`'s answer to one request.
-fn stub_reply(users: &Mutex<Vec<User>>, request: Request) -> Option<Event> {
+fn stub_reply(
+    users: &Mutex<Vec<User>>,
+    aaa: &Mutex<(Aaa, Admin)>,
+    request: Request,
+) -> Option<Event> {
     Some(match request {
-        Request::Get => Event::Config(Config {
-            users: users.lock().unwrap().clone(),
-            ..Config::default()
-        }),
+        Request::Get => {
+            let (aaa, admin) = aaa.lock().unwrap().clone();
+            Event::Config(Config {
+                users: users.lock().unwrap().clone(),
+                aaa,
+                admin,
+                ..Config::default()
+            })
+        }
         Request::UpgradePasswordHash { user, old, new } => {
             let mut users = users.lock().unwrap();
             match users
@@ -1014,4 +1030,135 @@ async fn heartbeat_is_for_daemons_only() {
         ask(&mut conn, WatchdogRequest::Heartbeat).await,
         WatchdogEvent::Denied(_)
     ));
+}
+
+/// A RADIUS stub: accepts `alice`/`pw` with Filter-Id `operator`, rejects the
+/// rest; `silent` never answers.
+async fn radius_stub(silent: bool) -> std::net::SocketAddr {
+    use nos_radius::{attr, make_reply, Code, Packet};
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if silent {
+                continue;
+            }
+            let req = Packet::decode(&buf[..n]).unwrap();
+            let (code, attrs) = if req.attr(attr::USER_NAME) == Some(b"alice") {
+                (
+                    Code::AccessAccept,
+                    vec![(attr::FILTER_ID, b"operator".to_vec())],
+                )
+            } else {
+                (Code::AccessReject, vec![])
+            };
+            let _ = sock
+                .send_to(&make_reply(code, &req, b"sh4red", attrs, true), from)
+                .await;
+        }
+    });
+    addr
+}
+
+fn use_radius(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBackend>) {
+    let mut g = e.aaa.lock().unwrap();
+    g.1.keys = vec![nos_proto::AdminKey {
+        label: "radius".into(),
+        secret: "sh4red".into(),
+    }];
+    g.0 = Aaa {
+        servers: vec![nos_proto::RadiusServer {
+            name: "r1".into(),
+            address: addr.ip(),
+            port: Some(addr.port()),
+            secret_ref: "radius".into(),
+            timeout_secs: Some(1),
+            retries: Some(0),
+        }],
+        login_order: order,
+        ..Aaa::default()
+    };
+}
+
+fn claim_of(cert: &[u8]) -> Option<String> {
+    let (_, c) = x509_parser::parse_x509_certificate(cert).unwrap();
+    let san = c.subject_alternative_name().unwrap().unwrap();
+    san.value.general_names.iter().find_map(|g| match g {
+        x509_parser::extensions::GeneralName::URI(u) => {
+            u.strip_prefix("nos://claim/").map(str::to_string)
+        }
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn radius_accept_mints_a_transient_user_with_the_role_in_the_certificate() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(false).await, vec![Radius, Local]);
+    let id = e.anonymous();
+    let mut conn = dial(&id, &e.broker).await;
+    let (csr, key) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(&mut conn, login("alice", "pw", csr)).await
+    else {
+        panic!("radius login refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+    id.set_certificate(cert_der, key).unwrap();
+    assert_eq!(id.peer(), Some(PeerId::new("user", "alice")));
+
+    // A renewal re-reads the claim from the presented certificate.
+    let mut conn = dial(&id, &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut conn, WatchdogRequest::RenewCert { csr_der: csr }).await
+    else {
+        panic!("renewal refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+}
+
+#[tokio::test]
+async fn radius_reject_never_falls_back_to_the_local_user() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(false).await, vec![Radius, Local]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    let event = ask(&mut conn, login("bob", "localpw", csr)).await;
+    assert!(matches!(&event, WatchdogEvent::Denied(m) if m == nos_proto::INVALID_CREDENTIALS));
+}
+
+#[tokio::test]
+async fn silent_radius_falls_back_to_local_only_when_local_is_listed() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(true).await, vec![Radius, Local]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    let event = ask(&mut conn, login("bob", "localpw", csr)).await;
+    let WatchdogEvent::Issued { cert_der, .. } = event else {
+        panic!("{event:?}");
+    };
+    assert_eq!(claim_of(&cert_der), None, "a local user carries no claim");
+
+    use_radius(&e, radius_stub(true).await, vec![Radius]);
+    let (csr, _) = generate_csr().unwrap();
+    let event = ask(&mut conn, login("bob", "localpw", csr)).await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+}
+
+#[tokio::test]
+async fn local_first_order_decides_a_local_user_locally() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(false).await, vec![Local, Radius]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    let event = ask(&mut conn, login("bob", "wrong", csr)).await;
+    assert!(matches!(&event, WatchdogEvent::Denied(m) if m == nos_proto::INVALID_CREDENTIALS));
+    let (csr, _) = generate_csr().unwrap();
+    let event = ask(&mut conn, login("alice", "pw", csr)).await;
+    assert!(matches!(event, WatchdogEvent::Issued { .. }), "{event:?}");
 }

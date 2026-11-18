@@ -1856,6 +1856,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the S-BFD discriminator to probe.",
             "For `mode sbfd`: the reflector's S-BFD discriminator, written as an IPv4 address (its 32 bits). Unset uses the session peer's own IPv4 address, so a reflector configured with its own address needs nothing here. An IPv6 peer needs it.",
         ),
+        Topic::Aaa => (
+            "Configure login backends.",
+            "Where `nos-watchdogd` checks a password: the local users, RADIUS servers (RFC 2865, over UDP), or both in `login-order`. A RADIUS user with no local entry is logged in as a transient user whose role comes from the reply (`role-attribute`); a local user keeps its configured role. RADIUS secrets are shared secrets: MD5 is the protocol's own primitive, so use RADIUS only over networks you trust.",
+        ),
+        Topic::AaaRadiusServer => (
+            "Add a RADIUS server.",
+            "Servers are tried in the order they are listed; a server that does not answer within `timeout-secs` (after `retries` more attempts) is skipped. An Access-Reject from any server ends the login.",
+        ),
+        Topic::AaaLoginOrder => (
+            "Set the order login backends are tried in.",
+            "`local` and `radius`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",
+        ),
+        Topic::AaaRoleAttribute => (
+            "Set the RADIUS attribute that carries the role.",
+            "`filter-id` (default), `class` or `reply-message`; its text is `admin`, `operator` or `read-only`. Missing or unrecognised means read-only.",
+        ),
+        Topic::RadiusAddress => (
+            "Set a RADIUS server's address.",
+            "An IP address (there is no resolver). Reached through the default network namespace.",
+        ),
+        Topic::RadiusPort => (
+            "Set a RADIUS server's UDP port.",
+            "1-65535. `delete` restores 1812.",
+        ),
+        Topic::RadiusSecretRef => (
+            "Name the admin key holding the shared secret.",
+            "The label of an `admin key` entry; the secret itself is never shown. The server needs the same value.",
+        ),
+        Topic::RadiusTimeout => (
+            "Set the seconds to wait for one reply.",
+            "1 to 30. `delete` restores 3.",
+        ),
+        Topic::RadiusRetries => (
+            "Set the extra attempts before the next server.",
+            "0 to 10. `delete` restores 2.",
+        ),
         Topic::LoginPolicy => (
             "Set the login lockout.",
             "Failed logins are counted per source address and user over a window; reaching the limit locks that pair out (HTTP 429 on the REST API) until the window ends. Applied live by `nos-restd` and `nos-watchdogd`.",

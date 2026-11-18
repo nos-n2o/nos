@@ -138,6 +138,11 @@ pub const RPKI_WRONG_ASN: u32 = 64999;
 pub const RTR_STUB: &str = "rtr-stub";
 pub const IP_RTR_STUB: Addr = Addr("10.50.0.10");
 pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
+/// `aaa`, #1153: `nos-radius-stub`, the scripted RADIUS server router-a logs
+/// users in against, and the shared secret both sides hold.
+pub const RADIUS_STUB: &str = "radius-stub";
+pub const IP_RADIUS_STUB: Addr = Addr("10.50.0.16");
+pub const RADIUS_SECRET: &str = "radius-sh4red";
 /// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
 /// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
 /// RFC 8097 "invalid", which router-a must ignore from eBGP.

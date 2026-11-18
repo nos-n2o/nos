@@ -503,6 +503,24 @@ topics! {
     BfdProfileMode,
     /// `BfdProfile.sbfd_remote_discriminator`
     BfdProfileSbfdRemoteDiscriminator,
+    /// `Config.aaa`
+    Aaa,
+    /// `Aaa.servers`
+    AaaRadiusServer,
+    /// `Aaa.login_order`
+    AaaLoginOrder,
+    /// `Aaa.role_attribute`
+    AaaRoleAttribute,
+    /// `RadiusServer.address`
+    RadiusAddress,
+    /// `RadiusServer.port`
+    RadiusPort,
+    /// `RadiusServer.secret_ref`
+    RadiusSecretRef,
+    /// `RadiusServer.timeout_secs`
+    RadiusTimeout,
+    /// `RadiusServer.retries`
+    RadiusRetries,
     /// `Config.login_policy`
     LoginPolicy,
     /// `LoginPolicy.max_failures`

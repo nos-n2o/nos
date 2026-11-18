@@ -176,6 +176,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "pki" => pki::pki(w).await,
         "pki-crl" => pki::pki_crl(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
+        "aaa" => pki::aaa(w).await,
         "logd-memory" => crate::logd_mem::phase(w).await,
         "config-mem" => crate::logd_mem::config_phase(w).await,
         other => bail!("unknown phase '{other}'"),
@@ -353,7 +354,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
-        "pki-suite" => &["up", "established", "pki", "pki-rotation"],
+        "pki-suite" => &["up", "established", "pki", "aaa", "pki-rotation"],
         // Slow (20-40 min, 30,000 logins): its own CI job, off the fast pki-suite (#677).
         "pki-crl" => &["up", "established", "pki-crl"],
         // Not run by CI (minutes of runtime, memory thresholds are the flakiest
@@ -515,6 +516,7 @@ pub const ALL: &[&str] = &[
     "ospf-forged-lsa",
     "ospf-remote-lfa",
     "pki",
+    "aaa",
     "pki-rotation",
     "pki-crl",
     "logd-memory",

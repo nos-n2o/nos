@@ -40,6 +40,16 @@ A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925
 
 - `pam_nos.so` (crate `nos-pam`) lets sshd check a password against `nos-watchdogd` (`LoginTicket`, then `nos` redeems the ticket; [ssh-access.md](../ssh-access.md)). `libnss_nos` gives each user a passwd entry for sshd. See [pam.md](pam.md#account-mapping-nss).
 
+## RADIUS login (#1153)
+
+- `Config.aaa { servers, login_order, role_attribute }`; a `RadiusServer` is `name`, `address`, `port` (1812), `secret_ref` (an admin-keystore label: the shared secret is masked everywhere like any admin key, and `Role::Watchdog` sees only the labels a server references), `timeout-secs` (3), `retries` (2). `login-order` is `local`, `radius` or both, in order; empty means `local`.
+- Only direct IPC logins (`WatchdogRequest::Login`: `nos`, `nos-provision`) use `login-order`; REST logins and PAM/ssh login tickets stay local-only for now.
+- The broker (`authenticate` in `watchdog/src/broker.rs`) fetches the config per login. A RADIUS Access-Reject ends the login, with no fallback to the next backend; the next backend is tried only when no server answered (`no radius server answered`). After `local` it is tried only for a name that is no local user, so a local user is always decided locally.
+- A RADIUS user with no local entry gets a certificate for `nos://user/<name>` carrying its role in a second URI SAN, `nos://claim/<role>` (`Ca::sign_csr_claiming`; only the CA writes it, a CSR's extensions are ignored). The role is the text of the reply attribute `role-attribute` names (`filter-id`, `class` or `reply-message`: `admin`, `operator`, `read-only`); anything else is `read-only`. `nos-configd` reads it from the peer certificate (`Stream::peer_claim`) and uses it only for a name the config has no entry for; a local user's role always comes from the config. A renewal re-reads the claim from the presented certificate, bounded by the session cap.
+- MD5 note: RADIUS's User-Password hiding (RFC 2865 §5.2), Response Authenticator and Message-Authenticator (HMAC-MD5, RFC 3579) are MD5-based by protocol; nothing here chooses MD5. Use it on a trusted management network. RadSec (RFC 6614) is not built.
+- Accounting (`nos_radius::account`) is in the crate but nothing emits records yet.
+- The e2e `aaa` phase runs against `nos-radius-stub` (a `lab`-image tool).
+
 ## Roles (#1147)
 
 - `User.role`: `admin` (default; users stored before roles are admins), `operator`, `read-only`. Set with `set user <name> role <role>`; a commit that would leave no admin is refused (`NoAdminLeft`, 422).
