@@ -484,3 +484,75 @@ async fn after_a_topology_exit_a_one_way_hello_tears_the_adjacency_down() {
     );
     assert_eq!(state_of(&status), NeighborState::Init);
 }
+
+fn own_lsas(lsas: &[nos_proto::LsaSummary], who: Ipv4Addr) -> usize {
+    lsas.iter().filter(|l| l.advertising_router == who).count()
+}
+
+/// RFC 3623 restarting router: nothing is originated while it waits; the
+/// timeout (or a topology change) ends it and origination resumes.
+#[tokio::test(start_paused = true)]
+async fn restart_mode_holds_origination_until_timeout_or_topology_change() {
+    for topology in [false, true] {
+        let wire = Arc::new(wire::Wire::default());
+        let b = router(&wire);
+        // No neighbors to wait for: not restart mode at all.
+        b.begin_restart(std::collections::BTreeSet::new(), Duration::from_secs(30));
+        assert!(!b.restart_active());
+        b.begin_restart([id(9)].into(), Duration::from_secs(30));
+        assert!(b.restart_active());
+        b.reconcile(
+            vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+            stub("192.0.2.2/32"),
+            id(2),
+        )
+        .await;
+        settle(20).await;
+        assert!(b.restart_active());
+        assert_eq!(own_lsas(&b.database_summaries().await, id(2)), 0);
+        if topology {
+            b.restart_tick(true).await;
+        } else {
+            settle(20).await;
+        }
+        assert!(!b.restart_active());
+        settle(5).await;
+        assert!(own_lsas(&b.database_summaries().await, id(2)) > 0);
+    }
+}
+
+/// The respawn waits for its pre-restart neighbor and ends `Complete` as soon
+/// as it is `Full`; the helper's grace ends with it.
+#[tokio::test(start_paused = true)]
+async fn restart_mode_ends_when_the_neighbors_are_full_again() {
+    let wire = Arc::new(wire::Wire::default());
+    let (a, b) = (router(&wire), router(&wire));
+    let link_b = wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint);
+    a.reconcile(
+        vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+        HashMap::new(),
+        id(1),
+    )
+    .await;
+    b.reconcile(vec![link_b.clone()], stub("192.0.2.2/32"), id(2))
+        .await;
+    b.set_graceful_restart(Some(120));
+    settle(60).await;
+    assert_eq!(b.full_neighbor_ids().await, [id(1)].into());
+    b.announce_graceful_restart().await;
+    b.shutdown().await;
+    settle(5).await;
+
+    let b2 = router(&wire);
+    b2.begin_restart([id(1)].into(), Duration::from_secs(100));
+    b2.reconcile(vec![link_b], stub("192.0.2.2/32"), id(2))
+        .await;
+    settle(60).await;
+    assert!(!b2.restart_active());
+    assert_eq!(
+        a.neighbor_summaries().await[0].state,
+        OspfNeighborState::Full
+    );
+    assert!(!helping(&a, id(2)).await);
+    assert!(routes_to(&a, "192.0.2.2/32").await);
+}

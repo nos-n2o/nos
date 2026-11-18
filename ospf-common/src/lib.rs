@@ -17,4 +17,5 @@ pub mod lsa;
 pub mod lsdb;
 pub mod neighbor;
 pub mod ratelimit;
+pub mod restart;
 pub mod throttle;

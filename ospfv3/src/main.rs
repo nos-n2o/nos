@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.dev.lsa_age_multiplier, args.dbd_max_headers);
     let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
-    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()));
+    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()).is_some());
     links.set_originate_lsinfinity(args.dev.originate_lsinfinity);
     links.set_router_lsa_max_links(args.dev.router_lsa_max_links);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
@@ -190,7 +190,12 @@ async fn main() -> anyhow::Result<()> {
         let grace_period = links.grace_period();
         if grace_period != 0 {
             // Lets the respawned process skip RFC 6987's on-startup period.
-            match boot::write_grace_marker(&grace_marker, unix_now() + u64::from(grace_period)) {
+            // ponytail: v3 writes no neighbors, so no restart mode yet (#1163 wires it).
+            match boot::write_grace_marker(
+                &grace_marker,
+                unix_now() + u64::from(grace_period),
+                &std::collections::BTreeSet::new(),
+            ) {
                 Ok(()) => {
                     info!(instance = %args.instance, "ospfv3 graceful restart marker written");
                 }

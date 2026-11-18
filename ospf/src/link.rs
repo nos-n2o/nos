@@ -565,6 +565,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         opaque_capable: false, // learnt from the neighbor's DBD
         stub: cfg.stub,
         nssa: cfg.nssa,
+        unpolled: true,
     };
     (adj, dbd)
 }
@@ -755,11 +756,14 @@ pub async fn run(
             }
             Some(command) = commands.recv() => match command {
                 LinkCommand::Grace(grace_period) => {
-                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, 0, &mut next_seq);
                     // RFC 4812: the last Hello says "restarting", for peers that read LLS not the Grace-LSA.
                     if cfg.lls_active() && cfg.virtual_link.is_none() {
                         send_hello_eof(&socket, &cfg, local_router_id, &status, &mut next_seq, lls::EOF_RS);
                     }
+                }
+                LinkCommand::FlushGrace => {
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, 0, lsa::MAX_AGE, &mut next_seq);
                 }
                 LinkCommand::FloodNow => {
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
@@ -790,6 +794,9 @@ pub enum LinkCommand {
     /// These routers' topology LSAs changed in this link's area: a helped
     /// neighbor other than them leaves grace (RFC 3623 §3.2 (c)).
     TopologyChanged(Vec<Ipv4Addr>),
+    /// RFC 3623 §2.3: restart mode ended, flush the Grace-LSA (one at `MaxAge`
+    /// to every `Full` neighbor).
+    FlushGrace,
 }
 
 struct LinkEntry {
@@ -896,6 +903,12 @@ pub struct LinkManager {
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
+    /// RFC 3623 restarting-router mode (`begin_restart`): `Some` while this
+    /// process is the respawn of a planned restart and has not yet seen its
+    /// pre-restart neighbors `Full` again. Mirrored in `restart_on` for the
+    /// lock-free reads of the origination pass and the route push.
+    restart: std::sync::Mutex<Option<grace::RestartState>>,
+    restart_on: AtomicBool,
     /// RFC 6987 stub router (`OspfInstance.max_metric_*`), see
     /// `max_metric_active`.
     max_metric: std::sync::Mutex<MaxMetric>,
@@ -1022,6 +1035,8 @@ impl LinkManager {
             spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
             host_bit_state: Mutex::new(HashMap::new()),
             restarting: AtomicBool::new(false),
+            restart: std::sync::Mutex::new(None),
+            restart_on: AtomicBool::new(false),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
@@ -1263,8 +1278,13 @@ impl LinkManager {
             .iter()
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
+        let mut superseded = Vec::new();
         for (area_id, lsdb) in area_stores {
-            let origins = lsdb.lock().await.take_topology_changes();
+            let (origins, changed) = {
+                let mut db = lsdb.lock().await;
+                (db.take_topology_changes(), db.take_superseded_changes())
+            };
+            superseded.extend(changed);
             if origins.is_empty() {
                 continue;
             }
@@ -1294,6 +1314,9 @@ impl LinkManager {
                 );
             }
         }
+        let own = *self.router_id.lock().await;
+        self.restart_tick(superseded.iter().any(|o| Some(*o) != own))
+            .await;
     }
 
     /// Diffs `desired` against currently-running links by `attach_point`:
