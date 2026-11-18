@@ -22,6 +22,9 @@ use super::decision::multipath_ties;
 use super::{best_index, BgpRib, Candidate, VpnRoute};
 use crate::vpn::{Rd, VpnKey, VrfSet};
 
+/// A held copy: its peer, path id and route.
+type Held<'a> = (IpAddr, u32, &'a VpnRoute);
+
 /// One route imported into one VRF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VpnImport {
@@ -64,21 +67,30 @@ impl BgpRib {
         if self.deferring() {
             return (None, None);
         }
-        let paths = self
+        // Every copy, with its peer and path id (the deterministic tie order).
+        let held: Vec<(&VpnKey<IpNet>, Held<'_>)> = self
             .vpn_adj_rib_in
-            .values()
-            .flatten()
-            .filter(|(_, r)| r.route.next_hop.is_some() && self.next_hop_feasible(r.route.next_hop))
-            .map(|(k, r)| (k, r.route.extended_communities.as_slice(), r));
+            .iter()
+            .flat_map(|(p, t)| {
+                t.iter()
+                    .flat_map(move |(k, ids)| ids.iter().map(move |(id, r)| (k, (*p, *id, r))))
+            })
+            .filter(|(_, (_, _, r))| {
+                r.route.next_hop.is_some() && self.next_hop_feasible(r.route.next_hop)
+            })
+            .collect();
+        let paths = held
+            .iter()
+            .map(|(k, h)| (*k, h.2.route.extended_communities.as_slice(), h));
         let mut out: VpnImports = self
             .vpn_vrfs
             .tables()
             .map(|t| (t.to_string(), HashMap::new()))
             .collect();
         for (table, routes) in self.vpn_vrfs.import_by_table(paths) {
-            let mut per_prefix: HashMap<IpNet, Vec<(&VpnKey<IpNet>, &VpnRoute)>> = HashMap::new();
-            for (k, r) in routes {
-                per_prefix.entry(k.1).or_default().push((k, r));
+            let mut per_prefix: HashMap<IpNet, Vec<(&VpnKey<IpNet>, Held<'_>)>> = HashMap::new();
+            for (k, h) in routes {
+                per_prefix.entry(k.1).or_default().push((k, *h));
             }
             let dest = out.entry(table.to_string()).or_default();
             for (prefix, cands) in per_prefix {
@@ -96,6 +108,7 @@ impl BgpRib {
         self.vpn_adj_rib_in
             .values()
             .flatten()
+            .flat_map(|(k, ids)| ids.values().map(move |r| (k, r)))
             .flat_map(|(k, r)| {
                 self.vpn_vrfs
                     .soo_blocked(&r.route.extended_communities)
@@ -107,16 +120,17 @@ impl BgpRib {
 
     /// The unicast decision process over one VRF prefix's candidates, then
     /// the multipath ties (`multipath_ties`, RD plays no part). They are
-    /// ordered by RD and the position is the step-10 path id, so a full tie
-    /// (one peer, two RDs) always picks the lowest RD. Only an identical
+    /// ordered by (RD, peer, path id) and the position is the step-10 path id,
+    /// so a full tie always picks the lowest RD, then peer, then path id
+    /// (the input comes from `HashMap` iteration, #1133). Only an identical
     /// (PE, labels) pair is collapsed: one PE under two RDs with different
     /// labels stays two next hops.
-    fn best_import(&self, mut cands: Vec<(&VpnKey<IpNet>, &VpnRoute)>) -> Option<VpnImport> {
-        cands.sort_by_key(|(k, _)| k.0);
+    fn best_import(&self, mut cands: Vec<(&VpnKey<IpNet>, Held<'_>)>) -> Option<VpnImport> {
+        cands.sort_by_key(|(k, (peer, id, _))| (k.0, *peer, *id));
         let scored: Vec<Candidate> = cands
             .iter()
             .zip(0u32..)
-            .map(|((_, r), id)| (r.route.clone(), id))
+            .map(|((_, (_, _, r)), id)| (r.route.clone(), id))
             .collect();
         let i = best_index(&scored, &self.igp)?;
         let best = &scored[i].0;
@@ -128,7 +142,7 @@ impl BgpRib {
             }
             // `tie` borrows `scored`; its index maps back to the VPN key.
             let j = scored.iter().position(|(r, _)| std::ptr::eq(r, tie))?;
-            let (k, r) = cands[j];
+            let (k, (_, _, r)) = cands[j];
             let path = VpnImportPath {
                 pe: r.route.next_hop?,
                 labels: r.labels.clone(),

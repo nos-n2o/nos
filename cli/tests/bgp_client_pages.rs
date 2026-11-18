@@ -143,6 +143,7 @@ async fn vpn_routes_are_walked_with_the_family_and_rd_on_every_page() {
             local_pref: 100,
             best: true,
             site_of_origin: None,
+            path_id: None,
         };
         match after {
             None => BgpEvent::VpnRoutesPage {
@@ -151,6 +152,7 @@ async fn vpn_routes_are_walked_with_the_family_and_rd_on_every_page() {
                     peer: peer(),
                     rd: [0; 8],
                     prefix: "10.0.0.0/24".parse().unwrap(),
+                    path_id: 0,
                 }),
             },
             Some(_) => BgpEvent::VpnRoutesPage {

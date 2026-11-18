@@ -128,6 +128,8 @@ pub use rtc::{membership as rtc_membership, AdvertisedRtc, RtcKey};
 pub use shared::{RibGuard, SharedRib};
 pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;
+pub(crate) use vpn_out::VpnCopy;
+use vpn_out::VpnTable;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
 pub use decision::Hops;
@@ -838,7 +840,7 @@ pub struct BgpRib {
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
     /// Received VPN-IPv4/IPv6 paths per peer, keyed by (RD, prefix), every
     /// RT kept (see `vpn_out`).
-    vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    vpn_adj_rib_in: HashMap<IpAddr, VpnTable>,
     /// Received VPN Flowspec (SAFI 134) rules per peer (#1084).
     vpn_flow_adj_rib_in: HashMap<IpAddr, HashMap<VpnFlowCopy, FlowspecRoute>>,
     /// Per held SAFI 134 rule, its validity in each VRF table that imports it.
@@ -854,15 +856,15 @@ pub struct BgpRib {
     vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,
     /// The SAFI 134 twin of `flowspec_stale`.
     vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowCopy>>,
-    /// Per key, the selected copy and where it came from (`select_vpn`).
-    vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
+    /// Per key, the selected copy: where it came from, its path id (`select_vpn`).
+    vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, u32, VpnRoute)>,
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
     /// one table's `Full` never clobbers another's; `Local` candidates.
     vpn_local: HashMap<String, HashMap<VpnKey<IpNet>, VpnRoute>>,
     /// What each peer was last sent per key (`sync_vpn_to`).
     vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
     /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
-    vpn_stale: HashMap<IpAddr, HashSet<VpnKey<IpNet>>>,
+    vpn_stale: HashMap<IpAddr, HashSet<VpnCopy>>,
     /// The VRFs this (underlay) instance imports VPN routes into (`vpn_import`).
     vpn_vrfs: crate::vpn::VrfSet,
     /// RFC 4684 membership per peer (`rtc`), stale entries included.
@@ -1900,12 +1902,12 @@ impl BgpRib {
         self.vpn_flow_stale.remove(&peer);
         self.drop_peer_vpn_flows(peer);
         self.gr_deadline.remove(&peer);
-        let vpns: Vec<VpnKey<IpNet>> = self
+        let vpns: Vec<VpnCopy> = self
             .vpn_adj_rib_in
             .get(&peer)
             .into_iter()
-            .flat_map(HashMap::keys)
-            .copied()
+            .flat_map(vpn_out::copies)
+            .map(|(c, _)| c)
             .collect();
         for k in vpns {
             self.drop_vpn(peer, &k);
