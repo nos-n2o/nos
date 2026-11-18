@@ -297,6 +297,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            nssa: area.area_type.is_nssa(),
         });
     }
 }
@@ -444,6 +445,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            nssa: area.area_type.is_nssa(),
         });
     }
 }
@@ -597,6 +599,21 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                         a.area_type.import_summaries(),
                         u32::from(a.stub_default_cost.unwrap_or(1)),
                     ),
+                )
+            })
+            .collect(),
+    );
+    links.set_nssa_areas(
+        own.areas
+            .iter()
+            .filter(|a| a.area_type.is_nssa())
+            .map(|a| {
+                (
+                    a.area_id,
+                    crate::link::NssaSettings {
+                        translate_always: a.nssa_translate_always,
+                        default_originate: a.nssa_default_originate,
+                    },
                 )
             })
             .collect(),
@@ -1336,6 +1353,7 @@ mod tests {
             instance_id: 0,
             helper_max_grace_period: 1800,
             stub: false,
+            nssa: false,
         }
     }
 

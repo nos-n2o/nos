@@ -46,8 +46,10 @@ pub struct Ospfv3Area {
     /// RFC 5340 §4.4.3 / RFC 2328 §3.6 stub area (no AS-External-LSAs, E-bit
     /// clear) or totally stubby (an ABR also sends no Inter-Area-Prefix-LSA
     /// but its default). Every router on the area's links must agree, or
-    /// their Hellos are dropped. The backbone can't be one; `Nssa` is not
-    /// built for `OSPFv3` yet. Checked by `valid_area_settings`.
+    /// their Hellos are dropped. `Nssa`/`NssaNoSummary` is an RFC 3101 NSSA:
+    /// no AS-External-LSA, but its own ASBRs' NSSA-LSAs (Type-7), translated
+    /// into AS-External-LSAs by one ABR. The backbone can't be one. Checked
+    /// by `valid_area_settings`.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = OspfAreaType)]
@@ -59,22 +61,39 @@ pub struct Ospfv3Area {
     #[garde(skip)]
     #[cli(topic = OspfAreaStubDefaultCost)]
     pub stub_default_cost: Option<u16>,
+
+    /// RFC 3101 `NSSATranslatorRole` `Always`: as an ABR of this NSSA, always
+    /// translate its Type-7s into Type-5s (and set the Router-LSA Nt-bit),
+    /// instead of only when elected (`Candidate`, the default). NSSA only.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfAreaNssaTranslateAlways, words = "nssa-translate-always enable", alias = "nssa-translate-always")]
+    pub nssa_translate_always: bool,
+
+    /// RFC 3101 §2.7: as an ABR of this NSSA, originate a default Type-7
+    /// (P-bit clear, so never translated) into it. NSSA only.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfAreaNssaDefaultOriginate, words = "nssa-default-originate enable", alias = "nssa-default-originate")]
+    pub nssa_default_originate: bool,
 }
 
 /// `area_type`/`stub_default_cost` checks, run from the owning instance's
 /// `areas` validator since the backbone rule is about the key.
 pub(crate) fn valid_area_settings(area: &Ospfv3Area) -> garde::Result {
-    if area.area_type.is_nssa() {
-        return Err(garde::Error::new("nssa is not supported for ospfv3 yet"));
-    }
     if area.area_type.is_stub() && area.area_id.is_unspecified() {
         return Err(garde::Error::new(
-            "the backbone (0.0.0.0) can't be a stub area",
+            "the backbone (0.0.0.0) can't be a stub area or an nssa",
+        ));
+    }
+    if (area.nssa_translate_always || area.nssa_default_originate) && !area.area_type.is_nssa() {
+        return Err(garde::Error::new(
+            "nssa-translate-always and nssa-default-originate are only allowed on an nssa",
         ));
     }
     match area.stub_default_cost {
         Some(_) if !area.area_type.is_stub() => Err(garde::Error::new(
-            "stub-default-cost is only allowed on a stub area",
+            "stub-default-cost is only allowed on a stub area or an nssa",
         )),
         Some(0) => Err(garde::Error::new("stub-default-cost must be 1 or more")),
         _ => Ok(()),
@@ -117,6 +136,8 @@ impl Default for Ospfv3Area {
             ranges: Vec::new(),
             area_type: OspfAreaType::Normal,
             stub_default_cost: None,
+            nssa_translate_always: false,
+            nssa_default_originate: false,
         }
     }
 }
@@ -202,7 +223,15 @@ mod tests {
         assert!(!check(a.clone()));
         a.stub_default_cost = None;
         a.area_type = OspfAreaType::Nssa;
+        assert!(check(a.clone()));
+        a.nssa_translate_always = true;
+        assert!(check(a.clone()));
+        a.area_type = OspfAreaType::Stub;
+        assert!(!check(a.clone()), "nssa flags need an nssa");
+        a.nssa_translate_always = false;
+        a.nssa_default_originate = true;
         assert!(!check(a.clone()));
+        a.nssa_default_originate = false;
         let mut b = area("0.0.0.0");
         b.area_type = OspfAreaType::Stub;
         assert!(!check(b));

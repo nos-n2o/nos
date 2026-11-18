@@ -101,6 +101,8 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
         ranges: Vec::new(),
         area_type: nos_proto::OspfAreaType::Normal,
         stub_default_cost: None,
+        nssa_translate_always: false,
+        nssa_default_originate: false,
     }
 }
 
@@ -402,6 +404,35 @@ async fn resync_stub_area_marks_the_link_and_feeds_the_manager() {
     assert_eq!(
         e.links.stub_areas_for_test(),
         std::collections::HashMap::from([(Ipv4Addr::new(0, 0, 0, 1), (false, 3))])
+    );
+}
+
+#[tokio::test]
+async fn resync_nssa_area_marks_the_link_and_feeds_the_manager() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].areas = vec![Ospfv3Area {
+        area_type: nos_proto::OspfAreaType::Nssa,
+        nssa_translate_always: true,
+        ..area("0.0.0.1", vec![profile("p1")])
+    }];
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    let l = e.running("nostst0.0").await.expect("link built");
+    assert!(l.stub && l.nssa, "an NSSA link is stub-like and N-bit");
+    let id = Ipv4Addr::new(0, 0, 0, 1);
+    assert_eq!(
+        e.links.nssa_areas_for_test(),
+        std::collections::HashMap::from([(
+            id,
+            crate::link::NssaSettings {
+                translate_always: true,
+                default_originate: false
+            }
+        )])
+    );
+    assert_eq!(
+        e.links.stub_areas_for_test(),
+        std::collections::HashMap::from([(id, (true, 1))])
     );
 }
 

@@ -27,9 +27,9 @@ pub fn mtu_based_max_headers(mtu: u16) -> usize {
     common::mtu_based_max_headers(mtu, 40 + 16 + 12)
 }
 
-/// `nos_ospf_common::exchange::on_dbd_received` for v3: `stub` keeps
-/// AS-scope LSAs out of a stub area (RFC 5340 §4.4.3, no NSSA) and there are
-/// no opaque LSAs. `p.dbd_options` is
+/// `nos_ospf_common::exchange::on_dbd_received` for v3: `stub` (also set for an
+/// NSSA, which is `nssa`) keeps AS-scope LSAs out of the link, `nssa` lets a
+/// Type-7 in and no opaque LSAs exist. `p.dbd_options` is
 /// `link::link_options`, so every DBD carries the link's Options (RFC 5340
 /// A.3.3), the AT-bit included.
 pub fn on_dbd_received(
@@ -39,6 +39,7 @@ pub fn on_dbd_received(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     stub: bool,
+    nssa: bool,
 ) -> Vec<Action> {
     common::on_dbd_received(
         adj,
@@ -46,7 +47,7 @@ pub fn on_dbd_received(
         p,
         dbd,
         local_lsdb_headers,
-        |h| lsa::in_area_scope(h.lsa_type, stub),
+        |h| lsa::in_area_scope(h.lsa_type, stub, nssa),
         |_| false,
     )
 }
@@ -83,6 +84,7 @@ pub fn on_lsu_received(
     lsu: &LsuPacket,
     now: Instant,
     stub: bool,
+    nssa: bool,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut stores = common::Stores {
         area: area_lsdb,
@@ -104,7 +106,7 @@ pub fn on_lsu_received(
             }
         },
         // §13 step 3: reserved scope, or AS-scope in a stub area.
-        |h| lsa::is_reserved_scope(h.lsa_type) || !lsa::in_area_scope(h.lsa_type, stub),
+        |h| lsa::is_reserved_scope(h.lsa_type) || !lsa::in_area_scope(h.lsa_type, stub, nssa),
         |h| h.lsa_type == lsa::LSA_TYPE_GRACE,
     )
 }
@@ -144,7 +146,15 @@ mod tests {
             lsa_headers: vec![header("1.1.1.1", 1)],
         };
         let mut adj = AdjacencyData::default();
-        let actions = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &poll, &[], false);
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::ExStart,
+            &p,
+            &poll,
+            &[],
+            false,
+            false,
+        );
         assert!(
             matches!(&actions[0], Action::SendDbd(reply) if reply.options == 0x0413),
             "{actions:?}"
@@ -243,6 +253,7 @@ mod tests {
             &lsu,
             Instant::now(),
             false,
+            false,
         );
         assert_eq!(newly_installed.len(), 3);
         assert!(as_scope.get(&external.header.key()).is_some());
@@ -288,6 +299,7 @@ mod tests {
             &lsu,
             Instant::now(),
             false,
+            false,
         );
         assert_eq!(installed.len(), 4);
         assert!(area.get(&u_area.header.key()).is_some());
@@ -329,6 +341,7 @@ mod tests {
             &lsu,
             Instant::now(),
             false,
+            false,
         );
         assert_eq!(installed, vec![grace.header]);
         assert_eq!(adj.pending_acks.len(), 2);
@@ -358,6 +371,7 @@ mod tests {
             &lsu,
             Instant::now(),
             true,
+            false,
         );
         assert_eq!(installed, vec![router.header]);
         assert_eq!(as_scope.all().len(), 0);
@@ -384,9 +398,17 @@ mod tests {
             lsa_headers: vec![external.header],
         };
         let mut adj = AdjacencyData::default();
-        let a = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &dbd, &[], true);
+        let a = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &dbd, &[], true, false);
         assert!(matches!(&a[..], [Action::NeighborEvent(_)]), "{a:?}");
-        let a = on_dbd_received(&mut adj, NeighborState::ExStart, &p, &dbd, &[], false);
+        let a = on_dbd_received(
+            &mut adj,
+            NeighborState::ExStart,
+            &p,
+            &dbd,
+            &[],
+            false,
+            false,
+        );
         assert!(!matches!(&a[..], [Action::NeighborEvent(_)]), "{a:?}");
     }
 }

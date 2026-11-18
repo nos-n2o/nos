@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-19 {
+  revision 2026-11-20 {
     description "Generated.";
   }
 
@@ -1129,6 +1129,14 @@ module nos-config {
       leaf stub_default_cost {
         type uint16;
         description "Set the cost of the default route an ABR sends into this stub area.";
+      }
+      leaf nssa_translate_always {
+        type boolean;
+        description "Always translate this NSSA's Type-7 routes, as its area border router.";
+      }
+      leaf nssa_default_originate {
+        type boolean;
+        description "Send a default route into this NSSA, as its area border router.";
       }
     }
     leaf extended_lsa {

@@ -4577,6 +4577,157 @@ pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
     flushed
 }
 
+/// RFC 3101 NSSA over OSPFv3 (#1156), self-contained, the `ospfv3-abr-transit`
+/// topology with area 1 an NSSA: router-c (ASBR, eth1) redistributes an IPv6
+/// static as an NSSA-LSA (0x2007) that router-b, the only ABR and so the
+/// elected translator, turns into its own AS-External-LSA. Router-a installs
+/// that over the backbone and routes it; router-a never translates and no
+/// AS-External-LSA enters the NSSA. Clearing the rule flushes both LSAs and
+/// removes router-a's route.
+pub async fn ospfv3_nssa(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
+            .await?;
+    }
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
+        .await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
+        .await?;
+    let result = ospfv3_nssa_run(w).await;
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn ospfv3_nssa_run(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let nssa = |id: Id, v4: &str, v6: &str, router_id: &str| {
+        strings(&[
+            "--interface",
+            "eth1",
+            "--address",
+            v4,
+            "--address6",
+            v6,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-area-type",
+            "nssa",
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ])
+    };
+    let external =
+        |pat: fn(u16) -> String| either_form(LSA_TYPE_AS_EXTERNAL_V3, LSA_TYPE_E_AS_EXTERNAL, pat);
+    let type5_originated = external(|t| format!("ospfv3 lsa originated lsa_type={t} "));
+    let type5_installed = external(|t| format!("ospfv3 lsa installed.*lsa_type={t} "));
+    let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
+    // Baselines at phase start (#886), before anything can originate or
+    // install an AS-External-LSA.
+    let (a_orig0, c_inst0) = (
+        a.count_fresh(&type5_originated).await,
+        c.count_fresh(&type5_installed).await,
+    );
+
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&nssa(
+        B,
+        &format!("{OSPFV3_A1_IP_B}/24"),
+        OSPFV3_A1_ADDRESS_B.s(),
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+    c.provision_flags(&with_base(C, vec![])).await?;
+    let mut c_flags = nssa(
+        C,
+        &format!("{OSPFV3_A1_IP_C}/24"),
+        OSPFV3_A1_ADDRESS_C.s(),
+        OSPFV3_ROUTER_ID_C,
+    );
+    c_flags.extend(strings(&[
+        "--static-route",
+        OSPFV3_A1_ASBR_PREFIX,
+        "--static-gateway",
+        OSPFV3_A1_ADDRESS_B.s().trim_end_matches("/64"),
+        "--redistribute-to-ospfv3",
+    ]));
+    c.provision_flags(&c_flags).await?;
+
+    a.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        90,
+    )
+    .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+        0,
+        90,
+    )
+    .await?;
+
+    // Router-c's NSSA-LSA, translated by router-b alone.
+    let type7 = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_NSSA_V3} ");
+    c.wait_new(&type7, 0, 60).await?;
+    b.wait_new("ospfv3 nssa translator role changed areas=.*0.0.0.1", 0, 60)
+        .await?;
+    b.wait_new(&type5_originated, 0, 60).await?;
+    let from_b = external(|t| {
+        format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}")
+    });
+    a.wait_new(&from_b, 0, 60).await?;
+    a.wait_new(&route, 0, 60).await?;
+    log("confirming router-a doesn't translate and no AS-External-LSA enters the NSSA");
+    a.assert_quiet(&type5_originated, a_orig0, 10).await?;
+    c.assert_quiet(&type5_installed, c_inst0, 1).await?;
+
+    // Redistribution removed: the NSSA-LSA and its translation are flushed
+    // (RFC 2328 §14.1) and router-a's route goes.
+    let removed = format!("removed route prefix={OSPFV3_A1_ASBR_PREFIX}");
+    let removed0 = a.count(&removed);
+    let aged5 = external(|t| format!("ospfv3 lsa prematurely aged lsa_type={t} "));
+    let aged5_0 = b.count(&aged5);
+    c.provision(&["--clear-redistribute-to-ospfv3"]).await?;
+    c.wait_new(
+        &format!("ospfv3 lsa prematurely aged lsa_type={LSA_TYPE_NSSA_V3} "),
+        0,
+        60,
+    )
+    .await?;
+    b.wait_new(&aged5, aged5_0, 60).await?;
+    a.wait_new(&removed, removed0, 60).await
+}
+
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
 /// period configured, is restarted with SIGTERM. It must send a Grace-LSA
 /// before exiting, and router-b must help: hold the adjacency and keep
