@@ -39,10 +39,14 @@
 //! advertising ABR (its distance plus the LSA metric), an AS-External-LSA
 //! through its ASBR — an intra-area Router-LSA vertex with the E-bit, else the
 //! cheapest Inter-Area-Router-LSA for it — plus the LSA's own metric.
-//! `ponytail:` a Type-2 metric is routed as Type-1, there is no §16.4
-//! intra→inter→external class precedence (`insert_best` is metric-only), a
-//! forwarding address is ignored, and an ABR doesn't restrict itself to the
-//! backbone's summaries (§16.2) — the same ceilings `ospf::spf` documents.
+//! Routes carry a `PathClass` (§16.4 / RFC 3101 §2.5: intra, inter, type-1
+//! external (E1/N1), type-2 external (E2/N2)); a better class wins whatever
+//! the cost, and two type-2 externals compare the LSA's own metric first
+//! (`RouteEntry::rank`, #614). The pushed metric stays distance + LSA metric.
+//! `ponytail:` a Type-7 and a Type-5 of the same class tie (RFC 3101 §2.5's
+//! N-over-E preference isn't applied), a forwarding address is ignored, and
+//! an ABR doesn't restrict itself to the backbone's summaries (§16.2) — the
+//! same ceilings `ospf::spf` documents.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -104,6 +108,8 @@ impl RouteEntry {
     /// `hops` must be non-empty.
     fn new(prefix: Ipv6Net, hops: Vec<(Ipv6Addr, u32)>, metric: u32, egress: Vertex) -> Self {
         RouteEntry {
+            class: PathClass::Intra,
+            e2_metric: 0,
             prefix: prefix.trunc(),
             next_hop: hops[0].0,
             interface_id: hops[0].1,
@@ -117,10 +123,29 @@ impl RouteEntry {
 }
 
 impl RouteEntry {
+    /// RFC 2328 §16.4: smaller wins — class first, then for a type-2
+    /// external its own metric, then the total cost.
+    pub fn rank(&self) -> (PathClass, u32, u32) {
+        if self.class == PathClass::External2 {
+            (self.class, self.e2_metric, self.metric)
+        } else {
+            (self.class, self.metric, 0)
+        }
+    }
+
+    #[must_use]
+    fn classed(mut self, class: PathClass, e2_metric: u32) -> Self {
+        self.class = class;
+        self.e2_metric = e2_metric;
+        self
+    }
+
     /// An ABR's discard route for one of its active advertised area ranges
     /// (RFC 5340 §4.4.3.3): no next hop, so `nos-ribd` installs a blackhole.
     pub fn discard(prefix: Ipv6Net, metric: u32) -> Self {
         RouteEntry {
+            class: PathClass::Intra,
+            e2_metric: 0,
             prefix,
             next_hops: Vec::new(),
             next_hop: Ipv6Addr::UNSPECIFIED,
@@ -133,9 +158,24 @@ impl RouteEntry {
     }
 }
 
+/// RFC 2328 §11 / §16.4 path types in order of preference; the NSSA N1/N2
+/// classes are the type-1/type-2 external ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PathClass {
+    Intra,
+    Inter,
+    External1,
+    External2,
+}
+
 /// One computed destination, ready to push to `nos-ribd`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEntry {
+    /// Which §16.4 class the route is of.
+    pub class: PathClass,
+    /// A type-2 external's own LSA metric (0 otherwise), the first tiebreak
+    /// within `External2`.
+    pub e2_metric: u32,
     pub prefix: Ipv6Net,
     /// Every equal-cost first hop (RFC 2328 §16.1, #1135): `(link-local
     /// address, root's ifindex)`, sorted and deduplicated; never empty.
@@ -463,6 +503,69 @@ pub fn compute_in(
         }
     }
     out.into_values().collect()
+}
+
+/// RFC 3101 §3.1 translator election, for `root` as one ABR of an NSSA whose
+/// LSDB is `lsas`: `root` translates unless `always` is off and another ABR
+/// (B-bit Router-LSA) reachable in the area has the Nt-bit or a higher
+/// router ID. `ponytail:` no `TranslatorStabilityInterval` — a translator
+/// that loses the election flushes its AS-External-LSAs at once.
+pub fn nssa_translator(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>], always: bool) -> bool {
+    if always {
+        return true;
+    }
+    let live = live_lsas(lsas);
+    let (routers, networks, _) = routers_networks_links(&live);
+    let (dist, _) = run_dijkstra(root, &routers, &networks, None);
+    !routers.iter().any(|(&id, r)| {
+        id != root
+            && r.flags & lsa::ROUTER_FLAG_B != 0
+            && (r.flags & lsa::ROUTER_FLAG_NT != 0 || id > root)
+            && dist.contains_key(&Vertex::Router(id))
+    })
+}
+
+/// RFC 3101 §3.2: what an elected translator turns into AS-External-LSAs
+/// from this NSSA's LSDB — every live NSSA-LSA with the P-bit and a
+/// forwarding address, from an ASBR other than `root` reachable in the area
+/// (P-bit cleared in the copy). Ascending by advertising router, so a caller
+/// inserting into a map keeps the highest router ID's for one prefix (§3.2's
+/// tiebreak, short of comparing metrics).
+pub fn nssa_translations(
+    root: Ipv4Addr,
+    lsas: &[std::sync::Arc<Lsa>],
+) -> Vec<(Ipv6Net, AsExternalLsaBody)> {
+    let live = live_lsas(lsas);
+    let (routers, networks, _) = routers_networks_links(&live);
+    let (dist, _) = run_dijkstra(root, &routers, &networks, None);
+    let mut out: Vec<(Ipv4Addr, Ipv6Net, AsExternalLsaBody)> = live
+        .iter()
+        .filter(|l| {
+            l.header.lsa_type == lsa::LSA_TYPE_NSSA
+                && l.header.advertising_router != root
+                && dist.contains_key(&Vertex::Router(l.header.advertising_router))
+        })
+        .filter_map(|l| match &l.body {
+            LsaBody::AsExternal(e)
+                if e.prefix_options & lsa::PREFIX_OPT_P != 0
+                    && e.prefix_options & lsa::PREFIX_OPT_NU == 0
+                    && e.forwarding_address.is_some()
+                    && e.metric < LS_INFINITY =>
+            {
+                Some((
+                    l.header.advertising_router,
+                    e.prefix.trunc(),
+                    AsExternalLsaBody {
+                        prefix_options: e.prefix_options & !lsa::PREFIX_OPT_P,
+                        ..*e
+                    },
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort_by_key(|(adv, ..)| *adv);
+    out.into_iter().map(|(_, p, b)| (p, b)).collect()
 }
 
 /// RFC 6987 `MaxLinkMetric` (`link.rs` advertises a stub router with it).
@@ -960,7 +1063,7 @@ fn collect_inter_area_route(
         return;
     }
     if let Some(via) = graph.router(abr) {
-        let route = route_via(p.prefix, via, p.metric, abr);
+        let route = route_via(p.prefix, via, p.metric, abr).classed(PathClass::Inter, 0);
         insert_best(out, prefix_key(p.prefix), route);
     }
 }
@@ -1019,7 +1122,12 @@ fn collect_external_route(
         return;
     }
     if let Some((via, egress)) = asbr_distance(graph, routers, inter_area_routers, asbr) {
-        let route = route_via(e.prefix, via, e.metric, egress);
+        let class = if e.type2 {
+            PathClass::External2
+        } else {
+            PathClass::External1
+        };
+        let route = route_via(e.prefix, via, e.metric, egress).classed(class, e.metric);
         insert_best(out, prefix_key(e.prefix), route);
     }
 }
@@ -1038,9 +1146,9 @@ fn insert_best(
         None => {
             out.insert(key, candidate);
         }
-        Some(existing) if candidate.metric < existing.metric => *existing = candidate,
-        // Equal cost: one route over the union of the paths (#1135).
-        Some(existing) if candidate.metric == existing.metric => {
+        Some(existing) if candidate.rank() < existing.rank() => *existing = candidate,
+        // Equal rank: one route over the union of the paths (#1135).
+        Some(existing) if candidate.rank() == existing.rank() => {
             existing.next_hops.extend(candidate.next_hops);
             existing.next_hops.sort_unstable();
             existing.next_hops.dedup();
@@ -1249,6 +1357,184 @@ mod tests {
                 referenced_link_state_id: None,
             }),
         )
+    }
+
+    fn ext_lsa(
+        lsa_type: u16,
+        asbr: Ipv4Addr,
+        prefix: &str,
+        type2: bool,
+        metric: u32,
+        prefix_options: u8,
+        forwarding_address: Option<Ipv6Addr>,
+    ) -> Arc<Lsa> {
+        lsa_of(
+            lsa_type,
+            3,
+            asbr,
+            LsaBody::AsExternal(AsExternalLsaBody {
+                type2,
+                metric,
+                prefix_options,
+                prefix: prefix.parse().unwrap(),
+                forwarding_address,
+                route_tag: None,
+                referenced_ls_type: 0,
+                referenced_link_state_id: None,
+            }),
+        )
+    }
+
+    /// root(1) —1— asbr(2), root —100— asbr(3), both ASBRs.
+    fn two_asbrs() -> Vec<Arc<Lsa>> {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        vec![
+            router_lsa(r1, vec![p2p(r2, 1, 1, 1), p2p(r3, 2, 1, 100)]),
+            with_flags(&router_lsa(r2, vec![p2p(r1, 1, 1, 1)]), lsa::ROUTER_FLAG_E),
+            with_flags(
+                &router_lsa(r3, vec![p2p(r1, 1, 2, 100)]),
+                lsa::ROUTER_FLAG_E,
+            ),
+            link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+            link_lsa(r3, 1, "fe80::3".parse().unwrap()),
+        ]
+    }
+
+    /// RFC 2328 §16.4 (#614): a type-1 external beats a type-2 whatever the
+    /// cost, and two type-2 externals compare the LSA's own metric before
+    /// the distance to the ASBR.
+    #[test]
+    fn path_class_precedence() {
+        assert!(PathClass::Intra < PathClass::Inter);
+        assert!(PathClass::Inter < PathClass::External1);
+        assert!(PathClass::External1 < PathClass::External2);
+        let (r2, r3) = (router_id(2), router_id(3));
+        let via = |extra: Vec<Arc<Lsa>>| {
+            let mut lsas = two_asbrs();
+            lsas.extend(extra);
+            let routes = compute(router_id(1), &lsas);
+            let r = routes
+                .iter()
+                .find(|r| r.prefix.to_string() == "2001:db8:e::/48")
+                .expect("external route")
+                .clone();
+            r.next_hop
+        };
+        let t = lsa::LSA_TYPE_AS_EXTERNAL;
+        // E2 20 via the near ASBR vs E2 10 via the far one: the smaller E2.
+        assert_eq!(
+            via(vec![
+                ext_lsa(t, r2, "2001:db8:e::/48", true, 20, 0, None),
+                ext_lsa(t, r3, "2001:db8:e::/48", true, 10, 0, None),
+            ]),
+            "fe80::3".parse::<Ipv6Addr>().unwrap()
+        );
+        // E1 beats E2 even with a far bigger cost.
+        assert_eq!(
+            via(vec![
+                ext_lsa(t, r2, "2001:db8:e::/48", true, 1, 0, None),
+                ext_lsa(t, r3, "2001:db8:e::/48", false, 50, 0, None),
+            ]),
+            "fe80::3".parse::<Ipv6Addr>().unwrap()
+        );
+    }
+
+    /// RFC 3101: an NSSA-LSA is an external route inside the NSSA (class
+    /// N1/N2 = E1/E2), and only a P-bit one with a forwarding address from a
+    /// reachable ASBR is translated, with the P-bit cleared.
+    #[test]
+    fn nssa_lsas_route_and_translate() {
+        let (root, asbr, gone) = (router_id(1), router_id(2), router_id(9));
+        let t7 = lsa::LSA_TYPE_NSSA;
+        let fa: Option<Ipv6Addr> = Some("2001:db8::2".parse().unwrap());
+        let mut lsas = two_asbrs();
+        lsas.extend([
+            ext_lsa(
+                t7,
+                asbr,
+                "2001:db8:a::/48",
+                false,
+                20,
+                lsa::PREFIX_OPT_P,
+                fa,
+            ),
+            ext_lsa(t7, asbr, "2001:db8:b::/48", false, 20, 0, fa),
+            ext_lsa(
+                t7,
+                asbr,
+                "2001:db8:c::/48",
+                false,
+                20,
+                lsa::PREFIX_OPT_P,
+                None,
+            ),
+            ext_lsa(
+                t7,
+                gone,
+                "2001:db8:d::/48",
+                false,
+                20,
+                lsa::PREFIX_OPT_P,
+                fa,
+            ),
+            ext_lsa(
+                t7,
+                root,
+                "2001:db8:f::/48",
+                false,
+                20,
+                lsa::PREFIX_OPT_P,
+                fa,
+            ),
+        ]);
+        let routes = compute(root, &lsas);
+        let routed_prefixes: Vec<String> = routes.iter().map(|r| r.prefix.to_string()).collect();
+        for p in ["a", "b", "c"] {
+            assert!(
+                routed_prefixes.contains(&format!("2001:db8:{p}::/48")),
+                "{routed_prefixes:?}"
+            );
+        }
+        assert!(!routed_prefixes
+            .iter()
+            .any(|p| p.contains(":d:") || p.contains(":f:")));
+        let translated = nssa_translations(root, &lsas);
+        assert_eq!(translated.len(), 1, "{translated:?}");
+        assert_eq!(translated[0].0.to_string(), "2001:db8:a::/48");
+        assert_eq!(translated[0].1.prefix_options, 0, "P-bit cleared");
+        assert_eq!(translated[0].1.forwarding_address, fa);
+    }
+
+    /// RFC 3101 §3.1: the highest router ID among reachable ABRs translates,
+    /// unless another has the Nt-bit; `always` translates regardless; an
+    /// unreachable ABR doesn't count.
+    #[test]
+    fn nssa_translator_election() {
+        let (low, high, far) = (router_id(1), router_id(2), router_id(3));
+        let lsas = |high_flags, far_flags| {
+            vec![
+                with_flags(
+                    &router_lsa(low, vec![p2p(high, 1, 1, 1)]),
+                    lsa::ROUTER_FLAG_B,
+                ),
+                with_flags(&router_lsa(high, vec![p2p(low, 1, 1, 1)]), high_flags),
+                // No link back to it: unreachable.
+                with_flags(&router_lsa(far, vec![]), far_flags),
+            ]
+        };
+        // The other isn't an ABR: low translates.
+        assert!(nssa_translator(low, &lsas(0, lsa::ROUTER_FLAG_B), false));
+        // Two ABRs: the higher ID wins.
+        let two = lsas(lsa::ROUTER_FLAG_B, lsa::ROUTER_FLAG_B | lsa::ROUTER_FLAG_NT);
+        assert!(!nssa_translator(low, &two, false));
+        assert!(nssa_translator(high, &two, false));
+        // Always beats a higher ID; Nt on the lower one beats the higher ID.
+        assert!(nssa_translator(low, &two, true));
+        let nt_low = vec![
+            with_flags(&two[0], lsa::ROUTER_FLAG_B | lsa::ROUTER_FLAG_NT),
+            two[1].clone(),
+        ];
+        assert!(!nssa_translator(high, &nt_low, false));
     }
 
     /// root(1) —5— abr(2): the area every inter-area test runs in.

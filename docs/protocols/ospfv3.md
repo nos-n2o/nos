@@ -315,7 +315,23 @@ commit
 - The routers clear the E option bit in the area's Hellos and LSAs. A Hello whose E bit disagrees is dropped (`dropping ospfv3 hello with mismatched e-bit`), so a router with the wrong type never gets past `Down`.
 - The ABR originates a `::/0` inter-area prefix LSA into the area at `stub-default-cost` (1 unless set); the routers inside install `::/0` through it. No AS-external LSA (`0x4005`, `0xc025`) is sent, requested, accepted or routed in the area, and one already held ages out when the area turns stub.
 - `area-type totally-stubby` on the ABR's area also stops the other inter-area prefix and router LSAs, leaving the default as the only summary. The routers inside may use `stub` or `totally-stubby`: they are the same for them.
-- The backbone cannot be a stub area, and `nssa` is refused for OSPFv3 at commit.
+- The backbone cannot be a stub area or an NSSA.
+
+### Make an area an NSSA
+
+An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
+
+```
+set ospfv3 instance v3 area 0.0.0.1 area-type nssa
+set ospfv3 instance v3 area 0.0.0.1 nssa-translate-always enable
+set ospfv3 instance v3 area 0.0.0.1 nssa-default-originate enable
+```
+
+- **Origination.** A router in the NSSA that redistributes routes originates one NSSA-LSA per prefix, with the P prefix option and its own link address as forwarding address; an ABR clears P (it originates the AS-external LSA itself). The router sets the E bit in its Router-LSA there.
+- **Translation.** One ABR per NSSA translates the NSSA-LSAs that have the P option and a forwarding address into its own AS-external LSAs, and sets E in its other areas. It is the ABR with the highest router ID, unless another has the Nt bit (`nssa-translate-always enable` sets it and forces the role). The log line is `ospfv3 nssa translator role changed`. An NSSA-LSA that goes away flushes its translation.
+- **`nssa-default-originate enable`** makes an ABR originate a `::/0` NSSA-LSA (no P, so never translated) into the area at `stub-default-cost`.
+- `area-type nssa-no-summary` also sends only a `::/0` inter-area prefix LSA into the area. The ABR sends no Inter-Area-Router-LSA into any NSSA.
+- The two `nssa-*` settings are refused on a non-NSSA area. Only the legacy LSA forms are used for NSSA-LSAs: in extended-LSA mode they stay `0x2007` (no RFC 8362 form).
 
 ## Features and behaviour
 
@@ -327,7 +343,7 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
 - **Unknown LSA types** (RFC 5340 §2.9) are accepted, not refused. With the U bit set they are stored and flooded by their S2/S1 scope (area, AS or link-local); with it clear they are kept link-local and never sent past the link they arrived on. They are never used for routing. An LSA with the reserved scope `11` is silently dropped (not acknowledged).
-- **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Hellos and LSAs set the E option bit, except in a stub area.
+- **Areas and AS boundary.** A route is chosen by class first (intra-area, inter-area, type-1 external or NSSA N1, type-2 external or N2), then by cost; two type-2 externals compare the LSA's own metric before the distance to the ASBR. The metric installed is always the LSA's metric plus the distance to the ASBR. Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Hellos and LSAs set the E option bit, except in a stub area.
 - **Link failure.** A lost local link (interface deleted, set down, or carrier lost) drops its neighbours within about a second: `nos-ospfv3d` follows the link state `nos-interfaced` streams and logs `ospfv3 link kernel interface down link=eth0.0 reason=absent|admin-down|no-carrier`, then `ospfv3 link kernel interface up` when it returns (a recreated device gets a fresh socket). The LSAs of the dropped link are withdrawn on the next origination tick. A failure beyond the local link (a dead remote end, a switch in between) still takes the dead interval (BFD is #190). A restarting `nos-interfaced` or `nos-ribd` tears no link down: the link keeps its running address, VRF and bridge (`ospfv3 link resolution failed, keeping running link`) while the configuration still demands it. With `--driver noop` nothing is gated.
 - **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
@@ -337,7 +353,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
 
 ## Configuration reference
 
@@ -351,7 +367,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
 | LSDB overload limit | `set ospfv3 instance <name> max-lsa <n>`; `delete ospfv3 instance <name> max-lsa` | `ospfv3-instance/<name>/max-lsa` | 1 to 1000000; 100000 when unset | | LSAs not originated by this router that one store (each area, the AS scope, each link's Link-LSAs) holds; a new LSA past it is discarded unacknowledged, held ones stay updatable, own and MaxAge LSAs never count, no neighbour is reset, links do not restart | `ospfv3 lsdb limit reached` (rate-limited, with `refused` total) |
-| area type | `set ospfv3 instance <name> area <area-id> area-type normal\|stub\|totally-stubby`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0`; no `nssa` | stub: no AS-external LSA, E bit clear, a `::/0` from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospfv3 database`, `show route <table>` |
+| area type | `set ospfv3 instance <name> area <area-id> area-type normal\|stub\|totally-stubby\|nssa\|nssa-no-summary`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0`; no `nssa` | stub: no AS-external LSA, E bit clear, a `::/0` from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospfv3 database`, `show route <table>` |
 | stub default cost | `set ospfv3 instance <name> area <area-id> stub-default-cost <metric>`; `delete … stub-default-cost` | `…/area/<area-id>/stub-default-cost` | 1 or more; 1 when unset | only on a stub area | metric of the ABR's `::/0` | `show ospfv3 database` |
 | max-metric administrative | `set ospfv3 instance <name> max-metric router-lsa administrative`; `delete ospfv3 instance <name> max-metric router-lsa administrative` | `ospfv3-instance/<name>/max-metric-administrative` | bool; off by default | | RFC 6987 stub router until removed | `ospfv3 stub router max-metric changed` |
 | max-metric on-startup | `set ospfv3 instance <name> max-metric router-lsa on-startup <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router for this long after the next start | `reason="on-startup"` |

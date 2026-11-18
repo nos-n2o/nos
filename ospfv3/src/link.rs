@@ -179,6 +179,9 @@ pub struct LinkConfig {
     /// The link's area is a stub or totally-stubby area (RFC 5340 §4.4.3):
     /// no E-bit, no AS-scope LSAs on this link.
     pub stub: bool,
+    /// The link's area is an NSSA (RFC 3101; `stub` is set too): the N-bit
+    /// replaces the E-bit in Options, and only here are Type-7s exchanged.
+    pub nssa: bool,
 }
 
 /// `helper_max_grace_period` when the instance sets none.
@@ -186,8 +189,8 @@ pub const DEFAULT_HELPER_MAX_GRACE_PERIOD: u32 = 1800;
 
 /// The Options every self-originated LSA and packet carries: `V6`/`R`, and
 /// `E` outside a stub area (RFC 5340 §A.2; an FRR neighbor treats a clear
-/// E-bit in a normal area as a mismatch). `link_options` clears E on a stub
-/// link; no NSSA in `OSPFv3` yet.
+/// E-bit in a normal area as a mismatch). `own_options` clears E on a stub
+/// link and sets N (RFC 3101 §2.1) in an NSSA.
 const OWN_OPTIONS: u32 = lsa::OPTION_V6 | lsa::OPTION_E | lsa::OPTION_R;
 
 /// Hello/DBD Options for this link — `OWN_OPTIONS`, plus RFC 7166 §2.1's
@@ -198,15 +201,16 @@ fn link_options(cfg: &LinkConfig) -> u32 {
     } else {
         0
     };
-    own_options(cfg.stub) | at
+    own_options(cfg.stub, cfg.nssa) | at
 }
 
-/// `OWN_OPTIONS` for an area of this kind: no E-bit in a stub area.
-fn own_options(stub: bool) -> u32 {
-    if stub {
-        OWN_OPTIONS & !lsa::OPTION_E
-    } else {
-        OWN_OPTIONS
+/// `OWN_OPTIONS` for an area of this kind: no E-bit in a stub area or NSSA,
+/// the N-bit in an NSSA.
+fn own_options(stub: bool, nssa: bool) -> u32 {
+    match (stub, nssa) {
+        (_, true) => (OWN_OPTIONS & !lsa::OPTION_E) | lsa::OPTION_N,
+        (true, false) => OWN_OPTIONS & !lsa::OPTION_E,
+        (false, false) => OWN_OPTIONS,
     }
 }
 
@@ -657,12 +661,21 @@ fn handle_hello(
     }
 
     // RFC 5340 §A.2 / RFC 2328 §10.5: the E-bit is clear exactly in a stub
-    // area, so both ends must agree on whether the area is one.
+    // area or NSSA, so both ends must agree on whether the area is one.
     if (hello.options & lsa::OPTION_E != 0) == cfg.stub {
         warn_limited!(
             limiter,
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospfv3 hello with mismatched e-bit"
+        );
+        return false;
+    }
+    // RFC 3101 §2.1: the N-bit is set exactly in an NSSA.
+    if (hello.options & lsa::OPTION_N != 0) != cfg.nssa {
+        warn_limited!(
+            limiter,
+            link = %cfg.attach_point, neighbor = %hello.router_id,
+            "dropping ospfv3 hello with mismatched n-bit"
         );
         return false;
     }
@@ -871,6 +884,7 @@ async fn handle_dbd(
         dbd,
         &local_lsdb_headers,
         cfg.stub,
+        cfg.nssa,
     );
 
     Some(finish_neighbor_event(
@@ -949,6 +963,7 @@ async fn handle_lsu(
             // tokio's clock, so paused-time tests see MinLSArrival pass.
             tokio::time::Instant::now().into_std(),
             cfg.stub,
+            cfg.nssa,
         );
         // A Grace-LSA is acted on at once and never held: a copy left in the
         // LSDB would be offered back to the restarted router and flooded to
@@ -1953,6 +1968,12 @@ pub struct LinkManager {
     /// Each stub area's `(import_summaries, default metric)` (`set_stub_areas`);
     /// an area missing here is a normal one.
     stub_areas: std::sync::Mutex<HashMap<Ipv4Addr, (bool, u32)>>,
+    /// Each NSSA's settings (`set_nssa_areas`); an NSSA is in `stub_areas` too.
+    nssa_areas: std::sync::Mutex<HashMap<Ipv4Addr, NssaSettings>>,
+    /// The NSSAs this router translates Type-7s of (RFC 3101 §3.1, elected at
+    /// the start of every origination tick) and what it translates, by prefix.
+    nssa_translating: std::sync::Mutex<HashSet<Ipv4Addr>>,
+    nssa_translated: std::sync::Mutex<HashMap<Ipv6Net, AsExternalLsaBody>>,
     /// Active advertised ranges and their metric, rewritten by every
     /// origination tick; `compute_routes` turns them into discard routes.
     active_ranges: std::sync::Mutex<HashMap<Ipv6Net, u32>>,
@@ -2004,9 +2025,19 @@ struct MaxMetric {
     logged: bool,
 }
 
+/// One NSSA's RFC 3101 settings, resolved from `Ospfv3Area`.
+// Independent flags, each read on its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NssaSettings {
+    /// `NSSATranslatorRole` `Always`.
+    pub translate_always: bool,
+    /// RFC 3101 §2.7: as an ABR, originate a default NSSA-LSA into the area.
+    pub default_originate: bool,
+}
+
 /// Every LS type this router originates in either RFC 8362 mode — the only
 /// ones `withdraw_undesired` ever flushes (never a Grace-LSA).
-const OWNED_TYPES: [u16; 14] = [
+const OWNED_TYPES: [u16; 15] = [
     lsa::LSA_TYPE_ROUTER,
     lsa::LSA_TYPE_NETWORK,
     lsa::LSA_TYPE_LINK,
@@ -2021,6 +2052,7 @@ const OWNED_TYPES: [u16; 14] = [
     lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
     lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
     lsa::LSA_TYPE_E_AS_EXTERNAL,
+    lsa::LSA_TYPE_NSSA,
 ];
 
 /// See `LinkManager::lsids`: `(ID, asked for since the last prune)` per key.
@@ -2092,6 +2124,17 @@ impl LinkManager {
     /// every resync; applied at the next origination tick.
     pub fn set_stub_areas(&self, stub: HashMap<Ipv4Addr, (bool, u32)>) {
         *self.stub_areas.lock().unwrap() = stub;
+    }
+
+    /// Every NSSA's settings, replaced on every resync (each is also in
+    /// `set_stub_areas`).
+    pub fn set_nssa_areas(&self, nssa: HashMap<Ipv4Addr, NssaSettings>) {
+        *self.nssa_areas.lock().unwrap() = nssa;
+    }
+
+    #[cfg(test)]
+    pub fn nssa_areas_for_test(&self) -> HashMap<Ipv4Addr, NssaSettings> {
+        self.nssa_areas.lock().unwrap().clone()
     }
 
     #[cfg(test)]
@@ -2310,6 +2353,9 @@ impl LinkManager {
             no_backbone_warned: AtomicBool::new(false),
             area_ranges: std::sync::Mutex::new(HashMap::new()),
             stub_areas: std::sync::Mutex::new(HashMap::new()),
+            nssa_areas: std::sync::Mutex::new(HashMap::new()),
+            nssa_translating: std::sync::Mutex::new(HashSet::new()),
+            nssa_translated: std::sync::Mutex::new(HashMap::new()),
             active_ranges: std::sync::Mutex::new(HashMap::new()),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             router_lsa_max_links: AtomicUsize::new(0),
@@ -2564,18 +2610,28 @@ impl LinkManager {
         }
         let asbr = !self.redistribute_filtered.lock().await.is_empty();
         let stub_areas = self.stub_areas.lock().unwrap().clone();
+        let nssa_areas = self.nssa_areas.lock().unwrap().clone();
+        let translating = !self.nssa_translating.lock().unwrap().is_empty();
         let types = self.lsa_types();
         let max_metric = self.max_metric_tick();
         debug_assert!(!lsa::is_link_local_scope(types.router));
         debug_assert!(!lsa::is_link_local_scope(types.network));
         for area_id in area_ids {
             let stub = stub_areas.contains_key(&area_id);
-            // No AS-External-LSA reaches a stub area, so no ASBR there.
-            let flags = if asbr && !stub {
-                flags | lsa::ROUTER_FLAG_E
-            } else {
-                flags
+            let nssa_cfg = nssa_areas.get(&area_id);
+            let nssa = nssa_cfg.is_some();
+            // No AS-External-LSA reaches a stub area, so no ASBR there; an
+            // NSSA's ASBR (NSSA-LSAs) is one, and its translator (RFC 3101
+            // §3.1) is one in the normal areas. Nt: an ABR that always
+            // translates (RFC 3101 A.2).
+            let mut flags = match (stub, nssa) {
+                (false, _) if asbr || translating => flags | lsa::ROUTER_FLAG_E,
+                (true, true) if asbr => flags | lsa::ROUTER_FLAG_E,
+                _ => flags,
             };
+            if nssa_cfg.is_some_and(|c| c.translate_always) && flags & lsa::ROUTER_FLAG_B != 0 {
+                flags |= lsa::ROUTER_FLAG_NT;
+            }
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
@@ -2618,7 +2674,7 @@ impl LinkManager {
                     id,
                     LsaBody::Router(RouterLsaBody {
                         flags,
-                        options: own_options(stub),
+                        options: own_options(stub, nssa),
                         links: router_links,
                     }),
                 ));
@@ -2648,7 +2704,7 @@ impl LinkManager {
                     types.network,
                     lsa::interface_id_key(cfg.interface_id),
                     LsaBody::Network(NetworkLsaBody {
-                        options: own_options(stub),
+                        options: own_options(stub, nssa),
                         attached_routers: attached,
                     }),
                 ));
@@ -2680,7 +2736,7 @@ impl LinkManager {
                 lsa::interface_id_key(cfg.interface_id),
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
-                    options: own_options(cfg.stub),
+                    options: own_options(cfg.stub, cfg.nssa),
                     link_local_address: cfg.link_local_address,
                     prefixes: vec![LinkPrefixEntry {
                         options: 0,
@@ -2869,6 +2925,7 @@ impl LinkManager {
         let types = self.lsa_types();
         let infinity = self.originate_lsinfinity.load(Ordering::Relaxed);
         let stub_areas = self.stub_areas.lock().unwrap().clone();
+        let nssa_areas = self.nssa_areas.lock().unwrap().clone();
         for (dest, lsdb) in &areas {
             // RFC 5340 §4.4.3 / RFC 2328 §12.4.3.1: a stub area gets no
             // Inter-Area-Router-LSA, a totally stubby one no other
@@ -2908,7 +2965,10 @@ impl LinkManager {
             if stub.is_some() {
                 asbrs.clear();
             }
-            if let Some((_, cost)) = stub {
+            // RFC 3101 §2.3: into an NSSA, only without summaries.
+            if let Some((import, cost)) = stub
+                && (!nssa_areas.contains_key(dest) || !import)
+            {
                 prefixes.insert(Ipv6Net::default(), cost);
             }
             let mut desired = Vec::new();
@@ -2953,11 +3013,60 @@ impl LinkManager {
         }
     }
 
-    /// RFC 5340 §4.4.3.5: one AS-External-LSA per redistributed IPv6 prefix,
-    /// into the AS-scope store — Type-1, metric `spf::EXTERNAL_METRIC`, no
-    /// forwarding address or tag.
+    /// RFC 3101 §3.1/§3.2, the start of every tick: elects whether this
+    /// router translates each NSSA's Type-7s, and keeps what it translates
+    /// for `originate_as_external_lsas`.
+    async fn elect_nssa_translators(&self, local_router_id: Ipv4Addr) {
+        let nssas = self.nssa_areas.lock().unwrap().clone();
+        let abr = self.is_backbone_abr().await;
+        let mut roles = HashSet::new();
+        let mut translated = HashMap::new();
+        for (area_id, cfg) in &nssas {
+            let lsdb = self.lsdbs.lock().await.get(area_id).cloned();
+            let Some(lsdb) = lsdb else { continue };
+            let lsas = lsdb.lock().await.all();
+            if abr && spf::nssa_translator(local_router_id, &lsas, cfg.translate_always) {
+                roles.insert(*area_id);
+                translated.extend(spf::nssa_translations(local_router_id, &lsas));
+            }
+        }
+        let changed = *self.nssa_translating.lock().unwrap() != roles;
+        if changed {
+            info!(areas = ?roles, "ospfv3 nssa translator role changed");
+        }
+        *self.nssa_translating.lock().unwrap() = roles;
+        *self.nssa_translated.lock().unwrap() = translated;
+    }
+
+    /// RFC 3101 §2.3: an NSSA-LSA's forwarding address — the lowest address
+    /// of this router's own links in the area, else a loopback prefix's.
+    async fn nssa_forwarding_address(&self, area_id: Ipv4Addr) -> Option<Ipv6Addr> {
+        let link = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.area_id == area_id)
+            .map(|e| e.config.prefix.addr())
+            .min();
+        match link {
+            Some(addr) => Some(addr),
+            None => self
+                .loopback_prefixes
+                .lock()
+                .await
+                .get(&area_id)
+                .and_then(|p| p.iter().map(|(net, _)| net.addr()).min()),
+        }
+    }
+
+    /// RFC 5340 §4.4.3.5: one AS-External-LSA per redistributed IPv6 prefix
+    /// (and per translated Type-7, RFC 3101 §3.2) into the AS-scope store —
+    /// Type-1, metric `spf::EXTERNAL_METRIC`, no tag — and one NSSA-LSA per
+    /// redistributed prefix into each NSSA (P-bit unless this router is an
+    /// ABR, which translates for itself), plus an optional default.
     async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
-        let prefixes: Vec<Ipv6Net> = self
+        let redistributed: Vec<Ipv6Net> = self
             .redistribute_filtered
             .lock()
             .await
@@ -2973,31 +3082,81 @@ impl LinkManager {
         // The AS-scope store only floods on non-stub links: a router whose
         // every area is stub is no ASBR.
         let stub_areas = self.stub_areas.lock().unwrap().clone();
+        let nssa_areas = self.nssa_areas.lock().unwrap().clone();
         let attached = self.attached_areas().await;
-        let prefixes =
-            if !attached.is_empty() && attached.iter().all(|a| stub_areas.contains_key(a)) {
-                Vec::new()
-            } else {
-                prefixes
-            };
-        for prefix in prefixes {
+        let mut as_ext: HashMap<Ipv6Net, AsExternalLsaBody> =
+            self.nssa_translated.lock().unwrap().clone();
+        if attached.is_empty() || attached.iter().any(|a| !stub_areas.contains_key(a)) {
+            for &prefix in &redistributed {
+                as_ext.insert(
+                    prefix,
+                    AsExternalLsaBody {
+                        type2: false,
+                        metric,
+                        prefix_options: 0,
+                        prefix,
+                        forwarding_address: None,
+                        route_tag: None,
+                        referenced_ls_type: 0,
+                        referenced_link_state_id: None,
+                    },
+                );
+            }
+        }
+        for (prefix, body) in as_ext {
             let lsid = self.lsid(lsa::LSA_TYPE_AS_EXTERNAL, prefix).await;
             done.as_scope.insert(install_self_originated(
                 &mut *self.as_lsdb.lock().await,
                 local_router_id,
                 types.as_external,
                 lsid,
-                LsaBody::AsExternal(AsExternalLsaBody {
-                    type2: false,
-                    metric,
-                    prefix_options: 0,
-                    prefix,
-                    forwarding_address: None,
-                    route_tag: None,
-                    referenced_ls_type: 0,
-                    referenced_link_state_id: None,
-                }),
+                LsaBody::AsExternal(body),
             ));
+        }
+
+        let abr = self.is_backbone_abr().await;
+        for (area_id, cfg) in &nssa_areas {
+            if !attached.contains(area_id) {
+                continue;
+            }
+            let fa = self.nssa_forwarding_address(*area_id).await;
+            // RFC 3101 §2.3/§2.4: P only with a forwarding address, and not
+            // from an ABR, which originates the AS-External-LSA itself.
+            let options = if abr || fa.is_none() {
+                0
+            } else {
+                lsa::PREFIX_OPT_P
+            };
+            let mut nssa_lsas: Vec<(Ipv6Net, u32, u8, Option<Ipv6Addr>)> = redistributed
+                .iter()
+                .map(|&p| (p, metric, options, fa))
+                .collect();
+            if abr && cfg.default_originate {
+                let cost = stub_areas.get(area_id).map_or(1, |&(_, cost)| cost);
+                nssa_lsas.push((Ipv6Net::default(), cost, 0, None));
+            }
+            let lsdb = self.lsdb_for(*area_id).await;
+            let mut lsdb = lsdb.lock().await;
+            let done = done.areas.entry(*area_id).or_default();
+            for (prefix, metric, prefix_options, forwarding_address) in nssa_lsas {
+                let lsid = self.lsid(lsa::LSA_TYPE_NSSA, prefix).await;
+                done.insert(install_self_originated(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NSSA,
+                    lsid,
+                    LsaBody::AsExternal(AsExternalLsaBody {
+                        type2: false,
+                        metric,
+                        prefix_options,
+                        prefix,
+                        forwarding_address,
+                        route_tag: None,
+                        referenced_ls_type: 0,
+                        referenced_link_state_id: None,
+                    }),
+                ));
+            }
         }
     }
 
@@ -3086,6 +3245,7 @@ impl LinkManager {
 
     async fn originate_all(&self, local_router_id: Ipv4Addr) {
         let mut done = Originated::default();
+        self.elect_nssa_translators(local_router_id).await;
         self.originate_router_lsas(local_router_id, &mut done).await;
         self.originate_link_lsas(local_router_id, &mut done).await;
         self.originate_intra_area_prefix_lsas(local_router_id, &mut done)
@@ -3273,7 +3433,12 @@ impl LinkManager {
             // intra-area ASBR or an Inter-Area-Router-LSA there); the cheapest
             // wins in the merge below.
             // (never a stub area's: RFC 5340 §4.4.3, its default is the route).
-            if !self.stub_areas.lock().unwrap().contains_key(&area_id) {
+            let stub = self.stub_areas.lock().unwrap().contains_key(&area_id);
+            let nssa = self.nssa_areas.lock().unwrap().contains_key(&area_id);
+            // A Type-5 or Type-7 held from before the area changed kind is
+            // no route there.
+            lsas.retain(|l| lsa::in_area_scope(l.header.lsa_type, stub, nssa));
+            if !stub {
                 lsas.extend(self.as_lsdb.lock().await.all());
             }
             let skip = backbone_abr && !area_id.is_unspecified();
@@ -3281,7 +3446,7 @@ impl LinkManager {
                 merged
                     .entry(entry.prefix)
                     .and_modify(|existing| {
-                        if entry.metric < existing.metric {
+                        if entry.rank() < existing.rank() {
                             *existing = entry.clone();
                         }
                     })
@@ -3740,6 +3905,7 @@ pub(crate) mod tests {
             instance_id: 0,
             helper_max_grace_period: 1800,
             stub: false,
+            nssa: false,
         }
     }
 
@@ -6120,6 +6286,136 @@ pub(crate) mod tests {
             "{routes:?}"
         );
         assert_eq!(router_flags(&b, area1, id(3)).await, Some(0));
+    }
+
+    /// RFC 3101 (#1156) over the in-memory wire: a (area 0) — b (ABR) — c
+    /// (NSSA area 1, ASBR). c's redistributed prefix is an NSSA-LSA with the
+    /// P-bit and a forwarding address; b, the only ABR, translates it into
+    /// its own AS-External-LSA that a routes (via b, with b's E-bit set);
+    /// the AS-External-LSA never enters the NSSA, and both go when c stops
+    /// redistributing.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn nssa_lsa_is_translated_into_the_backbone() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+        for r in [&b, &c] {
+            r.set_stub_areas(HashMap::from([(area1, (true, 1))]));
+            r.set_nssa_areas(HashMap::from([(area1, NssaSettings::default())]));
+        }
+        let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
+            area_id,
+            stub: area_id == area1,
+            nssa: area_id == area1,
+            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let external: Ipv6Net = "2001:db8:e::/48".parse().unwrap();
+        a.reconcile(vec![seg(1, 1, area0)], HashMap::new(), id(1))
+            .await;
+        b.reconcile(
+            vec![seg(2, 1, area0), seg(3, 2, area1)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        let c_link = vec![seg(4, 2, area1)];
+        c.reconcile(c_link.clone(), HashMap::new(), id(3)).await;
+        let redistribute = |routes: Vec<Ipv6Net>| {
+            RedistributeUpdate::Full(
+                routes
+                    .into_iter()
+                    .map(|p| nos_proto::RedistributedRoute {
+                        prefix: IpNet::V6(p),
+                        gateway: "2001:db8:2::99".parse().unwrap(),
+                    })
+                    .collect(),
+            )
+        };
+        c.apply_redistribute_update(redistribute(vec![external]))
+            .await;
+        settle(60).await;
+
+        let held = |db: Vec<Ospfv3LsaSummary>, lsa_type, adv| {
+            db.iter()
+                .filter(|l| l.lsa_type == lsa_type && l.advertising_router == adv)
+                .filter(|l| l.age < lsa::MAX_AGE)
+                .count()
+        };
+        // The backbone holds b's translation, no NSSA-LSA; the NSSA holds
+        // c's NSSA-LSA and no AS-External-LSA.
+        let db_a = a.database_summaries().await;
+        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 1);
+        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(3)), 0);
+        assert_eq!(held(db_a, lsa::LSA_TYPE_NSSA, id(3)), 0);
+        let db_c = c.database_summaries().await;
+        assert_eq!(held(db_c.clone(), lsa::LSA_TYPE_NSSA, id(3)), 1);
+        assert_eq!(held(db_c, lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 0);
+        let type7 = b
+            .lsdb_for(area1)
+            .await
+            .lock()
+            .await
+            .all()
+            .into_iter()
+            .find(|l| l.header.lsa_type == lsa::LSA_TYPE_NSSA && l.header.age < lsa::MAX_AGE)
+            .expect("NSSA-LSA on b");
+        let LsaBody::AsExternal(body) = &type7.body else {
+            panic!("expected an external body")
+        };
+        assert_eq!(body.prefix_options, lsa::PREFIX_OPT_P);
+        assert_eq!(
+            body.forwarding_address,
+            Some("2001:db8:2::4".parse().unwrap())
+        );
+        // a routes it through b; b routes it from the NSSA-LSA.
+        let route = a
+            .compute_routes()
+            .await
+            .into_iter()
+            .find(|r| r.prefix == external)
+            .expect("translated route on a");
+        assert_eq!(route.next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(route.class, spf::PathClass::External1);
+        assert!(b
+            .compute_routes()
+            .await
+            .iter()
+            .any(|r| r.prefix == external));
+        assert_eq!(
+            router_flags(&a, area0, id(2)).await,
+            Some(lsa::ROUTER_FLAG_B | lsa::ROUTER_FLAG_E)
+        );
+        assert_eq!(
+            router_flags(&b, area1, id(3)).await,
+            Some(lsa::ROUTER_FLAG_E)
+        );
+
+        // c stops redistributing: its NSSA-LSA is flushed and the route goes.
+        c.apply_redistribute_update(redistribute(Vec::new())).await;
+        settle(30).await;
+        assert_eq!(
+            held(c.database_summaries().await, lsa::LSA_TYPE_NSSA, id(3)),
+            0
+        );
+        assert!(a
+            .compute_routes()
+            .await
+            .iter()
+            .all(|r| r.prefix != external));
+    }
+
+    /// RFC 3101 §2.1: the N-bit must match the link's NSSA-ness, with the
+    /// E-bit clear in an NSSA.
+    #[test]
+    fn nssa_options_carry_the_n_bit_and_no_e_bit() {
+        for (stub, nssa) in [(false, false), (true, false), (true, true)] {
+            let o = own_options(stub, nssa);
+            assert_eq!(o & lsa::OPTION_N != 0, nssa);
+            assert_eq!(o & lsa::OPTION_E != 0, !stub);
+            assert_ne!(o & lsa::OPTION_V6, 0);
+        }
     }
 
     /// RFC 5340 §4.4.3: a (area 0, ASBR) — b (ABR) — c (area 1, stub). c
