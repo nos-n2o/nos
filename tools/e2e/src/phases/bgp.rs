@@ -4650,9 +4650,11 @@ pub async fn flowspec_vpn(w: &mut World) -> anyhow::Result<()> {
 /// `vpn-add-path` (#1132): a scripted speaker (`vpn_add_path.py`, router-g)
 /// negotiates RFC 7911 on AFI 1 / SAFI 128 only and sends router-a a plain
 /// unicast route (no id), then path 1 (label 100) and path 2 (label 200) of
-/// one VPNv4 key (RD `65001:1`, `10.10.0.0/24`, RT `65000:1`), then withdraws
-/// path 2. router-a keeps one copy per key (the later id replaces), imports
-/// it into `vrf-red`, and drops it on the withdrawal.
+/// one VPNv4 key (RD `65001:1`, `10.10.0.0/24`; RT `65000:1` and `65000:2`),
+/// then withdraws path 2 (#1133). router-a keeps both copies, `vrf-red`
+/// (imports RT 1) and `vrf-blue` (RT 2) each import their own, `GET
+/// /v1/bgp/vpnv4` lists one row per copy, and the withdrawal by id leaves
+/// `vrf-red`'s copy in place.
 pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     let mut flags = vpn_flags("65000:1");
     flags.extend(strings(&["--add-path", "both"]));
@@ -4689,36 +4691,62 @@ pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
+    log("a second VRF imports RT 65000:2");
+    let mut blue = vpn_flags("65000:1");
+    blue.extend(strings(&["--add-path", "both"]));
+    for (flag, value) in [
+        ("--vpn-table", "vrf-blue"),
+        ("--vpn-rd", "65000:101"),
+        ("--vpn-rt-export", "65000:101"),
+        ("--vpn-rt-import", "65000:2"),
+    ] {
+        let i = blue.iter().position(|f| f == flag).expect("vpn flag");
+        blue[i + 1] = value.to_string();
+    }
+    a.provision_flags(&blue).await?;
+
     log("ipv4 unicast framing is untouched: the id-less NLRI is learned");
     a.wait(&format!(
         "learned route for 10.99.0.0/24 into adj-rib-in peer={IP_G}"
     ))
     .await?;
 
-    log("VPN paths carry ids before the length octet: both decode, the later replaces the earlier");
+    log("VPN paths carry ids before the length octet: both copies are held");
     a.wait(&format!(
-        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[100\\] .*path_id=Some(1)"
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[100\\] .*path_id=1"
     ))
     .await?;
     a.wait(&format!(
-        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[200\\] .*path_id=Some(2)"
-    ))
-    .await?;
-    a.wait(&format!(
-        "vpn path replaces the held copy of the same key peer={IP_G} rd=65001:1 prefix=10.10.0.0/24 path_id=2"
-    ))
-    .await?;
-    a.wait(&format!(
-        "vpn route imported table={VPN_TABLE} prefix=10.10.0.0/24 labels=\\[[12]00\\]"
+        "vpn route learned peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[200\\] .*path_id=2"
     ))
     .await?;
 
-    log("withdrawing by id drops the copy");
+    log("each VRF imports the copy carrying its own Route Target");
     a.wait(&format!(
-        "vpn route withdrawn peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24"
+        "vpn route imported table={VPN_TABLE} prefix=10.10.0.0/24 labels=\\[100\\]"
     ))
     .await?;
-    a.wait("vpn route unimported").await?;
+    a.wait("vpn route imported table=vrf-blue prefix=10.10.0.0/24 labels=\\[200\\]")
+        .await?;
+
+    log("GET /v1/bgp/vpnv4 lists one row per copy");
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/vpnv4?rd=65001:1", None, 200)
+        .await?;
+    anyhow::ensure!(
+        body.contains("\"path_id\":1") && body.contains("\"path_id\":2"),
+        "expected one row per path id, got {body}"
+    );
+
+    log("withdrawing path 2 drops its copy and its import only");
+    let red_gone = format!("vpn route unimported table={VPN_TABLE}");
+    let red_before = a.count_fresh(&red_gone).await;
+    a.wait(&format!(
+        "vpn route withdrawn peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 path_id=2"
+    ))
+    .await?;
+    a.wait("vpn route unimported table=vrf-blue").await?;
+    a.assert_quiet(&red_gone, red_before, 5).await?;
     Ok(())
 }
 

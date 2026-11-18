@@ -7117,6 +7117,15 @@
             "description": "The BGP next hop (the egress PE).",
             "type": "string"
           },
+          "path_id": {
+            "description": "The RFC 7911 path id of the copy, set only when non-zero: one peer\ncan send several copies of one (RD, prefix) (#1133).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "peer": {
             "description": "The advertising peer.",
             "type": "string"

@@ -191,7 +191,12 @@ impl BgpRib {
     /// feasible next hop), by prefix, the RD stripped as for unicast import.
     fn vrf_unicast(&self, table: &str) -> VrfUnicast<'_> {
         let mut out: VrfUnicast<'_> = HashMap::new();
-        for (k, r) in self.vpn_adj_rib_in.values().flatten() {
+        for (k, r) in self
+            .vpn_adj_rib_in
+            .values()
+            .flatten()
+            .flat_map(|(k, ids)| ids.values().map(move |r| (k, r)))
+        {
             if r.route.next_hop.is_some()
                 && self.next_hop_feasible(r.route.next_hop)
                 && self
