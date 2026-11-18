@@ -95,7 +95,7 @@ pub use ospf_profile::{
     HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,
 };
 pub use ospfv3_area::{Ospfv3Area, Ospfv3AreaRange};
-pub use ospfv3_instance::Ospfv3Instance;
+pub use ospfv3_instance::{Ospfv3AddressFamily, Ospfv3Instance};
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
 pub use policy_symbols::PolicySymbols;
@@ -148,7 +148,10 @@ pub struct Config {
     /// `OSPFv2` speakers; each gets its own `nos-ospfd` process.
     pub ospf_instances: Vec<OspfInstance>,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|instances, _ctx: &Config| ospfv3_instance::valid_address_families(instances))
+    )]
     #[cli(topic = Ospfv3Instance, words = "ospfv3 instance")]
     /// `OSPFv3` speakers; each gets its own `nos-ospfv3d` process.
     pub ospfv3_instances: Vec<Ospfv3Instance>,

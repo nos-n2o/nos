@@ -3454,11 +3454,45 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
 
-    log("resetting instance-id to 0 on both routers");
+    // RFC 5838: an IPv4-unicast instance (ids 64-95, AF-bit set) on router-a
+    // alone is dropped by router-b (id 1); on both it reaches Full.
+    let with_af = |af: &str, id: &str, addr: &str, rid: &str| {
+        let mut f = with_id(id, addr, rid);
+        f.extend(strings(&["--ospfv3-address-family", af]));
+        f
+    };
+    log("setting the ipv4-unicast address family (instance-id 64) on router-a only");
+    let drops = b.count("ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=64");
+    a.provision_flags(&with_base(
+        A,
+        with_af("ipv4-unicast", "64", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.wait_new(
+        "ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=64",
+        drops,
+        30,
+    )
+    .await?;
+    log("setting the ipv4-unicast address family on router-b too");
     let (a_full, b_full) = (
         a.count(&full(OSPFV3_ROUTER_ID_B)),
         b.count(&full(OSPFV3_ROUTER_ID)),
     );
+    b.provision_flags(&with_base(
+        B,
+        with_af("ipv4-unicast", "64", OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+
+    log("resetting to ipv6-unicast, instance-id 0 on both routers");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    let with_id = |id: &str, addr: &str, rid: &str| with_af("ipv6-unicast", id, addr, rid);
     a.provision_flags(&with_base(
         A,
         with_id("0", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),

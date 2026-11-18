@@ -1610,6 +1610,11 @@ pub struct Args {
     /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
     #[arg(long)]
     pub ospfv3_max_lsa: Option<u32>,
+    /// RFC 5838 address family of that instance, `ipv6-unicast` or
+    /// `ipv4-unicast` (requires `--ospfv3-instance`; the profiles'
+    /// `--ospfv3-instance-id` must then be 64-95).
+    #[arg(long)]
+    pub ospfv3_address_family: Option<String>,
     /// RFC 6987 `max-metric router-lsa on-startup <secs>` for that instance
     /// (requires `--ospfv3-instance`); `0` clears it.
     #[arg(long)]
@@ -4408,6 +4413,19 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 enabled: true,
             }));
         }
+        if let Some(af) = &args.ospfv3_address_family {
+            let address_family = match af.as_str() {
+                "ipv6-unicast" => nos_proto::Ospfv3AddressFamily::Ipv6Unicast,
+                "ipv4-unicast" => nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+                other => anyhow::bail!("--ospfv3-address-family: unknown `{other}`"),
+            };
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetAddressFamily {
+                    name: name.clone(),
+                    address_family,
+                },
+            ));
+        }
         if let Some(max_lsa) = args.ospfv3_max_lsa {
             ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetMaxLsa {
                 name: name.clone(),
@@ -6954,6 +6972,23 @@ mod tests {
             );
             assert!(dbg("0").contains("max_lsa: None"), "{kind}");
         }
+    }
+
+    #[test]
+    fn ospfv3_address_family_sets_the_address_family() {
+        let dbg = format!(
+            "{:?}",
+            ops(&[
+                "--ospfv3-instance",
+                "o",
+                "--ospfv3-router-id",
+                "1.1.1.1",
+                "--ospfv3-address-family",
+                "ipv4-unicast"
+            ])
+            .unwrap()
+        );
+        assert!(dbg.contains("SetAddressFamily { name: \"o\", address_family: Ipv4Unicast }"));
     }
 
     #[test]

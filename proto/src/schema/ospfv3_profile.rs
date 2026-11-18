@@ -91,7 +91,8 @@ pub struct Ospfv3Profile {
 
     /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send
     /// and accept: a received packet carrying any other value is dropped.
-    /// `None` means 0. Limited to 0-31, RFC 5838 §2.1's IPv6-unicast range.
+    /// `None` means 0. 0-31 (IPv6 unicast) or 64-95 (IPv4 unicast), RFC 5838 §2.1;
+    /// the owning instance's `address_family` decides which.
     #[garde(custom(|i: &Option<u8>, _ctx: &Config| valid_instance_id(*i)))]
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileInstanceId)]
@@ -109,8 +110,8 @@ pub struct Ospfv3Profile {
 
 fn valid_instance_id(id: Option<u8>) -> garde::Result {
     match id {
-        Some(i) if i > 31 => Err(garde::Error::new(
-            "instance-id must be between 0 and 31 (RFC 5838 IPv6 unicast)",
+        Some(i) if !(0..=31).contains(&i) && !(64..=95).contains(&i) => Err(garde::Error::new(
+            "instance-id must be 0-31 (IPv6 unicast) or 64-95 (IPv4 unicast), RFC 5838",
         )),
         _ => Ok(()),
     }
@@ -260,6 +261,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
@@ -389,11 +391,32 @@ mod tests {
 
     #[test]
     fn instance_id_range() {
-        for (id, ok) in [(0, true), (31, true), (32, false)] {
+        use crate::schema::Ospfv3AddressFamily::{Ipv4Unicast, Ipv6Unicast};
+        // RFC 5838 §2.1: the id must lie in the instance's AF range; unset is 0.
+        let cases = [
+            (Ipv6Unicast, None, true),
+            (Ipv6Unicast, Some(0), true),
+            (Ipv6Unicast, Some(31), true),
+            (Ipv6Unicast, Some(32), false),
+            (Ipv6Unicast, Some(64), false),
+            (Ipv4Unicast, None, false),
+            (Ipv4Unicast, Some(0), false),
+            (Ipv4Unicast, Some(63), false),
+            (Ipv4Unicast, Some(64), true),
+            (Ipv4Unicast, Some(95), true),
+            (Ipv4Unicast, Some(96), false),
+        ];
+        for (af, id, ok) in cases {
             let mut p = profile("p1");
-            p.instance_id = Some(id);
-            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
-            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "instance-id {id}");
+            p.instance_id = id;
+            let mut i = instance("r1", vec![area("0.0.0.0", vec![p])]);
+            i.address_family = af;
+            let cfg = config_with(vec![i]);
+            assert_eq!(
+                cfg.validate_with(&cfg).is_ok(),
+                ok,
+                "{af:?} instance-id {id:?}"
+            );
         }
     }
 
