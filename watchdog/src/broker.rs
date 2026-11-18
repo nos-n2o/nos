@@ -472,7 +472,7 @@ async fn authenticate(
                 return verify_password(ctx, user, password).await.map(|()| None);
             }
             LoginBackend::Local => {}
-            LoginBackend::Radius => match radius_login(&cfg, user, &password).await {
+            LoginBackend::Radius => match radius_login(ctx, &cfg, user, &password).await {
                 Ok(role) => {
                     info!(user = ?user, role = role.claim(), "login accepted by radius");
                     return Ok(Some(role.claim().to_string()));
@@ -495,28 +495,78 @@ async fn authenticate(
     }
 }
 
+/// The Linux VRF device of routing table `table`, asked of its `nos-ribd`
+/// (`None` while it is not up).
+async fn vrf_name(ctx: &Ctx, table: &str) -> Option<String> {
+    use nos_proto::{RibEvent, RibRequest, ServiceRef};
+    let s = &ctx.sockets;
+    let path = ctx
+        .registry
+        .resolve(
+            &ServiceRef::RibTable(table.to_string()),
+            &s.config,
+            &s.interfaces,
+            &s.log,
+            &s.lacp,
+            &s.lldp,
+            &s.bfd,
+            &s.stp,
+            &s.acl,
+        )
+        .await?;
+    let call = async {
+        let stream = ctx
+            .pki
+            .identity
+            .connect(&path, &PeerId::new(Role::Ribd.as_str(), table))
+            .await
+            .ok()?;
+        let (r, w) = split(stream);
+        let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+        let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+        writer.send(RibRequest::GetVrfName).await.ok()?;
+        match reader.next().await {
+            Some(Ok(RibEvent::VrfName(name))) => name,
+            _ => None,
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .ok()
+        .flatten()
+}
+
 /// One Access-Request across the configured servers; the role comes from the
 /// reply attribute `aaa role-attribute` names (read-only when absent).
 async fn radius_login(
+    ctx: &Ctx,
     cfg: &nos_proto::Config,
     user: &str,
     password: &str,
 ) -> Result<UserRole, nos_radius::AuthError> {
-    let servers: Vec<nos_radius::Server> = cfg
-        .aaa
-        .servers
-        .iter()
-        .filter_map(|s| {
-            Some(nos_radius::Server {
-                addr: std::net::SocketAddr::new(s.address, s.port.unwrap_or(RADIUS_PORT_DEFAULT)),
-                secret: cfg.key(&s.secret_ref)?.as_bytes().to_vec(),
-                timeout: Duration::from_secs(u64::from(
-                    s.timeout_secs.unwrap_or(RADIUS_TIMEOUT_DEFAULT_SECS),
-                )),
-                retries: s.retries.unwrap_or(RADIUS_RETRIES_DEFAULT),
-            })
-        })
-        .collect();
+    let mut servers = Vec::new();
+    for s in &cfg.aaa.servers {
+        let Some(secret) = cfg.key(&s.secret_ref) else {
+            continue;
+        };
+        let mut vrf = None;
+        if let Some(t) = &s.routing_table {
+            vrf = vrf_name(ctx, t).await;
+            if vrf.is_none() {
+                warn!(server = %s.name, table = %t, "radius server skipped: the VRF of its routing table is not available");
+                continue;
+            }
+        }
+        servers.push(nos_radius::Server {
+            addr: std::net::SocketAddr::new(s.address, s.port.unwrap_or(RADIUS_PORT_DEFAULT)),
+            secret: secret.as_bytes().to_vec(),
+            timeout: Duration::from_secs(u64::from(
+                s.timeout_secs.unwrap_or(RADIUS_TIMEOUT_DEFAULT_SECS),
+            )),
+            retries: s.retries.unwrap_or(RADIUS_RETRIES_DEFAULT),
+            vrf,
+        });
+    }
     let accepted = nos_radius::authenticate(&servers, user, password, "nos").await?;
     let ty = match cfg.aaa.role_attribute {
         RoleAttribute::FilterId => nos_radius::attr::FILTER_ID,

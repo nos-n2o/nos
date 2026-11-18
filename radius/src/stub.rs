@@ -100,6 +100,7 @@ mod tests {
             secret: b"k".to_vec(),
             timeout: Duration::from_millis(500),
             retries: 1,
+            vrf: None,
         }];
         let ok = authenticate(&s, "alice", "pw", "t").await.unwrap();
         assert_eq!(ok.attr(attr::FILTER_ID), Some(&b"admin"[..]));

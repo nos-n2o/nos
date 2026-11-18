@@ -129,6 +129,7 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
             name: "stub".into(),
             address: IP_RADIUS_STUB.s().parse()?,
             port: None,
+            routing_table: Some("rt1".into()),
             secret_ref: "radius".into(),
             timeout_secs: Some(1),
             retries: Some(0),
@@ -142,7 +143,7 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     .await?;
 
     log("a RADIUS admin (no local entry) provisions the router");
-    let accepted = a.count("login accepted by radius user=\"rad-admin\" role=admin");
+    let accepted = a.count("login accepted by radius user=\"rad-admin\" role=\"admin\"");
     let (code, out) = run_provision(
         w,
         &["--login-user", "rad-admin", "--login-password", "pw-admin"],
@@ -152,7 +153,7 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
         bail!("a RADIUS admin should provision, got exit {code}: {out}");
     }
     a.wait_new(
-        "login accepted by radius user=\"rad-admin\" role=admin",
+        "login accepted by radius user=\"rad-admin\" role=\"admin\"",
         accepted,
         15,
     )

@@ -7,7 +7,7 @@ use garde::Validate;
 use nos_proto_derive::Cli;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_key_in;
+use crate::validators::{routing_table_reference_valid, unique_key_in};
 
 use super::Config;
 
@@ -95,6 +95,12 @@ pub struct RadiusServer {
     #[cli(topic = RadiusPort)]
     pub port: Option<u16>,
 
+    /// Send from inside this routing table's VRF. Default: the default netns.
+    #[serde(default)]
+    #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    #[cli(topic = RadiusRoutingTable)]
+    pub routing_table: Option<String>,
+
     /// Label of the admin-keystore entry holding the shared secret (never
     /// inline: the keystore is masked for REST and the CLI).
     #[garde(custom(|l: &String, ctx: &Config| valid_secret(l, ctx)))]
@@ -120,6 +126,7 @@ impl Default for RadiusServer {
             name: String::new(),
             address: IpAddr::from([0, 0, 0, 0]),
             port: None,
+            routing_table: None,
             secret_ref: String::new(),
             timeout_secs: None,
             retries: None,
@@ -216,6 +223,7 @@ mod tests {
                     name: "r1".into(),
                     address: "192.0.2.1".parse().unwrap(),
                     port: None,
+                    routing_table: None,
                     secret_ref: label.into(),
                     timeout_secs: None,
                     retries: None,

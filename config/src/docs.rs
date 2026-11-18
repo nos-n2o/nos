@@ -1874,11 +1874,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::RadiusAddress => (
             "Set a RADIUS server's address.",
-            "An IP address (there is no resolver). Reached through the default network namespace.",
+            "An IP address (there is no resolver). See `routing-table` for the VRF it is reached through.",
         ),
         Topic::RadiusPort => (
             "Set a RADIUS server's UDP port.",
             "1-65535. `delete` restores 1812.",
+        ),
+        Topic::RadiusRoutingTable => (
+            "Send RADIUS requests from inside a routing table's VRF.",
+            "Names an existing routing table: the socket is scoped into its VRF, so a server reachable only through that table can be used. `delete` uses the default network namespace.",
         ),
         Topic::RadiusSecretRef => (
             "Name the admin key holding the shared secret.",

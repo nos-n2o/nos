@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 tokio     = { workspace = true }
+socket2   = { workspace = true }
 md-5      = { workspace = true }
 hmac      = { workspace = true }
 getrandom = { workspace = true }

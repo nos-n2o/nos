@@ -20,6 +20,8 @@ pub struct Server {
     pub timeout: Duration,
     /// Extra attempts after the first, before moving to the next server.
     pub retries: u8,
+    /// Linux VRF device to send through (`SO_BINDTODEVICE`); `None` is the default netns.
+    pub vrf: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -53,7 +55,8 @@ async fn exchange(
     build: impl Fn(&[u8]) -> (Packet, [u8; 16]),
 ) -> Option<Packet> {
     for s in servers {
-        let Ok(sock) = bind_for(s.addr).await else {
+        // ponytail: a socket/bind/send error counts as "no answer" (no logging in this crate).
+        let Ok(sock) = bind_for(s.addr, s.vrf.as_deref()) else {
             continue;
         };
         if sock.connect(s.addr).await.is_err() {
@@ -82,14 +85,21 @@ async fn exchange(
     None
 }
 
-async fn bind_for(peer: SocketAddr) -> std::io::Result<UdpSocket> {
-    // ponytail: the default netns only; per-VRF sourcing needs SO_BINDTODEVICE (#1153 follow-up).
-    UdpSocket::bind(if peer.is_ipv4() {
-        "0.0.0.0:0"
+fn bind_for(peer: SocketAddr, vrf: Option<&str>) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+    let (domain, any) = if peer.is_ipv4() {
+        (Domain::IPV4, "0.0.0.0:0")
     } else {
-        "[::]:0"
-    })
-    .await
+        (Domain::IPV6, "[::]:0")
+    };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if let Some(v) = vrf {
+        sock.bind_device(Some(v.as_bytes()))?;
+    }
+    sock.set_nonblocking(true)?;
+    let any: SocketAddr = any.parse().expect("a literal address");
+    sock.bind(&SockAddr::from(any))?;
+    UdpSocket::from_std(sock.into())
 }
 
 /// RFC 2865 login: Access-Request with `user`/`password`; Access-Accept is
@@ -179,6 +189,7 @@ mod tests {
             secret: secret.to_vec(),
             timeout: Duration::from_millis(150),
             retries: 0,
+            vrf: None,
         }
     }
 

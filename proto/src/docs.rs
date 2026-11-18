@@ -515,6 +515,8 @@ topics! {
     RadiusAddress,
     /// `RadiusServer.port`
     RadiusPort,
+    /// `RadiusServer.routing_table`
+    RadiusRoutingTable,
     /// `RadiusServer.secret_ref`
     RadiusSecretRef,
     /// `RadiusServer.timeout_secs`

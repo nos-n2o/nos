@@ -1072,6 +1072,7 @@ fn use_radius(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBa
             name: "r1".into(),
             address: addr.ip(),
             port: Some(addr.port()),
+            routing_table: None,
             secret_ref: "radius".into(),
             timeout_secs: Some(1),
             retries: Some(0),
