@@ -303,6 +303,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // W^X for the watchdog and, by inheritance, every daemon (#1210): fail
+    // closed, nothing starts without it.
+    nos_watchdog::supervisor::enable_mdwe()
+        .context("PR_SET_MDWE failed: nos-watchdogd needs Linux >= 6.3")?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Before tracing: the log forwarder itself needs an identity to reach
     // nos-logd, so the CA has to exist first.

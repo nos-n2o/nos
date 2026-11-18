@@ -43,7 +43,7 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 
 ## W^X for daemons (#1210)
 
-- `nos-watchdogd` sets `PR_SET_MDWE` (`PR_MDWE_REFUSE_EXEC_GAIN`) in a `pre_exec` hook on every supervised process, `nos-sshd` included.
+- `nos-watchdogd` sets `PR_SET_MDWE` (`PR_MDWE_REFUSE_EXEC_GAIN`) on itself at start and fails to start without it; every supervised process inherits it, `nos-sshd` included. The watchdog is under it too (no JIT in it).
 - The kernel then refuses a writable+executable mapping and `mprotect` of a writable mapping to executable; inherited across fork and exec, never liftable by the daemon.
 - `nos-sshd`'s children (`sshd -i`, login shells) inherit it too: JIT-based tools (node, JVM, PyPy) fail in an ssh session. Accepted (owner decision, #1210).
 
