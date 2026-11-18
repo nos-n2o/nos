@@ -495,6 +495,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     );
     links.set_extended_lsa(own.extended_lsa);
     links.set_graceful_restart(own.graceful_restart_grace_period);
+    links.set_max_lsa(own.max_lsa);
     links.set_max_metric(
         own.max_metric_on_startup,
         own.max_metric_on_shutdown,

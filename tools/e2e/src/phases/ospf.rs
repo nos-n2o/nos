@@ -6204,6 +6204,169 @@ pub async fn ospf_forged_lsa(w: &mut World) -> anyhow::Result<()> {
     a.established().await
 }
 
+// --- #1146: LSDB overload limit ---
+
+/// `max-lsa` on router-a in `ospf-max-lsa`: small enough to hit with one injection.
+const MAX_LSA_CAP: usize = 10;
+/// Distinct fake LSAs injected past it.
+const MAX_LSA_INJECTED: usize = 40;
+/// Sequence number of the injected LSAs (above the initial one).
+const MAX_LSA_SEQ: &str = "2147484000";
+
+/// How many `9.9.1.*` (injected) LSAs `r`'s database holds, and the highest
+/// sequence number of one of `r`'s own LSAs (`own`).
+async fn max_lsa_counts(r: &Router, database: &str, own: &str) -> anyhow::Result<(usize, i64)> {
+    let body = r.rest_expect(Method::GET, database, None, 200).await?;
+    let report: serde_json::Value = serde_json::from_str(&body)?;
+    let lsas = report[0]["result"].as_array().cloned().unwrap_or_default();
+    let fake = lsas
+        .iter()
+        .filter(|l| {
+            l["advertising_router"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("9.9.1."))
+        })
+        .count();
+    let seq = lsas
+        .iter()
+        .filter(|l| l["advertising_router"] == own)
+        .filter_map(|l| l["sequence_number"].as_i64())
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("no lsa of {own} in {body}"))?;
+    Ok((fake, seq))
+}
+
+/// One protocol's run of `ospf_max_lsa`: router-a caps non-self LSAs at
+/// `MAX_LSA_CAP`; router-b's netns floods `MAX_LSA_INJECTED` distinct fake
+/// Router-LSAs. The limit is logged, the store stops at the cap, and router-a's
+/// own LSA still re-originates (a metric change); the fakes are then flushed.
+#[allow(clippy::too_many_arguments)]
+async fn max_lsa_run(
+    w: &World,
+    mode: &str,
+    log_prefix: &str,
+    database: &str,
+    a_rid: &str,
+    b_rid: &str,
+    flags: &[String],
+) -> anyhow::Result<()> {
+    let a = w.a()?;
+    // The shared `nos-ospf-common` line, so one text serves both daemons.
+    let limit = "ospf lsdb limit reached";
+    let l0 = a.count(limit);
+    let seq0 = max_lsa_counts(a, database, a_rid).await?.1;
+    let injected = MAX_LSA_INJECTED.to_string();
+    let inject = |step: &'static str| {
+        let args = [
+            "python3",
+            "-c",
+            include_str!("max_lsa.py"),
+            mode,
+            step,
+            OSPF_AREA,
+            b_rid,
+            if mode == "v2" { IP_B.s() } else { "-" },
+            &injected,
+            MAX_LSA_SEQ,
+        ];
+        async move {
+            let out = w
+                .dock
+                .in_netns(PYTHON_HELPER_IMAGE, "router-b", &args)
+                .await?;
+            log(out.trim());
+            anyhow::Ok(())
+        }
+    };
+    inject("flood").await?;
+    a.wait_new(limit, l0, 20).await?;
+    // Delayed acks, MinLSArrival and the periodic resend settle in a few seconds.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let (held, _) = max_lsa_counts(a, database, a_rid).await?;
+    anyhow::ensure!(
+        (1..=MAX_LSA_CAP).contains(&held),
+        "{mode}: {held} injected LSAs held with max-lsa {MAX_LSA_CAP}"
+    );
+    log(format!(
+        "{mode}: {held} of {MAX_LSA_INJECTED} injected LSAs held"
+    ));
+    // Own origination is never blocked: a metric change re-originates.
+    let mut stub = flags.to_vec();
+    stub.extend(strings(&[
+        &format!("--{log_prefix}-max-metric-administrative"),
+        "true",
+    ]));
+    a.provision_flags(&with_base(A, stub)).await?;
+    let mut reoriginated = false;
+    for _ in 0..30 {
+        if max_lsa_counts(a, database, a_rid).await?.1 > seq0 {
+            reoriginated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        reoriginated,
+        "{mode}: own LSA did not re-originate at the cap"
+    );
+    a.provision_flags(&with_base(A, flags.to_vec())).await?;
+    // Leave no fake LSA behind for the next phase.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    inject("flush").await
+}
+
+/// #1146 (self-contained): `max-lsa` bounds the LSDB a neighbor can grow, in
+/// OSPFv2 and OSPFv3 (see `max_lsa_run`).
+pub async fn ospf_max_lsa(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let cap = MAX_LSA_CAP.to_string();
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID));
+    fa.extend(strings(&["--ospf-max-lsa", &cap, "--ospfv3-max-lsa", &cap]));
+    let mut fb = ospf(OSPF_ROUTER_ID_B);
+    fb.extend(ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B));
+    a.provision_flags(&with_base(A, fa.clone())).await?;
+    b.provision_flags(&with_base(B, fb)).await?;
+    both_full_p2p(a, b).await?;
+    for (x, peer) in [(a, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID)] {
+        x.wait(&format!(
+            "ospfv3 neighbor reached full link=eth0.0 neighbor={peer}"
+        ))
+        .await?;
+    }
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:trixie-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    max_lsa_run(
+        w,
+        "v2",
+        "ospf",
+        "/v1/ospf/database",
+        OSPF_ROUTER_ID,
+        OSPF_ROUTER_ID_B,
+        &fa,
+    )
+    .await?;
+    max_lsa_run(
+        w,
+        "v3",
+        "ospfv3",
+        "/v1/ospfv3/database",
+        OSPFV3_ROUTER_ID,
+        OSPFV3_ROUTER_ID_B,
+        &fa,
+    )
+    .await?;
+    a.established().await
+}
+
 /// #954: a broadcast-domain attach point reads its bridge's observed kernel
 /// MTU. `--mtu 1400` on router-a's eth0 lowers the `eth0.<tag>` bridge port
 /// and so `br<N>` (no profile override): router-a rejects router-b's
