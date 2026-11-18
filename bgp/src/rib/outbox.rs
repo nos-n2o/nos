@@ -52,6 +52,9 @@ pub(super) struct Backlog {
     vpn_flows: HashSet<VpnFlowKey>,
     /// VPN keys whose latest update was dropped.
     vpns: HashSet<VpnKey<IpNet>>,
+    /// ADD-PATH ids of a VPN key whose `WithdrawVpn` was dropped (the twin
+    /// of `lost_ids`).
+    vpn_lost: HashMap<VpnKey<IpNet>, HashSet<u32>>,
     /// RT-Constraint keys whose latest update was dropped.
     rtcs: HashSet<super::RtcKey>,
     /// Prefixes re-sent so far in this overflow episode (for the log).
@@ -101,8 +104,11 @@ impl Backlog {
             OutboundUpdate::AnnounceVpn(adv) => {
                 self.vpns.insert(adv.key);
             }
-            OutboundUpdate::WithdrawVpn(key) => {
+            OutboundUpdate::WithdrawVpn(key, id) => {
                 self.vpns.insert(key);
+                if let Some(id) = id {
+                    self.vpn_lost.entry(key).or_default().insert(id);
+                }
             }
             OutboundUpdate::AnnounceRtc(adv) => {
                 self.rtcs.insert(adv.key);
@@ -124,6 +130,9 @@ impl Backlog {
         self.flows.extend(newer.flows);
         self.vpn_flows.extend(newer.vpn_flows);
         self.vpns.extend(newer.vpns);
+        for (k, ids) in newer.vpn_lost {
+            self.vpn_lost.entry(k).or_default().extend(ids);
+        }
         self.rtcs.extend(newer.rtcs);
         for (prefix, ids) in newer.lost_ids {
             self.lost_ids.entry(prefix).or_default().extend(ids);
@@ -273,6 +282,16 @@ impl BgpRib {
         for k in &vpns {
             backlog.vpns.remove(k);
             self.sync_vpn_to(peer, k, true);
+            for id in backlog.vpn_lost.remove(k).into_iter().flatten() {
+                let live = self
+                    .vpn_adj_rib_out
+                    .get(&peer)
+                    .and_then(|t| t.get(k))
+                    .is_some_and(|s| s.values().any(|a| a.route.path_id == Some(id)));
+                if !live {
+                    tx.send(OutboundUpdate::WithdrawVpn(*k, Some(id)));
+                }
+            }
         }
         backlog.drained += vpns.len();
         // Batched like `dirty`: a Type-5 burst can be a full table (#764).

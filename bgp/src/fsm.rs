@@ -1484,8 +1484,8 @@ async fn report_established(
         }
         if dir.tx {
             tx_afis.insert(key);
-            // The RIB sends ids only for unicast until #1127.
-            if is_unicast(family) {
+            // The RIB sends ids for unicast and VPN (#1134) only.
+            if is_unicast(family) || is_vpn(family) {
                 add_path_tx.insert(family);
             }
         }
@@ -2132,7 +2132,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
         }),
         OutboundUpdate::AnnounceVpn(v) => {
             let ((rd, prefix), labels) = (v.key, v.labels);
-            let next_hop = v.route.next_hop;
+            let (next_hop, path_id) = (v.route.next_hop, v.route.path_id);
             BgpMessage::Update(message::UpdateMessage {
                 withdrawn_routes: Vec::new(),
                 withdrawn_path_ids: Vec::new(),
@@ -2153,10 +2153,10 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     flowspec: Vec::new(),
                     flowspec_vpn: Vec::new(),
                     vpn: vec![crate::vpn::VpnNlri {
-                        path_id: None,
                         labels,
                         rd,
                         prefix,
+                        path_id,
                     }],
                     rtc: Vec::new(),
                 }],
@@ -2164,31 +2164,33 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 ..Default::default()
             })
         }
-        OutboundUpdate::WithdrawVpn((rd, prefix)) => BgpMessage::Update(message::UpdateMessage {
-            withdrawn_routes: Vec::new(),
-            withdrawn_path_ids: Vec::new(),
-            nlri: Vec::new(),
-            nlri_path_ids: Vec::new(),
-            attributes: None,
-            mp_reach: Vec::new(),
-            mp_unreach: vec![message::MpUnreachNlri {
-                afi: afi_of_ipnet(prefix),
-                safi: message::SAFI_VPN,
-                withdrawn: Vec::new(),
+        OutboundUpdate::WithdrawVpn((rd, prefix), path_id) => {
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
                 withdrawn_path_ids: Vec::new(),
-                evpn: Vec::new(),
-                flowspec: Vec::new(),
-                flowspec_vpn: Vec::new(),
-                vpn: vec![crate::vpn::VpnNlri {
-                    path_id: None,
-                    labels: Vec::new(),
-                    rd,
-                    prefix,
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: None,
+                mp_reach: Vec::new(),
+                mp_unreach: vec![message::MpUnreachNlri {
+                    afi: afi_of_ipnet(prefix),
+                    safi: message::SAFI_VPN,
+                    withdrawn: Vec::new(),
+                    withdrawn_path_ids: Vec::new(),
+                    evpn: Vec::new(),
+                    flowspec: Vec::new(),
+                    flowspec_vpn: Vec::new(),
+                    vpn: vec![crate::vpn::VpnNlri {
+                        path_id,
+                        labels: Vec::new(),
+                        rd,
+                        prefix,
+                    }],
+                    rtc: Vec::new(),
                 }],
-                rtc: Vec::new(),
-            }],
-            ..Default::default()
-        }),
+                ..Default::default()
+            })
+        }
         OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
             let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
             BgpMessage::Update(message::UpdateMessage {
