@@ -33,4 +33,7 @@ pub struct VpnNlri {
     pub labels: Vec<u32>,
     pub rd: Rd,
     pub prefix: IpNet,
+    /// RFC 7911 Path Identifier: `Some` only where the session negotiated
+    /// Add-Path for this family; written before the length octet.
+    pub path_id: Option<u32>,
 }

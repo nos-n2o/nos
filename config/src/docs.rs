@@ -1332,7 +1332,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             concat!(
-                "Sets the network-type field on a profile to point-to-point, broadcast or point-to-multipoint (RFC 2328 §9.5, OSPFv2 only), \
+                "Sets the network-type field on a profile to point-to-point, broadcast or point-to-multipoint (RFC 2328 §9.5, RFC 5340 §4.2), \
              overriding the default that would otherwise be derived from each attach point's \
              own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
              to broadcast). Never validated against the attach point's actual kind — this NOS \

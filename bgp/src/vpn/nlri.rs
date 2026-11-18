@@ -29,8 +29,22 @@ fn max_prefix_bits(afi: u16) -> Result<usize, WireError> {
 
 /// One NLRI: a label stack ending at S=1 (reach), or the single fixed
 /// Compatibility field of a `withdrawal`.
-fn decode_one(afi: u16, data: &[u8], withdrawal: bool) -> Result<(VpnNlri, usize), WireError> {
+fn decode_one(
+    afi: u16,
+    mut data: &[u8],
+    withdrawal: bool,
+    add_path: bool,
+) -> Result<(VpnNlri, usize), WireError> {
     let max_bits = max_prefix_bits(afi)?;
+    // RFC 7911 section 3: the Path Identifier precedes the length octet.
+    let (path_id, id_len) = if add_path {
+        let id = data.get(..4).ok_or(WireError::MalformedUpdate)?;
+        let id = u32::from_be_bytes(id.try_into().unwrap());
+        data = &data[4..];
+        (Some(id), 4)
+    } else {
+        (None, 0)
+    };
     let bits = usize::from(*data.first().ok_or(WireError::MalformedUpdate)?);
     let total = 1 + bits.div_ceil(8);
     let body = data.get(1..total).ok_or(WireError::MalformedUpdate)?;
@@ -71,28 +85,42 @@ fn decode_one(afi: u16, data: &[u8], withdrawal: bool) -> Result<(VpnNlri, usize
     let prefix = IpNet::new(addr, u8::try_from(prefix_bits).unwrap())
         .map_err(|_| WireError::MalformedUpdate)?
         .trunc();
-    Ok((VpnNlri { labels, rd, prefix }, total))
+    Ok((
+        VpnNlri {
+            labels,
+            rd,
+            prefix,
+            path_id,
+        },
+        total + id_len,
+    ))
 }
 
-fn decode_all(afi: u16, mut data: &[u8], withdrawal: bool) -> Result<Vec<VpnNlri>, WireError> {
+fn decode_all(
+    afi: u16,
+    mut data: &[u8],
+    withdrawal: bool,
+    add_path: bool,
+) -> Result<Vec<VpnNlri>, WireError> {
     let mut out = Vec::new();
     while !data.is_empty() {
-        let (n, used) = decode_one(afi, data, withdrawal)?;
+        let (n, used) = decode_one(afi, data, withdrawal, add_path)?;
         out.push(n);
         data = &data[used..];
     }
     Ok(out)
 }
 
-/// A run of announced VPN NLRIs; the label stack ends at the first label with
+/// A run of announced VPN NLRIs (each preceded by a 4-octet Path Identifier
+/// when `add_path`, RFC 7911); the label stack ends at the first label with
 /// S=1 (RFC 8277 section 2.3).
 ///
 /// # Errors
 /// `MalformedUpdate` for an AFI other than 1/2, a length that does not cover
 /// the labels and RD, a missing S=1, a prefix longer than the AFI allows,
 /// truncated octets or trailing bytes.
-pub fn decode_vpn_reach(afi: u16, data: &[u8]) -> Result<Vec<VpnNlri>, WireError> {
-    decode_all(afi, data, false)
+pub fn decode_vpn_reach(afi: u16, data: &[u8], add_path: bool) -> Result<Vec<VpnNlri>, WireError> {
+    decode_all(afi, data, false, add_path)
 }
 
 /// A run of withdrawn VPN NLRIs: one Compatibility field whose value is
@@ -100,11 +128,18 @@ pub fn decode_vpn_reach(afi: u16, data: &[u8]) -> Result<Vec<VpnNlri>, WireError
 ///
 /// # Errors
 /// As [`decode_vpn_reach`].
-pub fn decode_vpn_unreach(afi: u16, data: &[u8]) -> Result<Vec<VpnNlri>, WireError> {
-    decode_all(afi, data, true)
+pub fn decode_vpn_unreach(
+    afi: u16,
+    data: &[u8],
+    add_path: bool,
+) -> Result<Vec<VpnNlri>, WireError> {
+    decode_all(afi, data, true, add_path)
 }
 
 fn encode_one(n: &VpnNlri, label_field: u32, out: &mut Vec<u8>) {
+    if let Some(id) = n.path_id {
+        out.extend_from_slice(&id.to_be_bytes());
+    }
     let prefix_bits = usize::from(n.prefix.prefix_len());
     // At most 24 + 64 + 128 bits: fits the length octet.
     out.push(u8::try_from(LABEL_BITS + RD_BITS + prefix_bits).unwrap());
@@ -206,6 +241,7 @@ mod tests {
 
     fn route(labels: &[u32], prefix: &str) -> VpnNlri {
         VpnNlri {
+            path_id: None,
             labels: labels.to_vec(),
             rd: RD,
             prefix: net(prefix),
@@ -222,7 +258,7 @@ mod tests {
         encode_vpn_reach(&[route(&[100], "10.1.0.0/16")], &mut got);
         assert_eq!(got, want);
         assert_eq!(
-            decode_vpn_reach(AFI_IPV4, &want).unwrap(),
+            decode_vpn_reach(AFI_IPV4, &want, false).unwrap(),
             vec![route(&[100], "10.1.0.0/16")]
         );
     }
@@ -238,7 +274,10 @@ mod tests {
             let mut b = Vec::new();
             encode_vpn_reach(&[route(&[3], p)], &mut b);
             assert_eq!(b[0], len, "{p}");
-            assert_eq!(decode_vpn_reach(afi, &b).unwrap(), vec![route(&[3], p)]);
+            assert_eq!(
+                decode_vpn_reach(afi, &b, false).unwrap(),
+                vec![route(&[3], p)]
+            );
         }
     }
 
@@ -252,7 +291,7 @@ mod tests {
             }
             b.extend_from_slice(&RD);
             b.push(10);
-            let got = decode_vpn_reach(AFI_IPV4, &b).unwrap();
+            let got = decode_vpn_reach(AFI_IPV4, &b, false).unwrap();
             assert_eq!(got, vec![route(&stack, "10.0.0.0/8")]);
         }
         // IPv6 stack of two.
@@ -261,7 +300,7 @@ mod tests {
         b.extend_from_slice(&RD);
         b.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
         assert_eq!(
-            decode_vpn_reach(AFI_IPV6, &b).unwrap(),
+            decode_vpn_reach(AFI_IPV6, &b, false).unwrap(),
             vec![route(&[5, 6], "2001:db8::/32")]
         );
     }
@@ -271,8 +310,8 @@ mod tests {
         let v = vec![route(&[1], "10.0.0.0/8"), route(&[2], "172.16.0.0/12")];
         let mut b = Vec::new();
         encode_vpn_reach(&v, &mut b);
-        assert_eq!(decode_vpn_reach(AFI_IPV4, &b).unwrap(), v);
-        assert_eq!(decode_vpn_reach(AFI_IPV4, &[]).unwrap(), vec![]);
+        assert_eq!(decode_vpn_reach(AFI_IPV4, &b, false).unwrap(), v);
+        assert_eq!(decode_vpn_reach(AFI_IPV4, &[], false).unwrap(), vec![]);
     }
 
     #[test]
@@ -283,7 +322,7 @@ mod tests {
             b
         };
         let bad = |b: &[u8], afi| {
-            is_malformed(decode_vpn_reach(afi, b));
+            is_malformed(decode_vpn_reach(afi, b, false));
         };
         // No S=1 anywhere before the bits run out.
         let mut no_s = good.clone();
@@ -299,7 +338,7 @@ mod tests {
         long.extend_from_slice(&[1, 2, 3, 4, 5]);
         bad(&long, AFI_IPV4);
         // ... but 33 bits is fine for IPv6.
-        assert!(decode_vpn_reach(AFI_IPV6, &long).is_ok());
+        assert!(decode_vpn_reach(AFI_IPV6, &long, false).is_ok());
         // Truncated octets, trailing garbage, unknown AFI, missing length.
         bad(&good[..good.len() - 1], AFI_IPV4);
         let mut trail = good.clone();
@@ -315,7 +354,7 @@ mod tests {
         b.extend_from_slice(&RD);
         b.extend_from_slice(&[10, 0xff]);
         assert_eq!(
-            decode_vpn_reach(AFI_IPV4, &b).unwrap()[0].prefix,
+            decode_vpn_reach(AFI_IPV4, &b, false).unwrap()[0].prefix,
             net("10.128.0.0/9")
         );
     }
@@ -326,14 +365,43 @@ mod tests {
         let mut b = Vec::new();
         encode_vpn_unreach(&[route(&[77], "10.1.0.0/16")], &mut b);
         assert_eq!(&b[..4], &[24 + 64 + 16, 0x80, 0, 0]);
-        assert_eq!(decode_vpn_unreach(AFI_IPV4, &b).unwrap(), vec![w.clone()]);
+        assert_eq!(
+            decode_vpn_unreach(AFI_IPV4, &b, false).unwrap(),
+            vec![w.clone()]
+        );
         // 0x000000, a real label with S=1, and 0x800000 all decode the same.
         for f in [[0, 0, 0], [0x00, 0x06, 0x41], [0x80, 0, 0]] {
             b[1..4].copy_from_slice(&f);
-            assert_eq!(decode_vpn_unreach(AFI_IPV4, &b).unwrap(), vec![w.clone()]);
+            assert_eq!(
+                decode_vpn_unreach(AFI_IPV4, &b, false).unwrap(),
+                vec![w.clone()]
+            );
         }
         // Too short for the compatibility field + RD.
-        is_malformed(decode_vpn_unreach(AFI_IPV4, &[16, 0x80, 0]));
+        is_malformed(decode_vpn_unreach(AFI_IPV4, &[16, 0x80, 0], false));
+    }
+
+    #[test]
+    fn path_ids_precede_the_length_octet_and_round_trip() {
+        for (afi, p) in [(AFI_IPV4, "10.1.0.0/16"), (AFI_IPV6, "2001:db8::/32")] {
+            let mut n = route(&[100], p);
+            n.path_id = Some(7);
+            let mut reach = Vec::new();
+            encode_vpn_reach(&[n.clone()], &mut reach);
+            assert_eq!(&reach[..4], &[0, 0, 0, 7]);
+            assert_eq!(
+                decode_vpn_reach(afi, &reach, true).unwrap(),
+                vec![n.clone()]
+            );
+            let mut w = n.clone();
+            w.labels.clear();
+            let mut unreach = Vec::new();
+            encode_vpn_unreach(&[w.clone()], &mut unreach);
+            assert_eq!(&unreach[..4], &[0, 0, 0, 7]);
+            assert_eq!(decode_vpn_unreach(afi, &unreach, true).unwrap(), vec![w]);
+            // Without negotiation the id is misread: never accepted silently.
+            assert!(decode_vpn_reach(afi, &reach[..3], true).is_err());
+        }
     }
 
     #[test]

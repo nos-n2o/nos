@@ -82,6 +82,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - **Neighbor table hygiene** (#957, mirrors #956 in [OSPF internals](ospf-internals.md)):
   - The 1s `sweep_dead_neighbors` is the only dead timer, on every network type (no single p2p deadline); it logs `ospfv3 neighbor state changed to down link=… neighbor=…`.
   - A `Down` entry without `grace_deadline` idle for `dead_interval` is removed on a later tick (`ospfv3 neighbor entry removed link=… neighbor=…`), so forged router IDs no longer pin the 64-entry cap.
+  - Point-to-multipoint (#1160): Router-LSA lists one type-1 link per `Full` neighbor (p2p: the lowest ID only) and the router-referenced Intra-Area-Prefix-LSA carries the link address as a /128 with LA instead of the subnet; flooding stays unicast-capable, no election. `ospfv3-p2mp` e2e.
   - On point-to-point and point-to-multipoint (never broadcast) a Hello from a link-local address held by another live, non-grace entry puts that entry `Down` (adjacency cleared) before the cap check: `ospfv3 neighbor evicted, same address new router id`. Unlike #956 this covers p2mp too.
   - `router_lsa_links` names the lowest router ID among `Full`/grace entries, independent of map order.
   - Verified by `nos-e2e ospfv3-p2p-rid-change`; forged-Hello floods are unit-test only.

@@ -295,11 +295,13 @@ impl AddPathDir {
 }
 
 /// The families that can carry an RFC 7911 Path Identifier, in the order of
-/// `negotiate_add_path`'s result: unicast (SAFI 1) and VPN Flowspec (SAFI
-/// 134). Never EVPN, SAFI 128 (#1130) or SAFI 133.
-const ADD_PATH_FAMILIES: [AddressFamily; 4] = [
+/// `negotiate_add_path`'s result: unicast (SAFI 1), VPN unicast (SAFI 128)
+/// and VPN Flowspec (SAFI 134). Never EVPN or SAFI 133.
+const ADD_PATH_FAMILIES: [AddressFamily; 6] = [
     AddressFamily::Ipv4Unicast,
     AddressFamily::Ipv6Unicast,
+    AddressFamily::Vpnv4Unicast,
+    AddressFamily::Vpnv6Unicast,
     AddressFamily::Vpnv4Flowspec,
     AddressFamily::Vpnv6Flowspec,
 ];
@@ -309,8 +311,8 @@ const ADD_PATH_FAMILIES: [AddressFamily; 4] = [
 /// peer 1 or 3. Only a family this session is configured with counts. A
 /// tuple with a Send/Receive value outside 1..=3 makes the whole capability
 /// "not understood" (§4), so nothing is negotiated.
-fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> [AddPathDir; 4] {
-    let none = [AddPathDir::default(); 4];
+fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> [AddPathDir; 6] {
+    let none = [AddPathDir::default(); 6];
     let Some(mode) = ctx.add_path else {
         return none;
     };
@@ -409,7 +411,7 @@ struct RemoteInfo {
     /// RFC 4684 Route Target Constraint negotiated (`negotiate_rtc`).
     negotiated_rtc: bool,
     /// RFC 7911 ADD-PATH per family (`negotiate_add_path`, `ADD_PATH_FAMILIES`).
-    add_path: [AddPathDir; 4],
+    add_path: [AddPathDir; 6],
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
     /// 2-byte `AS_PATH` + `AS4_PATH` in both directions.
     four_octet_as: bool,
@@ -470,7 +472,7 @@ enum Action {
         negotiated_vpn: [bool; 2],
         negotiated_flowspec_vpn: [bool; 2],
         negotiated_rtc: bool,
-        add_path: [AddPathDir; 4],
+        add_path: [AddPathDir; 6],
         four_octet_as: bool,
         extended_message: bool,
         route_refresh: bool,
@@ -1493,8 +1495,10 @@ async fn report_established(
             peer = %peer.remote_address,
             ipv4 = add_path[0].as_str(),
             ipv6 = add_path[1].as_str(),
-            vpnv4_flowspec = add_path[2].as_str(),
-            vpnv6_flowspec = add_path[3].as_str(),
+            vpnv4 = add_path[2].as_str(),
+            vpnv6 = add_path[3].as_str(),
+            vpnv4_flowspec = add_path[4].as_str(),
+            vpnv6_flowspec = add_path[5].as_str(),
             "add-path negotiated"
         );
     }
@@ -2148,7 +2152,12 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                     flowspec: Vec::new(),
                     flowspec_vpn: Vec::new(),
-                    vpn: vec![crate::vpn::VpnNlri { labels, rd, prefix }],
+                    vpn: vec![crate::vpn::VpnNlri {
+                        path_id: None,
+                        labels,
+                        rd,
+                        prefix,
+                    }],
                     rtc: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
@@ -2171,6 +2180,7 @@ pub(crate) fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 flowspec: Vec::new(),
                 flowspec_vpn: Vec::new(),
                 vpn: vec![crate::vpn::VpnNlri {
+                    path_id: None,
                     labels: Vec::new(),
                     rd,
                     prefix,
@@ -2518,6 +2528,8 @@ mod tests {
                     want,
                     AddPathDir::default(),
                     AddPathDir::default(),
+                    AddPathDir::default(),
+                    AddPathDir::default(),
                     AddPathDir::default()
                 ],
                 "{mode:?} x {peer}"
@@ -2540,22 +2552,33 @@ mod tests {
         let off = AddPathDir::default();
         // Only SAFI 134 offered: SAFI 1 stays off.
         let open = open_with_add_path(&[(AFI_IPV4, 134, 3)]);
-        assert_eq!(negotiate_add_path(&open, &ctx), [off, off, full, off]);
+        assert_eq!(
+            negotiate_add_path(&open, &ctx),
+            [off, off, off, off, full, off]
+        );
         // Only SAFI 1 offered: SAFI 134 stays off.
         let open = open_with_add_path(&[(AFI_IPV4, 1, 3)]);
-        assert_eq!(negotiate_add_path(&open, &ctx), [full, off, off, off]);
+        assert_eq!(
+            negotiate_add_path(&open, &ctx),
+            [full, off, off, off, off, off]
+        );
         // A family we did not configure (vpnv6-flowspec dropped) never counts.
         let ctx6 = NegotiationContext {
             address_families: vec![AddressFamily::Vpnv4Flowspec],
             ..add_path_ctx(Some(Both))
         };
         let open = open_with_add_path(&[(AFI_IPV4, 134, 3), (AFI_IPV6, 134, 3)]);
-        assert_eq!(negotiate_add_path(&open, &ctx6), [off, off, full, off]);
+        assert_eq!(
+            negotiate_add_path(&open, &ctx6),
+            [off, off, off, off, full, off]
+        );
         // Receive-only peer: we only send.
         let open = open_with_add_path(&[(AFI_IPV6, 134, 1)]);
         assert_eq!(
             negotiate_add_path(&open, &ctx),
             [
+                off,
+                off,
                 off,
                 off,
                 off,
@@ -2567,12 +2590,55 @@ mod tests {
         );
         // An out-of-range value on any tuple voids the capability.
         let open = open_with_add_path(&[(AFI_IPV4, 134, 3), (AFI_IPV4, 1, 0)]);
-        assert_eq!(negotiate_add_path(&open, &ctx), [off; 4]);
+        assert_eq!(negotiate_add_path(&open, &ctx), [off; 6]);
+    }
+
+    #[test]
+    fn add_path_negotiates_vpn_unicast_on_its_own_tuple() {
+        use nos_proto::BgpAddPath::Both;
+        let ctx = NegotiationContext {
+            address_families: vec![
+                AddressFamily::Ipv4Unicast,
+                AddressFamily::Vpnv4Unicast,
+                AddressFamily::Vpnv6Unicast,
+            ],
+            ..add_path_ctx(Some(Both))
+        };
+        let full = AddPathDir { rx: true, tx: true };
+        let off = AddPathDir::default();
+        let open = open_with_add_path(&[(AFI_IPV4, 128, 3)]);
+        assert_eq!(
+            negotiate_add_path(&open, &ctx),
+            [off, off, full, off, off, off]
+        );
+        // Receive-only peer: we only send; v6 on its own tuple.
+        let open = open_with_add_path(&[(AFI_IPV6, 128, 1)]);
+        let send = AddPathDir {
+            rx: false,
+            tx: true,
+        };
+        assert_eq!(
+            negotiate_add_path(&open, &ctx),
+            [off, off, off, send, off, off]
+        );
+        // Not configured (vpnv6 dropped): never counts.
+        let ctx4 = NegotiationContext {
+            address_families: vec![AddressFamily::Vpnv4Unicast],
+            ..add_path_ctx(Some(Both))
+        };
+        let open = open_with_add_path(&[(AFI_IPV4, 128, 3), (AFI_IPV6, 128, 3)]);
+        assert_eq!(
+            negotiate_add_path(&open, &ctx4),
+            [off, off, full, off, off, off]
+        );
+        // An out-of-range value voids the whole capability.
+        let open = open_with_add_path(&[(AFI_IPV4, 128, 3), (AFI_IPV4, 1, 0)]);
+        assert_eq!(negotiate_add_path(&open, &ctx), [off; 6]);
     }
 
     #[test]
     fn add_path_ignores_safi2_bad_values_and_unconfigured_sessions() {
-        let none = [AddPathDir::default(); 4];
+        let none = [AddPathDir::default(); 6];
         let both = Some(nos_proto::BgpAddPath::Both);
         // A multicast (SAFI 2) tuple is not unicast ADD-PATH.
         let multicast = open_with_add_path(&[(AFI_IPV4, 2, 3)]);
@@ -2584,9 +2650,10 @@ mod tests {
         let fine = open_with_add_path(&[(AFI_IPV4, 1, 3), (AFI_IPV6, 1, 3)]);
         assert_eq!(negotiate_add_path(&fine, &add_path_ctx(None)), none);
         let full = AddPathDir { rx: true, tx: true };
+        let off = AddPathDir::default();
         assert_eq!(
             negotiate_add_path(&fine, &add_path_ctx(both)),
-            [full, full, AddPathDir::default(), AddPathDir::default()]
+            [full, full, off, off, off, off]
         );
     }
 
@@ -2924,7 +2991,7 @@ mod tests {
             negotiated_vpn: [false; 2],
             negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
-            add_path: [AddPathDir::default(); 4],
+            add_path: [AddPathDir::default(); 6],
             role: None,
             four_octet_as: true,
             extended_message: false,
@@ -2956,7 +3023,7 @@ mod tests {
             negotiated_vpn: [false; 2],
             negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
-            add_path: [AddPathDir::default(); 4],
+            add_path: [AddPathDir::default(); 6],
             role: None,
             four_octet_as: true,
             extended_message: false,
@@ -2991,7 +3058,7 @@ mod tests {
             negotiated_vpn: [false; 2],
             negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
-            add_path: [AddPathDir::default(); 4],
+            add_path: [AddPathDir::default(); 6],
             role: None,
             four_octet_as: true,
             extended_message: false,
@@ -3061,7 +3128,7 @@ mod tests {
             negotiated_vpn: [false; 2],
             negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
-            add_path: [AddPathDir::default(); 4],
+            add_path: [AddPathDir::default(); 6],
             role: None,
             four_octet_as: true,
             extended_message: false,
@@ -3091,7 +3158,7 @@ mod tests {
             negotiated_vpn: [false; 2],
             negotiated_flowspec_vpn: [false; 2],
             negotiated_rtc: false,
-            add_path: [AddPathDir::default(); 4],
+            add_path: [AddPathDir::default(); 6],
             role: None,
             four_octet_as: true,
             extended_message: false,
