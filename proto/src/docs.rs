@@ -335,6 +335,8 @@ topics! {
     Ospfv3InstanceGracefulRestart,
     /// `Ospfv3Instance.max_lsa`
     Ospfv3InstanceMaxLsa,
+    /// `Ospfv3Instance.address_family`
+    Ospfv3InstanceAddressFamily,
     /// `Ospfv3Instance.graceful_restart_helper_max_grace_period`
     Ospfv3InstanceGracefulRestartHelperMaxGracePeriod,
     /// `Ospfv3Instance.max_metric_on_startup`

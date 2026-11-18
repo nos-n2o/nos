@@ -120,6 +120,57 @@ pub struct Ospfv3Instance {
     #[garde(range(min = 1, max = 1_000_000))]
     #[cli(topic = Ospfv3InstanceMaxLsa, words = "max-lsa")]
     pub max_lsa: Option<u32>,
+
+    /// RFC 5838 address family this instance routes: `ipv6-unicast`
+    /// (default, instance IDs 0-31) or `ipv4-unicast` (instance IDs 64-95;
+    /// every profile of the instance must then set one, and the AF-bit is
+    /// set in its Hellos, DBDs and LSAs). IPv6/IPv4 multicast are not built.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceAddressFamily, words = "address-family")]
+    pub address_family: Ospfv3AddressFamily,
+}
+
+/// An RFC 5838 §2.1 address family of an `Ospfv3Instance`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum Ospfv3AddressFamily {
+    #[default]
+    /// IPv6 unicast: the base `OSPFv3` AF, instance IDs 0 to 31.
+    Ipv6Unicast,
+    /// IPv4 unicast (RFC 5838): instance IDs 64 to 95.
+    Ipv4Unicast,
+}
+
+impl Ospfv3AddressFamily {
+    /// RFC 5838 §2.1's Instance ID range of this AF.
+    pub const fn instance_ids(self) -> std::ops::RangeInclusive<u8> {
+        match self {
+            Ospfv3AddressFamily::Ipv6Unicast => 0..=31,
+            Ospfv3AddressFamily::Ipv4Unicast => 64..=95,
+        }
+    }
+}
+
+/// Every profile's Instance ID (unset means 0) must lie in its instance's AF
+/// range (RFC 5838 §2.1), so an IPv4-unicast instance needs an explicit one.
+pub(crate) fn valid_address_families(instances: &[Ospfv3Instance]) -> garde::Result {
+    for i in instances {
+        let range = i.address_family.instance_ids();
+        let bad = i
+            .areas
+            .iter()
+            .flat_map(|a| &a.profiles)
+            .any(|p| !range.contains(&p.instance_id.unwrap_or(0)));
+        if bad {
+            return Err(garde::Error::new(format!(
+                "every profile's instance-id must be {}-{} for this instance's address-family (RFC 5838)",
+                range.start(),
+                range.end()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -138,6 +189,7 @@ impl Default for Ospfv3Instance {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            address_family: Ospfv3AddressFamily::Ipv6Unicast,
         }
     }
 }
@@ -182,6 +234,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 

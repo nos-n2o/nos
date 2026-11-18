@@ -166,10 +166,24 @@ $C -X PUT -H 'Content-Type: application/json' -d '1' $B/v1/transactions/v3iid/os
 $C -X POST $B/v1/transactions/v3iid/commit
 ```
 
-- The range is 0 to 31, the IPv6 unicast range of RFC 5838.
+- The range is 0 to 31 (IPv6 unicast) or 64 to 95 (IPv4 unicast), RFC 5838 §2.1; the instance's address family decides which (next section).
 - Changing it restarts the link's adjacencies.
 - A dropped packet is logged at debug level only (`ospfv3 packet instance id mismatch, dropping`, with `received` and `expected`). If a neighbour never shows up in `show ospfv3 neigh`, compare both ends' instance IDs.
 - `delete ospfv3 instance v3 area 0.0.0.0 profile p6 instance-id` goes back to 0.
+
+### Choose the address family (RFC 5838)
+
+```
+configure v3af
+set ospfv3 instance v3 address-family ipv4-unicast
+set ospfv3 instance v3 area 0.0.0.0 profile p6 instance-id 64
+commit
+```
+
+- `ipv6-unicast` is the default; `delete ospfv3 instance v3 address-family` goes back to it.
+- Every profile's instance ID must lie in the family's range (0-31 or 64-95), so an `ipv4-unicast` instance needs an explicit `instance-id` on each profile; the commit fails otherwise.
+- An `ipv4-unicast` instance sets the AF-bit in its Hellos, DBDs and LSAs and discards a Hello without it (`dropping ospfv3 hello without af-bit`). The base IPv6 family sets no AF-bit and accepts either, for compatibility.
+- Only the foundation is built: the adjacency forms, but no IPv4 route is computed yet. Several instances on one link are not possible yet: an attach point names one profile and a routing table claims one OSPFv3 instance.
 
 ### Use extended LSAs (RFC 8362)
 
@@ -353,7 +367,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
 
 ## Configuration reference
 
@@ -380,7 +394,8 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | Passive | `set ospfv3 instance <name> area <area-id> profile <p> passive enable`; relative `set passive enable` / `delete passive` | `…/profile/<p>/passive` | `true`/`false`; default `false` | excludes crypto-key and bfd | advertise the attach point's prefix, no Hello, no adjacency | `GET …/profile/<p>/passive` |
 | crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <label>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"<label>","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; label of an admin key whose secret is 1 to 80 bytes; unset by default | labels must exist, at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | | the key must exist | signs sent packets; all keys verify | `show this` in the profile |
-| instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31; unset means 0 | 0 to 31 | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
+| address family | `set ospfv3 instance <name> address-family <ipv6-unicast\|ipv4-unicast>`; `delete … address-family` | `ospfv3-instance/<name>/address-family` | `Ipv6Unicast` (default), `Ipv4Unicast` | every profile's instance ID within the family's range | `ipv4-unicast` sets the AF-bit and requires it from neighbours | `show this` in the instance |
+| instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31 or 64 to 95; unset means 0 | in the instance's address family range | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/profile/<p>/auth` | default | | | |
 | subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3` | `interface/<if>/subinterface/<tag>/ospfv3-profile`, `interface/loopback-<table>/ospfv3-profile` | | the attach point needs `routing-table` | runs OSPFv3 on the link | `show ospfv3 neigh` |
 | broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profile` | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |

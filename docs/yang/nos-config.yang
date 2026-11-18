@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-20 {
+  revision 2026-11-21 {
     description "Generated.";
   }
 
@@ -1166,6 +1166,13 @@ module nos-config {
     leaf max_lsa {
       type uint32;
       description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
+    }
+    leaf address_family {
+      type enumeration {
+        enum "Ipv6Unicast";
+        enum "Ipv4Unicast";
+      }
+      description "Choose the RFC 5838 address family this OSPFv3 instance routes.";
     }
   }
   list static_routing_instances {

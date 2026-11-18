@@ -135,6 +135,10 @@ const GRACE_SEND_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 /// One link's fully-resolved desired state — diffed wholesale by
 /// `LinkManager::reconcile`, mirroring `ospf::link::LinkConfig`.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-link flags (mtu-ignore, stub, nssa, ipv4-af), diffed wholesale"
+)]
 pub struct LinkConfig {
     /// Display key, matching `reconcile::attach_points_for`'s
     /// `"<interface>.<tag>"`/`"broadcast-domain:<name>"` convention.
@@ -179,6 +183,10 @@ pub struct LinkConfig {
     /// The link's area is a stub or totally-stubby area (RFC 5340 §4.4.3):
     /// no E-bit, no AS-scope LSAs on this link.
     pub stub: bool,
+    /// The instance's address family is IPv4 unicast (RFC 5838): the AF-bit
+    /// is set in this link's Hellos, DBDs and LSAs, and a Hello without it
+    /// is discarded.
+    pub ipv4_af: bool,
     /// The link's area is an NSSA (RFC 3101; `stub` is set too): the N-bit
     /// replaces the E-bit in Options, and only here are Type-7s exchanged.
     pub nssa: bool,
@@ -201,16 +209,21 @@ fn link_options(cfg: &LinkConfig) -> u32 {
     } else {
         0
     };
-    own_options(cfg.stub, cfg.nssa) | at
+    own_options(cfg.stub, cfg.nssa, cfg.ipv4_af) | at
 }
 
 /// `OWN_OPTIONS` for an area of this kind: no E-bit in a stub area or NSSA,
-/// the N-bit in an NSSA.
-fn own_options(stub: bool, nssa: bool) -> u32 {
-    match (stub, nssa) {
+/// the N-bit in an NSSA, the AF-bit (RFC 5838) on an IPv4-unicast link.
+fn own_options(stub: bool, nssa: bool, ipv4_af: bool) -> u32 {
+    let base = match (stub, nssa) {
         (_, true) => (OWN_OPTIONS & !lsa::OPTION_E) | lsa::OPTION_N,
         (true, false) => OWN_OPTIONS & !lsa::OPTION_E,
         (false, false) => OWN_OPTIONS,
+    };
+    if ipv4_af {
+        base | lsa::OPTION_AF
+    } else {
+        base
     }
 }
 
@@ -677,6 +690,17 @@ fn handle_hello(
             limiter,
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospfv3 hello with mismatched n-bit"
+        );
+        return false;
+    }
+
+    // RFC 5838 §2.4: an IPv4-unicast instance only forms adjacencies with
+    // routers that set the AF-bit (the base IPv6 AF is exempt).
+    if cfg.ipv4_af && hello.options & lsa::OPTION_AF == 0 {
+        warn_limited!(
+            limiter,
+            link = %cfg.attach_point, neighbor = %hello.router_id,
+            "dropping ospfv3 hello without af-bit"
         );
         return false;
     }
@@ -2634,6 +2658,9 @@ impl LinkManager {
                 flags |= lsa::ROUTER_FLAG_NT;
             }
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
+            // ponytail: one AF per instance, read off the area's first link;
+            // a loopback-only area's Router-LSA carries no AF-bit.
+            let ipv4_af = links.first().is_some_and(|(c, _)| c.ipv4_af);
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
             let done = done.areas.entry(area_id).or_default();
@@ -2675,7 +2702,7 @@ impl LinkManager {
                     id,
                     LsaBody::Router(RouterLsaBody {
                         flags,
-                        options: own_options(stub, nssa),
+                        options: own_options(stub, nssa, ipv4_af),
                         links: router_links,
                     }),
                 ));
@@ -2705,7 +2732,7 @@ impl LinkManager {
                     types.network,
                     lsa::interface_id_key(cfg.interface_id),
                     LsaBody::Network(NetworkLsaBody {
-                        options: own_options(stub, nssa),
+                        options: own_options(stub, nssa, cfg.ipv4_af),
                         attached_routers: attached,
                     }),
                 ));
@@ -2737,7 +2764,7 @@ impl LinkManager {
                 lsa::interface_id_key(cfg.interface_id),
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
-                    options: own_options(cfg.stub, cfg.nssa),
+                    options: own_options(cfg.stub, cfg.nssa, cfg.ipv4_af),
                     link_local_address: cfg.link_local_address,
                     prefixes: vec![LinkPrefixEntry {
                         options: 0,
@@ -3906,6 +3933,7 @@ pub(crate) mod tests {
             instance_id: 0,
             helper_max_grace_period: 1800,
             stub: false,
+            ipv4_af: false,
             nssa: false,
         }
     }
@@ -6412,7 +6440,7 @@ pub(crate) mod tests {
     #[test]
     fn nssa_options_carry_the_n_bit_and_no_e_bit() {
         for (stub, nssa) in [(false, false), (true, false), (true, true)] {
-            let o = own_options(stub, nssa);
+            let o = own_options(stub, nssa, false);
             assert_eq!(o & lsa::OPTION_N != 0, nssa);
             assert_eq!(o & lsa::OPTION_E != 0, !stub);
             assert_ne!(o & lsa::OPTION_V6, 0);
@@ -6645,6 +6673,52 @@ pub(crate) mod tests {
             b.reconcile(vec![lb], loopback(2), id(2)).await;
             settle(60).await;
             assert_eq!(a.neighbor_summaries().await[0].state, want, "{ia}/{ib}");
+        }
+    }
+
+    /// RFC 5838: an IPv4-unicast link needs the AF-bit on the other side too;
+    /// an IPv6-AF side accepts either, but then never sees itself listed.
+    #[tokio::test(start_paused = true)]
+    async fn af_bit_must_match_on_an_ipv4_link() {
+        for (a_af, b_af, want) in [
+            (true, true, OspfNeighborState::Full),
+            (true, false, OspfNeighborState::Down),
+            (false, true, OspfNeighborState::Init),
+            (false, false, OspfNeighborState::Full),
+        ] {
+            let wire = Arc::new(wire::Wire::default());
+            let (a, b) = (router(&wire), router(&wire));
+            let id_of = |af: bool| if af { 64 } else { 0 };
+            let mut la = wired_link(1, NetworkType::PointToPoint);
+            (la.ipv4_af, la.instance_id) = (a_af, id_of(a_af));
+            let mut lb = wired_link(2, NetworkType::PointToPoint);
+            (lb.ipv4_af, lb.instance_id) = (b_af, id_of(a_af));
+            a.reconcile(vec![la], HashMap::new(), id(1)).await;
+            b.reconcile(vec![lb], loopback(2), id(2)).await;
+            settle(60).await;
+            assert_eq!(a.neighbor_summaries().await[0].state, want, "{a_af}/{b_af}");
+        }
+    }
+
+    /// Two instances (IPv6 id 0, IPv4 id 64) on one wire each reach Full with
+    /// their own peer only.
+    #[tokio::test(start_paused = true)]
+    async fn two_instances_share_one_wire() {
+        let wire = Arc::new(wire::Wire::default());
+        let rs: Vec<_> = (0..4).map(|_| router(&wire)).collect();
+        for (n, r) in rs.iter().enumerate() {
+            let n = u8::try_from(n).unwrap() + 1;
+            let mut l = wired_link(n, NetworkType::PointToPoint);
+            if n > 2 {
+                (l.ipv4_af, l.instance_id) = (true, 64);
+            }
+            r.reconcile(vec![l], loopback(n), id(n)).await;
+        }
+        settle(60).await;
+        for r in &rs {
+            let s = r.neighbor_summaries().await;
+            assert_eq!(s.len(), 1, "only its own instance's peer");
+            assert_eq!(s[0].state, OspfNeighborState::Full);
         }
     }
 
