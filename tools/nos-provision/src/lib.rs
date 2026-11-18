@@ -1432,6 +1432,9 @@ pub struct Args {
     /// instance; `0` clears it.
     #[arg(long)]
     pub ospf_graceful_restart_helper_max_grace_period: Option<u32>,
+    /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
+    #[arg(long)]
+    pub ospf_max_lsa: Option<u32>,
     /// RFC 6860 prefix suppression for that instance (requires
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
@@ -1604,6 +1607,9 @@ pub struct Args {
     /// instance; `0` clears it.
     #[arg(long)]
     pub ospfv3_graceful_restart_helper_max_grace_period: Option<u32>,
+    /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
+    #[arg(long)]
+    pub ospfv3_max_lsa: Option<u32>,
     /// RFC 6987 `max-metric router-lsa on-startup <secs>` for that instance
     /// (requires `--ospfv3-instance`); `0` clears it.
     #[arg(long)]
@@ -4066,6 +4072,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
+        if let Some(max_lsa) = args.ospf_max_lsa {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetMaxLsa {
+                name: name.clone(),
+                max_lsa: (max_lsa != 0).then_some(max_lsa),
+            }));
+        }
         if let Some(seconds) = args.ospf_graceful_restart_helper_max_grace_period {
             ops.push(ConfigOp::OspfInstance(
                 OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod {
@@ -4394,6 +4406,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
                 name: name.clone(),
                 enabled: true,
+            }));
+        }
+        if let Some(max_lsa) = args.ospfv3_max_lsa {
+            ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetMaxLsa {
+                name: name.clone(),
+                max_lsa: (max_lsa != 0).then_some(max_lsa),
             }));
         }
         if let Some(seconds) = args.ospfv3_graceful_restart_helper_max_grace_period {
@@ -6915,6 +6933,27 @@ mod tests {
         shows(&build_ops(&args).unwrap(), "SetLls");
         let orphan = parse(&["--ospf-lls", "true"]);
         assert!(build_ops(&orphan).is_err());
+    }
+
+    #[test]
+    fn max_lsa_flags_set_or_clear() {
+        for (flag, name, kind) in [
+            ("--ospf-max-lsa", "--ospf-instance", "Ospf"),
+            ("--ospfv3-max-lsa", "--ospfv3-instance", "Ospfv3"),
+        ] {
+            let router_id = flag.replace("max-lsa", "router-id");
+            let dbg = |n: &str| {
+                format!(
+                    "{:?}",
+                    ops(&[name, "o", &router_id, "1.1.1.1", flag, n]).unwrap()
+                )
+            };
+            assert!(
+                dbg("50").contains("SetMaxLsa { name: \"o\", max_lsa: Some(50) }"),
+                "{kind}"
+            );
+            assert!(dbg("0").contains("max_lsa: None"), "{kind}");
+        }
     }
 
     #[test]

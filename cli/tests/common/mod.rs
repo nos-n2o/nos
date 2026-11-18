@@ -148,6 +148,7 @@ pub fn base_running() -> Config {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,
@@ -166,6 +167,7 @@ pub fn base_running() -> Config {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
         }],
         ..Default::default()
     }
