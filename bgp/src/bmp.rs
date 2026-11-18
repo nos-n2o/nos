@@ -27,9 +27,8 @@ use tracing::{debug, info, warn};
 use crate::evpn::EvpnNlri;
 use crate::message::{BgpCodec, BgpMessage, UpdateMessage};
 use crate::rib::{
-    EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnFlowCopy, VpnRoute,
+    EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, SharedRib, VpnCopy, VpnFlowCopy, VpnRoute,
 };
-use crate::vpn::VpnKey;
 use ipnet::IpNet;
 use nos_proto::{BmpFrameCounts, BmpMonitor, BmpMonitorOut, BmpStationState, BmpStationStatus};
 
@@ -644,10 +643,15 @@ impl Hub {
     }
 
     /// The post-policy stream for VPN path `k`.
-    pub fn vpn_post(&self, peer: IpAddr, k: &VpnKey<IpNet>, route: Option<&VpnRoute>) {
-        self.emit(peer, true, |_| match route {
-            Some(r) => monitor::vpn_to_update(k, r),
-            None => monitor::vpn_withdraw_to_update(k),
+    pub fn vpn_post(&self, peer: IpAddr, c: &VpnCopy, route: Option<&VpnRoute>) {
+        self.emit(peer, true, |info| {
+            let ap = info
+                .add_path_afis
+                .contains(&(monitor::afi_of(c.0 .1), crate::message::SAFI_VPN));
+            match route {
+                Some(r) => monitor::vpn_to_update(c, r, ap),
+                None => monitor::vpn_withdraw_to_update(c, ap),
+            }
         });
     }
 

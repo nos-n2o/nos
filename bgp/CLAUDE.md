@@ -114,7 +114,7 @@ The RFC 4360 transitive bit is enforced on eBGP export (#162). RFC 1997: `decisi
 - `AddressFamily::L2vpnEvpn` is appended last in the enum (postcard indexes by position). `evpn_adj_rib_in` is keyed by `EvpnNlri::route_key` (attribute fields zeroed, #188); best path does not apply (RFC 7432 §15 aside). `evpn_import_policy` (#502, `None` = accept all) gates Type-1/2/3/5 in `learn_evpn` before mobility (reject = withdraw, Type-4 exempt).
 - MAC mobility has **no withdraw**: a sequence only means something relative to the last one seen, so `MacMobility` forgets a `(VNI, MAC)` only after an hour of silence (`EXPIRE`).
 - Same ESI is not a move (#172): `MacMobility::holds`; else PEs on one segment freeze each other as duplicates.
-- Flowspec, VPN (keyed by (RD, prefix), every RT kept, one ADD-PATH copy until #1133), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
+- Flowspec, VPN (copies keyed by (RD, prefix, id), every RT kept; send: #1134), VRF import (`vpn::VrfSet`; PE via the underlay's `ResolveNextHop`): internals page.
 - `nos-bgpd` never originates on its own: `nos-fdbd`/`nos-ribd` supply RD, RTs, VTEP, VNI, label (`evpn_local`, `vpn_local` by table).
 
 ## L3VPN (#573), RT-Constraint (#875)

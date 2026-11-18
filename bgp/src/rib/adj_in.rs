@@ -692,11 +692,13 @@ impl BgpRib {
             }
         }
         if let Some(stale) = self.vpn_stale.get_mut(&from) {
-            for n in update.mp_reach.iter().flat_map(|m| &m.vpn) {
-                stale.remove(&(n.rd, n.prefix));
-            }
-            for n in update.mp_unreach.iter().flat_map(|m| &m.vpn) {
-                stale.remove(&(n.rd, n.prefix));
+            for n in update
+                .mp_reach
+                .iter()
+                .flat_map(|m| &m.vpn)
+                .chain(update.mp_unreach.iter().flat_map(|m| &m.vpn))
+            {
+                stale.remove(&((n.rd, n.prefix), n.path_id.unwrap_or(0)));
             }
         }
         let withdrawn = withdrawn_paths(update);
@@ -727,7 +729,7 @@ impl BgpRib {
         for u in &update.mp_unreach {
             self.drop_rtcs(from, &u.rtc);
             for n in &u.vpn {
-                self.drop_vpn(from, &(n.rd, n.prefix));
+                self.drop_vpn(from, &((n.rd, n.prefix), n.path_id.unwrap_or(0)));
             }
             let Some(family) = flowspec_family(u.afi) else {
                 continue;
@@ -982,7 +984,7 @@ impl BgpRib {
         for m in &update.mp_reach {
             self.drop_rtcs(from, &m.rtc);
             for n in &m.vpn {
-                self.drop_vpn(from, &(n.rd, n.prefix));
+                self.drop_vpn(from, &((n.rd, n.prefix), n.path_id.unwrap_or(0)));
             }
             if let Some(family) = super::flowspec_vpn::vpn_flow_family(m.afi) {
                 for (_, n, id) in vpn_flow_rows(m.afi, &m.flowspec_vpn, &m.nlri_path_ids) {

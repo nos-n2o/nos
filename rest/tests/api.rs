@@ -1528,12 +1528,14 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
                 local_pref: limit,
                 best: true,
                 site_of_origin: None,
+                path_id: None,
             }],
             // A first page has a next one, the continuation is the last.
             next: after.is_none().then(|| nos_proto::VpnRouteCursor {
                 peer: "192.0.2.1".parse().unwrap(),
                 rd: [0, 0, 0xfd, 0xe9, 0, 0, 0, 1],
                 prefix: "10.0.0.0/24".parse().unwrap(),
+                path_id: 0,
             }),
         },
         _ => BgpEvent::PeerNotFound,
