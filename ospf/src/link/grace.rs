@@ -313,7 +313,7 @@ impl LinkManager {
     /// flushes the Grace-LSA (§2.3) and wakes the origination pass; the route
     /// push then sends its first `Full`. `topology_changed`: strict LSA
     /// checking saw a router other than us change an installed LSA (§2.2).
-    pub(super) async fn restart_tick(&self, topology_changed: bool) {
+    pub async fn restart_tick(&self, topology_changed: bool) {
         if !self.restart_active() {
             return;
         }

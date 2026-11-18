@@ -538,4 +538,43 @@ mod tests {
         assert_eq!(pushed_on(2).await, full);
         task.abort();
     }
+
+    /// RFC 3623 restart mode (#1145): nothing is pushed (not even a
+    /// connection made) until it ends, then the first `Full` goes out.
+    #[tokio::test]
+    async fn restart_mode_holds_back_the_first_full() {
+        use nos_test_support::{Fake, Fakes};
+
+        let f = Fakes::start(&[Fake::Watchdog, Fake::Ribd("rt1".into())]);
+        let wire = Arc::new(crate::link::tests::wire::Wire::default());
+        let links = LinkManager::with_opener(
+            1,
+            None,
+            crate::boot::BootCounter::in_memory(),
+            wire.opener(),
+        );
+        links.begin_restart(
+            [std::net::Ipv4Addr::new(9, 9, 9, 9)].into(),
+            Duration::from_millis(100),
+        );
+        let (_rt_tx, rt) = watch::channel(Some("rt1".to_string()));
+        let (_stop, shutdown) = watch::channel(false);
+        let task = spawn(f.watchdog_socket(), links.clone(), rt, shutdown, 4);
+        let ribd = &f.ribd["rt1"];
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(ribd.connections(), 0);
+        assert!(ribd.take_pushed().is_empty());
+        // The deadline has passed: the next tick ends the mode (timeout).
+        links.restart_tick(false).await;
+        assert!(!links.restart_active());
+        for _ in 0..500 {
+            if let Some(p) = ribd.take_pushed().into_iter().next() {
+                assert_eq!(frames_of(p), vec![OspfRouteUpdate::Full(Vec::new())]);
+                task.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no push after restart mode ended");
+    }
 }
