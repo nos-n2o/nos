@@ -1,3 +1,5 @@
+/// Login backends (`Aaa`): RADIUS servers and their order.
+pub mod aaa;
 /// Access lists (`Acl`): ordered permit/deny rules attached to interfaces.
 pub mod acl;
 /// The admin keystore (`Admin`): labelled secrets other sections reference.
@@ -61,6 +63,10 @@ pub mod switching_profile;
 /// Local login users (`User`) with argon2id password hashes.
 pub mod user;
 
+pub use aaa::{
+    Aaa, LoginBackend, RadiusServer, RoleAttribute, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
+    RADIUS_TIMEOUT_DEFAULT_SECS,
+};
 pub use acl::{flowspec_points, Acl, AclAction, AclProtocol, AclRule, FlowspecPoint, PortRange};
 pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN, SSH_HOST_KEY_LABEL};
 pub use as_path_list::AsPathList;
@@ -239,6 +245,13 @@ pub struct Config {
     #[cli(topic = LoginPolicy, words = "login-policy")]
     pub login_policy: LoginPolicy,
 
+    /// Login backends (RADIUS) and their order. `serde(default)` so on-disk
+    /// config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = Aaa)]
+    pub aaa: Aaa,
+
     /// Local users allowed to log in. `serde(default)` so on-disk config saved
     /// before this field existed still loads (`nos-configd` then seeds `admin`).
     #[serde(default)]
@@ -340,6 +353,7 @@ impl Default for Config {
             lldp: LldpSettings::default(),
             logging: LoggingSettings::default(),
             login_policy: LoginPolicy::default(),
+            aaa: Aaa::default(),
             users: Vec::new(),
             bfd_profiles: Vec::new(),
             sbfd_reflector: SbfdReflector::default(),

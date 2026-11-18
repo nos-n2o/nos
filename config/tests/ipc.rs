@@ -2170,7 +2170,7 @@ async fn roles_gate_what_a_person_may_do_over_ipc() {
     .await
     .unwrap();
     assert!(matches!(next_event(&mut r).await, Event::Committed { .. }));
-    assert_eq!(store.user_role("ro").await, ReadOnly);
+    assert_eq!(store.user_role("ro", None).await, ReadOnly);
 
     // The admin still edits and saves status.
     aw.send(Request::SaveStatus).await.unwrap();

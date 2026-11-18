@@ -44,13 +44,17 @@ impl fmt::Display for ListenAddr {
 struct Caller {
     role: Role,
     name: String,
+    /// The role an external login backend (RADIUS) put in the certificate:
+    /// used only for a user the config has no entry for (#1153).
+    claim: Option<UserRole>,
 }
 
 impl Caller {
-    fn from_peer(peer: PeerId) -> Option<Self> {
+    fn from_peer(peer: PeerId, claim: Option<&str>) -> Option<Self> {
         Some(Self {
             role: Role::parse(&peer.role)?,
             name: peer.name,
+            claim: claim.and_then(UserRole::from_claim),
         })
     }
 }
@@ -86,7 +90,8 @@ async fn serve(incoming: Incoming, store: ConfigStore) {
             return;
         }
     };
-    let Some(caller) = peer.and_then(Caller::from_peer) else {
+    let Some(caller) = peer.and_then(|p| Caller::from_peer(p, stream.peer_claim().as_deref()))
+    else {
         warn!("IPC peer's certificate carries no recognised role, dropping it");
         return;
     };
@@ -480,7 +485,14 @@ where
     };
     if matches!(caller.role, Role::User | Role::Restd) {
         let actor = effective_actor(caller, body_actor(&req));
-        let role = store.user_role(&actor).await;
+        let role = store
+            .user_role(
+                &actor,
+                (caller.role == Role::User)
+                    .then_some(caller.claim)
+                    .flatten(),
+            )
+            .await;
         if !authz::permitted(role, &actor, &req) {
             let shown = format!("{req:?}");
             warn!(

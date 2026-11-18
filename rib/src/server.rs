@@ -86,7 +86,8 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // the underlay table.
         // `logd` scopes a syslog collector's socket into its table's VRF.
         // `sshd` binds its listener inside the VRF; it never needs the table id.
-        RibRequest::GetVrfName => role == Role::Sshd || vrf_resolver(role),
+        // `watchdog` scopes a RADIUS server's socket into it (#1153).
+        RibRequest::GetVrfName => matches!(role, Role::Sshd | Role::Watchdog) || vrf_resolver(role),
         RibRequest::GetTableId => vrf_resolver(role),
         // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
         RibRequest::PushBgpRoutes(_)
@@ -1164,10 +1165,12 @@ mod authz_tests {
             Role::Logd,
             Role::Bfdd,
             Role::Sshd,
+            Role::Watchdog,
         ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }
         assert!(!allowed(Role::Sshd, &RibRequest::GetTableId));
+        assert!(!allowed(Role::Watchdog, &RibRequest::GetTableId));
         assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));
     }
 

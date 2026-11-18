@@ -11,6 +11,12 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 - Singleton `LoginPolicy { max_failures: u8 (1..=100, default 5), lockout_window_secs: u32 (1..=86400, default 60) }`, `serde(default)` so older configs load; no op, edited through the generic path edit (`set login-policy max-failures 2`), diffed field-level (`ConfigDiff.login_policy`, `DiffScope::LoginPolicy`).
 - Read by `nos-restd` (`LoginGate`) and `nos-watchdogd` (per-connection cutoff, `max_failures` only; `lockout_window_secs` is REST-only); see `docs/architecture/auth.md`.
 
+## Login backends (`Config.aaa`, #1153)
+
+- Singleton `Aaa { servers: Vec<RadiusServer>, login_order: Vec<LoginBackend>, role_attribute: RoleAttribute }`, `serde(default)`, no op (generic path edit: `set aaa radius-server <name> address ...`), diffed field-level (`ConfigDiff.aaa`, `DiffScope::Aaa`).
+- `RadiusServer.secret_ref` is a keystore label validated like BGP's `key_ref` (must exist and be non-empty); `Aaa.order()` is the effective order (`local` when empty).
+- Read by `nos-watchdogd`'s login broker; see `docs/architecture/auth.md`.
+
 ## Nesting one level under a parent
 
 - `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`; `StaticRoute` nests one level under `StaticRoutingInstance` the same way.

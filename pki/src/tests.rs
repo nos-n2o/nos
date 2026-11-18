@@ -207,6 +207,26 @@ fn csr_signing_takes_the_key_but_never_the_identity() {
         Some(PeerId::new("user", "alice"))
     );
 
+    // A claim rides along as a second SAN and never replaces the identity.
+    let (csr2, _) = generate_csr().unwrap();
+    let claimed = ca
+        .sign_csr_claiming(
+            &csr2,
+            &PeerId::new("user", "carol"),
+            "operator",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    assert_eq!(
+        PeerId::from_cert_der(&claimed),
+        Some(PeerId::new("user", "carol"))
+    );
+    assert_eq!(
+        PeerId::claim_from_cert_der(&claimed).as_deref(),
+        Some("operator")
+    );
+    assert_eq!(PeerId::claim_from_cert_der(&cert), None);
+
     // …and the result is a usable identity on the client's own key.
     let (csr, key) = generate_csr().unwrap();
     let cert = ca

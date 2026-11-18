@@ -820,7 +820,7 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
         Role::Bfdd,
     ];
     // `nos-sshd` binds inside the VRF but never needs the table id.
-    let vrf_name = [&vrf[..], &[Role::Sshd]].concat();
+    let vrf_name = [&vrf[..], &[Role::Sshd, Role::Watchdog]].concat();
     let igp = [Role::User, Role::Restd, Role::Bgpd];
     let cases: [Case; 7] = [
         (
