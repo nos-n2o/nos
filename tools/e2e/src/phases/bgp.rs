@@ -4728,9 +4728,14 @@ pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     log("withdrawing path 2 drops its copy and its import only");
     let red_gone = format!("vpn route unimported table={VPN_TABLE}");
     let red_before = a.count_fresh(&red_gone).await;
-    a.wait(&format!(
-        "vpn route withdrawn peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 path_id=2"
-    ))
+    // The speaker withdraws 150 s after its session came up, past the send half.
+    a.wait_new(
+        &format!(
+            "vpn route withdrawn peer={IP_G} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 path_id=2"
+        ),
+        0,
+        150,
+    )
     .await?;
     a.wait("vpn route unimported table=vrf-blue").await?;
     a.assert_quiet(&red_gone, red_before, 5).await?;
