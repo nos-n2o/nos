@@ -76,6 +76,7 @@ pub struct Packet {
 }
 
 fn md5(parts: &[&[u8]]) -> [u8; 16] {
+    // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- RFC 2865/2866 mandate MD5
     let mut h = Md5::new();
     for p in parts {
         h.update(p);
