@@ -392,3 +392,5 @@ Every route above, and every config-tree path with its JSON schema, is described
 - **Browsable**: `https://<address>:<port>/swagger-ui/`, an interactive explorer served by the router itself, with no internet access needed. A browser needs your REST client certificate and key installed, and `rest-ca.crt` trusted, before it can open it.
 
 The document has 206 paths: the fixed routes listed on this page and one path per config-tree location (`/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/hold-time`, and so on). Use it as the complete field-level reference for request and response bodies.
+
+A RESTCONF (RFC 8040) view of the same config is served under `/restconf`: see [restconf.md](restconf.md).
