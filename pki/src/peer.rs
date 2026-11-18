@@ -5,6 +5,9 @@ use std::fmt::{self, Write};
 
 use x509_parser::extensions::GeneralName;
 
+/// The pseudo-role of the extra URI SAN that carries a role claim.
+pub(crate) const CLAIM_ROLE: &str = "claim";
+
 /// Who a peer is: the `nos://<role>/<name>` URI SAN of its certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeerId {
@@ -48,6 +51,19 @@ impl PeerId {
             }
         }
         Some(Self::new(role, String::from_utf8(bytes).ok()?))
+    }
+
+    /// The role claim (`nos://claim/<claim>` URI SAN) a CA-signed certificate
+    /// carries, if any: see `Ca::sign_csr_claiming`.
+    pub(crate) fn claim_from_cert_der(der: &[u8]) -> Option<String> {
+        let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+        let san = cert.subject_alternative_name().ok()??;
+        san.value.general_names.iter().find_map(|g| match g {
+            GeneralName::URI(u) => Self::parse(u)
+                .filter(|p| p.role == CLAIM_ROLE)
+                .map(|p| p.name),
+            _ => None,
+        })
     }
 
     /// The identity a (CA-signed) certificate asserts. The CA writes exactly

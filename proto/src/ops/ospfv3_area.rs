@@ -230,6 +230,8 @@ mod tests {
                         ranges: Vec::new(),
                         area_type: crate::schema::OspfAreaType::Normal,
                         stub_default_cost: None,
+                        nssa_translate_always: false,
+                        nssa_default_originate: false,
                     },
                     Ospfv3Area {
                         area_id: area_id("0.0.0.1"),
@@ -237,6 +239,8 @@ mod tests {
                         ranges: Vec::new(),
                         area_type: crate::schema::OspfAreaType::Normal,
                         stub_default_cost: None,
+                        nssa_translate_always: false,
+                        nssa_default_originate: false,
                     },
                 ],
             )],

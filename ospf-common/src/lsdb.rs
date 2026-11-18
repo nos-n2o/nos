@@ -51,6 +51,10 @@ pub struct Lsdb<L: Lsa> {
     /// Advertising routers whose topology LSA changed since the last
     /// `take_topology_changes` — see `Lsa::is_topology`.
     topology_changes: HashSet<Ipv4Addr>,
+    /// The subset of `topology_changes` that replaced or flushed an LSA
+    /// already held (not a first install): RFC 3623 §2.2's restarting-router
+    /// check, see `take_superseded_changes`.
+    superseded_changes: HashSet<Ipv4Addr>,
     /// Overload limit (#1146): own router ID plus the shared cap — see
     /// `set_limit`.
     limit: Option<(Ipv4Addr, Arc<AtomicU32>)>,
@@ -74,6 +78,7 @@ impl<L: Lsa> Default for Lsdb<L> {
             reflected: HashSet::new(),
             reflect_notify: None,
             topology_changes: HashSet::new(),
+            superseded_changes: HashSet::new(),
             limit: None,
             foreign: 0,
             refused: 0,
@@ -177,6 +182,12 @@ impl<L: Lsa> Lsdb<L> {
         self.topology_changes.drain().collect()
     }
 
+    /// Like `take_topology_changes`, only for LSAs that replaced or flushed
+    /// one already held.
+    pub fn take_superseded_changes(&mut self) -> Vec<Ipv4Addr> {
+        self.superseded_changes.drain().collect()
+    }
+
     /// Records `lsa`'s origin when installing it over `old` is a topology change.
     fn note_topology(&mut self, lsa: &L, old: Option<&L>) {
         let flush = lsa.header().age() >= MAX_AGE;
@@ -186,8 +197,11 @@ impl<L: Lsa> Lsdb<L> {
                 Some(o) => !o.same_content(lsa) || (flush && o.header().age() < MAX_AGE),
             };
         if changed {
-            self.topology_changes
-                .insert(lsa.header().advertising_router());
+            let origin = lsa.header().advertising_router();
+            self.topology_changes.insert(origin);
+            if old.is_some() {
+                self.superseded_changes.insert(origin);
+            }
         }
     }
 
@@ -372,8 +386,10 @@ mod tests {
         assert!(db.take_topology_changes().is_empty(), "drained once");
         db.install(with(9, 2, 5, 0));
         assert!(db.take_topology_changes().is_empty(), "identical refresh");
+        assert!(db.take_superseded_changes().is_empty(), "first install");
         db.install(with(9, 3, 6, 0));
         db.install(with(9, 4, 7, 0));
+        assert_eq!(db.take_superseded_changes(), vec![origin], "changed copy");
         assert_eq!(
             db.take_topology_changes(),
             vec![origin],

@@ -94,6 +94,117 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     revoke_restarted_daemon(w).await
 }
 
+/// #1153: RADIUS login. A scripted server (`nos-radius-stub`) knows an admin
+/// and a read-only user; `login-order radius local` makes the watchdog ask it
+/// first. Checks the role carried in the certificate (admin edits, read-only
+/// is refused), that a reject never falls back to the local user of the same
+/// name, and that a silent server does.
+pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
+    w.dock
+        .start_nos_tool(
+            RADIUS_STUB,
+            NET,
+            IP_RADIUS_STUB.s(),
+            &[
+                "nos-radius-stub",
+                "--secret",
+                RADIUS_SECRET,
+                "--user",
+                "rad-admin:pw-admin:admin",
+                "--user",
+                "rad-ro:pw-ro:read-only",
+            ],
+            &[],
+        )
+        .await?;
+    let a = w.a()?;
+
+    log("login-order radius local, one server");
+    a.edit(|c| {
+        c.admin.keys.push(nos_proto::AdminKey {
+            label: "radius".into(),
+            secret: RADIUS_SECRET.into(),
+        });
+        c.aaa.servers = vec![nos_proto::RadiusServer {
+            name: "stub".into(),
+            address: IP_RADIUS_STUB.s().parse()?,
+            port: None,
+            routing_table: Some("rt1".into()),
+            secret_ref: "radius".into(),
+            timeout_secs: Some(1),
+            retries: Some(0),
+        }];
+        c.aaa.login_order = vec![
+            nos_proto::LoginBackend::Radius,
+            nos_proto::LoginBackend::Local,
+        ];
+        Ok(())
+    })
+    .await?;
+
+    log("a RADIUS admin (no local entry) provisions the router");
+    let accepted = a.count("login accepted by radius user=\"rad-admin\" role=\"admin\"");
+    let (code, out) = run_provision(
+        w,
+        &["--login-user", "rad-admin", "--login-password", "pw-admin"],
+    )
+    .await?;
+    if code != 0 || !out.contains("provisioning complete") {
+        bail!("a RADIUS admin should provision, got exit {code}: {out}");
+    }
+    a.wait_new(
+        "login accepted by radius user=\"rad-admin\" role=\"admin\"",
+        accepted,
+        15,
+    )
+    .await?;
+
+    log("a RADIUS read-only user logs in but its role refuses the edits");
+    let refused = a.count("the user's role does not allow it");
+    let (code, _) =
+        run_provision(w, &["--login-user", "rad-ro", "--login-password", "pw-ro"]).await?;
+    if code == 0 {
+        bail!("a read-only RADIUS user must not be able to provision");
+    }
+    a.wait_new("the user's role does not allow it", refused, 15)
+        .await?;
+
+    log("a RADIUS reject never falls back to a local user with that password");
+    let rejected = a.count(&format!("radius login rejected user=\"{E2E_USER}\""));
+    let (code, out) = provision_as(w, E2E_PASSWORD).await?;
+    if code == 0 || !out.contains("login refused") {
+        bail!("a RADIUS reject must end the login, got exit {code}: {out}");
+    }
+    a.wait_new(
+        &format!("radius login rejected user=\"{E2E_USER}\""),
+        rejected,
+        15,
+    )
+    .await?;
+
+    log("with the server gone the local user logs in");
+    w.dock.container_remove(RADIUS_STUB).await;
+    let silent = a.count("no radius server answered");
+    let (code, out) = provision_as(w, E2E_PASSWORD).await?;
+    if code != 0 || !out.contains("provisioning complete") {
+        bail!("a silent RADIUS server must fall back to local, got exit {code}: {out}");
+    }
+    a.wait_new("no radius server answered", silent, 15).await?;
+
+    log("back to local-only login");
+    a.edit(|c| {
+        c.aaa = nos_proto::Aaa::default();
+        c.admin.keys.retain(|k| k.label != "radius");
+        Ok(())
+    })
+    .await?;
+    let (code, out) = provision_as(w, E2E_PASSWORD).await?;
+    if code != 0 {
+        bail!("local login after removing aaa failed: {code}: {out}");
+    }
+    Ok(())
+}
+
 /// #1148: `login-policy max-failures 2` is applied live by `nos-restd` and
 /// `nos-watchdogd` (both log it), two bad logins then lock a user out (429,
 /// `login lockout started`), and restoring the defaults is applied too.

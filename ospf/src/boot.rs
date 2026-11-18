@@ -3,11 +3,14 @@
 //! fresh, strictly larger value, so a neighbor's replay check never sees the
 //! sequence go backwards across a link restart *or* a process restart.
 
+use std::collections::BTreeSet;
 use std::io::{self, Write};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nos_ospf_common::restart;
 use tracing::warn;
 
 pub struct BootCounter {
@@ -93,21 +96,26 @@ fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// RFC 3623 graceful-restart marker (`<instance>.gr`): the grace deadline in
-/// unix seconds, written before the Grace-LSAs go out so the respawned
-/// process skips RFC 6987's on-startup period while its helpers keep the old
-/// topology. Atomic, like the boot count.
-pub fn write_grace_marker(path: &Path, deadline: u64) -> io::Result<()> {
-    write_atomic(path, &deadline.to_string())
+/// RFC 3623 graceful-restart marker (`<instance>.gr`, format in
+/// `nos_ospf_common::restart`): the grace deadline and the `Full` neighbors,
+/// written before the Grace-LSAs go out so the respawned process enters
+/// restart mode and skips RFC 6987's on-startup period while its helpers
+/// keep the old topology. Atomic, like the boot count.
+pub fn write_grace_marker(
+    path: &Path,
+    deadline: u64,
+    neighbors: &BTreeSet<Ipv4Addr>,
+) -> io::Result<()> {
+    write_atomic(path, &restart::encode_marker(deadline, neighbors))
 }
 
-/// Consumes the marker (deleted whatever its content): `true` only if its
+/// Consumes the marker (deleted whatever its content): `Some` only if its
 /// deadline is still ahead of `now` and at most a `u16` grace period away
-/// (rejects a clock jump or garbage). Missing, unreadable or corrupt: `false`.
-pub fn take_grace_marker(path: &Path, now: u64) -> bool {
+/// (rejects a clock jump or garbage). Missing, unreadable or corrupt: `None`.
+pub fn take_grace_marker(path: &Path, now: u64) -> Option<restart::Marker> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
         Err(e) => {
             warn!(error = %e, "cannot read ospf graceful restart marker");
             String::new()
@@ -116,12 +124,11 @@ pub fn take_grace_marker(path: &Path, now: u64) -> bool {
     if let Err(e) = std::fs::remove_file(path) {
         warn!(error = %e, "cannot delete ospf graceful restart marker");
     }
-    if let Ok(deadline) = content.trim().parse::<u64>() {
-        now < deadline && deadline <= now + u64::from(u16::MAX)
-    } else {
-        warn!("corrupt ospf graceful restart marker, ignoring");
-        false
+    let marker = restart::parse_marker(&content, now);
+    if marker.is_none() {
+        warn!("corrupt or expired ospf graceful restart marker, ignoring");
     }
+    marker
 }
 
 #[cfg(test)]
@@ -134,19 +141,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nos-gr-{}", std::process::id()));
         let path = dir.join("i.gr");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!take_grace_marker(&path, 1000));
-        write_grace_marker(&path, 1120).unwrap();
-        assert!(take_grace_marker(&path, 1000));
+        let nb: BTreeSet<Ipv4Addr> = [Ipv4Addr::new(2, 2, 2, 2)].into();
+        assert!(take_grace_marker(&path, 1000).is_none());
+        write_grace_marker(&path, 1120, &nb).unwrap();
+        let m = take_grace_marker(&path, 1000).unwrap();
+        assert_eq!((m.deadline, m.neighbors), (1120, nb.clone()));
         assert!(!path.exists());
-        assert!(!take_grace_marker(&path, 1000));
+        assert!(take_grace_marker(&path, 1000).is_none());
         // At or past the deadline.
-        write_grace_marker(&path, 1000).unwrap();
-        assert!(!take_grace_marker(&path, 1000));
-        // Further ahead than any u16 grace period.
-        write_grace_marker(&path, 1000 + 65_536).unwrap();
-        assert!(!take_grace_marker(&path, 1000));
+        write_grace_marker(&path, 1000, &nb).unwrap();
+        assert!(take_grace_marker(&path, 1000).is_none());
         std::fs::write(&path, "garbage").unwrap();
-        assert!(!take_grace_marker(&path, 1000));
+        assert!(take_grace_marker(&path, 1000).is_none());
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -175,7 +181,7 @@ mod tests {
         std::os::unix::fs::symlink(&victim, dir.path().join("i.tmp")).unwrap();
         let path = dir.path().join("i.boot");
         assert_eq!(BootCounter::persistent(path).next(), 1);
-        write_grace_marker(&dir.path().join("i.gr"), 5).unwrap();
+        write_grace_marker(&dir.path().join("i.gr"), 5, &BTreeSet::new()).unwrap();
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
         let mut names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

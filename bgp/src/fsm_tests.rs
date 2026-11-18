@@ -578,9 +578,10 @@ fn vpn_encodes_as_safi_128_with_its_label_rd_and_next_hop() {
     );
     assert_eq!(u.attributes.unwrap().local_pref, Some(150));
 
-    let u = expect_update(outbound_update_to_message(OutboundUpdate::WithdrawVpn((
-        rd, prefix,
-    ))));
+    let u = expect_update(outbound_update_to_message(OutboundUpdate::WithdrawVpn(
+        (rd, prefix),
+        None,
+    )));
     assert!(u.attributes.is_none() && u.mp_reach.is_empty());
     let mp = &u.mp_unreach[0];
     assert_eq!((mp.afi, mp.safi), (AFI_IPV6, message::SAFI_VPN));

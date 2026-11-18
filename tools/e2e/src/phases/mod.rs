@@ -149,6 +149,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-abr" => ospf::ospfv3_abr(w).await,
         "ospfv3-area-range" => ospf::ospfv3_area_range(w).await,
         "ospfv3-stub" => ospf::ospfv3_stub(w).await,
+        "ospfv3-nssa" => ospf::ospfv3_nssa(w).await,
         "ospfv3-lsinfinity" => ospf::ospfv3_lsinfinity(w).await,
         "ospfv3-lsinfinity-asbr" => ospf::ospfv3_lsinfinity_asbr(w).await,
         "ospfv3-graceful-restart" => ospf::ospfv3_graceful_restart(w).await,
@@ -177,6 +178,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "pki" => pki::pki(w).await,
         "pki-crl" => pki::pki_crl(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
+        "aaa" => pki::aaa(w).await,
         "logd-memory" => crate::logd_mem::phase(w).await,
         "config-mem" => crate::logd_mem::config_phase(w).await,
         other => bail!("unknown phase '{other}'"),
@@ -278,6 +280,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospf-stub",
             "ospfv3-stub",
             "ospf-nssa",
+            "ospfv3-nssa",
             "ospf-external-flood",
             "ospf-virtual-link",
             "ospf-abr-transit",
@@ -355,7 +358,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
-        "pki-suite" => &["up", "established", "pki", "pki-rotation"],
+        "pki-suite" => &["up", "established", "pki", "aaa", "pki-rotation"],
         // Slow (20-40 min, 30,000 logins): its own CI job, off the fast pki-suite (#677).
         "pki-crl" => &["up", "established", "pki-crl"],
         // Not run by CI (minutes of runtime, memory thresholds are the flakiest
@@ -489,6 +492,7 @@ pub const ALL: &[&str] = &[
     "ospf-stub",
     "ospfv3-stub",
     "ospf-nssa",
+    "ospfv3-nssa",
     "ospf-external-flood",
     "ospf-virtual-link",
     "ospf-abr-transit",
@@ -518,6 +522,7 @@ pub const ALL: &[&str] = &[
     "ospf-max-lsa",
     "ospf-remote-lfa",
     "pki",
+    "aaa",
     "pki-rotation",
     "pki-crl",
     "logd-memory",

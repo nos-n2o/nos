@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-19 {
+  revision 2026-11-21 {
     description "Generated.";
   }
 
@@ -1130,6 +1130,14 @@ module nos-config {
         type uint16;
         description "Set the cost of the default route an ABR sends into this stub area.";
       }
+      leaf nssa_translate_always {
+        type boolean;
+        description "Always translate this NSSA's Type-7 routes, as its area border router.";
+      }
+      leaf nssa_default_originate {
+        type boolean;
+        description "Send a default route into this NSSA, as its area border router.";
+      }
     }
     leaf extended_lsa {
       type boolean;
@@ -1804,6 +1812,52 @@ module nos-config {
     leaf lockout_window_secs {
       type uint32;
       description "Set the lockout window in seconds.";
+    }
+  }
+  container aaa {
+    description "Configure login backends.";
+    list servers {
+      key "name";
+      description "Add a RADIUS server.";
+      leaf name {
+        type string;
+      }
+      leaf address {
+        type inet:ip-address;
+        description "Set a RADIUS server's address.";
+      }
+      leaf port {
+        type uint16;
+        description "Set a RADIUS server's UDP port.";
+      }
+      leaf routing_table {
+        type string;
+        description "Send RADIUS requests from inside a routing table's VRF.";
+      }
+      leaf secret_ref {
+        type string;
+        description "Name the admin key holding the shared secret.";
+      }
+      leaf timeout_secs {
+        type uint8;
+        description "Set the seconds to wait for one reply.";
+      }
+      leaf retries {
+        type uint8;
+        description "Set the extra attempts before the next server.";
+      }
+    }
+    leaf-list login_order {
+      type string;
+      description "Set the order login backends are tried in.";
+    }
+    leaf role_attribute {
+      type enumeration {
+        enum "FilterId";
+        enum "Class";
+        enum "ReplyMessage";
+      }
+      description "Set the RADIUS attribute that carries the role.";
     }
   }
   list users {

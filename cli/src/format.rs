@@ -1856,6 +1856,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         users,
         logging,
         login_policy,
+        aaa,
         bfd_profiles,
         sbfd_reflector,
         spanning_tree,
@@ -1872,6 +1873,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         .iter()
         .chain(logging)
         .chain(login_policy)
+        .chain(aaa)
         .chain(sbfd_reflector)
         .chain(spanning_tree)
         .chain(admin)

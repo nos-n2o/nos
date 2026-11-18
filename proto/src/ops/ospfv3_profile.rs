@@ -557,6 +557,8 @@ mod tests {
             ranges: Vec::new(),
             area_type: crate::schema::OspfAreaType::Normal,
             stub_default_cost: None,
+            nssa_translate_always: false,
+            nssa_default_originate: false,
         }
     }
 

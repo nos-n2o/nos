@@ -94,7 +94,7 @@ fn root_field(
             policy_definitions, community_aliases, community_groups, as_path_lists, prefix_lists,
             broadcast_domains, switching_profiles, port_aggregates, users, bfd_profiles,
             stp_port_profiles, acls;
-        values: hostname, lldp, logging, login_policy, sbfd_reflector, spanning_tree, admin
+        values: hostname, lldp, logging, login_policy, aaa, sbfd_reflector, spanning_tree, admin
     );
     panic!("Config.{} has no typed diff", f.name);
 }
@@ -282,6 +282,7 @@ fn put(d: &mut ConfigDiff, name: &str, mut fields: Vec<FieldDiff>, subs: Vec<Sec
         "users" => d.users = subs,
         "logging" => d.logging = fields,
         "login_policy" => d.login_policy = fields,
+        "aaa" => d.aaa = fields,
         "bfd_profiles" => d.bfd_profiles = subs,
         "sbfd_reflector" => d.sbfd_reflector = fields,
         "spanning_tree" => d.spanning_tree = fields,

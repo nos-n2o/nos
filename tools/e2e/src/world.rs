@@ -128,7 +128,7 @@ impl World {
         self.start(B, None, watchdog_args).await
     }
 
-    const CONTAINERS: [&'static str; 14] = [
+    const CONTAINERS: [&'static str; 15] = [
         "router-a",
         "router-b",
         "router-c",
@@ -141,6 +141,7 @@ impl World {
         H_HOST,
         RPKI_CACHE,
         RTR_STUB,
+        RADIUS_STUB,
         SYSLOG_COLLECTOR,
         BMP_COLLECTOR,
     ];

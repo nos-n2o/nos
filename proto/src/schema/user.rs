@@ -29,6 +29,26 @@ pub enum UserRole {
     ReadOnly,
 }
 
+impl UserRole {
+    /// The text a certificate or a RADIUS reply carries for this role.
+    #[must_use]
+    pub fn claim(self) -> &'static str {
+        match self {
+            UserRole::Admin => "admin",
+            UserRole::Operator => "operator",
+            UserRole::ReadOnly => "read-only",
+        }
+    }
+
+    /// Inverse of [`UserRole::claim`] (ASCII case-insensitive, trimmed).
+    #[must_use]
+    pub fn from_claim(text: &str) -> Option<Self> {
+        [UserRole::Admin, UserRole::Operator, UserRole::ReadOnly]
+            .into_iter()
+            .find(|r| r.claim().eq_ignore_ascii_case(text.trim()))
+    }
+}
+
 /// A local user who may log in to `nos-cli` and call the REST API (mutual
 /// TLS after a password login). What it may do is its `role`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

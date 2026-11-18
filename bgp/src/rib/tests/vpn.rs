@@ -130,7 +130,7 @@ fn vpns(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
         .filter(|u| {
             matches!(
                 u,
-                OutboundUpdate::AnnounceVpn(_) | OutboundUpdate::WithdrawVpn(_)
+                OutboundUpdate::AnnounceVpn(_) | OutboundUpdate::WithdrawVpn(..)
             )
         })
         .collect()
@@ -253,7 +253,7 @@ fn one_prefix_under_two_rds_is_two_routes_both_reflected_labels_unchanged() {
     assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 1);
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD1, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD1, P), None)]
     );
 
     // Peer loss withdraws what is left.
@@ -261,7 +261,7 @@ fn one_prefix_under_two_rds_is_two_routes_both_reflected_labels_unchanged() {
     assert_eq!(held(&rib, AddressFamily::Vpnv4Unicast).len(), 0);
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD2, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD2, P), None)]
     );
 }
 
@@ -307,7 +307,7 @@ fn reflection_follows_rfc_4456_and_loops_are_dropped() {
         .any(|(p, ..)| *p == addr(CLIENT_SRC)));
     assert_eq!(
         vpns(&mut rx[3]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD1, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD1, P), None)]
     );
     // Our own router id as ORIGINATOR_ID: dropped too.
     let mut own = reach("10.0.0.7", vec![], vec![nlri(RD2, P, 200)]);
@@ -369,7 +369,7 @@ fn import_policy_reject_drops_a_held_route_and_rts_never_gate_storage() {
     assert_eq!(rib.peer_stats(addr(SRC)).rejected, 1, "BMP stat 0");
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD1, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD1, P), None)]
     );
 }
 
@@ -443,7 +443,10 @@ fn graceful_restart_keeps_listed_vpn_families_until_end_of_rib() {
     assert_eq!(rib.stale_count(addr(SRC)), 2);
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD1, "2001:db8:1::/48"))]
+        vec![OutboundUpdate::WithdrawVpn(
+            key(RD1, "2001:db8:1::/48"),
+            None
+        )]
     );
 
     let _src = reg(&mut rib, SRC, false, false, afs());
@@ -464,7 +467,7 @@ fn graceful_restart_keeps_listed_vpn_families_until_end_of_rib() {
         vec![key(RD1, P)]
     );
     assert_eq!(rib.stale_count(addr(SRC)), 0);
-    assert!(vpns(&mut rx[1]).contains(&OutboundUpdate::WithdrawVpn(key(RD2, "10.20.0.0/24"))));
+    assert!(vpns(&mut rx[1]).contains(&OutboundUpdate::WithdrawVpn(key(RD2, "10.20.0.0/24"), None)));
 }
 
 #[test]
@@ -840,7 +843,7 @@ fn a_label_change_reannounces_a_remove_withdraws_and_tables_are_isolated() {
     rib.apply_vpn_prefixes("red", full(vec![]));
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P), None)]
     );
     rib.apply_vpn_prefixes(
         "blue",
@@ -848,7 +851,7 @@ fn a_label_change_reannounces_a_remove_withdraws_and_tables_are_isolated() {
     );
     assert_eq!(
         vpns(&mut rx[1]),
-        vec![OutboundUpdate::WithdrawVpn(key(RD2, "10.30.0.0/24"))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD2, "10.30.0.0/24"), None)]
     );
 }
 
@@ -921,7 +924,7 @@ fn a_vrf_export_waits_for_the_end_of_a_deferral_and_reaches_a_late_peer() {
     assert_eq!(vpns(&mut late), [] as [OutboundUpdate; 0]);
     assert_eq!(
         vpns(&mut src),
-        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P))]
+        vec![OutboundUpdate::WithdrawVpn(key(RD_RED, P), None)]
     );
 }
 
@@ -1371,4 +1374,87 @@ fn import_ties_across_peers_are_ordered_by_peer_address() {
     for _ in 0..8 {
         assert_eq!(red_paths(&rib)[0].0, addr("10.9.0.2"));
     }
+}
+
+// ---- Add-Path send (#1134) ----
+
+const AP: &str = "10.0.0.8"; // iBGP observer we send VPN Add-Path to
+
+fn ap_peer(rib: &mut BgpRib, count: Option<usize>) -> mpsc::Receiver<OutboundUpdate> {
+    rib.set_peer_add_path_send_count(addr(AP), count);
+    let (tx, rx) = test_channel();
+    rib.peer_established(
+        addr(AP),
+        true,
+        Some(addr("10.0.0.254")),
+        afs(),
+        true,
+        None,
+        false,
+        false,
+        HashSet::from([AddressFamily::Vpnv4Unicast]),
+        accept_all_policy(),
+        tx,
+    );
+    rx
+}
+
+fn copy(id: u32, label: u32, as_path: Vec<u32>) -> UpdateMessage {
+    let mut n = nlri(RD1, P, label);
+    n.path_id = Some(id);
+    reach("10.9.9.9", as_path, vec![n])
+}
+
+fn wd(id: u32) -> UpdateMessage {
+    let mut n = nlri(RD1, P, 0);
+    n.path_id = Some(id);
+    unreach(vec![n])
+}
+
+/// `(label or 0 for a withdrawal, path id)` of every VPN update.
+fn events(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<(u32, Option<u32>)> {
+    vpns(rx)
+        .into_iter()
+        .map(|u| match u {
+            OutboundUpdate::AnnounceVpn(a) => (a.labels[0], a.route.path_id),
+            OutboundUpdate::WithdrawVpn(_, id) => (0, id),
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+#[test]
+fn add_path_peer_gets_every_copy_others_the_best() {
+    let (mut rib, mut rx) = setup();
+    let mut ap = ap_peer(&mut rib, None);
+    let _ = (events(&mut ap), advs(&mut rx[2]));
+    feed(&mut rib, SRC, false, &copy(1, 101, vec![65001]));
+    feed(&mut rib, SRC, false, &copy(2, 102, vec![65001, 65009]));
+    let got = events(&mut ap);
+    assert!(
+        got.contains(&(101, Some(1))) && got.contains(&(102, Some(2))),
+        "{got:?}"
+    );
+    // A peer without Add-Path: exactly one copy, the best, no id.
+    assert_eq!(events(&mut rx[2]).last(), Some(&(101, None)));
+
+    // Withdrawing one copy withdraws only its id; the other stays.
+    feed(&mut rib, SRC, false, &wd(1));
+    let got = events(&mut ap);
+    assert!(got.contains(&(0, Some(1))), "{got:?}");
+    assert!(!got.contains(&(0, Some(2))), "{got:?}");
+    // Ids are never recycled once withdrawn: the next copy gets a fresh one.
+    feed(&mut rib, SRC, false, &copy(3, 103, vec![65001]));
+    assert!(events(&mut ap).contains(&(103, Some(3))));
+}
+
+#[test]
+fn add_path_send_count_limits_copies() {
+    let (mut rib, _rx) = setup();
+    let mut ap = ap_peer(&mut rib, Some(1));
+    feed(&mut rib, SRC, false, &copy(1, 101, vec![65001, 65009]));
+    assert_eq!(events(&mut ap), [(101, Some(1))]);
+    // A better copy displaces it and takes its id (implicit replace).
+    feed(&mut rib, SRC, false, &copy(2, 102, vec![65001]));
+    assert_eq!(events(&mut ap), [(102, Some(1))]);
 }

@@ -138,6 +138,11 @@ pub const RPKI_WRONG_ASN: u32 = 64999;
 pub const RTR_STUB: &str = "rtr-stub";
 pub const IP_RTR_STUB: Addr = Addr("10.50.0.10");
 pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
+/// `aaa`, #1153: `nos-radius-stub`, the scripted RADIUS server router-a logs
+/// users in against, and the shared secret both sides hold.
+pub const RADIUS_STUB: &str = "radius-stub";
+pub const IP_RADIUS_STUB: Addr = Addr("10.50.0.16");
+pub const RADIUS_SECRET: &str = "radius-sh4red";
 /// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
 /// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
 /// RFC 8097 "invalid", which router-a must ignore from eBGP.
@@ -469,6 +474,10 @@ pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
 /// helps, so its own Router-LSA changes (a topology change). No other phase
 /// uses it.
 pub const OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS: &str = "203.0.113.113/32";
+/// `ospf-graceful-restart`: router-b's loopback in OSPF from the start, so
+/// router-a (the restarter) holds an OSPF route whose kernel entry must never
+/// be removed while its `nos-ospfd` restarts (#1145). No other phase uses it.
+pub const OSPF_GR_PEER_LOOPBACK_ADDRESS: &str = "203.0.113.114/32";
 /// `ospf-opaque`: an FRR router (`router-f`, pulled, same tag as
 /// `tools/bench-bgp.sh`'s `FRR_IMAGE`) on its own network with router-a's
 /// eth1 only, so router-b can hear FRR's LSAs only through router-a.
@@ -580,6 +589,8 @@ pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 /// `ospfv3` leaves both routers in extended mode.
 pub const LSA_TYPE_AS_EXTERNAL_V3: u16 = 0x4005;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0xC025;
+/// RFC 5340 §A.4.8 NSSA-LSA (0x2007, RFC 3101 Type-7), as `lsa_type` prints.
+pub const LSA_TYPE_NSSA_V3: u16 = 0x2007;
 /// RFC 5340 Inter-Area-Prefix-LSA (0x2003) and E-Inter-Area-Prefix (0xA023).
 pub const LSA_TYPE_INTER_AREA_PREFIX_V3: u16 = 0x2003;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;
