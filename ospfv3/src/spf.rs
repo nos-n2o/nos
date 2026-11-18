@@ -1488,11 +1488,14 @@ mod tests {
             ),
         ]);
         let routes = compute(root, &lsas);
-        let routed: Vec<String> = routes.iter().map(|r| r.prefix.to_string()).collect();
+        let routed_prefixes: Vec<String> = routes.iter().map(|r| r.prefix.to_string()).collect();
         for p in ["a", "b", "c"] {
-            assert!(routed.contains(&format!("2001:db8:{p}::/48")), "{routed:?}");
+            assert!(
+                routed_prefixes.contains(&format!("2001:db8:{p}::/48")),
+                "{routed_prefixes:?}"
+            );
         }
-        assert!(!routed
+        assert!(!routed_prefixes
             .iter()
             .any(|p| p.contains(":d:") || p.contains(":f:")));
         let translated = nssa_translations(root, &lsas);

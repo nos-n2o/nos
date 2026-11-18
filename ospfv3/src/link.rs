@@ -3084,11 +3084,11 @@ impl LinkManager {
         let stub_areas = self.stub_areas.lock().unwrap().clone();
         let nssa_areas = self.nssa_areas.lock().unwrap().clone();
         let attached = self.attached_areas().await;
-        let mut type5: HashMap<Ipv6Net, AsExternalLsaBody> =
+        let mut as_ext: HashMap<Ipv6Net, AsExternalLsaBody> =
             self.nssa_translated.lock().unwrap().clone();
         if attached.is_empty() || attached.iter().any(|a| !stub_areas.contains_key(a)) {
             for &prefix in &redistributed {
-                type5.insert(
+                as_ext.insert(
                     prefix,
                     AsExternalLsaBody {
                         type2: false,
@@ -3103,7 +3103,7 @@ impl LinkManager {
                 );
             }
         }
-        for (prefix, body) in type5 {
+        for (prefix, body) in as_ext {
             let lsid = self.lsid(lsa::LSA_TYPE_AS_EXTERNAL, prefix).await;
             done.as_scope.insert(install_self_originated(
                 &mut *self.as_lsdb.lock().await,
@@ -3127,18 +3127,18 @@ impl LinkManager {
             } else {
                 lsa::PREFIX_OPT_P
             };
-            let mut type7: Vec<(Ipv6Net, u32, u8, Option<Ipv6Addr>)> = redistributed
+            let mut nssa_lsas: Vec<(Ipv6Net, u32, u8, Option<Ipv6Addr>)> = redistributed
                 .iter()
                 .map(|&p| (p, metric, options, fa))
                 .collect();
             if abr && cfg.default_originate {
                 let cost = stub_areas.get(area_id).map_or(1, |&(_, cost)| cost);
-                type7.push((Ipv6Net::default(), cost, 0, None));
+                nssa_lsas.push((Ipv6Net::default(), cost, 0, None));
             }
             let lsdb = self.lsdb_for(*area_id).await;
             let mut lsdb = lsdb.lock().await;
             let done = done.areas.entry(*area_id).or_default();
-            for (prefix, metric, prefix_options, forwarding_address) in type7 {
+            for (prefix, metric, prefix_options, forwarding_address) in nssa_lsas {
                 let lsid = self.lsid(lsa::LSA_TYPE_NSSA, prefix).await;
                 done.insert(install_self_originated(
                     &mut lsdb,

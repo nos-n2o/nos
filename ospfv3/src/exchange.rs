@@ -76,6 +76,10 @@ pub fn on_lsr_received(
 /// in the area's; S2/S1 "reserved" is discarded unacked (§4.5 step 3); a
 /// Grace-LSA is exempt from the `MaxAge` discard (never held: `handle_lsu`
 /// acts on it at once, and its `MaxAge` copy is what ends a grace).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the three stores, the packet and the link's stub/nssa flags"
+)]
 pub fn on_lsu_received(
     adj: &mut AdjacencyData,
     area_lsdb: &mut Lsdb,
