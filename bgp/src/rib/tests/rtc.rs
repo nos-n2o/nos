@@ -125,7 +125,7 @@ fn rtcs(rx: &mut mpsc::Receiver<OutboundUpdate>) -> Vec<OutboundUpdate> {
 fn withdrawn_vpn(rx: &mut mpsc::Receiver<OutboundUpdate>) -> usize {
     recv_all(rx)
         .into_iter()
-        .filter(|u| matches!(u, OutboundUpdate::WithdrawVpn(_)))
+        .filter(|u| matches!(u, OutboundUpdate::WithdrawVpn(..)))
         .count()
 }
 
@@ -754,4 +754,54 @@ fn our_restart_defers_until_the_rtc_end_of_rib() {
     }
     rib.end_of_rib(addr(EBGP), AddressFamily::RtConstraint);
     assert!(!rib.deferring());
+}
+
+/// #1134: RT-Constraint gates each Add-Path copy on its own RTs, so narrowing
+/// membership withdraws only the copy it no longer covers.
+#[test]
+fn rtc_gates_each_add_path_copy_on_its_own_rts() {
+    let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
+    rib.set_peer_asn(addr(SRC), 65001);
+    rib.set_peer_asn(addr(EBGP), OBS_AS);
+    let _src = reg(&mut rib, SRC, false, false, plain_afs());
+    let (tx, mut rx) = test_channel();
+    rib.peer_established(
+        addr(EBGP),
+        false,
+        Some(addr("10.0.0.254")),
+        rtc_afs(),
+        true,
+        None,
+        false,
+        false,
+        HashSet::from([AddressFamily::Vpnv4Unicast]),
+        accept_all_policy(),
+        tx,
+    );
+    feed_rtc(&mut rib, vec![exact(RT), exact(RT2)]);
+    for (id, rt) in [(1, RT), (2, RT2)] {
+        let mut n = nlri(RD1, P, 100 + id);
+        n.path_id = Some(id);
+        let mut u = reach(SRC, vec![65001], vec![n]);
+        u.attributes.as_mut().unwrap().extended_communities = vec![rt];
+        feed(&mut rib, SRC, false, &u);
+    }
+    let ids: Vec<_> = advs(&mut rx).iter().map(|a| a.route.path_id).collect();
+    assert!(ids.contains(&Some(1)) && ids.contains(&Some(2)), "{ids:?}");
+    // Membership narrows to RT2: only copy 1 is withdrawn.
+    rib.handle_update(
+        addr(EBGP),
+        false,
+        v4("2.2.2.2"),
+        &rtc_withdraw(vec![exact(RT)]),
+        &nos_rpl::ACCEPT_ALL,
+    );
+    let got: Vec<_> = recv_all(&mut rx)
+        .into_iter()
+        .filter_map(|u| match u {
+            OutboundUpdate::WithdrawVpn(_, id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, [Some(1)]);
 }

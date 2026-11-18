@@ -621,7 +621,9 @@ pub enum OutboundUpdate {
     WithdrawFlowspec(AddressFamily, FlowSpec),
     /// A selected VPN path (see `vpn_out`).
     AnnounceVpn(AdvertisedVpn),
-    WithdrawVpn(VpnKey<IpNet>),
+    /// The trailing id is the RFC 7911 path id, `Some` exactly toward a peer
+    /// we send ADD-PATH to for the family.
+    WithdrawVpn(VpnKey<IpNet>, Option<u32>),
     /// An RFC 4684 membership route (see `rtc`).
     AnnounceRtc(AdvertisedRtc),
     WithdrawRtc(RtcKey),
@@ -861,8 +863,12 @@ pub struct BgpRib {
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
     /// one table's `Full` never clobbers another's; `Local` candidates.
     vpn_local: HashMap<String, HashMap<VpnKey<IpNet>, VpnRoute>>,
-    /// What each peer was last sent per key (`sync_vpn_to`).
-    vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
+    /// What each peer was last sent per key: one entry per advertised copy,
+    /// by its source (`sync_vpn_to`); the wire id is `route.path_id`.
+    vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, HashMap<PathKey, AdvertisedVpn>>>,
+    /// Per ADD-PATH send peer and key, the next fresh path id (the VPN twin
+    /// of `add_path_next_id`).
+    vpn_next_id: HashMap<(IpAddr, VpnKey<IpNet>), u32>,
     /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
     vpn_stale: HashMap<IpAddr, HashSet<VpnCopy>>,
     /// The VRFs this (underlay) instance imports VPN routes into (`vpn_import`).
@@ -1032,6 +1038,7 @@ impl BgpRib {
             vpn_loc: HashMap::new(),
             vpn_local: HashMap::new(),
             vpn_adj_rib_out: HashMap::new(),
+            vpn_next_id: HashMap::new(),
             vpn_stale: HashMap::new(),
             vpn_flow_adj_rib_in: HashMap::new(),
             vpn_flow_validity: HashMap::new(),
@@ -1870,6 +1877,7 @@ impl BgpRib {
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
         self.vpn_adj_rib_out.remove(&peer);
+        self.vpn_next_id.retain(|(p, _), _| *p != peer);
         self.vpn_flow_adj_rib_out.remove(&peer);
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);

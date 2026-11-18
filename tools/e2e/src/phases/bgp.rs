@@ -4657,7 +4657,7 @@ pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
         .replace("@IP_G@", IP_G.s())
         .replace("@ASN@", &ASN_G.to_string())
         .replace("@RID@", RID_G)
-        .replace("@WITHDRAW_AFTER@", "30");
+        .replace("@WITHDRAW_AFTER@", "150");
     w.dock
         .start_plain(
             "router-g",
@@ -4722,6 +4722,9 @@ pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
         "expected one row per path id, got {body}"
     );
 
+    vpn_add_path_send(w).await?;
+    let a = w.a()?;
+
     log("withdrawing path 2 drops its copy and its import only");
     let red_gone = format!("vpn route unimported table={VPN_TABLE}");
     let red_before = a.count_fresh(&red_gone).await;
@@ -4731,6 +4734,102 @@ pub async fn vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait("vpn route unimported table=vrf-blue").await?;
     a.assert_quiet(&red_gone, red_before, 5).await?;
+    Ok(())
+}
+
+/// `vpn-add-path`, send half (#1134): router-b (`vpn`, `rtc`, `add-path
+/// receive`, `vrf-red` importing RT 65000:1 and `vrf-blue` RT 65000:2) peers
+/// router-a, which holds the scripted speaker's two copies of one key. It
+/// advertises both under two path ids, each VRF imports its own, narrowing
+/// router-b's membership to RT 65000:2 withdraws only the RT 65000:1 copy.
+async fn vpn_add_path_send(w: &mut World) -> anyhow::Result<()> {
+    log("router-b peers router-a over vpnv4 + rt-constraint with Add-Path (#1134)");
+    let b_flags = |red_rt: &str| {
+        let mut f = B.base_flags();
+        f.extend(strings(&[
+            "--vpn",
+            "--rtc",
+            "--add-path",
+            "receive",
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            VPN_RD_B,
+            "--vpn-rt-export",
+            VPN_RD_B,
+            "--vpn-rt-import",
+            red_rt,
+        ]));
+        f
+    };
+    let a_to_b = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-b",
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B.s(),
+        "--vpn",
+        "--rtc",
+        "--add-path",
+        "both",
+    ]);
+    w.start(B, Some(b_flags(VPN_RT)), &[]).await?;
+    mpls_ready(w, &["router-b"]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&a_to_b).await?;
+    let mut blue = b_flags(VPN_RT);
+    for (flag, value) in [
+        ("--vpn-table", "vrf-blue"),
+        ("--vpn-rd", "65000:102"),
+        ("--vpn-rt-export", "65000:102"),
+        ("--vpn-rt-import", "65000:2"),
+    ] {
+        let i = blue.iter().position(|f| f == flag).expect("vpn flag");
+        blue[i + 1] = value.to_string();
+    }
+    b.provision_flags(&blue).await?;
+
+    log("router-a advertises both copies under their own path ids");
+    let adv = |label: u32| {
+        format!(
+            "vpn route advertised peer={IP_B} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[{label}\\] .*path_id="
+        )
+    };
+    a.wait(&adv(100)).await?;
+    a.wait(&adv(200)).await?;
+    b.wait(&format!(
+        "vpn route learned peer={IP_A} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[100\\] .*path_id="
+    ))
+    .await?;
+    b.wait(&format!(
+        "vpn route learned peer={IP_A} family=vpnv4 rd=65001:1 prefix=10.10.0.0/24 labels=\\[200\\] .*path_id="
+    ))
+    .await?;
+    b.wait(&format!(
+        "vpn route imported table={VPN_TABLE} prefix=10.10.0.0/24 labels=\\[100\\]"
+    ))
+    .await?;
+    b.wait("vpn route imported table=vrf-blue prefix=10.10.0.0/24 labels=\\[200\\]")
+        .await?;
+
+    log("narrowing router-b's membership to RT 65000:2 withdraws only the RT 65000:1 copy");
+    let gone = format!("vpn route advertisement withdrawn peer={IP_B} family=vpnv4 rd=65001:1");
+    let gone_base = a.count(&gone);
+    let blue_gone = b.count_fresh("vpn route unimported table=vrf-blue").await;
+    b.provision_flags(&b_flags("65000:7")).await?;
+    a.wait_new(&gone, gone_base, 60).await?;
+    b.wait(&format!("vpn route unimported table={VPN_TABLE}"))
+        .await?;
+    a.assert_quiet(&gone, gone_base + 1, 5).await?;
+    b.assert_quiet("vpn route unimported table=vrf-blue", blue_gone, 1)
+        .await?;
     Ok(())
 }
 

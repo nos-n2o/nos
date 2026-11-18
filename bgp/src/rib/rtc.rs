@@ -431,12 +431,14 @@ impl BgpRib {
     fn resync_vpn(&mut self, peer: IpAddr, keys: &[RtcKey]) {
         let touched: Vec<_> = self
             .vpn_loc
-            .iter()
-            .filter(|(_, (_, _, r))| {
-                keys.iter()
-                    .any(|n| n.covers_any(&r.route.extended_communities))
+            .keys()
+            .filter(|k| {
+                self.vpn_candidates(k).iter().any(|(_, _, r)| {
+                    keys.iter()
+                        .any(|n| n.covers_any(&r.route.extended_communities))
+                })
             })
-            .map(|(k, _)| *k)
+            .copied()
             .collect();
         for k in touched {
             self.sync_vpn_to(peer, &k, false);
