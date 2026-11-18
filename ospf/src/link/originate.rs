@@ -471,7 +471,9 @@ impl LinkManager {
     /// re-originated is one this router no longer advertises (an opaque LSA
     /// of a previous incarnation, say), so it is flushed.
     pub(super) async fn origination_pass(&self) {
-        if self.shutting_down.load(Ordering::Relaxed) {
+        // RFC 3623 §2.1: a restarting router originates nothing (the
+        // helpers hold our old LSAs); `restart_tick` wakes this on exit.
+        if self.shutting_down.load(Ordering::Relaxed) || self.restart_active() {
             return;
         }
         let Some(router_id) = *self.router_id.lock().await else {

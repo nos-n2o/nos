@@ -474,6 +474,10 @@ pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
 /// helps, so its own Router-LSA changes (a topology change). No other phase
 /// uses it.
 pub const OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS: &str = "203.0.113.113/32";
+/// `ospf-graceful-restart`: router-b's loopback in OSPF from the start, so
+/// router-a (the restarter) holds an OSPF route whose kernel entry must never
+/// be removed while its `nos-ospfd` restarts (#1145). No other phase uses it.
+pub const OSPF_GR_PEER_LOOPBACK_ADDRESS: &str = "203.0.113.114/32";
 /// `ospf-opaque`: an FRR router (`router-f`, pulled, same tag as
 /// `tools/bench-bgp.sh`'s `FRR_IMAGE`) on its own network with router-a's
 /// eth1 only, so router-b can hear FRR's LSAs only through router-a.

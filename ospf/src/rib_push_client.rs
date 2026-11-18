@@ -37,6 +37,8 @@ use nos_daemon::watchdog::resolve_once;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Matches every other reconnect/resolve loop in this codebase.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
+/// How often restart mode is re-checked while the push is held back.
+const RESTART_POLL: Duration = Duration::from_millis(200);
 
 /// Spawns the background task that owns the route-push connection for this
 /// process's lifetime.
@@ -64,6 +66,15 @@ async fn run(
     chunk: usize,
 ) {
     while !*shutdown.borrow() {
+        // RFC 3623 restart mode: push nothing, so `nos-ribd` keeps the routes
+        // of the previous process (it drops none on disconnect; only a `Full`
+        // replaces them) until the first, complete `Full` after the exit.
+        if links.restart_active() {
+            if wait_or_shutdown(RESTART_POLL, &mut shutdown).await {
+                break;
+            }
+            continue;
+        }
         let Some(table) = routing_table_rx.borrow().clone() else {
             if wait_or_shutdown(POLL_INTERVAL, &mut shutdown).await {
                 break;

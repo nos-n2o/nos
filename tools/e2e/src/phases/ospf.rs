@@ -1413,9 +1413,18 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&helper_cap(&[
         "--ospf-graceful-restart-helper-max-grace-period",
         "60",
+        "--loopback-address",
+        OSPF_GR_PEER_LOOPBACK_ADDRESS,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
     ]))
     .await?;
     b.wait_new(cap60, cap60_0, 60).await?;
+    // router-a holds an OSPF route to router-b's loopback before it restarts.
+    a.wait(&format!(
+        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ))
+    .await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
         .await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_again_a0, 60)
@@ -1447,6 +1456,21 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let marker = "ospf graceful restart marker written";
     let skipped = "ospf stub router on-startup skipped after graceful restart";
     let (mm0, marker0, skipped0) = (a.count(max_metric_on), a.count(marker), a.count(skipped));
+    // RFC 3623 §2 restarting router (#1145): the respawn enters restart mode,
+    // pushes no routes until its neighbor is Full again, so router-a's own
+    // kernel route to router-b's loopback is never removed (#1027-safe: the
+    // removal is logged by `nos-ribd` on router-a itself).
+    let restart_in = "ospf restart mode: entered neighbors=1";
+    let restart_out = "ospf restart mode: exited reason=complete";
+    let grace_flush =
+        format!("ospf graceful restart: grace-lsa flushed link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
+    let removed = format!("removed route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}");
+    let (in0, out0, flush0, removed0) = (
+        a.count(restart_in),
+        a.count(restart_out),
+        a.count(&grace_flush),
+        a.count(&removed),
+    );
     let marks = (a.log_mark(), b.log_mark());
     log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
     w.dock
@@ -1469,6 +1493,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         // with the neighbor that held it Full the whole time.
         b.wait_new(&full_on_b, full_b0, 90).await?;
         a.wait_new(&full_on_a, full_a0, 90).await?;
+        a.wait_new(restart_in, in0, 90).await?;
+        a.wait_new(restart_out, out0, 90).await?;
+        a.wait_new(&grace_flush, flush0, 30).await?;
         // Reaching Full ended the grace period. A topology change now (router-b's
         // own Router-LSA gains a stub link) must find no grace to exit; the exit
         // itself (RFC 3623 §3.2 (c)) is a unit test in `link/tests/grace.rs`, as
@@ -1501,6 +1528,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // RFC 3623 §2: the restarter keeps its LSAs; the helper never tears the
     // adjacency down and never flushes them.
     quiet_settled(a, flush_on_a, flush_a0).await?;
+    quiet_settled(a, &removed, removed0).await?;
     quiet_settled(b, torn, torn0).await?;
     quiet_settled(b, &flushed, flushed0).await?;
     // Neither on-shutdown nor on-startup ever turned max-metric on.
@@ -1527,6 +1555,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "0",
         "--loopback-remove-address",
         OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS,
+    ]))
+    .await?;
+    b.provision_flags(&helper_cap(&[
+        "--loopback-remove-address",
+        OSPF_GR_PEER_LOOPBACK_ADDRESS,
         "--clear-ospf-loopback-profile",
     ]))
     .await?;

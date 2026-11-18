@@ -340,6 +340,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     let adj = AdjacencyData {
         dd_sequence_number: seed,
         last_dbd_sent: Some(dbd.clone()),
+        unpolled: true,
         ..AdjacencyData::default()
     };
     (adj, dbd)
