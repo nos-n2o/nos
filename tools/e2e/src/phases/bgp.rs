@@ -85,6 +85,22 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
         dump_bgp_state(w).await;
         return Err(e);
     }
+    // #1210: every daemon was spawned under MDWE (the watchdog logs `spawned`
+    // only after the pre_exec prctl succeeded) and none failed to spawn.
+    for d in [
+        "nos-configd",
+        "nos-logd",
+        "nos-interfaced",
+        "nos-ribd",
+        "nos-bgpd",
+    ] {
+        w.a()?
+            .wait(&format!("spawned process={d}.* mdwe=true"))
+            .await?;
+    }
+    if w.a()?.count_fresh("failed to spawn").await > 0 {
+        bail!("router-a: a daemon failed to spawn (MDWE needs Linux >= 6.3)");
+    }
     // RFC 8654: both nos-bgpd always advertise Extended Message, so each side
     // must have negotiated it with the other.
     w.a()?
