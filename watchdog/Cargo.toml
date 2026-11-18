@@ -28,6 +28,7 @@ nos-password       = { workspace = true }
 nos-radius         = { workspace = true }
 getrandom          = { workspace = true }
 sha2               = { workspace = true }
+libc               = { workspace = true }
 
 [[bin]]
 name = "nos-watchdogd"
