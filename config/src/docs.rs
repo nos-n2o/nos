@@ -1872,6 +1872,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the order login backends are tried in.",
             "`local` and `radius`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",
         ),
+        Topic::AaaAccounting => (
+            "Send RADIUS accounting.",
+            "RFC 2866 records to every server: a Start at each login, a Stop when its session ends (within a few seconds of the certificate being revoked or expiring) and an Interim-Update per config commit (`Acct-Session-Id commit:<transaction>`, `User-Name` the committer). Sent through a bounded queue: a slow or dead server drops records, it never delays a login or a commit. Default off.",
+        ),
+        Topic::RadiusAccountingPort => (
+            "Set a RADIUS server's accounting UDP port.",
+            "1-65535. `delete` restores 1813.",
+        ),
         Topic::AaaRoleAttribute => (
             "Set the RADIUS attribute that carries the role.",
             "`filter-id` (default), `class` or `reply-message`; its text is `admin`, `operator` or `read-only`. Missing or unrecognised means read-only.",

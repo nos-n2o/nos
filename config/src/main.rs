@@ -103,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {}", args.listen))?;
 
     if let Some(socket) = args.watchdog_socket {
+        nos_config::accounting::start(socket.clone());
         nos_daemon::liveness::start(socket);
     }
     tracing::info!(peer = ?identity.peer(), "ipc identity loaded");

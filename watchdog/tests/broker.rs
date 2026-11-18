@@ -1072,6 +1072,7 @@ fn use_radius(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBa
             name: "r1".into(),
             address: addr.ip(),
             port: Some(addr.port()),
+            accounting_port: Some(addr.port()),
             routing_table: None,
             secret_ref: "radius".into(),
             timeout_secs: Some(1),
@@ -1162,4 +1163,111 @@ async fn local_first_order_decides_a_local_user_locally() {
     let (csr, _) = generate_csr().unwrap();
     let event = ask(&mut conn, login("alice", "pw", csr)).await;
     assert!(matches!(event, WatchdogEvent::Issued { .. }), "{event:?}");
+}
+
+/// A RADIUS stub that accepts every login and acknowledges every accounting
+/// request, forwarding `(status, user, session)` of each accounting one.
+async fn radius_acct_stub() -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::UnboundedReceiver<(u32, String, String)>,
+) {
+    use nos_radius::{attr, make_reply, Code, Packet};
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            let req = Packet::decode(&buf[..n]).unwrap();
+            let text = |t| String::from_utf8_lossy(req.attr(t).unwrap_or_default()).into_owned();
+            let reply = if req.code == Code::AccountingRequest {
+                let status = u32::from_be_bytes(
+                    req.attr(attr::ACCT_STATUS_TYPE)
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                );
+                let _ = tx.send((status, text(attr::USER_NAME), text(attr::ACCT_SESSION_ID)));
+                make_reply(Code::AccountingResponse, &req, b"sh4red", vec![], false)
+            } else {
+                make_reply(Code::AccessAccept, &req, b"sh4red", vec![], true)
+            };
+            let _ = sock.send_to(&reply, from).await;
+        }
+    });
+    (addr, rx)
+}
+
+#[tokio::test]
+async fn accounting_sends_start_and_stop_and_a_commit_record_from_configd() {
+    use nos_proto::LoginBackend::Radius;
+    let e = env(vec![]).await;
+    let (addr, mut records) = radius_acct_stub().await;
+    use_radius(&e, addr, vec![Radius]);
+    e.aaa.lock().unwrap().0.accounting = true;
+
+    let id = e.anonymous();
+    let mut conn = dial(&id, &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    assert!(matches!(
+        ask(&mut conn, login("alice", "pw", csr)).await,
+        WatchdogEvent::Issued { .. }
+    ));
+    let (status, user, session) = records.recv().await.unwrap();
+    assert_eq!((status, user.as_str()), (1, "alice"));
+
+    // A commit record only from nos-configd.
+    let mut cfgd = dial(&e.daemon(Role::Configd, ""), &e.broker).await;
+    let commit = || WatchdogRequest::AccountCommit {
+        actor: "carol".into(),
+        transaction: "tx9".into(),
+    };
+    assert!(matches!(ask(&mut cfgd, commit()).await, WatchdogEvent::Ok));
+    assert_eq!(
+        records.recv().await.unwrap(),
+        (3, "carol".into(), "commit:tx9".into())
+    );
+    let mut other = dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await;
+    assert!(matches!(
+        ask(&mut other, commit()).await,
+        WatchdogEvent::Denied(_)
+    ));
+
+    // The session ends when its certificates are revoked.
+    e.pki.revoke_user("alice");
+    let (status, user, stop_session) =
+        tokio::time::timeout(Duration::from_secs(20), records.recv())
+            .await
+            .expect("a Stop within a few poll intervals")
+            .unwrap();
+    assert_eq!((status, user.as_str()), (2, "alice"));
+    assert_eq!(stop_session, session);
+}
+
+#[tokio::test]
+async fn accounting_is_silent_while_switched_off() {
+    use nos_proto::LoginBackend::Radius;
+    let e = env(vec![]).await;
+    let (addr, mut records) = radius_acct_stub().await;
+    use_radius(&e, addr, vec![Radius]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    assert!(matches!(
+        ask(&mut conn, login("alice", "pw", csr)).await,
+        WatchdogEvent::Issued { .. }
+    ));
+    let mut cfgd = dial(&e.daemon(Role::Configd, ""), &e.broker).await;
+    ask(
+        &mut cfgd,
+        WatchdogRequest::AccountCommit {
+            actor: "c".into(),
+            transaction: "t".into(),
+        },
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1500), records.recv())
+            .await
+            .is_err()
+    );
 }

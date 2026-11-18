@@ -9,7 +9,8 @@ use nos_pki::{Incoming, PeerId};
 use nos_proto::{
     IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent, WatchdogRequest,
     INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT,
-    RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED,
+    RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
+    RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -17,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, trace, warn};
 
+use crate::accounting::{self, Record};
 use crate::pki::Pki;
 use crate::registry::EndpointRegistry;
 use crate::users_client;
@@ -78,6 +80,8 @@ struct Ctx {
     anonymous_idle: Duration,
     /// `LoginPolicy.max_failures`, live (#1148).
     max_failures: Arc<AtomicU8>,
+    /// Accounting records for the worker (#1153); bounded, never waited on.
+    acct: accounting::Sender,
     /// When the over-cap warning last fired (at most one per second).
     last_cap_warn: Mutex<Option<Instant>>,
 }
@@ -115,6 +119,7 @@ pub fn start_with_limits(
         sockets.config.clone(),
         max_failures.clone(),
     ));
+    let (acct, acct_rx) = accounting::queue();
     let ctx = Arc::new(Ctx {
         registry,
         sockets,
@@ -123,8 +128,10 @@ pub fn start_with_limits(
         anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
         anonymous_idle: limits.anonymous_idle,
         max_failures,
+        acct,
         last_cap_warn: Mutex::new(None),
     });
+    tokio::spawn(account_worker(ctx.clone(), acct_rx));
     Ok(tokio::spawn(async move {
         loop {
             let incoming = listener.accept_resilient().await;
@@ -233,6 +240,7 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
         | WatchdogRequest::LoginTicket { .. }
         | WatchdogRequest::RedeemTicket { .. } => true,
         WatchdogRequest::ResolveEndpoint { .. } => peer.is_some(),
+        WatchdogRequest::AccountCommit { .. } => role == Some(Role::Configd.as_str()),
         WatchdogRequest::RenewCert { .. } => role == Some(Role::User.as_str()),
         // `nos-restd` vouches for REST clients: it has verified their certificate
         // (or, for a login, forwards the password it was given).
@@ -308,6 +316,10 @@ async fn dispatch(
                     WatchdogEvent::Denied("login unavailable".to_string())
                 }
             }
+        }
+        WatchdogRequest::AccountCommit { actor, transaction } => {
+            accounting::offer(&ctx.acct, Record::Commit { actor, transaction });
+            WatchdogEvent::Ok
         }
         WatchdogRequest::ResolveEndpoint { service } => {
             let s = &ctx.sockets;
@@ -435,11 +447,72 @@ async fn login(
         }
         None
     };
-    let event = issue(ctx, user, csr_der, realm, Instant::now(), claim.as_deref());
+    let started = Instant::now();
+    let event = issue(ctx, user, csr_der, realm, started, claim.as_deref());
     if matches!(event, WatchdogEvent::Issued { .. }) {
         info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
+        if matches!(realm, Realm::Ipc) {
+            account_session(ctx, user, started);
+        }
     }
     event
+}
+
+/// How often an accounting session is checked for its end.
+const SESSION_POLL: Duration = Duration::from_secs(5);
+
+/// Queues a Start now and, from a task, the Stop once no certificate of this
+/// login is live any more (expired, or revoked by a password change or a
+/// deleted user). The Stop is therefore up to `SESSION_POLL` late.
+fn account_session(ctx: &Ctx, user: &str, started: Instant) {
+    let session = accounting::session_id();
+    let user = user.to_string();
+    accounting::offer(
+        &ctx.acct,
+        Record::Start {
+            user: user.clone(),
+            session: session.clone(),
+        },
+    );
+    let (tx, pki) = (ctx.acct.clone(), ctx.pki.clone());
+    tokio::spawn(async move {
+        while pki.session_live(&user, started) {
+            tokio::time::sleep(SESSION_POLL).await;
+        }
+        let secs = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
+        accounting::offer(
+            &tx,
+            Record::Stop {
+                user,
+                session,
+                secs,
+            },
+        );
+    });
+}
+
+/// Sends queued records one at a time, so a slow server backs the bounded
+/// queue up (and drops) instead of delaying anything else.
+async fn account_worker(ctx: Arc<Ctx>, mut rx: tokio::sync::mpsc::Receiver<Record>) {
+    while let Some(record) = rx.recv().await {
+        let Ok(cfg) = users_client::fetch_config(&ctx.pki.identity, &ctx.sockets.config).await
+        else {
+            debug!("accounting record dropped: the config is not readable");
+            continue;
+        };
+        if !cfg.aaa.accounting {
+            continue;
+        }
+        let servers = radius_servers(&ctx, &cfg, true).await;
+        if servers.is_empty() {
+            continue;
+        }
+        if nos_radius::account(&servers, accounting::attrs(&record)).await {
+            debug!(?record, "radius accounting acknowledged");
+        } else {
+            warn!(?record, "radius accounting not acknowledged by any server");
+        }
+    }
 }
 
 /// Walks `aaa login-order` (#1153). `Ok(Some(role))` is a RADIUS accept (the
@@ -536,14 +609,13 @@ async fn vrf_name(ctx: &Ctx, table: &str) -> Option<String> {
         .flatten()
 }
 
-/// One Access-Request across the configured servers; the role comes from the
-/// reply attribute `aaa role-attribute` names (read-only when absent).
-async fn radius_login(
+/// The configured servers, with their secret, port (authentication or
+/// accounting) and VRF device; one whose secret or VRF is missing is skipped.
+async fn radius_servers(
     ctx: &Ctx,
     cfg: &nos_proto::Config,
-    user: &str,
-    password: &str,
-) -> Result<UserRole, nos_radius::AuthError> {
+    accounting: bool,
+) -> Vec<nos_radius::Server> {
     let mut servers = Vec::new();
     for s in &cfg.aaa.servers {
         let Some(secret) = cfg.key(&s.secret_ref) else {
@@ -557,8 +629,13 @@ async fn radius_login(
                 continue;
             }
         }
+        let port = if accounting {
+            s.accounting_port.unwrap_or(RADIUS_ACCT_PORT_DEFAULT)
+        } else {
+            s.port.unwrap_or(RADIUS_PORT_DEFAULT)
+        };
         servers.push(nos_radius::Server {
-            addr: std::net::SocketAddr::new(s.address, s.port.unwrap_or(RADIUS_PORT_DEFAULT)),
+            addr: std::net::SocketAddr::new(s.address, port),
             secret: secret.as_bytes().to_vec(),
             timeout: Duration::from_secs(u64::from(
                 s.timeout_secs.unwrap_or(RADIUS_TIMEOUT_DEFAULT_SECS),
@@ -567,6 +644,18 @@ async fn radius_login(
             vrf,
         });
     }
+    servers
+}
+
+/// One Access-Request across the configured servers; the role comes from the
+/// reply attribute `aaa role-attribute` names (read-only when absent).
+async fn radius_login(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    user: &str,
+    password: &str,
+) -> Result<UserRole, nos_radius::AuthError> {
+    let servers = radius_servers(ctx, cfg, false).await;
     let accepted = nos_radius::authenticate(&servers, user, password, "nos").await?;
     let ty = match cfg.aaa.role_attribute {
         RoleAttribute::FilterId => nos_radius::attr::FILTER_ID,

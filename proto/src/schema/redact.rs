@@ -296,6 +296,7 @@ mod tests {
             name: "r".into(),
             address: "192.0.2.1".parse().unwrap(),
             port: None,
+            accounting_port: None,
             routing_table: None,
             secret_ref: "radius".into(),
             timeout_secs: None,

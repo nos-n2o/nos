@@ -168,6 +168,15 @@ impl Pki {
         Ok(cert)
     }
 
+    /// Whether an unexpired IPC certificate of the password login that began
+    /// at `started` still exists (renewals inherit `started`; a revocation
+    /// removes the entries). Ends an accounting session (#1153).
+    pub fn session_live(&self, user: &str, started: Instant) -> bool {
+        lock(&self.users)
+            .get(user)
+            .is_some_and(|v| v.iter().any(|(s, st)| *st == started && !s.expired()))
+    }
+
     /// Caps how long renewals may extend one IPC password login.
     pub fn set_ipc_session_max(&self, max: Duration) {
         self.ipc_session_max.store(max.as_secs(), Ordering::Relaxed);

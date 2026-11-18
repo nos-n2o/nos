@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-20 {
+  revision 2026-11-21 {
     description "Generated.";
   }
 
@@ -1823,6 +1823,10 @@ module nos-config {
         type uint16;
         description "Set a RADIUS server's UDP port.";
       }
+      leaf accounting_port {
+        type uint16;
+        description "Set a RADIUS server's accounting UDP port.";
+      }
       leaf routing_table {
         type string;
         description "Send RADIUS requests from inside a routing table's VRF.";
@@ -1843,6 +1847,10 @@ module nos-config {
     leaf-list login_order {
       type string;
       description "Set the order login backends are tried in.";
+    }
+    leaf accounting {
+      type boolean;
+      description "Send RADIUS accounting.";
     }
     leaf role_attribute {
       type enumeration {

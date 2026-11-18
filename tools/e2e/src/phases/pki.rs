@@ -129,11 +129,13 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
             name: "stub".into(),
             address: IP_RADIUS_STUB.s().parse()?,
             port: None,
+            accounting_port: Some(1812),
             routing_table: Some("rt1".into()),
             secret_ref: "radius".into(),
             timeout_secs: Some(1),
             retries: Some(0),
         }];
+        c.aaa.accounting = true;
         c.aaa.login_order = vec![
             nos_proto::LoginBackend::Radius,
             nos_proto::LoginBackend::Local,
@@ -158,6 +160,24 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
         15,
     )
     .await?;
+
+    log("accounting: a Start for the login and an Interim-Update for its commit reach the server");
+    for needle in [
+        "accounting status=1 user=rad-admin",
+        "accounting status=3 user=rad-admin session=commit:",
+    ] {
+        let mut seen = false;
+        for _ in 0..15 {
+            if w.dock.logs(RADIUS_STUB).await?.contains(needle) {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !seen {
+            bail!("the RADIUS stub never saw '{needle}'");
+        }
+    }
 
     log("a RADIUS read-only user logs in but its role refuses the edits");
     let refused = a.count("the user's role does not allow it");

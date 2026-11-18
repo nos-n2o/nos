@@ -13,6 +13,7 @@ pub mod attr {
     pub const NAS_IDENTIFIER: u8 = 32;
     pub const ACCT_STATUS_TYPE: u8 = 40;
     pub const ACCT_SESSION_ID: u8 = 44;
+    pub const ACCT_SESSION_TIME: u8 = 46;
     pub const ACCT_TERMINATE_CAUSE: u8 = 49;
     pub const MESSAGE_AUTHENTICATOR: u8 = 80;
 }
