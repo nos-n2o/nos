@@ -700,7 +700,7 @@ pub fn nssa_translations(
     let mut out: Vec<(Ipv4Addr, Ipv6Net, AsExternalLsaBody)> = live
         .iter()
         .filter(|l| {
-            l.header.lsa_type == lsa::LSA_TYPE_NSSA
+            matches!(l.header.lsa_type, lsa::LSA_TYPE_NSSA | lsa::LSA_TYPE_E_NSSA)
                 && l.header.advertising_router != root
                 && dist.contains_key(&Vertex::Router(l.header.advertising_router))
         })

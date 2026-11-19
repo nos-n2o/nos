@@ -341,7 +341,7 @@ commit
 
 ### Make an area an NSSA
 
-An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
+An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, or `0xa027` in extended mode; the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
 
 ```
 set ospfv3 instance v3 area 0.0.0.1 area-type nssa
@@ -353,7 +353,7 @@ set ospfv3 instance v3 area 0.0.0.1 nssa-default-originate enable
 - **Translation.** One ABR per NSSA translates the NSSA-LSAs that have the P option and a forwarding address into its own AS-external LSAs, and sets E in its other areas. It is the ABR with the highest router ID, unless another has the Nt bit (`nssa-translate-always enable` sets it and forces the role). The log line is `ospfv3 nssa translator role changed`. An NSSA-LSA that goes away flushes its translation.
 - **`nssa-default-originate enable`** makes an ABR originate a `::/0` NSSA-LSA (no P, so never translated) into the area at `stub-default-cost`.
 - `area-type nssa-no-summary` also sends only a `::/0` inter-area prefix LSA into the area. The ABR sends no Inter-Area-Router-LSA into any NSSA.
-- The two `nssa-*` settings are refused on a non-NSSA area. Only the legacy LSA forms are used for NSSA-LSAs: in extended-LSA mode they stay `0x2007` (no RFC 8362 form).
+- The two `nssa-*` settings are refused on a non-NSSA area. In extended-LSA mode NSSA-LSAs are originated as E-NSSA-LSAs (`0xa027`, RFC 8362) instead of `0x2007`, and both forms are accepted.
 
 ### Join an area to the backbone through another area (virtual link)
 
