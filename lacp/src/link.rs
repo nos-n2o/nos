@@ -12,8 +12,10 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::churn_machine::{self, ChurnState};
+use crate::conversation::send_version;
+use crate::cscd::{Advert, PartnerV2};
 use crate::mux_machine::{self, MuxState};
-use crate::packet::{self, state_bit, Lacpdu, PortInfo};
+use crate::packet::{self, state_bit, ConvDigest, Lacpdu, PortInfo, V2Tlvs};
 use crate::periodic_tx_machine::interval_for;
 use crate::receive_machine::{self, ReceiveState};
 use crate::socket::LacpSocket;
@@ -44,6 +46,13 @@ pub struct LinkConfig {
     /// 802.1AX `Churn_Detection_Time` (60s; shortened only by tests/e2e via
     /// `NOS_LACP_CHURN_SECS`, see `aggregate.rs`).
     pub churn_time: Duration,
+    /// The configured `lacp-version` (1 or 2): what [`send_version`] starts from.
+    pub version_pref: u8,
+    /// This member's `lacp-link-number`, advertised in the digest TLV.
+    pub link_number: Option<u16>,
+    /// The aggregate's advertisement (algorithm + map digest), republished by
+    /// `aggregate.rs` whenever the Distributing set or the config changes.
+    pub advert_rx: watch::Receiver<Advert>,
 }
 
 /// One member port's currently-observed state, as reported up to
@@ -64,6 +73,8 @@ pub struct PortObservation {
     /// LACPDUs dropped for a Version byte other than 1 or 2 since this link
     /// task started (in memory only).
     pub unsupported_version_pdus: u64,
+    /// The partner's version and v2 TLVs from its last LACPDU (#894).
+    pub v2: PartnerV2,
 }
 
 impl PortObservation {
@@ -94,6 +105,10 @@ impl PortObservation {
         self.current() || (self.receive_state == ReceiveState::Expired && self.partner.is_some())
     }
 }
+
+/// How long our v2 PDUs must have been on the wire before a partner's v1 PDU
+/// downgrades us (see `Port::on_frame`).
+const V2_GRACE: Duration = Duration::from_secs(3);
 
 /// A deadline far enough in the future to act as "this timer is disabled" —
 /// simpler than threading `Option<Instant>` through every `tokio::select!`
@@ -154,6 +169,7 @@ pub async fn run(
 /// The event loop of one port: timers, Selection Logic verdicts and received
 /// PDUs, until the aggregate is gone or the link's receive side fails.
 async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>, link: &L) {
+    let mut advert_rx = p.config.advert_rx.clone();
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(p.tx.next_periodic_send) => p.on_periodic(link),
@@ -172,6 +188,11 @@ async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>
                 }
                 let selected = *selected_rx.borrow_and_update();
                 p.on_selection(selected, link);
+            }
+            // An advert sender that is gone ends the loop one turn later via
+            // `selected_rx` (the manager owns both), so just ignore the error.
+            Ok(()) = advert_rx.changed() => {
+                p.on_advert(advert_rx.borrow_and_update().clone(), link);
             }
             recv = link.recv() => {
                 let Ok(bytes) = recv else {
@@ -211,6 +232,14 @@ struct Port {
     churn: Churn,
     /// Whether the last LACPDU's Partner block described us (recordPDU).
     partner_view_matches: bool,
+    /// The partner's version and v2 TLVs (reset when it is given up).
+    partner_v2: PartnerV2,
+    /// What [`send_version`] last chose; changes are logged.
+    sent_version: u8,
+    advert: Advert,
+    /// When we last started sending v2 (`None` while sending v1): a v1 PDU
+    /// within [`V2_GRACE`] of it is no downgrade, see `on_frame`.
+    v2_since: Option<Instant>,
 }
 
 impl Port {
@@ -235,6 +264,8 @@ impl Port {
         tx.update_periodic(&config.interface, config.actor_active, receive_state, None);
         let mut churn = Churn::new(&config.interface, config.churn_time);
         churn.eval(MuxState::Detached, None);
+        let sent_version = send_version(config.version_pref, None);
+        let advert = config.advert_rx.borrow().clone();
         let port = Self {
             config,
             observations,
@@ -253,6 +284,10 @@ impl Port {
             unsupported_version_pdus: 0,
             churn,
             partner_view_matches: true,
+            partner_v2: PartnerV2::default(),
+            sent_version,
+            advert,
+            v2_since: (sent_version >= 2).then(Instant::now),
         };
         port.report();
         port
@@ -265,6 +300,8 @@ impl Port {
             self.receive_state,
             self.mux_state,
             self.partner,
+            self.sent_version,
+            &self.advert,
         )
     }
 
@@ -279,7 +316,16 @@ impl Port {
             self.partner,
             &self.churn,
             self.unsupported_version_pdus,
+            self.partner_v2,
         );
+    }
+
+    /// The aggregate's advertisement changed (Distributing set or config):
+    /// a differing PDU goes out through the usual `TxLimiter`.
+    fn on_advert(&mut self, advert: Advert, sink: &dyn FrameSink) {
+        self.advert = advert;
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
     }
 
     /// Re-evaluates what depends on the machines' state after any event, then
@@ -325,6 +371,9 @@ impl Port {
                 }),
                 _ => None,
             };
+            if self.receive_state == ReceiveState::Defaulted {
+                self.partner_v2 = PartnerV2::default();
+            }
             let (ms, mux_action) = mux_machine::step(
                 self.mux_state,
                 mux_machine::Event::PartnerStateChanged {
@@ -476,6 +525,25 @@ impl Port {
             recorded.state &= !state_bit::SYNCHRONIZATION;
         }
         self.partner = Some(recorded);
+        // Decode only accepts versions 1 and 2, so byte 1 is the partner's.
+        let v2 = pdu.v2.as_ref();
+        self.partner_v2 = PartnerV2 {
+            version: bytes.get(1).copied(),
+            algorithm: v2.and_then(|v| v.algorithm),
+            digest: v2.and_then(|v| v.conv_digest),
+        };
+        let version = send_version(self.config.version_pref, self.partner_v2.version);
+        // A v2-capable partner that has not yet seen our v2 still sends v1; if
+        // each side downgraded on that, two NOS routers would stay on v1
+        // forever. So a v1 PDU only downgrades once our v2 has been out for
+        // `V2_GRACE`; a genuinely v1-only partner keeps sending v1 and follows.
+        let hold =
+            version < self.sent_version && self.v2_since.is_some_and(|t| t.elapsed() < V2_GRACE);
+        if version != self.sent_version && !hold {
+            info!(interface = %self.config.interface, version, "lacp sent version changed");
+            self.sent_version = version;
+            self.v2_since = (version >= 2).then(Instant::now);
+        }
         let (rs, action) = receive_machine::step(
             self.receive_state,
             receive_machine::Event::LacpduReceived {
@@ -566,6 +634,7 @@ fn report(
     partner: Option<PortInfo>,
     churn: &Churn,
     unsupported_version_pdus: u64,
+    v2: PartnerV2,
 ) {
     let observation = PortObservation {
         receive_state,
@@ -575,6 +644,7 @@ fn report(
         actor_churn: churn.actor,
         partner_churn: churn.partner,
         unsupported_version_pdus,
+        v2,
     };
     let mut observations = observations.lock().unwrap();
     // Only signal on a real change: `aggregate.rs` reacts to every
@@ -761,6 +831,8 @@ fn build_pdu(
     receive_state: ReceiveState,
     mux_state: MuxState,
     partner: Option<PortInfo>,
+    sent_version: u8,
+    advert: &Advert,
 ) -> Lacpdu {
     let actor = actor_info(
         config,
@@ -773,7 +845,26 @@ fn build_pdu(
         actor,
         partner,
         collector_max_delay: 0,
-        v2: None,
+        v2: (sent_version >= 2).then(|| v2_tlvs(advert, config.link_number)),
+    }
+}
+
+/// Version-2 TLVs: the Port Algorithm always (open decision 4 A, also for
+/// `unspecified`), the digest only with an algorithm, a digest and a `Link_Number`.
+/// ponytail: no Port Conversation Mask TLVs on the wire (the digest is what the
+/// peer compares); add them when a v2 peer capture shows they are required.
+fn v2_tlvs(advert: &Advert, link_number: Option<u16>) -> V2Tlvs {
+    let conv_digest = match (advert.digest, link_number) {
+        (Ok(digest), Some(link_number)) => Some(ConvDigest {
+            link_number,
+            digest,
+        }),
+        _ => None,
+    };
+    V2Tlvs {
+        algorithm: Some(advert.algorithm),
+        conv_digest,
+        ..V2Tlvs::default()
     }
 }
 
@@ -934,6 +1025,7 @@ mod tests {
                 None,
                 &Churn::new("eth1", Duration::from_secs(60)),
                 0,
+                PartnerV2::default(),
             );
         };
 

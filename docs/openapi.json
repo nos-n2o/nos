@@ -4841,7 +4841,7 @@
           },
           "lacp_port_algorithm": {
             "$ref": "#/components/schemas/LacpPortAlgorithm",
-            "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+            "description": "See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement."
           },
           "lacp_rate": {
             "$ref": "#/components/schemas/LacpRate",
@@ -4865,7 +4865,7 @@
           },
           "lacp_version": {
             "$ref": "#/components/schemas/LacpVersion",
-            "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+            "description": "See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in)."
           },
           "min_links": {
             "description": "Minimum number of member ports that must be `Distributing` for the\nbond to carry traffic: below it `nos-lacpd` pushes an empty active\nset, so the kernel bond holds no member, while the ports keep\nnegotiating and the bond refills as soon as the count is met. 0 and 1\nbehave the same (any Distributing port is enough). Only meaningful\nfor a `Lacp`-mode aggregate; ignored (not rejected) otherwise, and not\nchecked against the member count, which lives on the `Interface`s.",
@@ -95024,7 +95024,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpPortAlgorithm",
-                  "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement."
                 }
               }
             },
@@ -95094,7 +95094,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpPortAlgorithm",
-                  "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement."
                 }
               }
             },
@@ -95140,7 +95140,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/LacpPortAlgorithm",
-                "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                "description": "See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement."
               }
             }
           },
@@ -95152,7 +95152,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpPortAlgorithm",
-                  "description": "See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement."
                 }
               }
             },
@@ -95868,7 +95868,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpVersion",
-                  "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in)."
                 }
               }
             },
@@ -95938,7 +95938,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpVersion",
-                  "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in)."
                 }
               }
             },
@@ -95984,7 +95984,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/LacpVersion",
-                "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                "description": "See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in)."
               }
             }
           },
@@ -95996,7 +95996,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LacpVersion",
-                  "description": "See [`LacpVersion`]. Accepted and shown; nothing reads it yet."
+                  "description": "See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in)."
                 }
               }
             },

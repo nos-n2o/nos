@@ -58,6 +58,14 @@ fn config(active: bool, rate: LacpRate, selected_rx: watch::Receiver<bool>) -> L
         rate,
         selected_rx,
         churn_time: Duration::from_secs(5),
+        version_pref: 1,
+        link_number: Some(1),
+        // Leaked so the channel stays open for the test's life.
+        advert_rx: {
+            let (tx, rx) = watch::channel(Advert::default());
+            std::mem::forget(tx);
+            rx
+        },
     }
 }
 
@@ -391,6 +399,7 @@ fn observation_predicates_follow_the_partner_and_churn() {
         actor_churn: ChurnState::NoChurn,
         partner_churn: ChurnState::NoChurn,
         unsupported_version_pdus: 0,
+        v2: PartnerV2::default(),
     };
     assert!(o.current() && !o.is_churned() && !o.partner_individual());
     o.partner = Some(partner_info(state_bit::ACTIVITY));
@@ -709,4 +718,142 @@ fn own_system_id_lacpdus_are_dropped_and_warn_once() {
     r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
     assert!(!r.port.loopback_logged);
     assert!(r.port.partner.is_some());
+}
+
+// --- #894: version adaptation, v2 TLVs, partner recording ---
+
+fn rig_v(pref: u8) -> Rig {
+    let (tx, rx) = watch::channel(false);
+    let mut c = config(true, LacpRate::Slow, rx);
+    c.version_pref = pref;
+    let observations = Arc::new(Mutex::new(HashMap::new()));
+    let port = Port::new(c, observations.clone(), Arc::new(Notify::new()), 3);
+    Rig {
+        port,
+        sink: VecSink::default(),
+        observations,
+        _selected_tx: tx,
+    }
+}
+
+fn frame_v(version: u8, v2: Option<V2Tlvs>) -> Vec<u8> {
+    let mut pdu = decode(&partner_frame(ACTIVE_PARTNER)).unwrap();
+    pdu.v2 = v2;
+    let mut b = encode(&pdu);
+    b[1] = version;
+    b
+}
+
+fn last_version(r: &Rig) -> u8 {
+    r.sink.sent.lock().unwrap().last().unwrap()[1]
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_1_preference_never_sends_v2() {
+    let mut r = rig_v(1);
+    r.port.on_periodic(&r.sink);
+    assert_eq!(last_version(&r), 1);
+    r.refill();
+    r.port
+        .on_frame(&frame_v(2, Some(V2Tlvs::default())), &r.sink);
+    r.port.on_periodic(&r.sink);
+    assert_eq!(last_version(&r), 1);
+    assert_eq!(r.observed().v2.version, Some(2));
+}
+
+#[tokio::test(start_paused = true)]
+async fn version_2_downgrades_on_a_v1_partner_and_reupgrades_on_v2() {
+    let mut r = rig_v(2);
+    r.port.on_periodic(&r.sink);
+    assert_eq!(last_version(&r), 2, "explicit opt-in sends v2 first");
+    assert_eq!(r.sink.count(), 1);
+
+    // Inside the grace period a v1 PDU (a partner that has not yet seen our
+    // v2) is no reason to downgrade.
+    r.refill();
+    r.port.on_frame(&frame_v(1, None), &r.sink);
+    assert_eq!(r.port.sent_version, 2);
+    assert_eq!(r.observed().v2.version, Some(1));
+    tokio::time::advance(V2_GRACE).await;
+    r.refill();
+    r.port.on_frame(&frame_v(1, None), &r.sink);
+    assert_eq!(r.port.sent_version, 1);
+    assert_eq!(last_version(&r), 1, "the change goes out at once");
+    assert_eq!(r.observed().v2.version, Some(1));
+    let n = r.sink.count();
+
+    // Same v1 partner again: no retransmit storm.
+    r.refill();
+    r.port.on_frame(&frame_v(1, None), &r.sink);
+    assert_eq!(r.sink.count(), n);
+
+    r.refill();
+    r.port
+        .on_frame(&frame_v(2, Some(V2Tlvs::default())), &r.sink);
+    assert_eq!(r.port.sent_version, 2);
+    assert_eq!(last_version(&r), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn partner_v2_tlvs_are_recorded_and_the_advert_is_sent() {
+    let mut r = rig_v(2);
+    let tlvs = V2Tlvs {
+        algorithm: Some(crate::conversation::PortAlgorithm::CVid),
+        conv_digest: Some(ConvDigest {
+            link_number: 4,
+            digest: [7; 16],
+        }),
+        ..V2Tlvs::default()
+    };
+    r.port.on_frame(&frame_v(2, Some(tlvs)), &r.sink);
+    let v2 = r.observed().v2;
+    assert_eq!(v2.algorithm, Some(crate::conversation::PortAlgorithm::CVid));
+    assert_eq!(v2.digest.unwrap().link_number, 4);
+
+    // The aggregate publishes an algorithm and digest: we send them, with
+    // our own Link_Number.
+    r.refill();
+    r.port.on_advert(
+        Advert {
+            algorithm: crate::conversation::PortAlgorithm::CVid,
+            digest: Ok([9; 16]),
+        },
+        &r.sink,
+    );
+    let sent = decode(r.sink.sent.lock().unwrap().last().unwrap())
+        .unwrap()
+        .v2
+        .unwrap();
+    assert_eq!(
+        sent.algorithm,
+        Some(crate::conversation::PortAlgorithm::CVid)
+    );
+    assert_eq!(
+        sent.conv_digest,
+        Some(ConvDigest {
+            link_number: 1,
+            digest: [9; 16]
+        })
+    );
+    // Unchanged advert: nothing more is sent.
+    let n = r.sink.count();
+    r.refill();
+    r.port.on_advert(r.port.advert.clone(), &r.sink);
+    assert_eq!(r.sink.count(), n);
+}
+
+#[test]
+fn unspecified_advert_sends_only_the_algorithm_tlv() {
+    let t = v2_tlvs(&Advert::default(), Some(1));
+    assert_eq!(
+        t.algorithm,
+        Some(crate::conversation::PortAlgorithm::Unspecified)
+    );
+    assert_eq!(t.conv_digest, None);
+    // No Link_Number: no digest either.
+    let a = Advert {
+        algorithm: crate::conversation::PortAlgorithm::CVid,
+        digest: Ok([1; 16]),
+    };
+    assert_eq!(v2_tlvs(&a, None).conv_digest, None);
 }
