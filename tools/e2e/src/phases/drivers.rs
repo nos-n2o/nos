@@ -4911,11 +4911,13 @@ pub(super) async fn assert_sandbox(
 ) -> anyhow::Result<()> {
     let st = proc_status(w, comm).await?;
     let want_nnp = format!("NoNewPrivs:\t{nnp}");
+    // #1217: the sandboxed (NNP) daemons carry the seccomp deny-list (mode 2), `nos-sshd` none.
+    let want_seccomp = format!("Seccomp:\t{}", if nnp == 1 { 2 } else { 0 });
     let want_cap = cap_eff.map_or(String::new(), |c| format!("CapEff:\t{c}"));
-    if !st.contains(&want_nnp) || !st.contains(&want_cap) {
-        bail!("{comm}: wanted `{want_nnp}` and `{want_cap}`, got:\n{st}");
+    if !st.contains(&want_nnp) || !st.contains(&want_cap) || !st.contains(&want_seccomp) {
+        bail!("{comm}: wanted `{want_nnp}`, `{want_seccomp}` and `{want_cap}`, got:\n{st}");
     }
-    log(format!("{comm}: {want_nnp}, {want_cap}"));
+    log(format!("{comm}: {want_nnp}, {want_seccomp}, {want_cap}"));
     Ok(())
 }
 
@@ -4931,5 +4933,7 @@ pub async fn sandbox_nnp(w: &mut World) -> anyhow::Result<()> {
     assert_sandbox(w, "nos-bgpd", 1, Some(CAP_EFF_NET_RAW_BIND)).await?;
     assert_sandbox(w, "nos-configd", 1, Some(CAP_EFF_NONE)).await?;
     assert_sandbox(w, "nos-logd", 1, Some(CAP_EFF_NONE)).await?;
+    // #1217: no daemon was killed by the seccomp deny-list (SIGSYS) since the run began.
+    a.assert_quiet("exited.*signal: 31", 0, 1).await?;
     Ok(())
 }

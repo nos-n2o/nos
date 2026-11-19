@@ -9,6 +9,7 @@
     reason = "32/64-bit capability word splitting and byte-slice plumbing, all bounded"
 )]
 
+pub mod seccomp;
 pub mod sys;
 
 use std::fmt;
