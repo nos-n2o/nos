@@ -5667,10 +5667,12 @@ mod tests {
             }
         };
         assert!(ops.contains(&set(true, false)) && ops.contains(&set(false, true)));
-        assert!(
-            err(&[&base[..], &["--ospfv3-extended-lsa", "--ospfv3-extended-lsa-sparse"]].concat())
-                .contains("mutually exclusive")
-        );
+        assert!(err(&[
+            &base[..],
+            &["--ospfv3-extended-lsa", "--ospfv3-extended-lsa-sparse"]
+        ]
+        .concat())
+        .contains("mutually exclusive"));
     }
 
     #[test]

@@ -5087,17 +5087,18 @@ pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
         (c.count(&route(lo_a)), c.count(&route(lo_b))),
     ];
     let (legacy_a0, ext_b0) = (b.count(&legacy_a), a.count(&ext_b));
-    let lo = |p: &'static str, mode: &'static str| {
-        let mut f = vec![
+    let lo = |prefix: &'static str, mode: &'static str| {
+        let mut flags = vec![
             "--ospfv3-loopback-address",
-            p,
+            prefix,
             "--ospfv3-loopback-profile",
             OSPFV3_PROFILE,
         ];
-        f.extend(Some(mode).filter(|m| !m.is_empty()));
-        f
+        flags.extend(Some(mode).filter(|m| !m.is_empty()));
+        flags
     };
-    a.provision(&lo(lo_a, "--ospfv3-extended-lsa-sparse")).await?;
+    a.provision(&lo(lo_a, "--ospfv3-extended-lsa-sparse"))
+        .await?;
     b.provision(&lo(lo_b, "--ospfv3-extended-lsa")).await?;
     c.provision(&lo(lo_c, "")).await?;
 
@@ -5105,20 +5106,16 @@ pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&ext_b, ext_b0, 60).await?;
     let link = format!("link=broadcast-domain:{BD}");
     for (r, peers) in [
-        (&*a, [OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C]),
-        (&*b, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_C]),
-        (&*c, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B]),
+        (a, [OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C]),
+        (b, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_C]),
+        (c, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B]),
     ] {
         for n in peers {
             r.wait(&format!("ospfv3 neighbor reached full {link} neighbor={n}"))
                 .await?;
         }
     }
-    let wants = [
-        (&*a, [lo_b, lo_c]),
-        (&*b, [lo_a, lo_c]),
-        (&*c, [lo_a, lo_b]),
-    ];
+    let wants = [(a, [lo_b, lo_c]), (b, [lo_a, lo_c]), (c, [lo_a, lo_b])];
     for ((r, ps), (m0, m1)) in wants.into_iter().zip(marks) {
         r.wait_new(&route(ps[0]), m0, 60).await?;
         r.wait_new(&route(ps[1]), m1, 60).await?;
