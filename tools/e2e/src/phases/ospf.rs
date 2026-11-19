@@ -5074,19 +5074,14 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
 pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     let [lo_a, lo_b, lo_c] = OSPFV3_SPARSE_LOOPBACKS;
-    let route = |p: &str| format!("added route prefix={p}.*source=Some(Ospf)");
+    // The loopbacks are unique to this phase, so a first-occurrence wait is safe.
+    let route = |p: &str| format!("added route prefix={p}.*source=Some(Ospf) backup=false");
     let legacy_a = format!(
         "ospfv3 lsa installed.*lsa_type={LSA_TYPE_ROUTER_V3}.*advertising_router={OSPFV3_ROUTER_ID}"
     );
     let ext_b = format!(
         "ospfv3 lsa installed.*lsa_type={LSA_TYPE_E_ROUTER}.*advertising_router={OSPFV3_ROUTER_ID_B}"
     );
-    let marks = [
-        (a.count(&route(lo_b)), a.count(&route(lo_c))),
-        (b.count(&route(lo_a)), b.count(&route(lo_c))),
-        (c.count(&route(lo_a)), c.count(&route(lo_b))),
-    ];
-    let (legacy_a0, ext_b0) = (b.count(&legacy_a), a.count(&ext_b));
     let lo = |prefix: &'static str, mode: &'static str| {
         let mut flags = vec![
             "--ospfv3-loopback-address",
@@ -5097,13 +5092,23 @@ pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
         flags.extend(Some(mode).filter(|m| !m.is_empty()));
         flags
     };
+    // Only the loopback's first IPv6 address is originated: drop the earlier
+    // phases' (`ospfv3-lfa`'s on router-b, `ospfv3-dr`'s on router-c) first.
+    for (r, old) in [
+        (a, OSPFV3_LOOPBACK_ADDRESS),
+        (b, OSPFV3_LFA_LOOPBACK_ADDRESS),
+        (c, OSPFV3_DR_LOOPBACK_ADDRESS_C),
+    ] {
+        // Absent when a phase before already removed it.
+        let _ = r.provision(&["--loopback-remove-address", old]).await;
+    }
     a.provision(&lo(lo_a, "--ospfv3-extended-lsa-sparse"))
         .await?;
     b.provision(&lo(lo_b, "--ospfv3-extended-lsa")).await?;
     c.provision(&lo(lo_c, "")).await?;
 
-    b.wait_new(&legacy_a, legacy_a0, 60).await?;
-    a.wait_new(&ext_b, ext_b0, 60).await?;
+    b.wait(&legacy_a).await?;
+    a.wait(&ext_b).await?;
     let link = format!("link=broadcast-domain:{BD}");
     for (r, peers) in [
         (a, [OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C]),
@@ -5116,16 +5121,23 @@ pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
         }
     }
     let wants = [(a, [lo_b, lo_c]), (b, [lo_a, lo_c]), (c, [lo_a, lo_b])];
-    for ((r, ps), (m0, m1)) in wants.into_iter().zip(marks) {
-        r.wait_new(&route(ps[0]), m0, 60).await?;
-        r.wait_new(&route(ps[1]), m1, 60).await?;
+    for (r, ps) in wants {
+        for p in ps {
+            r.wait(&route(p)).await?;
+        }
     }
 
     // Leave full mode on both (what `ospfv3` left) and no loopback behind.
     a.provision(&["--ospfv3-extended-lsa", "--clear-ospfv3-loopback-profile"])
         .await?;
     b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await
+    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    for (r, mine) in [(a, lo_a), (b, lo_b), (c, lo_c)] {
+        r.provision(&["--loopback-remove-address", mine]).await?;
+    }
+    // Give router-b `ospfv3-lfa`'s address back (`ospfv3-spf-ecmp` removes it).
+    b.provision(&lo(OSPFV3_LFA_LOOPBACK_ADDRESS, "")).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile"]).await
 }
 
 /// RFC 5286 loop-free alternate over OSPFv3 (requires `ospfv3-dr`, which puts
