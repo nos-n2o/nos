@@ -601,7 +601,10 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
             backup_tunnel: Some(v6(N + 3)),
         })
         .collect();
-    let whole = RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::Full(routes.clone())]);
+    let whole = RibRequest::PushOspfRoutes {
+        instance: "o1".into(),
+        updates: vec![OspfRouteUpdate::Full(routes.clone())],
+    };
     assert!(
         IpcCodec::<RibRequest>::default()
             .encode(whole, &mut bytes::BytesMut::new())
@@ -616,7 +619,10 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
     // `GetTableId`'s reply is the barrier: every earlier frame was handled.
     for frame in frames {
         writer
-            .feed(RibRequest::PushOspfRoutes(frame))
+            .feed(RibRequest::PushOspfRoutes {
+                instance: "o1".into(),
+                updates: frame,
+            })
             .await
             .unwrap();
     }
@@ -628,7 +634,13 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
         "half a table published"
     );
 
-    writer.send(RibRequest::PushOspfRoutes(last)).await.unwrap();
+    writer
+        .send(RibRequest::PushOspfRoutes {
+            instance: "o1".into(),
+            updates: last,
+        })
+        .await
+        .unwrap();
     writer.send(RibRequest::GetTableId).await.unwrap();
     reader.next().await.unwrap().unwrap();
     assert_eq!(rib.read().await.count_source(RouteSource::Ospf), N);
@@ -892,8 +904,9 @@ async fn ospf_pushes_land_only_from_the_ospf_daemons() {
     for (i, role) in Role::ALL.into_iter().enumerate() {
         let prefix: nos_proto::IpNet = format!("10.{i}.0.0/24").parse().unwrap();
         let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
-        w.send(RibRequest::PushOspfRoutes(vec![
-            nos_proto::OspfRouteUpdate::Add(nos_proto::OspfRoute {
+        w.send(RibRequest::PushOspfRoutes {
+            instance: "x".into(),
+            updates: vec![nos_proto::OspfRouteUpdate::Add(nos_proto::OspfRoute {
                 prefix,
                 next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
                 backup_next_hop: None,
@@ -901,8 +914,8 @@ async fn ospf_pushes_land_only_from_the_ospf_daemons() {
                 metric: 10,
                 discard: false,
                 backup_tunnel: None,
-            }),
-        ]))
+            })],
+        })
         .await
         .unwrap();
         if matches!(role, Role::Ospfd | Role::Ospfv3d) {
@@ -1015,4 +1028,85 @@ async fn a_chunked_evpn_full_is_applied_once_on_its_closing_frame() {
         .expect("closing Full not applied");
     assert_eq!(rib.read().await.evpn.received.len(), 30);
     assert_eq!(driver.applied.lock().await.len(), 1, "one apply");
+}
+
+use nos_proto::{OspfRoute, OspfRouteUpdate};
+
+fn ospf_route(prefix: &str, metric: u32) -> OspfRoute {
+    OspfRoute {
+        prefix: prefix.parse().unwrap(),
+        next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
+        backup_next_hop: None,
+        backup_interface_id: None,
+        metric,
+        discard: false,
+        backup_tunnel: None,
+    }
+}
+
+/// Two instances on one table: each `Full` replaces only its own routes, and a
+/// chunked snapshot of one interleaved with the other's is neither half applied
+/// nor clobbered (#1277).
+#[tokio::test]
+async fn ospf_instances_keep_their_own_routes() {
+    let (_tmp, path, rib, _driver, _server) = gate_server();
+    let (mut r1, mut w1) = connect_as(&path, "ospfd", "a").await;
+    let (mut r3, mut w3) = connect_as(&path, "ospfv3d", "a").await;
+    let push = |instance: &str, updates| RibRequest::PushOspfRoutes {
+        instance: instance.into(),
+        updates,
+    };
+    w1.send(push(
+        "a",
+        vec![OspfRouteUpdate::Full(vec![ospf_route("10.1.0.0/24", 10)])],
+    ))
+    .await
+    .unwrap();
+    // v3 FullPart first, then a v2 Full while it is staged, then the v3 close.
+    w3.send(push(
+        "a",
+        vec![OspfRouteUpdate::FullPart(vec![ospf_route(
+            "10.2.0.0/24",
+            10,
+        )])],
+    ))
+    .await
+    .unwrap();
+    w1.send(push(
+        "a",
+        vec![OspfRouteUpdate::Full(vec![ospf_route("10.1.0.0/24", 20)])],
+    ))
+    .await
+    .unwrap();
+    w1.send(RibRequest::GetTableId).await.unwrap();
+    r1.next().await.unwrap().unwrap();
+    assert_eq!(rib.read().await.count_source(RouteSource::Ospf), 1);
+    w3.send(push(
+        "a",
+        vec![OspfRouteUpdate::Full(vec![ospf_route("10.3.0.0/24", 10)])],
+    ))
+    .await
+    .unwrap();
+    w3.send(RibRequest::GetTableId).await.unwrap();
+    r3.next().await.unwrap().unwrap();
+    let guard = rib.read().await;
+    assert_eq!(guard.count_source(RouteSource::Ospf), 3);
+    for p in ["10.1.0.0/24", "10.2.0.0/24", "10.3.0.0/24"] {
+        assert!(guard.best_route(&p.parse().unwrap()).is_some(), "{p}");
+    }
+}
+
+/// A daemon cannot push as a sibling instance.
+#[tokio::test]
+async fn ospf_push_for_another_instance_is_refused() {
+    let (_tmp, path, rib, _driver, _server) = gate_server();
+    let (mut r, mut w) = connect_as(&path, "ospfd", "a").await;
+    w.send(RibRequest::PushOspfRoutes {
+        instance: "b".into(),
+        updates: vec![OspfRouteUpdate::Add(ospf_route("10.1.0.0/24", 10))],
+    })
+    .await
+    .unwrap();
+    assert!(reply_or_closed(&mut r).await.is_none());
+    assert!(rib.read().await.is_empty());
 }

@@ -3994,16 +3994,35 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
     wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
+    // #1277: one `nos-ribd` table holds the v2 and v3 route sets of two
+    // owners. Restarting one daemon (it pushes a fresh `Full`) must leave the
+    // other family's route installed on router-b.
+    let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
+    let v2_removed = format!("removed route prefix={ASBR_PREFIX} ");
+    let v3_removed0 = b.count(&removed);
+    let full_v2 = full_p2p(OSPF_ROUTER_ID);
+    let full_v2_0 = b.count(&full_v2);
+    log("killing router-b's nos-ospfd; router-b's ospfv3 route must stay installed");
+    w.dock.kill_process("router-b", "nos-ospfd").await?;
+    b.wait_new(&full_v2, full_v2_0, 90).await?;
+    b.assert_quiet(&removed, v3_removed0, 1).await?;
+    let v2_removed0 = b.count(&v2_removed);
+    let full_v3 = format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
+    let full_v3_0 = b.count(&full_v3);
+    log("killing router-b's nos-ospfv3d; router-b's ospf route must stay installed");
+    w.dock.kill_process("router-b", "nos-ospfv3d").await?;
+    b.wait_new(&full_v3, full_v3_0, 90).await?;
+    b.assert_quiet(&v2_removed, v2_removed0, 1).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
+
     let aged = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa prematurely aged lsa_type={t} ")
     });
     let flushed = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa maxage flushed .*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID}")
     });
-    let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
     let (aged0, flushed0, removed0) = (a.count(&aged), b.count(&flushed), b.count(&removed));
     let v2_aged = "ospf lsa prematurely aged.*lsa_type=5";
-    let v2_removed = format!("removed route prefix={ASBR_PREFIX} ");
     let (v2_aged0, v2_removed0) = (a.count(v2_aged), b.count(&v2_removed));
     log("removing router-a's ospfv3 redistribute rule; only its as-external-lsa must be flushed");
     a.provision(&["--clear-redistribute-to-ospfv3"]).await?;

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 
 use nos_proto::{Config, IpNet, NextHop};
@@ -56,6 +56,28 @@ impl RouteSource {
             RouteSource::Bgp => 20,
             RouteSource::Ospf => 110,
             RouteSource::Evpn | RouteSource::Vpn => 200,
+        }
+    }
+}
+
+/// Who pushed an `Ospf` route: one OSPF daemon instance. The family is part of
+/// the key because `ospf_instances` and `ospfv3_instances` are separate
+/// sections that may reuse a name (#1277). Orders v2 before v3, then by name,
+/// the final best-path tie-break.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct OspfOwner {
+    /// `true` for `nos-ospfv3d`.
+    pub v3: bool,
+    /// The instance name.
+    pub name: String,
+}
+
+impl OspfOwner {
+    /// The owner for the daemon `role` pushing as `instance`.
+    pub fn new(v3: bool, instance: impl Into<String>) -> Self {
+        Self {
+            v3,
+            name: instance.into(),
         }
     }
 }
@@ -136,6 +158,10 @@ pub struct Rib {
     /// SPF cost per `Ospf`-sourced prefix, kept beside `entries` (not in
     /// `RibEntry`) since the kernel diff must not see a metric-only change.
     ospf_metrics: HashMap<IpNet, u32>,
+    /// Each OSPF owner's own routes and SPF costs (#1277). `entries` holds one
+    /// derived `Ospf` candidate per prefix, the best across owners
+    /// (`refresh_ospf`), so the rest of the table never sees owners.
+    ospf: BTreeMap<OspfOwner, HashMap<IpNet, (RibEntry, u32)>>,
     /// The table's EVPN IP-VRF state, beside `entries` like `ospf_metrics`.
     pub evpn: crate::evpn::EvpnState,
     /// PE and RD of each next hop per `Vpn`-sourced prefix, for `show route` only (beside
@@ -163,6 +189,7 @@ impl Rib {
         source: RouteSource,
         entries: impl IntoIterator<Item = RibEntry>,
     ) {
+        debug_assert_ne!(source, RouteSource::Ospf, "use replace_ospf");
         for candidates in self.entries.values_mut() {
             candidates.retain(|e| e.source != source);
         }
@@ -188,6 +215,7 @@ impl Rib {
     /// Upserts one `source`-sourced candidate for `entry.prefix` — used for
     /// a BGP push's incremental `Add`.
     pub fn upsert(&mut self, entry: RibEntry) {
+        debug_assert_ne!(entry.source, RouteSource::Ospf, "use upsert_ospf_and_diff");
         let candidates = self.entries.entry(entry.prefix).or_default();
         candidates.retain(|e| e.source != entry.source);
         candidates.push(entry);
@@ -197,6 +225,7 @@ impl Rib {
     /// push's incremental `Remove`. Prunes the prefix entirely if that was
     /// its last remaining candidate.
     pub fn remove(&mut self, prefix: &IpNet, source: RouteSource) {
+        debug_assert_ne!(source, RouteSource::Ospf, "use remove_ospf_and_diff");
         if let Some(candidates) = self.entries.get_mut(prefix) {
             candidates.retain(|e| e.source != source);
             if candidates.is_empty() {
@@ -326,17 +355,102 @@ impl Rib {
         self.entries.is_empty()
     }
 
-    /// Replaces every recorded OSPF metric (a `Full` push).
-    pub fn set_ospf_metrics(&mut self, metrics: impl IntoIterator<Item = (IpNet, u32)>) {
-        self.ospf_metrics = metrics.into_iter().collect();
-    }
-
     /// Records (`Some`) or forgets (`None`) one prefix's OSPF metric.
     pub fn set_ospf_metric(&mut self, prefix: IpNet, metric: Option<u32>) {
         match metric {
             Some(m) => self.ospf_metrics.insert(prefix, m),
             None => self.ospf_metrics.remove(&prefix),
         };
+    }
+
+    /// Re-derives `prefix`'s single `Ospf` candidate and metric from every
+    /// owner's route: a real route beats a discard, then the lowest SPF cost,
+    /// then owner order. A discard of one owner never hides another's route.
+    fn refresh_ospf(&mut self, prefix: &IpNet) {
+        let best = self
+            .ospf
+            .iter()
+            .filter_map(|(owner, routes)| Some((owner, routes.get(prefix)?)))
+            .min_by_key(|(owner, (e, metric))| (e.is_discard(), *metric, *owner))
+            .map(|(_, (e, metric))| (e.clone(), *metric));
+        if let Some(candidates) = self.entries.get_mut(prefix) {
+            candidates.retain(|e| e.source != RouteSource::Ospf);
+        }
+        if let Some((entry, metric)) = best {
+            self.entries.entry(*prefix).or_default().push(entry);
+            self.ospf_metrics.insert(*prefix, metric);
+        } else {
+            self.ospf_metrics.remove(prefix);
+            if self.entries.get(prefix).is_some_and(Vec::is_empty) {
+                self.entries.remove(prefix);
+            }
+        }
+    }
+
+    /// Replaces every route of one OSPF owner (a `Full` push), leaving the
+    /// other owners' untouched.
+    pub fn replace_ospf(
+        &mut self,
+        owner: &OspfOwner,
+        routes: impl IntoIterator<Item = (RibEntry, u32)>,
+    ) {
+        let new: HashMap<IpNet, (RibEntry, u32)> = routes
+            .into_iter()
+            .map(|(e, m)| (e.prefix, (e, m)))
+            .collect();
+        let mut touched: Vec<IpNet> = new.keys().copied().collect();
+        if let Some(old) = self.ospf.insert(owner.clone(), new) {
+            touched.extend(old.into_keys());
+        }
+        for prefix in touched {
+            self.refresh_ospf(&prefix);
+        }
+    }
+
+    /// One owner's incremental `Add`; reports the prefix's winner change.
+    pub fn upsert_ospf_and_diff(
+        &mut self,
+        owner: &OspfOwner,
+        entry: RibEntry,
+        metric: u32,
+    ) -> BestPathChange {
+        let prefix = entry.prefix;
+        let before = self.best_route(&prefix).cloned();
+        self.ospf
+            .entry(owner.clone())
+            .or_default()
+            .insert(prefix, (entry, metric));
+        self.refresh_ospf(&prefix);
+        diff_best(before.as_ref(), self.best_route(&prefix).cloned())
+    }
+
+    /// One owner's incremental `Remove`; reports the prefix's winner change.
+    pub fn remove_ospf_and_diff(&mut self, owner: &OspfOwner, prefix: &IpNet) -> BestPathChange {
+        let before = self.best_route(prefix).cloned();
+        if let Some(routes) = self.ospf.get_mut(owner) {
+            routes.remove(prefix);
+        }
+        self.refresh_ospf(prefix);
+        diff_best(before.as_ref(), self.best_route(prefix).cloned())
+    }
+
+    /// Drops every owner not in `keep` (its instance left the config) and
+    /// returns them. The caller applies the table to the kernel afterwards.
+    pub fn retain_ospf_owners(&mut self, keep: &HashSet<OspfOwner>) -> Vec<OspfOwner> {
+        let gone: Vec<OspfOwner> = self
+            .ospf
+            .keys()
+            .filter(|o| !keep.contains(*o))
+            .cloned()
+            .collect();
+        for owner in &gone {
+            if let Some(old) = self.ospf.remove(owner) {
+                for prefix in old.into_keys() {
+                    self.refresh_ospf(&prefix);
+                }
+            }
+        }
+        gone
     }
 
     /// Rebuilds the `Evpn` candidates from `evpn.received` and `evpn.local`
@@ -1361,5 +1475,94 @@ mod tests {
             ..Default::default()
         }];
         assert!(!bfd_target(&c, "rt1")[&gw].multihop);
+    }
+
+    // ------------------------------------------------ per-owner OSPF (#1277)
+
+    fn owner(v3: bool, name: &str) -> OspfOwner {
+        OspfOwner::new(v3, name)
+    }
+
+    fn ospf(prefix: &str, gateway: &str) -> RibEntry {
+        entry(prefix, gateway, RouteSource::Ospf)
+    }
+
+    #[test]
+    fn ospf_owners_replace_only_their_own_routes() {
+        let mut rib = Rib::new();
+        let (a, b) = (owner(false, "a"), owner(true, "a"));
+        rib.replace_ospf(&a, [(ospf("10.1.0.0/24", "10.0.0.1"), 5)]);
+        rib.replace_ospf(&b, [(ospf("10.2.0.0/24", "10.0.0.2"), 7)]);
+        rib.replace_ospf(&a, [(ospf("10.3.0.0/24", "10.0.0.1"), 9)]);
+        assert!(rib.best_route(&"10.1.0.0/24".parse().unwrap()).is_none());
+        assert!(rib.best_route(&"10.2.0.0/24".parse().unwrap()).is_some());
+        assert!(rib.best_route(&"10.3.0.0/24".parse().unwrap()).is_some());
+        let mut costs = rib.igp_costs();
+        costs.sort();
+        assert_eq!(
+            costs,
+            vec![
+                ("10.2.0.0/24".parse().unwrap(), 7),
+                ("10.3.0.0/24".parse().unwrap(), 9)
+            ]
+        );
+        // Add/Remove touch only their owner.
+        let p: IpNet = "10.2.0.0/24".parse().unwrap();
+        assert_eq!(rib.remove_ospf_and_diff(&a, &p), BestPathChange::Unchanged);
+        assert_eq!(rib.remove_ospf_and_diff(&b, &p), BestPathChange::Removed);
+        assert!(rib.best_route(&"10.3.0.0/24".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn same_prefix_lowest_metric_then_owner_order_wins() {
+        let mut rib = Rib::new();
+        let p: IpNet = "10.1.0.0/24".parse().unwrap();
+        let (a, b) = (owner(false, "a"), owner(false, "b"));
+        rib.replace_ospf(&b, [(ospf("10.1.0.0/24", "10.0.0.2"), 5)]);
+        rib.replace_ospf(&a, [(ospf("10.1.0.0/24", "10.0.0.1"), 5)]);
+        // Tie: owner order, so "a".
+        assert_eq!(
+            rib.best_route(&p).unwrap().next_hops[0].gateway.to_string(),
+            "10.0.0.1"
+        );
+        rib.upsert_ospf_and_diff(&a, ospf("10.1.0.0/24", "10.0.0.1"), 50);
+        assert_eq!(
+            rib.best_route(&p).unwrap().next_hops[0].gateway.to_string(),
+            "10.0.0.2"
+        );
+        assert_eq!(rib.igp_costs(), vec![(p, 5)]);
+        // A winner flip with identical next hops is no kernel change.
+        let mut rib = Rib::new();
+        rib.replace_ospf(&a, [(ospf("10.1.0.0/24", "10.0.0.1"), 5)]);
+        rib.replace_ospf(&b, [(ospf("10.1.0.0/24", "10.0.0.1"), 9)]);
+        assert_eq!(
+            rib.upsert_ospf_and_diff(&a, ospf("10.1.0.0/24", "10.0.0.1"), 99),
+            BestPathChange::Unchanged
+        );
+        assert_eq!(rib.igp_costs(), vec![(p, 9)]);
+    }
+
+    #[test]
+    fn a_discard_of_one_owner_never_hides_anothers_route() {
+        let mut rib = Rib::new();
+        let p: IpNet = "10.1.0.0/24".parse().unwrap();
+        let mut discard = ospf("10.1.0.0/24", "10.0.0.1");
+        discard.next_hops.clear();
+        rib.replace_ospf(&owner(false, "a"), [(discard, 1)]);
+        rib.replace_ospf(&owner(true, "a"), [(ospf("10.1.0.0/24", "10.0.0.2"), 40)]);
+        assert!(!rib.best_route(&p).unwrap().is_discard());
+        assert_eq!(rib.igp_costs(), vec![(p, 40)]);
+    }
+
+    #[test]
+    fn retain_ospf_owners_drops_the_rest() {
+        let mut rib = Rib::new();
+        let (a, b) = (owner(false, "a"), owner(true, "a"));
+        rib.replace_ospf(&a, [(ospf("10.1.0.0/24", "10.0.0.1"), 5)]);
+        rib.replace_ospf(&b, [(ospf("10.2.0.0/24", "10.0.0.2"), 5)]);
+        let gone = rib.retain_ospf_owners(&HashSet::from([a]));
+        assert_eq!(gone, vec![b]);
+        assert_eq!(rib.count_source(RouteSource::Ospf), 1);
+        assert_eq!(rib.igp_costs().len(), 1);
     }
 }

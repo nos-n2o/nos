@@ -20,7 +20,7 @@ use crate::evpn::{self, L3Vni};
 use crate::evpn_client::EvpnTarget;
 use crate::interface_client;
 use crate::ospf_client;
-use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
+use crate::rib::{build_from_config, OspfOwner, Rib, RibEntry, RouteSource};
 use crate::vpn;
 use crate::vpn_client::VpnTarget;
 use nos_daemon::config;
@@ -75,7 +75,7 @@ pub const STARTUP_HOLD: Duration = Duration::from_secs(120);
 /// one (or `deadline` passes), full applies only add.
 #[derive(Debug)]
 struct StartupHold {
-    pending: HashSet<RouteSource>,
+    pending: HashSet<Pending>,
     deadline: Instant,
 }
 
@@ -89,23 +89,43 @@ enum HoldState {
     Done,
 }
 
-/// The sources the running config says feed `table`.
-// ponytail: `ospf_instance` and `ospfv3_instance` both map to `Ospf`, so the
-// first of the two `Full`s ends the wait for both; a split key would need a
-// per-family tag on `PushOspfRoutes`.
-fn configured_sources(cfg: &Config, table: &str) -> HashSet<RouteSource> {
+/// One producer the startup hold waits for: a route source, or one OSPF
+/// instance (each pushes its own `Full`, #1277).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pending {
+    /// A non-OSPF source.
+    Source(RouteSource),
+    /// One OSPF daemon instance.
+    Ospf(OspfOwner),
+}
+
+/// The OSPF instances the running config assigns to `table`.
+fn configured_ospf_owners(cfg: &Config, table: &str) -> HashSet<OspfOwner> {
     let mut s = HashSet::new();
+    if let Some(t) = cfg.routing_tables.iter().find(|t| t.name == table) {
+        if let Some(i) = &t.ospf_instance {
+            s.insert(OspfOwner::new(false, i.clone()));
+        }
+        if let Some(i) = &t.ospfv3_instance {
+            s.insert(OspfOwner::new(true, i.clone()));
+        }
+    }
+    s
+}
+
+/// The producers the running config says feed `table`.
+fn configured_sources(cfg: &Config, table: &str) -> HashSet<Pending> {
+    let mut s: HashSet<Pending> = configured_ospf_owners(cfg, table)
+        .into_iter()
+        .map(Pending::Ospf)
+        .collect();
     if let Some(t) = cfg.routing_tables.iter().find(|t| t.name == table) {
         let mut set = |on: bool, src| {
             if on {
-                s.insert(src);
+                s.insert(Pending::Source(src));
             }
         };
         set(t.bgp_instance.is_some(), RouteSource::Bgp);
-        set(
-            t.ospf_instance.is_some() || t.ospfv3_instance.is_some(),
-            RouteSource::Ospf,
-        );
         set(t.evpn.bgp_instance.is_some(), RouteSource::Evpn);
         set(t.vpn.bgp_instance.is_some(), RouteSource::Vpn);
     }
@@ -147,7 +167,7 @@ impl KernelGate {
     pub(crate) fn arm_hold(
         &self,
         _held: &GateGuard<'_>,
-        pending: HashSet<RouteSource>,
+        pending: HashSet<Pending>,
         driver: &dyn RibDriver,
         table: &str,
     ) -> bool {
@@ -169,10 +189,10 @@ impl KernelGate {
     }
 
     /// `source` sent its closing `Full`. `true` when that ends the hold.
-    pub(crate) fn source_done(&self, _held: &GateGuard<'_>, source: RouteSource) -> bool {
+    pub(crate) fn source_done(&self, _held: &GateGuard<'_>, source: &Pending) -> bool {
         match &mut *self.hold.lock().unwrap() {
             HoldState::Holding(h) => {
-                h.pending.remove(&source);
+                h.pending.remove(source);
                 h.pending.is_empty()
             }
             _ => false,
@@ -406,6 +426,11 @@ async fn resync(
                 guard.evpn.local = l3;
             }
             guard.refresh_evpn();
+            // An OSPF instance that left the config takes its routes along; a
+            // closed push connection never does (#1145 restart mode).
+            for owner in guard.retain_ospf_owners(&configured_ospf_owners(&cfg, table)) {
+                info!(table = %table, instance = %owner.name, v3 = owner.v3, "ospf owner withdrawn");
+            }
             let routes = guard.best_routes_for_kernel();
             drop(guard);
 
