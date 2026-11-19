@@ -4986,18 +4986,19 @@ async fn ospfv3_nssa_run(w: &mut World) -> anyhow::Result<()> {
         c.count_fresh(&type5_installed).await,
     );
 
-    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
-        .await?;
-    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
-        .await?;
-    b.provision_flags(&nssa(
+    let a_base = with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID));
+    let b_base = with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B));
+    let b_nssa = nssa(
         B,
         &format!("{OSPFV3_A1_IP_B}/24"),
         OSPFV3_A1_ADDRESS_B.s(),
         OSPFV3_ROUTER_ID_B,
-    ))
-    .await?;
-    c.provision_flags(&with_base(C, vec![])).await?;
+    );
+    a.provision_flags(&a_base).await?;
+    b.provision_flags(&b_base).await?;
+    b.provision_flags(&b_nssa).await?;
+    let c_base = with_base(C, vec![]);
+    c.provision_flags(&c_base).await?;
     let mut c_flags = nssa(
         C,
         &format!("{OSPFV3_A1_IP_C}/24"),
@@ -5012,6 +5013,7 @@ async fn ospfv3_nssa_run(w: &mut World) -> anyhow::Result<()> {
         "--redistribute-to-ospfv3",
     ]));
     c.provision_flags(&c_flags).await?;
+    let c_nssa = c_flags.clone();
 
     a.wait_new(
         &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
@@ -5055,7 +5057,32 @@ async fn ospfv3_nssa_run(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     b.wait_new(&aged5, aged5_0, 60).await?;
-    a.wait_new(&removed, removed0, 60).await
+    a.wait_new(&removed, removed0, 60).await?;
+
+    // RFC 8362 (#1157): extended-lsa on all three routers re-originates the
+    // NSSA-LSA as an E-NSSA-LSA (0xA027, the legacy one ages), router-b
+    // translates it into an E-AS-External-LSA (0xC025) and router-a routes
+    // it again.
+    log("switching all routers to extended-lsa: E-NSSA-LSA 0xA027 translated to 0xC025");
+    let e_type5 = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_AS_EXTERNAL} ");
+    let e_type5_0 = b.count_fresh(&e_type5).await;
+    let added = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}");
+    let added0 = a.count_fresh(&added).await;
+    let ext = strings(&["--ospfv3-extended-lsa"]);
+    for (r, base) in [(a, &a_base), (b, &b_base), (c, &c_base)] {
+        r.provision_flags(&[base.clone(), ext.clone()].concat())
+            .await?;
+    }
+    b.provision_flags(&[b_nssa, ext.clone()].concat()).await?;
+    c.provision_flags(&[c_nssa, ext].concat()).await?;
+    c.wait_new(
+        &format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_NSSA} "),
+        0,
+        60,
+    )
+    .await?;
+    b.wait_new(&e_type5, e_type5_0, 60).await?;
+    a.wait_new(&added, added0, 60).await
 }
 
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
