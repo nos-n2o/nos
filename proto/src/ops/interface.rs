@@ -181,6 +181,7 @@ pub enum InterfaceOp {
 
 impl InterfaceOp {
     /// Applies this edit to `config`; fails with an `OpError` when its target is missing.
+    #[allow(clippy::too_many_lines)] // one flat arm per edit
     pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
         match self {
             InterfaceOp::Ensure { name } => {

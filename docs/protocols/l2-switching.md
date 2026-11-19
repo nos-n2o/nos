@@ -163,7 +163,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | name | `edit broadcast domain <bd>`; `delete broadcast domain <bd>` | `broadcast-domain/<bd>` | string, 1-64 characters | unique; no profile may still reference a deleted domain | creates or deletes the domain's bridge | `show config` |
 | address | `set broadcast domain <bd> address <cidr> [label <text>]` / `set address …`; `delete … address <cidr>` | `broadcast-domain/<bd>/address/<cidr, / as %2F>`, body `{"address":"<cidr>","label":null}` | IPv4 or IPv6 `addr/len`; list, default empty | no repeated address | addresses the SVI; the label is stored only | `show route <table>` |
 | routing-table | `set broadcast domain <bd> routing-table <t>` / `set routing-table <t>`; `delete … routing-table` | `broadcast-domain/<bd>/routing-table` | name; default unset | table exists | puts the SVI in the table's VRF | `show route <t>` |
-| ospf, ospfv3 | `set broadcast domain <bd> ospf <profile>` (relative: `set ospf <profile>`), `… ospfv3 <profile>` | `broadcast-domain/<bd>/ospf-profile`, `…/ospfv3-profiles` | name; default unset | profile exists; needs `routing-table` | runs OSPF / OSPFv3 on the SVI | `show ospf neigh` |
+| ospf, ospfv3 | `set broadcast domain <bd> ospf <profile>` (relative: `set ospf <profile>`), `… ospfv3 <profile>` | `broadcast-domain/<bd>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs `routing-table` | runs OSPF / OSPFv3 on the SVI | `show ospf neigh` |
 | vni, rd, route-target, vtep-source, redistribute | `set broadcast domain <bd> vni …` etc. | `broadcast-domain/<bd>/vni` etc. | | | EVPN/VXLAN, documented with EVPN | `show fdb <bd>` |
 
 ### `switching-profile <sp>`

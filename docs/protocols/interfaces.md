@@ -182,7 +182,7 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 |---|---|---|---|---|---|---|
 | address | `set interface <if>[.<tag>] address <cidr> [label <text>]` / `set address <cidr> [label <text>]`; `delete … address <cidr>` | `interface/<if>/subinterface/<tag>/address/<cidr, / as %2F>`, body `{"address":"<cidr>","label":null}` | IPv4 or IPv6 `addr/len`; list, default empty | no repeated address | adds the address; the label is stored only | `show interface <if>`, `show route <table>` |
 | routing-table | `set interface <if>[.<tag>] routing-table <t>` / `set routing-table <t>`; `delete … routing-table` | `interface/<if>/subinterface/<tag>/routing-table` | name; default unset | table exists | joins the table's VRF; addresses become connected routes | `show interface <if>`, `show route <t>` |
-| ospf, ospfv3 | `set interface <if>[.<tag>] ospf <profile>`, `… ospfv3 <profile>`; `delete … ospf`, `… ospfv3 <profile>` (ospfv3 is a list: `set` adds, `delete <profile>` removes) | `interface/<if>/subinterface/<tag>/ospf-profile`, `…/ospfv3-profiles` | name; default unset | profile exists; needs a routing-table on the same subinterface | runs OSPF / OSPFv3 on it | `show ospf neigh`, `show ospfv3 neigh` |
+| ospf, ospfv3 | `set interface <if>[.<tag>] ospf <profile>`, `… ospfv3 <profile>`; `delete … ospf`, `… ospfv3 <profile>` (ospfv3 is a list: `set` adds, `delete <profile>` removes) | `interface/<if>/subinterface/<tag>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs a routing-table on the same subinterface | runs OSPF / OSPFv3 on it | `show ospf neigh`, `show ospfv3 neigh` |
 
 ### `interface <lo>` (loopback)
 
@@ -191,7 +191,7 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 | name | `edit interface loopback-<table>`; `delete interface loopback-<table>` | `interface/loopback-<table>` | `loopback-` + a routing table name | the table exists; one loopback per table | creates or deletes the loopback device, in that table | `show interface <lo>` |
 | address | `set interface <lo> address <cidr> [label <text>]` / `set address …`; `delete … address <cidr>` | `interface/<lo>/address/<cidr>` | as for a subinterface | no repeated address | as for a subinterface | `show interface <lo>`, `show route <table>` |
 | routing-table | `set interface <lo> routing-table <table>` / `set routing-table <table>`; `delete … routing-table` | `interface/<lo>/routing-table` | name; default unset (the table in the name) | table exists | set it to the table in the name; only needed by `ospf`/`ospfv3` (the addresses are connected routes either way) | `show route <table>` |
-| ospf, ospfv3 | `set interface <lo> ospf <profile>`, `… ospfv3 <profile>` | `interface/<lo>/ospf-profile`, `…/ospfv3-profiles` | name; default unset | profile exists; needs `routing-table` | advertises the loopback in OSPF / OSPFv3 | `show ospf database` |
+| ospf, ospfv3 | `set interface <lo> ospf <profile>`, `… ospfv3 <profile>` | `interface/<lo>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs `routing-table` | advertises the loopback in OSPF / OSPFv3 | `show ospf database` |
 | mtu | `set interface <lo> mtu <n>` / `set mtu <n>`; `delete … mtu` | `interface/<lo>/mtu` | as for a physical interface (default 1500, enforced) | | | `show interface <lo>` |
 
 A loopback cannot have subinterfaces, a switching profile, a port aggregate or LLDP.

@@ -561,6 +561,23 @@ pub enum OpError {
     },
 }
 
+/// Idempotent push of one `OSPFv3` profile onto an attach point's list.
+fn add_ospfv3_profile(list: &mut Vec<String>, profile: &str) {
+    if !list.iter().any(|p| p == profile) {
+        list.push(profile.to_string());
+    }
+}
+
+/// Removes one `OSPFv3` profile from an attach point's list; absent is an error.
+fn remove_ospfv3_profile(list: &mut Vec<String>, profile: &str) -> Result<(), OpError> {
+    let before = list.len();
+    list.retain(|p| p != profile);
+    if list.len() == before {
+        return Err(OpError::Ospfv3ProfileNotAttached(profile.to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,21 +600,4 @@ mod tests {
         });
         assert_eq!(op.kind(), "Admin");
     }
-}
-
-/// Idempotent push of one `OSPFv3` profile onto an attach point's list.
-fn add_ospfv3_profile(list: &mut Vec<String>, profile: &str) {
-    if !list.iter().any(|p| p == profile) {
-        list.push(profile.to_string());
-    }
-}
-
-/// Removes one `OSPFv3` profile from an attach point's list; absent is an error.
-fn remove_ospfv3_profile(list: &mut Vec<String>, profile: &str) -> Result<(), OpError> {
-    let before = list.len();
-    list.retain(|p| p != profile);
-    if list.len() == before {
-        return Err(OpError::Ospfv3ProfileNotAttached(profile.to_string()));
-    }
-    Ok(())
 }

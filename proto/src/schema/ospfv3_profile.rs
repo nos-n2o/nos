@@ -361,7 +361,7 @@ mod tests {
             instance("r2", vec![area("0.0.0.0", vec![with_id("b1", Some(1))])]),
             instance("r3", vec![area("0.0.0.0", vec![with_id("c1", Some(2))])]),
         ]);
-        let v = |l: &[&str]| valid(&l.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &cfg);
+        let v = |l: &[&str]| valid(&l.iter().map(ToString::to_string).collect::<Vec<_>>(), &cfg);
         assert!(v(&[]).is_ok());
         assert!(v(&["a1", "b1"]).is_ok(), "distinct instances and ids");
         assert!(v(&["a1", "b1", "c1"]).is_ok());

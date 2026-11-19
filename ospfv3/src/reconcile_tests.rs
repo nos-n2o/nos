@@ -915,6 +915,22 @@ fn attach_points_mixed_config_in_order() {
     assert_eq!(subinterface_attach_points(&cfg, "p1").len(), 1);
 }
 
+/// One interface lists a profile of each of two instances; each daemon
+/// selects it only by its own instance's profile.
+#[test]
+fn one_interface_lists_profiles_of_two_instances() {
+    let cfg = Config {
+        interfaces: vec![Interface {
+            ospfv3_profiles: vec!["p1".into(), "q1".into()],
+            ..iface("loopback-a", vec![])
+        }],
+        ..Default::default()
+    };
+    assert_eq!(attach_points_for(&cfg, "p1"), ["loopback-a"]);
+    assert_eq!(attach_points_for(&cfg, "q1"), ["loopback-a"]);
+    assert_eq!(attach_points_for(&cfg, "r1"), Vec::<String>::new());
+}
+
 #[test]
 fn broadcast_domain_has_address_means_ipv6() {
     let cfg = Config {
