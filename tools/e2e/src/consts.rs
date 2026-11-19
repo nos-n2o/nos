@@ -712,6 +712,8 @@ pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
 /// prefixes are the virtual link's addresses (prefixes no other phase uses).
 pub const OSPFV3_VLINK_LOOPBACK_B: &str = "2001:db8:a::2/128";
 pub const OSPFV3_VLINK_LOOPBACK_C: &str = "2001:db8:a::3/128";
+/// The backbone-only a-b segment (`OSPFV3_ADDRESS_A`/`_B`) router-c routes over the link.
+pub const OSPFV3_VLINK_BACKBONE: &str = "2001:db8:1::/64";
 
 /// `sandbox-nnp` (#1211): the effective capability mask each daemon must keep through
 /// `nos-sandbox-exec`, written out from the capability numbers (NET_BIND_SERVICE=10,

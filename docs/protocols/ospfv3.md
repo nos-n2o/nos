@@ -370,7 +370,7 @@ on router-c (`9.9.9.10` is router-b's router ID), and the mirror image on router
 - **What it runs.** A backbone adjacency, unicast between the two addresses (hop limit 64, the only sends that leave the link): Hellos, no DR, the link's own timers and authentication (`hello-interval`, `dead-interval`, `crypto-key`, as on a profile), the transit link's MTU and instance ID. A router with a configured virtual link counts as attached to the backbone (B bit, summaries).
 - **Check it.** `show ospfv3 neigh` lists `vlink-<transit-area>-<router-id>` in area 0.0.0.0, `Full`. In `GET /v1/ospfv3/database`, each end's area-0 Router-LSA lists the other in `virtual_links`, and its Router-LSA in the transit area has the V bit (`router_flags` & 4).
 - **Remove it.** `delete … virtual-link <router-id>`. The other end drops the neighbour after its dead interval (`ospfv3 neighbor state changed to down link=vlink-…`) unless it is removed there too.
-- **Not yet.** Routes across the virtual link (SPF over the type-4 link, transit summaries): #1159.
+- **Routes.** The backbone-less router routes the backbone through the link (RFC 5340 §4.8, RFC 2328 §16.1): the type-4 link is an SPF edge at its cost, with the first hops toward the far end taken from the transit area; the far end summarizes the backbone into its other areas. A backbone-attached ABR ignores summaries in its non-backbone areas, except that a transit area (V bit) may shorten an inter-area backbone route (§16.3). When the link drops, the routes go with it.
 
 ## Features and behaviour
 
@@ -392,7 +392,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), routes across virtual links (the adjacency itself works), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
 
 ## Configuration reference
 

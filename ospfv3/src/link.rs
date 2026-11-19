@@ -2686,7 +2686,7 @@ impl LinkManager {
     }
 
     /// RFC 5340 §3.1 / RFC 2328 §3.1: an ABR is attached to 2+ areas, one of
-    /// them the backbone (no virtual links in v3). B-bit and every summary
+    /// them the backbone (a configured virtual link counts, #1159). B-bit and every summary
     /// follow this (#610).
     async fn is_backbone_abr(&self) -> bool {
         let areas = self.attached_areas().await;
@@ -2708,6 +2708,24 @@ impl LinkManager {
             areas.insert(Ipv4Addr::UNSPECIFIED);
         }
         areas
+    }
+
+    /// RFC 5340 §4.7: the transit-area first hops toward each configured
+    /// virtual link's endpoint (`spf::Context::virtual_links`).
+    async fn virtual_next_hops(&self, router_id: Ipv4Addr) -> Vec<spf::VirtualNextHops> {
+        let configured = self.virtual_links.lock().await.clone();
+        let mut out = Vec::new();
+        for v in configured {
+            let Some(lsdb) = self.lsdbs.lock().await.get(&v.transit_area).cloned() else {
+                continue;
+            };
+            let mut lsas = lsdb.lock().await.all();
+            for (_, link_lsdb) in self.link_local_lsdbs_in(v.transit_area).await {
+                lsas.extend(link_lsdb.lock().await.all());
+            }
+            out.extend(spf::virtual_next_hops(router_id, &lsas, v.endpoint));
+        }
+        out
     }
 
     /// The Link State ID for a prefix-keyed LSA — see `lsids`.
@@ -3076,11 +3094,17 @@ impl LinkManager {
         // Per source area: what it offers, and its own intra-area view (what
         // a destination area reaches itself is never summarized into it).
         let mut views = Vec::new();
+        // Distance only, so no virtual next hops: the far end of a virtual
+        // link summarizes the backbone into its other areas.
+        let ctx = |area_id: &Ipv4Addr| spf::Context {
+            backbone: area_id.is_unspecified(),
+            ..spf::Context::default()
+        };
         for (area_id, lsdb) in &areas {
             let lsas = lsdb.lock().await.all();
             let area_ranges = ranges.get(area_id).map_or(&[][..], |r| &r[..]);
             let (prefixes, asbrs, own) = if area_id.is_unspecified() {
-                let v = spf::backbone_view(local_router_id, &lsas);
+                let v = spf::backbone_view(local_router_id, &lsas, &ctx(area_id));
                 let (mut prefixes, active) =
                     nos_ospf_common::areas::apply_ranges(&v.intra.prefixes, area_ranges);
                 active_ranges.extend(active);
@@ -3089,7 +3113,7 @@ impl LinkManager {
                 asbrs.extend(v.inter_asbrs);
                 (prefixes, asbrs, v.intra)
             } else {
-                let v = spf::intra_area_routes(local_router_id, &lsas);
+                let v = spf::intra_area_routes(local_router_id, &lsas, &ctx(area_id));
                 let (prefixes, active) =
                     nos_ospf_common::areas::apply_ranges(&v.prefixes, area_ranges);
                 active_ranges.extend(active);
@@ -3684,6 +3708,10 @@ impl LinkManager {
             .collect();
         let mut merged: HashMap<Ipv6Net, spf::RouteEntry> = HashMap::new();
         let backbone_abr = self.is_backbone_abr().await;
+        let virtual_hops = self.virtual_next_hops(router_id).await;
+        // The prefixes whose route is the backbone's, which §16.3 may improve.
+        let mut backbone_routes: HashSet<Ipv6Net> = HashSet::new();
+        let mut transit: Vec<spf::RouteEntry> = Vec::new();
         for (area_id, lsdb) in areas {
             let mut lsas = lsdb.lock().await.all();
             for (_, link_lsdb) in self.link_local_lsdbs_in(area_id).await {
@@ -3701,16 +3729,38 @@ impl LinkManager {
             if !stub {
                 lsas.extend(self.as_lsdb.lock().await.all());
             }
-            let skip = backbone_abr && !area_id.is_unspecified();
-            for entry in spf::compute_in(router_id, &lsas, skip) {
-                merged
-                    .entry(entry.prefix)
-                    .and_modify(|existing| {
-                        if entry.rank() < existing.rank() {
-                            *existing = entry.clone();
-                        }
-                    })
-                    .or_insert(entry);
+            let backbone = area_id.is_unspecified();
+            let ctx = spf::Context {
+                backbone,
+                skip_summaries: backbone_abr && !backbone,
+                virtual_links: &virtual_hops,
+            };
+            if ctx.skip_summaries {
+                transit.extend(spf::transit_summaries(router_id, &lsas));
+            }
+            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+                let prefix = entry.prefix;
+                match merged.get_mut(&prefix) {
+                    Some(existing) if entry.rank() >= existing.rank() => continue,
+                    Some(existing) => *existing = entry,
+                    None => {
+                        merged.insert(prefix, entry);
+                    }
+                }
+                if backbone {
+                    backbone_routes.insert(prefix);
+                } else {
+                    backbone_routes.remove(&prefix);
+                }
+            }
+        }
+        // RFC 2328 §16.3: a transit area may hold a shorter path to a
+        // backbone destination than the backbone's own (virtual-link) path.
+        for candidate in transit {
+            if backbone_routes.contains(&candidate.prefix)
+                && let Some(existing) = merged.get_mut(&candidate.prefix)
+            {
+                spf::apply_transit(existing, candidate);
             }
         }
         // RFC 5340 §4.4.3.3: a discard route per active advertised range,
@@ -6805,9 +6855,25 @@ pub(crate) mod tests {
             0
         );
 
-        // c drops its end: b's virtual neighbor dies, V and the type-4 link go.
+        // #1159, §16.1: c, attached to area 1 only, routes the backbone
+        // (a-b's segment) through the virtual link, with b's transit next hop.
+        let backbone_net: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let route = |m: Arc<LinkManager>| async move {
+            m.compute_routes()
+                .await
+                .into_iter()
+                .find(|r| r.prefix == backbone_net)
+        };
+        let via = route(Arc::clone(&c)).await.expect("backbone route at c");
+        assert_eq!(via.class, spf::PathClass::Intra);
+        assert_eq!(via.next_hops.len(), 1);
+
+        // c drops its end: b's virtual neighbor dies, V and the type-4 link go,
+        // and c falls back to the area-1 summary (inter-area, not the backbone).
         c.set_virtual_links(Vec::new()).await;
         settle(120).await;
+        let after = route(Arc::clone(&c)).await.expect("summary route at c");
+        assert_eq!(after.class, spf::PathClass::Inter);
         let flags = router_flags(&b, area1, id(2)).await.unwrap();
         assert_eq!(flags & lsa::ROUTER_FLAG_V, 0);
         assert_eq!(

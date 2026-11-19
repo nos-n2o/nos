@@ -4790,6 +4790,20 @@ async fn ospfv3_virtual_link_run(w: &mut World) -> anyhow::Result<()> {
         OSPFV3_ROUTER_ID_B,
     ))
     .await?;
+    // #1159: router-b does not summarize the backbone's a-b segment into
+    // area 1 (a not-advertise range), so router-c can only learn it over the
+    // virtual link.
+    b.provision(&strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA,
+        "--ospfv3-area-range",
+        &format!("{OSPFV3_VLINK_BACKBONE}:not-advertise"),
+    ]))
+    .await?;
 
     a.wait_new(
         &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
@@ -4848,6 +4862,13 @@ async fn ospfv3_virtual_link_run(w: &mut World) -> anyhow::Result<()> {
         .await?;
     }
 
+    log("router-c, in area 1 only, routes the backbone segment over the virtual link");
+    let backbone_route = format!("added route prefix={OSPFV3_VLINK_BACKBONE} .*source=Some(Ospf)");
+    c.wait(&backbone_route).await?;
+    if !c.rt1_has(OSPFV3_VLINK_BACKBONE, "Ospf").await? {
+        bail!("router-c's rt1 does not list the backbone route {OSPFV3_VLINK_BACKBONE}");
+    }
+
     log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
     c.provision(&strings(&[
         "--ospfv3-instance",
@@ -4859,6 +4880,9 @@ async fn ospfv3_virtual_link_run(w: &mut World) -> anyhow::Result<()> {
     ]))
     .await?;
     c.wait(&format!("ospfv3 virtual link down link={c_link}"))
+        .await?;
+    log("router-c loses the backbone route with the link");
+    c.wait(&format!("removed route prefix={OSPFV3_VLINK_BACKBONE}"))
         .await?;
     b.wait_new(
         &format!("ospfv3 neighbor state changed to down link={b_link}"),
