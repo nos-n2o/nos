@@ -4002,10 +4002,14 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     let v3_removed0 = b.count(&removed);
     let full_v2 = full_p2p(OSPF_ROUTER_ID);
     let full_v2_0 = b.count(&full_v2);
+    let v2_added0 = b.count(&v2_route);
+    let v3_added0 = b.count(&route);
     log("killing router-b's nos-ospfd; router-b's ospfv3 route must stay installed");
     w.dock.kill_process("router-b", "nos-ospfd").await?;
     b.wait_new(&full_v2, full_v2_0, 90).await?;
     b.assert_quiet(&removed, v3_removed0, 1).await?;
+    // The restarted daemon's own route returns once its SPF has run.
+    b.wait_new(&v2_route, v2_added0, 150).await?;
     let v2_removed0 = b.count(&v2_removed);
     let full_v3 = format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
     let full_v3_0 = b.count(&full_v3);
@@ -4013,6 +4017,7 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     w.dock.kill_process("router-b", "nos-ospfv3d").await?;
     b.wait_new(&full_v3, full_v3_0, 90).await?;
     b.assert_quiet(&v2_removed, v2_removed0, 1).await?;
+    b.wait_new(&route, v3_added0, 150).await?;
     wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
     let aged = either_form(legacy, extended, |t| {
