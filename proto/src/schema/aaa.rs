@@ -15,6 +15,8 @@ use super::Config;
 pub const RADIUS_PORT_DEFAULT: u16 = 1812;
 /// Seconds to wait for one reply, unless configured.
 pub const RADIUS_TIMEOUT_DEFAULT_SECS: u8 = 3;
+/// RADIUS accounting port (RFC 2866), unless configured.
+pub const RADIUS_ACCT_PORT_DEFAULT: u16 = 1813;
 /// Extra attempts per server, unless configured.
 pub const RADIUS_RETRIES_DEFAULT: u8 = 2;
 
@@ -62,6 +64,15 @@ pub struct Aaa {
     #[cli(topic = AaaLoginOrder, words = "login-order")]
     pub login_order: Vec<LoginBackend>,
 
+    /// Send RADIUS accounting (RFC 2866) to every server: a Start at each
+    /// login, a Stop when its session ends, and an Interim-Update per config
+    /// commit. Best effort through a bounded queue; never delays a login or a
+    /// commit. Default off.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = AaaAccounting)]
+    pub accounting: bool,
+
     /// Where the reply carries the role. Default `filter-id`.
     #[serde(default)]
     #[garde(skip)]
@@ -95,6 +106,12 @@ pub struct RadiusServer {
     #[cli(topic = RadiusPort)]
     pub port: Option<u16>,
 
+    /// Accounting UDP port. Default 1813.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<u16>, _ctx: &Config| valid_port(*p)))]
+    #[cli(topic = RadiusAccountingPort)]
+    pub accounting_port: Option<u16>,
+
     /// Send from inside this routing table's VRF. Default: the default netns.
     #[serde(default)]
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
@@ -126,6 +143,7 @@ impl Default for RadiusServer {
             name: String::new(),
             address: IpAddr::from([0, 0, 0, 0]),
             port: None,
+            accounting_port: None,
             routing_table: None,
             secret_ref: String::new(),
             timeout_secs: None,
@@ -223,6 +241,7 @@ mod tests {
                     name: "r1".into(),
                     address: "192.0.2.1".parse().unwrap(),
                     port: None,
+                    accounting_port: None,
                     routing_table: None,
                     secret_ref: label.into(),
                     timeout_secs: None,
@@ -230,6 +249,7 @@ mod tests {
                 }],
                 login_order: order,
                 role_attribute: RoleAttribute::default(),
+                accounting: false,
             },
             ..Default::default()
         }

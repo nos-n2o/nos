@@ -199,7 +199,9 @@ async fn dispatch_unmasked(
             .await
         {
             Ok(warnings) => {
-                info!(transaction = ?name, actor = ?effective_actor(caller, actor), confirm_timeout = ?confirm_timeout, "config commit audit");
+                let who = effective_actor(caller, actor);
+                crate::accounting::record(&who, &name);
+                info!(transaction = ?name, actor = ?who, confirm_timeout = ?confirm_timeout, "config commit audit");
                 for w in &warnings {
                     warn!(transaction = ?name, warning = %w, "commit warning");
                 }

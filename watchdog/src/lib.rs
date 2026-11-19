@@ -1,3 +1,4 @@
+pub mod accounting;
 pub mod broker;
 pub mod heartbeat;
 pub mod instances;

@@ -1,3 +1,4 @@
+pub mod accounting;
 pub mod authz;
 pub mod docs;
 pub mod error;
