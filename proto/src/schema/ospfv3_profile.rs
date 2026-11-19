@@ -154,6 +154,9 @@ pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result 
         if p.passive && (p.auth.is_some() || p.bfd.is_some()) {
             return Err(garde::Error::new("passive excludes auth and bfd"));
         }
+        if p.passive && p.network_type == Some(NetworkType::Hybrid) {
+            return Err(garde::Error::new("passive excludes hybrid"));
+        }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval)
             && dead <= hello
         {
@@ -305,6 +308,41 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_excludes_passive() {
+        let mk = |passive| {
+            let p = Ospfv3Profile {
+                passive,
+                network_type: Some(NetworkType::Hybrid),
+                ..profile("p")
+            };
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(mk(false));
+        assert!(!mk(true));
+    }
+
+    /// RFC 6845 hybrid needs a broadcast attach point.
+    #[test]
+    fn hybrid_profile_may_not_attach_to_a_point_to_point_link() {
+        use crate::validators::ospfv3_profile_point_to_point_valid as valid;
+        let mk = |nt| {
+            let p = Ospfv3Profile {
+                network_type: nt,
+                ..profile("p")
+            };
+            config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])])
+        };
+        let name = "p".to_string();
+        assert!(valid(Some(&name), &mk(Some(NetworkType::Broadcast))).is_ok());
+        assert!(valid(Some(&name), &mk(None)).is_ok());
+        assert!(valid(None, &mk(Some(NetworkType::Hybrid))).is_ok());
+        let err = valid(Some(&name), &mk(Some(NetworkType::Hybrid))).unwrap_err();
+        assert!(err.to_string().contains("broadcast domain"), "{err}");
+        assert!(valid(Some(&"nope".to_string()), &mk(None)).is_err());
+    }
+
+    #[test]
     fn valid_profile_passes() {
         let cfg = config_with(vec![instance(
             "r1",
@@ -430,6 +468,7 @@ mod tests {
             NetworkType::PointToPoint,
             NetworkType::Broadcast,
             NetworkType::PointToMultipoint,
+            NetworkType::Hybrid,
         ] {
             let mut p = profile("p1");
             p.network_type = Some(network_type);

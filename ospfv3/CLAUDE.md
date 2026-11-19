@@ -34,8 +34,9 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Virtual links** (#1158, #1159): `resolve_virtual_links` makes each a `LinkConfig` with `virtual_link: Some` (area 0, no Link-LSA); SPF: type 4 is a backbone edge (`spf::Context`, §16.3); see internals.
 - **Receive hardening** (#394): mismatched hello/dead interval dropped (#650); non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2. Dead timers are the 1s `sweep_dead_neighbors` on every network type (no p2p deadline); it removes idle `Down` entries and `handle_hello` evicts a same-address entry under a new router ID on p2p/p2mp (#957).
 - Own LSA flooded back newer (§13.4, #731): same `mark_reflected`/`reoriginate`/`origination_pass` mechanism as `nos-ospfd`.
+- **Hybrid** (#1180): `hybrid_router_links`.
 - **Not built**: see `docs/protocols/ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager`; attach points use `nostst0`, a device no host has. The `cfg(test)` getters on `LinkManager` are its read side.
-- Verify kernel, IPC or wire changes with the matching `nos-e2e` phase (`ospfv3*`, `docs/e2e-phases.md`).
+- Verify kernel/IPC/wire changes with the `ospfv3*` `nos-e2e` phases.
 - **Multicast flood** (#879): as `ospf/CLAUDE.md`: `flood_full_neighbors`/`flush_pending_acks` use `flood_dest` and `LinkSocket::send_flood` (`ff02::5`/`ff02::6`, one signed packet per chunk); unicast fallback on error; retransmissions, DBD/LSR, Grace stay unicast.
 - **AllDRouters** (#854): `run_election` joins/leaves `ff02::6` (DR/Backup only, never p2p) via `OspfSocket::set_all_drouters`.

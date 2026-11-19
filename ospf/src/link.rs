@@ -494,7 +494,7 @@ impl LinkStatus {
                 NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                     InterfaceState::PointToPoint
                 }
-                NetworkType::Broadcast => InterfaceState::Waiting,
+                NetworkType::Broadcast | NetworkType::Hybrid => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
             dr: None,

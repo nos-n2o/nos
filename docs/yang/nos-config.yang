@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-24 {
+  revision 2026-11-25 {
     description "Generated.";
   }
 
@@ -808,6 +808,7 @@ module nos-config {
             enum "PointToPoint";
             enum "Broadcast";
             enum "PointToMultipoint";
+            enum "Hybrid";
           }
           description "Set an OSPF profile's network type.";
         }
@@ -1064,6 +1065,7 @@ module nos-config {
             enum "PointToPoint";
             enum "Broadcast";
             enum "PointToMultipoint";
+            enum "Hybrid";
           }
           description "Set an OSPF profile's network type.";
         }
