@@ -334,6 +334,15 @@ pub enum WatchdogRequest {
     /// runtime is making progress; `nos-watchdogd` restarts a daemon whose
     /// beats stop. Any daemon role; answered with `Ok`.
     Heartbeat,
+    /// `nos-configd` only (#1153): one config commit by `actor`, for RADIUS
+    /// accounting. Fire-and-forget: answered with `Ok` as soon as it is
+    /// queued, and dropped (not blocked on) when the accounting queue is full.
+    AccountCommit {
+        /// Who committed (the certificate user, or the REST user `nos-restd` named).
+        actor: String,
+        /// The committed transaction's name.
+        transaction: String,
+    },
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -379,6 +388,11 @@ impl fmt::Debug for WatchdogRequest {
                 f.debug_struct("RedeemTicket").finish_non_exhaustive()
             }
             WatchdogRequest::Heartbeat => f.write_str("Heartbeat"),
+            WatchdogRequest::AccountCommit { actor, transaction } => f
+                .debug_struct("AccountCommit")
+                .field("actor", actor)
+                .field("transaction", transaction)
+                .finish(),
         }
     }
 }

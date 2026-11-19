@@ -90,6 +90,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "evpn-l3" => bgp::evpn_l3(w).await,
         "evpn-l3-chunked" => bgp::evpn_l3_chunked(w).await,
         "loopback" => drivers::loopback(w).await,
+        "sandbox-nnp" => drivers::sandbox_nnp(w).await,
         "routes-paging" => drivers::routes_paging(w).await,
         "vrf-unknown" => drivers::vrf_unknown(w).await,
         "mtu" => drivers::mtu(w).await,
@@ -193,6 +194,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         "base" => &[
             "up",
             "established",
+            "sandbox-nnp",
             "reconnect",
             "collision",
             "shutdown",
@@ -212,6 +214,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         "drivers" => &[
             "up",
             "established",
+            "sandbox-nnp",
             "loopback",
             "routes-paging",
             "vrf-unknown",
@@ -376,6 +379,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
 pub const ALL: &[&str] = &[
     "up",
     "established",
+    "sandbox-nnp",
     "reconnect",
     "collision",
     "shutdown",

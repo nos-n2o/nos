@@ -97,6 +97,7 @@ impl Stack {
         let log = std::fs::File::create(dir.path().join("watchdog.log")).unwrap();
         let watchdog = Command::new(bins.join("nos-watchdogd"))
             .env("RUST_LOG", "debug")
+            .arg("--no-sandbox") // the daemons are not in /usr/local/bin (#1211)
             .args(["--configd-bin", &b("nos-configd")])
             .args(["--bgpd-bin", &b("nos-bgpd")])
             .args(["--ribd-bin", &b("nos-ribd")])

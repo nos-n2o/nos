@@ -152,6 +152,7 @@ pub fn router(daemons: Daemons) -> Router {
         // Swagger UI reads the route above (not a `utoipa` struct of its own),
         // so it shows the generated config-tree paths too.
         .merge(SwaggerUi::new("/swagger-ui").config(Config::from("/openapi.json")))
+        .merge(crate::restconf::routes())
         .with_state(daemons.clone())
         // Last, so it wraps every route above — the merged Swagger UI, the
         // OpenAPI document and the SSE log stream included.

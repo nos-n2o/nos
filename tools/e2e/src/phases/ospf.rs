@@ -207,6 +207,8 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait("dropping ospf hello with mismatched hello-interval")
         .await?;
+    // #1211: nos-ospfd keeps CAP_NET_RAW through the sandbox trampoline.
+    super::drivers::assert_sandbox(w, "nos-ospfd", 1, Some(CAP_EFF_NET_RAW)).await?;
     log("confirming the mismatched-hello-interval neighbor never reaches init");
     a.assert_quiet(&init_b, init0, 8).await?;
 

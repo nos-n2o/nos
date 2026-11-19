@@ -14,6 +14,7 @@ pub mod login;
 pub mod merge_patch;
 pub mod openapi;
 pub mod ratelimit;
+pub mod restconf;
 pub mod show;
 pub mod tls;
 pub mod tx;

@@ -515,6 +515,10 @@ topics! {
     AaaRadiusServer,
     /// `Aaa.login_order`
     AaaLoginOrder,
+    /// `Aaa.accounting`
+    AaaAccounting,
+    /// `RadiusServer.accounting_port`
+    RadiusAccountingPort,
     /// `Aaa.role_attribute`
     AaaRoleAttribute,
     /// `RadiusServer.address`

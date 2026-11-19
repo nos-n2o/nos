@@ -189,7 +189,7 @@ pub struct OpenQuery {
 
 /// The transaction's `ETag` (RFC 9110 §8.8.3): its generation as a strong,
 /// quoted decimal — every edit is a real content change, never `W/`.
-fn etag(generation: u64) -> (HeaderName, HeaderValue) {
+pub(crate) fn etag(generation: u64) -> (HeaderName, HeaderValue) {
     (
         header::ETAG,
         HeaderValue::from_str(&format!("\"{generation}\"")).expect("digits are valid"),
@@ -198,7 +198,7 @@ fn etag(generation: u64) -> (HeaderName, HeaderValue) {
 
 /// One entity-tag of an `If-Match`/`If-None-Match` list (RFC 9110 §8.8.3).
 #[derive(Debug, PartialEq, Eq)]
-struct Tag {
+pub(crate) struct Tag {
     weak: bool,
     /// `None` for a well-formed tag that is not a generation (opaque): valid
     /// syntax, never equal to ours.
@@ -207,7 +207,7 @@ struct Tag {
 
 /// A parsed `If-Match`/`If-None-Match` (RFC 9110 §13.1.1/§13.1.2).
 #[derive(Debug, PartialEq, Eq)]
-enum Condition {
+pub(crate) enum Condition {
     /// `*` — any current representation.
     Any,
     /// `1#entity-tag`.
@@ -243,7 +243,7 @@ fn parse_tags(mut s: &str) -> Option<Vec<Tag>> {
 impl Condition {
     /// The header (all its lines, joined as a list), if sent. Malformed
     /// syntax is a 400; a well-formed tag that never matches is not.
-    fn from_header(headers: &HeaderMap, name: &HeaderName) -> ApiResult<Option<Self>> {
+    pub(crate) fn from_header(headers: &HeaderMap, name: &HeaderName) -> ApiResult<Option<Self>> {
         let lines = headers.get_all(name);
         if lines.iter().next().is_none() {
             return Ok(None);
@@ -264,7 +264,7 @@ impl Condition {
 
     /// `strong`: `If-Match` (a weak tag never matches); otherwise the weak
     /// comparison of `If-None-Match`.
-    fn matches(&self, generation: u64, strong: bool) -> bool {
+    pub(crate) fn matches(&self, generation: u64, strong: bool) -> bool {
         match self {
             Condition::Any => true,
             Condition::Tags(tags) => tags

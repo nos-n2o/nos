@@ -704,3 +704,12 @@ pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
 /// prefixes are the virtual link's addresses (prefixes no other phase uses).
 pub const OSPFV3_VLINK_LOOPBACK_B: &str = "2001:db8:a::2/128";
 pub const OSPFV3_VLINK_LOOPBACK_C: &str = "2001:db8:a::3/128";
+
+/// `sandbox-nnp` (#1211): the effective capability mask each daemon must keep through
+/// `nos-sandbox-exec`, written out from the capability numbers (NET_BIND_SERVICE=10,
+/// NET_ADMIN=12, NET_RAW=13), never read back from the Dockerfile's `setcap` lines, so a
+/// trampoline bug cannot hide itself.
+pub const CAP_EFF_NET_ADMIN_RAW: &str = "0000000000003000";
+pub const CAP_EFF_NET_RAW_BIND: &str = "0000000000002400";
+pub const CAP_EFF_NET_RAW: &str = "0000000000002000";
+pub const CAP_EFF_NONE: &str = "0000000000000000";

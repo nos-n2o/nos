@@ -12,6 +12,8 @@ pub enum ApiError {
     Forbidden(String),
     /// The body's `Content-Type` is not one this endpoint accepts.
     UnsupportedMediaType(String),
+    /// `Accept` names no representation this endpoint serves.
+    NotAcceptable(String),
     /// A list key selector matches several elements and none exactly.
     Conflict(String),
     /// RFC 6585 §4: too many failed logins; try again in `retry_after_secs`.
@@ -85,6 +87,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             ApiError::UnsupportedMediaType(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
+            ApiError::NotAcceptable(m) => (StatusCode::NOT_ACCEPTABLE, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::TooManyRequests {
                 detail,
@@ -153,7 +156,7 @@ pub async fn problem_for_framework_errors(resp: Response) -> Response {
     let is_problem = resp
         .headers()
         .get(header::CONTENT_TYPE)
-        .is_some_and(|v| v == PROBLEM_JSON);
+        .is_some_and(|v| v == PROBLEM_JSON || v == crate::restconf::YANG_DATA);
     if !is_error || is_problem {
         return resp;
     }
