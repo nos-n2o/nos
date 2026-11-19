@@ -175,6 +175,7 @@ mod tests {
 
     #[test]
     fn target_must_be_a_regular_file_inside_dir() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test-only, pid-named dir in a unit test
         let tmp = std::env::temp_dir().join(format!("nos-sandbox-test-{}", std::process::id()));
         let dir = tmp.join("bin");
         std::fs::create_dir_all(&dir).unwrap();

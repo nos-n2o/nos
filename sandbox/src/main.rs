@@ -7,6 +7,7 @@ use std::path::Path;
 use nos_sandbox::{check_target, parse_args, sys, TARGET_DIR};
 
 fn run() -> Result<std::convert::Infallible, nos_sandbox::Error> {
+    // nosemgrep: rust.lang.security.args.args -- skip(1): only the arguments after argv[0] are used
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let inv = parse_args(&argv)?;
     let target = check_target(Path::new(&inv.program), Path::new(TARGET_DIR))?;
