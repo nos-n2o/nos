@@ -154,6 +154,9 @@ pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result 
         if p.passive && (p.auth.is_some() || p.bfd.is_some()) {
             return Err(garde::Error::new("passive excludes auth and bfd"));
         }
+        if p.passive && p.network_type == Some(NetworkType::Hybrid) {
+            return Err(garde::Error::new("passive excludes hybrid"));
+        }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval)
             && dead <= hello
         {
@@ -305,6 +308,72 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_excludes_passive() {
+        let mk = |passive| {
+            let p = Ospfv3Profile {
+                passive,
+                network_type: Some(NetworkType::Hybrid),
+                ..profile("p")
+            };
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(mk(false));
+        assert!(!mk(true));
+    }
+
+    /// RFC 6845 hybrid needs a broadcast attach point.
+    #[test]
+    fn hybrid_profile_may_not_attach_to_a_point_to_point_link() {
+        use crate::validators::ospfv3_profiles_point_to_point_valid as valid;
+        let mk = |nt| {
+            let p = Ospfv3Profile {
+                network_type: nt,
+                ..profile("p")
+            };
+            config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])])
+        };
+        let name = vec!["p".to_string()];
+        assert!(valid(&name, &mk(Some(NetworkType::Broadcast))).is_ok());
+        assert!(valid(&name, &mk(None)).is_ok());
+        assert!(valid(&[], &mk(Some(NetworkType::Hybrid))).is_ok());
+        let err = valid(&name, &mk(Some(NetworkType::Hybrid))).unwrap_err();
+        assert!(err.to_string().contains("broadcast domain"), "{err}");
+        assert!(valid(&["nope".to_string()], &mk(None)).is_err());
+    }
+
+    /// #1278: a list of profiles, one per instance, distinct instance IDs.
+    #[test]
+    fn profile_list_rules() {
+        use crate::validators::ospfv3_profiles_valid as valid;
+        let with_id = |n: &str, id: Option<u8>| Ospfv3Profile {
+            instance_id: id,
+            ..profile(n)
+        };
+        let cfg = config_with(vec![
+            instance(
+                "r1",
+                vec![area(
+                    "0.0.0.0",
+                    vec![with_id("a1", None), with_id("a2", Some(1))],
+                )],
+            ),
+            instance("r2", vec![area("0.0.0.0", vec![with_id("b1", Some(1))])]),
+            instance("r3", vec![area("0.0.0.0", vec![with_id("c1", Some(2))])]),
+        ]);
+        let v = |l: &[&str]| valid(&l.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &cfg);
+        assert!(v(&[]).is_ok());
+        assert!(v(&["a1", "b1"]).is_ok(), "distinct instances and ids");
+        assert!(v(&["a1", "b1", "c1"]).is_ok());
+        assert!(v(&["nope"]).is_err(), "missing");
+        assert!(v(&["a1", "a1"]).is_err(), "duplicate");
+        let same_inst = v(&["a1", "a2"]).unwrap_err().to_string();
+        assert!(same_inst.contains("same instance"), "{same_inst}");
+        let same_id = v(&["a2", "b1"]).unwrap_err().to_string();
+        assert!(same_id.contains("instance-id"), "{same_id}");
+    }
+
+    #[test]
     fn valid_profile_passes() {
         let cfg = config_with(vec![instance(
             "r1",
@@ -430,6 +499,7 @@ mod tests {
             NetworkType::PointToPoint,
             NetworkType::Broadcast,
             NetworkType::PointToMultipoint,
+            NetworkType::Hybrid,
         ] {
             let mut p = profile("p1");
             p.network_type = Some(network_type);

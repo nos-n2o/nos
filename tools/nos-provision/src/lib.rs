@@ -4631,6 +4631,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                             "point-to-point" => NetworkType::PointToPoint,
                             "broadcast" => NetworkType::Broadcast,
                             "point-to-multipoint" => NetworkType::PointToMultipoint,
+                            "hybrid" => NetworkType::Hybrid,
                             other => bail!("--ospfv3-profile-network-type: unknown {other:?}"),
                         },
                     },

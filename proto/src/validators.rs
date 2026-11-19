@@ -200,6 +200,28 @@ pub fn ospfv3_profiles_valid(names: &[String], ctx: &crate::schema::Config) -> g
     Ok(())
 }
 
+/// `ospfv3_profiles_valid`, plus RFC 6845 hybrid needs a broadcast
+/// attach point: a subinterface or interface may not name a `Hybrid` profile.
+pub fn ospfv3_profiles_point_to_point_valid(
+    names: &[String],
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    ospfv3_profiles_valid(names, ctx)?;
+    let hybrid = names.iter().any(|name| {
+        ctx.ospfv3_instances
+            .iter()
+            .flat_map(|i| &i.areas)
+            .flat_map(|a| &a.profiles)
+            .any(|p| &p.name == name && p.network_type == Some(crate::schema::NetworkType::Hybrid))
+    });
+    if hybrid {
+        return Err(garde::Error::new(
+            "a hybrid ospfv3 profile needs a broadcast domain attach point",
+        ));
+    }
+    Ok(())
+}
+
 /// Returns a `garde` error unless `value` is composed only of ASCII
 /// letters, digits, and hyphens, with no leading or trailing hyphen.
 ///

@@ -5536,6 +5536,159 @@ pub async fn ospfv3_p2mp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// RFC 6845 hybrid broadcast and point-to-multipoint (#1180; requires
+/// `ospfv3-dr`, which stands up router-c on the shared bridge): a second
+/// profile forced to `hybrid` on the bridge of all three routers. The
+/// election, Hello and database sync are the broadcast ones (an election
+/// logged, every pair Full as the DR/BDR are adjacent to the DROther), but the
+/// Router-LSAs list point-to-point links and the DR originates no Network-LSA
+/// (§4.5): each router installs the others' /128 host routes and router-c's
+/// loopback. Switching the bridge back to the broadcast profile re-elects.
+pub async fn ospfv3_hybrid(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let hybrid = |rid: &str| {
+        strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            rid,
+            "--ospfv3-area",
+            OSPFV3_AREA,
+            "--ospfv3-profile",
+            OSPFV3_HYBRID_PROFILE,
+            "--ospfv3-profile-network-type",
+            "hybrid",
+            "--routing-table",
+            "rt1",
+            "--broadcast-domain",
+            BD,
+            "--ospfv3-broadcast-domain-profile",
+            OSPFV3_HYBRID_PROFILE,
+        ])
+    };
+    let link = format!("link=broadcast-domain:{BD}");
+    let became = format!("ospfv3 interface became .* {link}");
+    let full = |n: &str| format!("ospfv3 neighbor reached full {link} neighbor={n}");
+    let host = |addr: &str| addr.split('/').next().unwrap_or_default().to_string();
+    let added = |addr: &str| format!("added route prefix={}/128.*source=Some(Ospf)", host(addr));
+    let loopback = format!("added route prefix={OSPFV3_DR_LOOPBACK_ADDRESS_C}.*source=Some(Ospf)");
+
+    let routers = [
+        (a, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C),
+        (b, OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_C),
+        (c, OSPFV3_ROUTER_ID_C, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B),
+    ];
+    let base: Vec<_> = routers
+        .iter()
+        .map(|(r, _, p, q)| (r.count(&became), r.count(&full(p)), r.count(&full(q))))
+        .collect();
+    let (a_b, a_c, b_a, b_c, c_a, c_b) = (
+        a.count(&added(OSPFV3_BROADCAST_ADDRESS_B)),
+        a.count(&added(OSPFV3_BROADCAST_ADDRESS_C)),
+        b.count(&added(OSPFV3_BROADCAST_ADDRESS_A)),
+        b.count(&added(OSPFV3_BROADCAST_ADDRESS_C)),
+        c.count(&added(OSPFV3_BROADCAST_ADDRESS_A)),
+        c.count(&added(OSPFV3_BROADCAST_ADDRESS_B)),
+    );
+    let (loop_a, loop_b) = (a.count(&loopback), b.count(&loopback));
+
+    log("forcing a hybrid profile (rfc 6845) on the bridge of all three routers");
+    a.provision_flags(&with_base(A, hybrid(OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, hybrid(OSPFV3_ROUTER_ID_B)))
+        .await?;
+    c.provision_flags(&with_base(crate::router::C, hybrid(OSPFV3_ROUTER_ID_C)))
+        .await?;
+    for ((r, _, p, q), (e0, p0, q0)) in routers.iter().zip(&base) {
+        r.wait_new(&became, *e0, 120).await?;
+        r.wait_new(&full(p), *p0, 120).await?;
+        r.wait_new(&full(q), *q0, 120).await?;
+    }
+    // Point-to-point links in the Router-LSAs: the peers' own addresses are
+    // /128 host routes, not the bridge's /64.
+    a.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_B), a_b, 60)
+        .await?;
+    a.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_C), a_c, 60)
+        .await?;
+    b.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_A), b_a, 60)
+        .await?;
+    b.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_C), b_c, 60)
+        .await?;
+    c.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_A), c_a, 60)
+        .await?;
+    c.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_B), c_b, 60)
+        .await?;
+
+    let mut flags = strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_C,
+        "--ospfv3-area",
+        OSPFV3_AREA,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE,
+    ]);
+    flags.extend(strings(&[
+        "--ospfv3-loopback-address",
+        OSPFV3_DR_LOOPBACK_ADDRESS_C,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]));
+    c.provision_flags(&with_base(crate::router::C, flags))
+        .await?;
+    a.wait_new(&loopback, loop_a, 60).await?;
+    b.wait_new(&loopback, loop_b, 60).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+
+    log("no Network-LSA is held (rfc 6845 4.5)");
+    let mut left = String::new();
+    for _ in 0..30 {
+        let body = a
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let rows = report[0]["result"].as_array().cloned().unwrap_or_default();
+        left = rows
+            .iter()
+            .filter(|r| {
+                r["lsa_type"].as_u64().is_some_and(|t| t & 0x1fff == 2)
+                    && r["age"].as_u64().is_some_and(|age| age < 3600)
+            })
+            .map(ToString::to_string)
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    if !left.is_empty() {
+        bail!("a network-lsa is still held on a hybrid bridge: {left}");
+    }
+
+    log("switching the bridge back to the broadcast profile re-elects");
+    let base: Vec<_> = routers.iter().map(|(r, ..)| r.count(&became)).collect();
+    a.provision_flags(&with_base(
+        A,
+        ospfv3_broadcast_with_l2(OSPF_BROADCAST_ADDRESS_A, OSPFV3_BROADCAST_ADDRESS_A),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        ospfv3_broadcast_with_l2(OSPF_BROADCAST_ADDRESS_B, OSPFV3_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    c.provision_flags(&with_base(
+        crate::router::C,
+        ospfv3_broadcast(OSPFV3_BROADCAST_ADDRESS_C),
+    ))
+    .await?;
+    for ((r, ..), e0) in routers.iter().zip(&base) {
+        r.wait_new(&became, *e0, 120).await?;
+    }
+    Ok(())
+}
+
 /// RFC 2328 §16.1 ECMP over OSPFv3 (#1135, requires `ospfv3-dr`): router-b is
 /// reachable from router-a over both the p2p `eth0.0` and the shared bridge at
 /// the same cost, so its loopback is one `RTA_MULTIPATH` route (`next_hops=2`).

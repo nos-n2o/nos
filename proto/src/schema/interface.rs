@@ -3,7 +3,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_valid,
+    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_point_to_point_valid,
     routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
     unique_key_in,
 };
@@ -93,7 +93,7 @@ pub struct Subinterface {
     /// A list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4
     /// multiple instances on one link), distinct effective Instance IDs.
     #[serde(default)]
-    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_valid(p, ctx)))]
+    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_point_to_point_valid(p, ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profiles: Vec<String>,
 
@@ -288,7 +288,7 @@ pub struct Interface {
     /// A list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4
     /// multiple instances on one link), distinct effective Instance IDs.
     #[serde(default)]
-    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_valid(p, ctx)))]
+    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_point_to_point_valid(p, ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profiles: Vec<String>,
 

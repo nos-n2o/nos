@@ -150,7 +150,7 @@ pub(super) fn router_lsa_links(
                     });
                 }
             }
-            NetworkType::Broadcast => {
+            NetworkType::Broadcast | NetworkType::Hybrid => {
                 // RFC 2328 §12.4.1.2: the transit link only once adjacent to
                 // the DR; before that (or with no DR yet) the subnet is a stub.
                 match status

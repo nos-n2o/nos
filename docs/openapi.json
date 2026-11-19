@@ -1726,12 +1726,12 @@
               "null"
             ]
           },
-          "ospfv3_profile": {
-            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "ospfv3_profiles": {
+            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "rd": {
             "description": "EVPN Route Distinguisher, `asn:nn` or `a.b.c.d:nn`.",
@@ -3010,12 +3010,12 @@
               "null"
             ]
           },
-          "ospfv3_profile": {
-            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "ospfv3_profiles": {
+            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "port_aggregate": {
             "description": "If set, names a `PortAggregate` this interface is a static bonded\nmember of. Mutually exclusive with `switching_profile` and a non-empty\n`subinterfaces` — a bonded slave, like a VRF- or bridge-enslaved link,\ncan only have one Linux master device. See\n`valid_port_aggregate_membership`.",
@@ -3950,7 +3950,8 @@
         "enum": [
           "PointToPoint",
           "Broadcast",
-          "PointToMultipoint"
+          "PointToMultipoint",
+          "Hybrid"
         ],
         "type": "string"
       },
@@ -6886,12 +6887,12 @@
               "null"
             ]
           },
-          "ospfv3_profile": {
-            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "ospfv3_profiles": {
+            "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "routing_table": {
             "description": "Routing table (VRF) the subinterface joins, if any.",
@@ -51749,7 +51750,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `ospfv3-profile` setting.",
+        "summary": "Remove: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -51760,11 +51761,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -51791,7 +51792,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `ospfv3-profile` setting.",
+        "summary": "Read: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -51833,11 +51834,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -51870,7 +51871,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `ospfv3-profile` setting.",
+        "summary": "Merge-patch: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -51882,11 +51883,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             }
           },
@@ -51897,11 +51898,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -51931,7 +51932,256 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `ospfv3-profile` setting.",
+        "summary": "Set: Every `ospfv3-profile` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/broadcast-domain/{broadcast_domain}/ospfv3-profile/{ospfv3_profile}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "broadcast_domain",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospfv3_profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `ospfv3-profile`, addressed by its value.",
         "tags": [
           "transactions"
         ]
@@ -60216,7 +60466,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `ospfv3-profile` setting.",
+        "summary": "Remove: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -60227,11 +60477,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -60258,7 +60508,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `ospfv3-profile` setting.",
+        "summary": "Read: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -60300,11 +60550,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -60337,7 +60587,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `ospfv3-profile` setting.",
+        "summary": "Merge-patch: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -60349,11 +60599,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             }
           },
@@ -60364,11 +60614,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profile`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see\n`Subinterface.ospfv3_profiles`'s doc comment for why this is a\nseparate field rather than a widened `ospf_profile`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -60398,7 +60648,256 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `ospfv3-profile` setting.",
+        "summary": "Set: Every `ospfv3-profile` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/interface/{interface}/ospfv3-profile/{ospfv3_profile}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "interface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospfv3_profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `ospfv3-profile`, addressed by its value.",
         "tags": [
           "transactions"
         ]
@@ -63595,7 +64094,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `ospfv3-profile` setting.",
+        "summary": "Remove: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -63606,11 +64105,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -63637,7 +64136,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `ospfv3-profile` setting.",
+        "summary": "Read: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -63688,11 +64187,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -63725,7 +64224,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `ospfv3-profile` setting.",
+        "summary": "Merge-patch: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -63737,11 +64236,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             }
           },
@@ -63752,11 +64251,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -63786,7 +64285,265 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `ospfv3-profile` setting.",
+        "summary": "Set: Every `ospfv3-profile` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/interface/{interface}/subinterface/{subinterface}/ospfv3-profile/{ospfv3_profile}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "interface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "subinterface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospfv3_profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `ospfv3-profile`, addressed by its value.",
         "tags": [
           "transactions"
         ]
@@ -99633,7 +100390,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `ospfv3-profile` setting.",
+        "summary": "Remove: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -99644,11 +100401,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -99675,7 +100432,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `ospfv3-profile` setting.",
+        "summary": "Read: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -99726,11 +100483,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -99763,7 +100520,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `ospfv3-profile` setting.",
+        "summary": "Merge-patch: Every `ospfv3-profile` entry.",
         "tags": [
           "transactions"
         ]
@@ -99775,11 +100532,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             }
           },
@@ -99790,11 +100547,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a\nseparate field, not a widened `ospf_profile`, so one subinterface can\nrun v2 and v3 simultaneously (real dual-stack routers do this\nroutinely). Also requires `routing_table` set on this same\nsubinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.\n\nA list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4\nmultiple instances on one link), distinct effective Instance IDs.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -99824,7 +100581,265 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `ospfv3-profile` setting.",
+        "summary": "Set: Every `ospfv3-profile` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/port-aggregate/{port_aggregate}/subinterface/{subinterface}/ospfv3-profile/{ospfv3_profile}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "port_aggregate",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "subinterface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospfv3_profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: One `ospfv3-profile`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `ospfv3-profile`, addressed by its value.",
         "tags": [
           "transactions"
         ]
