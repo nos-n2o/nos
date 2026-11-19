@@ -396,7 +396,7 @@ impl LinkStatus {
                 NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                     InterfaceState::PointToPoint
                 }
-                NetworkType::Broadcast => InterfaceState::Waiting,
+                NetworkType::Broadcast | NetworkType::Hybrid => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
             dr: None,
@@ -498,7 +498,7 @@ pub async fn run(
     )));
     hello_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let is_broadcast = cfg.network_type == NetworkType::Broadcast;
+    let is_broadcast = elects_dr(cfg.network_type);
     let mut dead_sweep = tokio::time::interval(std::time::Duration::from_secs(1));
     dead_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let wait_deadline =
@@ -692,7 +692,7 @@ fn send_hello(
         NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
             (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
         }
-        NetworkType::Broadcast => (
+        NetworkType::Broadcast | NetworkType::Hybrid => (
             current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
             current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
         ),
@@ -833,8 +833,8 @@ fn handle_hello(
 
     // #957: a point-to-point / multipoint peer back under a new router ID from
     // the same address supersedes its old entry at once. Grace entries are
-    // kept (RFC 5187); broadcast never evicts.
-    if cfg.network_type != NetworkType::Broadcast {
+    // kept (RFC 5187); broadcast and hybrid never evict.
+    if !elects_dr(cfg.network_type) {
         evict_same_address(cfg, status, source, hello.router_id);
     }
 
@@ -911,18 +911,21 @@ fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
+        NetworkType::Broadcast | NetworkType::Hybrid
+            if waiting && hello.designated_router == hello.router_id =>
+        {
             run_election(socket, cfg, local_router_id, status);
             true
         }
-        NetworkType::Broadcast if !waiting => {
+        NetworkType::Broadcast | NetworkType::Hybrid if !waiting => {
             run_election(socket, cfg, local_router_id, status);
             false
         }
         // `last_heard` was refreshed above; the sweep expires it.
-        NetworkType::Broadcast | NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
-            false
-        }
+        NetworkType::Broadcast
+        | NetworkType::Hybrid
+        | NetworkType::PointToPoint
+        | NetworkType::PointToMultipoint => false,
     }
 }
 
@@ -1471,7 +1474,7 @@ fn flush_pending_acks(
 /// group; the DR/Backup role picks which.
 fn current_dest(cfg: &LinkConfig, status: &StatusHandle) -> Dest {
     flood_dest(
-        cfg.network_type == NetworkType::Broadcast,
+        elects_dr(cfg.network_type),
         matches!(
             status.borrow().interface_state,
             InterfaceState::Dr | InterfaceState::Backup
@@ -2175,7 +2178,7 @@ pub struct NssaSettings {
 
 /// Every LS type this router originates in either RFC 8362 mode — the only
 /// ones `withdraw_undesired` ever flushes (never a Grace-LSA).
-const OWNED_TYPES: [u16; 15] = [
+const OWNED_TYPES: [u16; 16] = [
     lsa::LSA_TYPE_ROUTER,
     lsa::LSA_TYPE_NETWORK,
     lsa::LSA_TYPE_LINK,
@@ -2191,6 +2194,7 @@ const OWNED_TYPES: [u16; 15] = [
     lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
     lsa::LSA_TYPE_E_AS_EXTERNAL,
     lsa::LSA_TYPE_NSSA,
+    lsa::LSA_TYPE_E_NSSA,
 ];
 
 /// See `LinkManager::lsids`: `(ID, asked for since the last prune)` per key.
@@ -2217,6 +2221,7 @@ struct LsaTypes {
     inter_area_prefix: u16,
     inter_area_router: u16,
     as_external: u16,
+    nssa: u16,
 }
 
 impl LsaTypes {
@@ -2230,6 +2235,7 @@ impl LsaTypes {
                 inter_area_prefix: lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
                 inter_area_router: lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
                 as_external: lsa::LSA_TYPE_E_AS_EXTERNAL,
+                nssa: lsa::LSA_TYPE_E_NSSA,
             }
         } else {
             Self {
@@ -2240,6 +2246,7 @@ impl LsaTypes {
                 inter_area_prefix: lsa::LSA_TYPE_INTER_AREA_PREFIX,
                 inter_area_router: lsa::LSA_TYPE_INTER_AREA_ROUTER,
                 as_external: lsa::LSA_TYPE_AS_EXTERNAL,
+                nssa: lsa::LSA_TYPE_NSSA,
             }
         }
     }
@@ -2686,7 +2693,7 @@ impl LinkManager {
     }
 
     /// RFC 5340 §3.1 / RFC 2328 §3.1: an ABR is attached to 2+ areas, one of
-    /// them the backbone (no virtual links in v3). B-bit and every summary
+    /// them the backbone (a configured virtual link counts, #1159). B-bit and every summary
     /// follow this (#610).
     async fn is_backbone_abr(&self) -> bool {
         let areas = self.attached_areas().await;
@@ -2708,6 +2715,24 @@ impl LinkManager {
             areas.insert(Ipv4Addr::UNSPECIFIED);
         }
         areas
+    }
+
+    /// RFC 5340 §4.7: the transit-area first hops toward each configured
+    /// virtual link's endpoint (`spf::Context::virtual_links`).
+    async fn virtual_next_hops(&self, router_id: Ipv4Addr) -> Vec<spf::VirtualNextHops> {
+        let configured = self.virtual_links.lock().await.clone();
+        let mut out = Vec::new();
+        for v in configured {
+            let Some(lsdb) = self.lsdbs.lock().await.get(&v.transit_area).cloned() else {
+                continue;
+            };
+            let mut lsas = lsdb.lock().await.all();
+            for (_, link_lsdb) in self.link_local_lsdbs_in(v.transit_area).await {
+                lsas.extend(link_lsdb.lock().await.all());
+            }
+            out.extend(spf::virtual_next_hops(router_id, &lsas, v.endpoint));
+        }
+        out
     }
 
     /// The Link State ID for a prefix-keyed LSA — see `lsids`.
@@ -2826,11 +2851,15 @@ impl LinkManager {
                 0 => None,
                 m => Some(m),
             };
-            let fragments = split_router_links(
-                &router_lsa_links(local_router_id, &links, max_metric),
-                budget,
-                max_links,
-            );
+            let mut all_links = router_lsa_links(local_router_id, &links, max_metric);
+            if links
+                .iter()
+                .any(|(c, _)| c.network_type == NetworkType::Hybrid)
+            {
+                let dr_view = router_lsa_targets(&lsdb, types.router, local_router_id);
+                all_links.extend(hybrid_router_links(&links, &dr_view, max_metric));
+            }
+            let fragments = split_router_links(&all_links, budget, max_links);
             if fragments.len() > 1 {
                 info!(area = %area_id, fragments = fragments.len(), "ospfv3 router-lsa split");
             }
@@ -2967,21 +2996,36 @@ impl LinkManager {
                         && (cfg.network_type != NetworkType::Broadcast
                             || !network_prefix_originated(status))
                 })
-                .map(|(cfg, _)| {
-                    if cfg.network_type == NetworkType::PointToMultipoint {
+                .flat_map(|(cfg, _)| {
+                    if cfg.network_type == NetworkType::Hybrid {
+                        // RFC 6845 §4.6.2: the address as a /128 (LA) as on
+                        // point-to-multipoint, and the interface's prefix too.
+                        vec![
+                            IntraAreaPrefixEntry {
+                                options: lsa::PREFIX_OPT_LA,
+                                metric: cfg.cost,
+                                prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
+                            },
+                            IntraAreaPrefixEntry {
+                                options: 0,
+                                metric: cfg.cost,
+                                prefix: cfg.prefix,
+                            },
+                        ]
+                    } else if cfg.network_type == NetworkType::PointToMultipoint {
                         // RFC 5340 §4.4.3.9: the router's own address as a
                         // /128 host prefix (LA), not the subnet.
-                        IntraAreaPrefixEntry {
+                        vec![IntraAreaPrefixEntry {
                             options: lsa::PREFIX_OPT_LA,
                             metric: cfg.cost,
                             prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
-                        }
+                        }]
                     } else {
-                        IntraAreaPrefixEntry {
+                        vec![IntraAreaPrefixEntry {
                             options: 0,
                             metric: cfg.cost,
                             prefix: cfg.prefix,
-                        }
+                        }]
                     }
                 })
                 .collect();
@@ -3076,11 +3120,17 @@ impl LinkManager {
         // Per source area: what it offers, and its own intra-area view (what
         // a destination area reaches itself is never summarized into it).
         let mut views = Vec::new();
+        // Distance only, so no virtual next hops: the far end of a virtual
+        // link summarizes the backbone into its other areas.
+        let ctx = |area_id: &Ipv4Addr| spf::Context {
+            backbone: area_id.is_unspecified(),
+            ..spf::Context::default()
+        };
         for (area_id, lsdb) in &areas {
             let lsas = lsdb.lock().await.all();
             let area_ranges = ranges.get(area_id).map_or(&[][..], |r| &r[..]);
             let (prefixes, asbrs, own) = if area_id.is_unspecified() {
-                let v = spf::backbone_view(local_router_id, &lsas);
+                let v = spf::backbone_view(local_router_id, &lsas, &ctx(area_id));
                 let (mut prefixes, active) =
                     nos_ospf_common::areas::apply_ranges(&v.intra.prefixes, area_ranges);
                 active_ranges.extend(active);
@@ -3089,7 +3139,7 @@ impl LinkManager {
                 asbrs.extend(v.inter_asbrs);
                 (prefixes, asbrs, v.intra)
             } else {
-                let v = spf::intra_area_routes(local_router_id, &lsas);
+                let v = spf::intra_area_routes(local_router_id, &lsas, &ctx(area_id));
                 let (prefixes, active) =
                     nos_ospf_common::areas::apply_ranges(&v.prefixes, area_ranges);
                 active_ranges.extend(active);
@@ -3319,7 +3369,7 @@ impl LinkManager {
                 done.insert(install_self_originated(
                     &mut lsdb,
                     local_router_id,
-                    lsa::LSA_TYPE_NSSA,
+                    types.nssa,
                     lsid,
                     LsaBody::AsExternal(AsExternalLsaBody {
                         type2: false,
@@ -3684,6 +3734,10 @@ impl LinkManager {
             .collect();
         let mut merged: HashMap<Ipv6Net, spf::RouteEntry> = HashMap::new();
         let backbone_abr = self.is_backbone_abr().await;
+        let virtual_hops = self.virtual_next_hops(router_id).await;
+        // The prefixes whose route is the backbone's, which §16.3 may improve.
+        let mut backbone_routes: HashSet<Ipv6Net> = HashSet::new();
+        let mut transit: Vec<spf::RouteEntry> = Vec::new();
         for (area_id, lsdb) in areas {
             let mut lsas = lsdb.lock().await.all();
             for (_, link_lsdb) in self.link_local_lsdbs_in(area_id).await {
@@ -3701,16 +3755,38 @@ impl LinkManager {
             if !stub {
                 lsas.extend(self.as_lsdb.lock().await.all());
             }
-            let skip = backbone_abr && !area_id.is_unspecified();
-            for entry in spf::compute_in(router_id, &lsas, skip) {
-                merged
-                    .entry(entry.prefix)
-                    .and_modify(|existing| {
-                        if entry.rank() < existing.rank() {
-                            *existing = entry.clone();
-                        }
-                    })
-                    .or_insert(entry);
+            let backbone = area_id.is_unspecified();
+            let ctx = spf::Context {
+                backbone,
+                skip_summaries: backbone_abr && !backbone,
+                virtual_links: &virtual_hops,
+            };
+            if ctx.skip_summaries {
+                transit.extend(spf::transit_summaries(router_id, &lsas));
+            }
+            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+                let prefix = entry.prefix;
+                match merged.get_mut(&prefix) {
+                    Some(existing) if entry.rank() >= existing.rank() => continue,
+                    Some(existing) => *existing = entry,
+                    None => {
+                        merged.insert(prefix, entry);
+                    }
+                }
+                if backbone {
+                    backbone_routes.insert(prefix);
+                } else {
+                    backbone_routes.remove(&prefix);
+                }
+            }
+        }
+        // RFC 2328 §16.3: a transit area may hold a shorter path to a
+        // backbone destination than the backbone's own (virtual-link) path.
+        for candidate in transit {
+            if backbone_routes.contains(&candidate.prefix)
+                && let Some(existing) = merged.get_mut(&candidate.prefix)
+            {
+                spf::apply_transit(existing, candidate);
             }
         }
         // RFC 5340 §4.4.3.3: a discard route per active advertised range,
@@ -3817,7 +3893,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
     let interface_state = to_interface_state(status.interface_state);
 
     if status.neighbors.is_empty() {
-        if entry.config.network_type == NetworkType::Broadcast {
+        if elects_dr(entry.config.network_type) {
             return Vec::new();
         }
         return vec![Ospfv3NeighborSummary {
@@ -3860,6 +3936,99 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
 /// the DR neighbor is `Full`, or we are the DR and at least one neighbor is
 /// `Full` (a graceful-restarting neighbor still counts, as on p2p).
 /// ponytail: mirror of `ospf::link::originate::adjacent_to_dr`.
+/// Broadcast and RFC 6845 hybrid both run the DR/BDR election.
+const fn elects_dr(network_type: NetworkType) -> bool {
+    matches!(network_type, NetworkType::Broadcast | NetworkType::Hybrid)
+}
+
+/// Per advertising router (other than `local`), the neighbors its
+/// Router-LSA fragments in `lsdb` carry a point-to-point link to.
+fn router_lsa_targets(
+    lsdb: &Lsdb,
+    router_type: u16,
+    local: Ipv4Addr,
+) -> HashMap<Ipv4Addr, HashSet<Ipv4Addr>> {
+    let mut view: HashMap<Ipv4Addr, HashSet<Ipv4Addr>> = HashMap::new();
+    for l in lsdb.all() {
+        let h = &l.header;
+        if h.lsa_type != router_type || h.advertising_router == local || h.age >= lsa::MAX_AGE {
+            continue;
+        }
+        if let LsaBody::Router(b) = &l.body {
+            view.entry(h.advertising_router).or_default().extend(
+                b.links
+                    .iter()
+                    .filter(|x| x.link_type == LINK_TYPE_POINT_TO_POINT)
+                    .map(|x| x.neighbor_router_id),
+            );
+        }
+    }
+    view
+}
+
+/// RFC 6845 §4.6: a hybrid link is described as point-to-multipoint, but a
+/// DR lists every `Full` neighbor, and a non-DR lists nothing until it is
+/// `Full` with a DR that agrees on its role, then every neighbor at 2-Way or
+/// better that the DR's Router-LSA links to (`dr_view`, the DR itself
+/// included). Cost: the interface's (no per-neighbor output cost yet).
+fn hybrid_router_links(
+    links: &[(LinkConfig, LinkStatus)],
+    dr_view: &HashMap<Ipv4Addr, HashSet<Ipv4Addr>>,
+    max_metric: bool,
+) -> Vec<RouterLsaLink> {
+    let mut result = Vec::new();
+    for (cfg, status) in links {
+        if cfg.network_type != NetworkType::Hybrid || cfg.virtual_link.is_some() {
+            continue;
+        }
+        let Some(dr) = status.dr else { continue };
+        let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+        let mut peers: Vec<(&Ipv4Addr, &NeighborInfo)> =
+            if status.interface_state == InterfaceState::Dr {
+                status.neighbors.iter().filter(|(_, n)| up(n)).collect()
+            } else {
+                let agreed = status
+                    .neighbors
+                    .get(&dr)
+                    .is_some_and(|n| up(n) && n.declared_dr == dr);
+                let empty = HashSet::new();
+                let theirs = dr_view.get(&dr).unwrap_or(&empty);
+                if !agreed {
+                    continue;
+                }
+                status
+                    .neighbors
+                    .iter()
+                    .filter(|(id, n)| {
+                        matches!(
+                            n.state,
+                            NeighborState::TwoWay
+                                | NeighborState::ExStart
+                                | NeighborState::Exchange
+                                | NeighborState::Loading
+                                | NeighborState::Full
+                        ) && (**id == dr || theirs.contains(*id))
+                    })
+                    .collect()
+            };
+        peers.sort_by_key(|(id, _)| **id);
+        for (id, info) in peers {
+            result.push(RouterLsaLink {
+                link_type: LINK_TYPE_POINT_TO_POINT,
+                metric: if max_metric {
+                    MAX_LINK_METRIC
+                } else {
+                    cfg.cost
+                },
+                interface_id: cfg.interface_id,
+                neighbor_interface_id: info.interface_id,
+                neighbor_router_id: *id,
+            });
+        }
+    }
+    result
+}
+
 fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
     let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
     match status.dr {
@@ -3948,6 +4117,8 @@ fn router_lsa_links(
                     });
                 }
             }
+            // RFC 6845 §4.6: needs the DR's Router-LSA, see `hybrid_router_links`.
+            NetworkType::Hybrid => {}
             NetworkType::Broadcast => {
                 // RFC 5340 §4.4.3.2: the transit link only once adjacent to
                 // the DR. The prefix meanwhile rides the router-referenced
@@ -4740,6 +4911,192 @@ pub(crate) mod tests {
         assert_eq!(body.prefixes.len(), 1);
         assert_eq!(body.prefixes[0].prefix, "2001:db8::1/128".parse().unwrap());
         assert_eq!(body.prefixes[0].options, lsa::PREFIX_OPT_LA);
+    }
+
+    fn hybrid_link(
+        role: InterfaceState,
+        dr: Ipv4Addr,
+        neighbors: &[(u8, NeighborState)],
+    ) -> (LinkConfig, LinkStatus) {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Hybrid;
+        let mut status = LinkStatus::new(NetworkType::Hybrid);
+        status.interface_state = role;
+        status.dr = Some(dr);
+        for (i, state) in neighbors {
+            let id = Ipv4Addr::new(9, 9, 9, *i);
+            let mut n = neighbor_info(*state, "fe80::2".parse().unwrap(), u32::from(*i));
+            n.declared_dr = dr;
+            status.neighbors.insert(id, n);
+        }
+        (cfg, status)
+    }
+
+    /// RFC 6845 §4.1/§4.3: hybrid runs the election like broadcast, starts in
+    /// `Waiting`, and floods to the groups (a broadcast-model destination).
+    #[test]
+    fn hybrid_elects_and_floods_like_broadcast() {
+        assert_eq!(
+            LinkStatus::new(NetworkType::Hybrid).interface_state,
+            InterfaceState::Waiting
+        );
+        assert!(elects_dr(NetworkType::Hybrid) && elects_dr(NetworkType::Broadcast));
+        assert!(!elects_dr(NetworkType::PointToMultipoint));
+        let (cfg, status) = hybrid_link(InterfaceState::Dr, ME, &[]);
+        let (tx, _rx) = watch::channel(status);
+        assert_eq!(current_dest(&cfg, &tx), Dest::AllSpfRouters);
+    }
+
+    /// RFC 6845 §4.6: a DR lists every `Full` neighbor, the cost is the
+    /// interface's, and the broadcast arm adds no transit link.
+    #[test]
+    fn hybrid_router_links_dr_lists_every_full_neighbor() {
+        let (cfg, status) = hybrid_link(
+            InterfaceState::Dr,
+            ME,
+            &[
+                (12, NeighborState::Full),
+                (10, NeighborState::Full),
+                (11, NeighborState::TwoWay),
+            ],
+        );
+        let links = [(cfg, status)];
+        assert_eq!(router_lsa_links(ME, &links, false), []);
+        let got = hybrid_router_links(&links, &HashMap::new(), false);
+        let ids: Vec<_> = got.iter().map(|l| l.neighbor_router_id).collect();
+        assert_eq!(
+            ids,
+            [Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(9, 9, 9, 12)]
+        );
+        assert!(got.iter().all(|l| l.link_type == LINK_TYPE_POINT_TO_POINT));
+        assert_eq!(got[0].metric, links[0].0.cost);
+        assert_eq!(got[0].neighbor_interface_id, 10);
+    }
+
+    /// RFC 6845 §4.6: a non-DR needs a `Full`, agreeing DR, then lists the DR
+    /// and the 2-Way-or-better neighbors the DR's Router-LSA links to.
+    #[test]
+    fn hybrid_router_links_non_dr_follows_the_drs_router_lsa() {
+        let dr = Ipv4Addr::new(9, 9, 9, 10);
+        let other = Ipv4Addr::new(9, 9, 9, 11);
+        let stranger = Ipv4Addr::new(9, 9, 9, 12);
+        let view = HashMap::from([(dr, HashSet::from([ME, other]))]);
+        let nbrs = [
+            (10, NeighborState::Full),
+            (11, NeighborState::TwoWay),
+            (12, NeighborState::TwoWay),
+        ];
+        let (cfg, status) = hybrid_link(InterfaceState::DrOther, dr, &nbrs);
+        let ids = |l: Vec<RouterLsaLink>| -> Vec<Ipv4Addr> {
+            l.iter().map(|x| x.neighbor_router_id).collect()
+        };
+        let got = ids(hybrid_router_links(
+            &[(cfg.clone(), status.clone())],
+            &view,
+            false,
+        ));
+        assert_eq!(got, [dr, other], "{stranger} is not in the DR's LSA");
+        // No DR LSA yet: only the DR itself (it is the adjacency).
+        let got = ids(hybrid_router_links(
+            &[(cfg.clone(), status.clone())],
+            &HashMap::new(),
+            false,
+        ));
+        assert_eq!(got, [dr]);
+        // Not Full with the DR, or the DR disagrees on its role: nothing.
+        let mut bad = status.clone();
+        bad.neighbors.get_mut(&dr).unwrap().state = NeighborState::TwoWay;
+        assert_eq!(
+            hybrid_router_links(&[(cfg.clone(), bad)], &view, false),
+            Vec::<RouterLsaLink>::new()
+        );
+        let mut bad = status;
+        bad.neighbors.get_mut(&dr).unwrap().declared_dr = Ipv4Addr::UNSPECIFIED;
+        assert_eq!(
+            hybrid_router_links(&[(cfg, bad)], &view, false),
+            Vec::<RouterLsaLink>::new()
+        );
+    }
+
+    /// RFC 6845 §4.5/§4.6.2: no Network-LSA, and the Intra-Area-Prefix-LSA
+    /// carries both the /128 (LA) and the interface prefix.
+    #[tokio::test]
+    async fn hybrid_originates_no_network_lsa_and_both_prefixes() {
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = NetworkType::Hybrid;
+        cfg.prefix = "2001:db8::1/64".parse().unwrap();
+        manager
+            .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
+            .await;
+        manager.originate_all(router_id).await;
+        let lsdb = manager.lsdb_for(cfg.area_id).await;
+        let lsdb = lsdb.lock().await;
+        let types = manager.lsa_types();
+        assert!(lsdb
+            .all()
+            .iter()
+            .all(|l| l.header.lsa_type != types.network));
+        let key = LsaKey {
+            lsa_type: types.intra_area_prefix,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: router_id,
+        };
+        let installed = lsdb.get(&key).unwrap();
+        let LsaBody::IntraAreaPrefix(body) = &installed.body else {
+            panic!("expected intra-area-prefix lsa")
+        };
+        let got: Vec<_> = body
+            .prefixes
+            .iter()
+            .map(|p| (p.prefix, p.options))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("2001:db8::1/128".parse().unwrap(), lsa::PREFIX_OPT_LA),
+                ("2001:db8::1/64".parse().unwrap(), 0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_lsa_targets_collects_other_routers_point_to_point_links() {
+        let mut db = Lsdb::new();
+        let dr = Ipv4Addr::new(9, 9, 9, 10);
+        let types = LinkManager::new(1, None).lsa_types();
+        let link_to = |id| RouterLsaLink {
+            link_type: LINK_TYPE_POINT_TO_POINT,
+            metric: 1,
+            interface_id: 1,
+            neighbor_interface_id: 2,
+            neighbor_router_id: id,
+        };
+        install_self_originated(
+            &mut db,
+            dr,
+            types.router,
+            dr,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: vec![link_to(ME)],
+            }),
+        );
+        install_self_originated(
+            &mut db,
+            ME,
+            types.router,
+            ME,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: vec![link_to(dr)],
+            }),
+        );
+        let view = router_lsa_targets(&db, types.router, ME);
+        assert_eq!(view, HashMap::from([(dr, HashSet::from([ME]))]));
     }
 
     /// RFC 6987 §2: a stub router advertises every link at `MaxLinkMetric`.
@@ -5591,6 +5948,59 @@ pub(crate) mod tests {
         for t in EXTENDED {
             assert_eq!(db[&t].1, lsa::MAX_AGE, "{t:#x} flushed");
         }
+    }
+
+    /// #1157: toggling `extended-lsa` in an NSSA ages the other flavor of
+    /// the NSSA-LSA (`0x2007` <-> `0xA027`) with its sequence number kept.
+    #[tokio::test]
+    async fn extended_mode_toggle_flushes_the_other_nssa_flavor() {
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        manager.set_stub_areas(HashMap::from([(area1, (true, 1))]));
+        manager.set_nssa_areas(HashMap::from([(area1, NssaSettings::default())]));
+        let cfg = LinkConfig {
+            area_id: area1,
+            stub: true,
+            nssa: true,
+            ..link("eth0.0", 10)
+        };
+        manager
+            .reconcile(vec![cfg], HashMap::new(), router_id)
+            .await;
+        manager
+            .apply_redistribute_update(RedistributeUpdate::Full(vec![
+                nos_proto::RedistributedRoute {
+                    prefix: IpNet::V6("2001:db8:e::/48".parse().unwrap()),
+                    gateway: "2001:db8::99".parse().unwrap(),
+                },
+            ]))
+            .await;
+        let m = &manager;
+        let age_of = |t: u16| async move {
+            m.database_summaries()
+                .await
+                .into_iter()
+                .find(|s| s.lsa_type == t)
+                .map(|s| (s.sequence_number, s.age))
+        };
+        manager.originate_all(router_id).await;
+        let legacy = age_of(lsa::LSA_TYPE_NSSA).await.unwrap();
+        assert!(legacy.1 < lsa::MAX_AGE);
+        assert!(age_of(lsa::LSA_TYPE_E_NSSA).await.is_none());
+
+        manager.set_extended_lsa(true);
+        manager.originate_all(router_id).await;
+        assert_eq!(
+            age_of(lsa::LSA_TYPE_NSSA).await,
+            Some((legacy.0, lsa::MAX_AGE))
+        );
+        assert!(age_of(lsa::LSA_TYPE_E_NSSA).await.unwrap().1 < lsa::MAX_AGE);
+
+        manager.set_extended_lsa(false);
+        manager.originate_all(router_id).await;
+        assert_eq!(age_of(lsa::LSA_TYPE_E_NSSA).await.unwrap().1, lsa::MAX_AGE);
+        assert!(age_of(lsa::LSA_TYPE_NSSA).await.unwrap().1 < lsa::MAX_AGE);
     }
 
     #[tokio::test]
@@ -6805,9 +7215,25 @@ pub(crate) mod tests {
             0
         );
 
-        // c drops its end: b's virtual neighbor dies, V and the type-4 link go.
+        // #1159, §16.1: c, attached to area 1 only, routes the backbone
+        // (a-b's segment) through the virtual link, with b's transit next hop.
+        let backbone_net: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let route = |m: Arc<LinkManager>| async move {
+            m.compute_routes()
+                .await
+                .into_iter()
+                .find(|r| r.prefix == backbone_net)
+        };
+        let via = route(Arc::clone(&c)).await.expect("backbone route at c");
+        assert_eq!(via.class, spf::PathClass::Intra);
+        assert_eq!(via.next_hops.len(), 1);
+
+        // c drops its end: b's virtual neighbor dies, V and the type-4 link go,
+        // and c falls back to the area-1 summary (inter-area, not the backbone).
         c.set_virtual_links(Vec::new()).await;
         settle(120).await;
+        let after = route(Arc::clone(&c)).await.expect("summary route at c");
+        assert_eq!(after.class, spf::PathClass::Inter);
         let flags = router_flags(&b, area1, id(2)).await.unwrap();
         assert_eq!(flags & lsa::ROUTER_FLAG_V, 0);
         assert_eq!(
@@ -6823,10 +7249,29 @@ pub(crate) mod tests {
     /// the AS-External-LSA never enters the NSSA, and both go when c stops
     /// redistributing.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::too_many_lines)]
     async fn nssa_lsa_is_translated_into_the_backbone() {
+        nssa_translation(false).await;
+    }
+
+    /// The same with RFC 8362 full mode on every router (#1157): E-NSSA-LSA
+    /// `0xA027` translated into an E-AS-External-LSA `0xC025`.
+    #[tokio::test(start_paused = true)]
+    async fn e_nssa_lsa_is_translated_into_the_backbone() {
+        nssa_translation(true).await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn nssa_translation(extended: bool) {
+        let (t7, t5) = if extended {
+            (lsa::LSA_TYPE_E_NSSA, lsa::LSA_TYPE_E_AS_EXTERNAL)
+        } else {
+            (lsa::LSA_TYPE_NSSA, lsa::LSA_TYPE_AS_EXTERNAL)
+        };
         let wire = Arc::new(wire::Wire::default());
         let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        for r in [&a, &b, &c] {
+            r.set_extended_lsa(extended);
+        }
         let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
         for r in [&b, &c] {
             r.set_stub_areas(HashMap::from([(area1, (true, 1))]));
@@ -6874,12 +7319,12 @@ pub(crate) mod tests {
         // The backbone holds b's translation, no NSSA-LSA; the NSSA holds
         // c's NSSA-LSA and no AS-External-LSA.
         let db_a = a.database_summaries().await;
-        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 1);
-        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(3)), 0);
-        assert_eq!(held(db_a, lsa::LSA_TYPE_NSSA, id(3)), 0);
+        assert_eq!(held(db_a.clone(), t5, id(2)), 1);
+        assert_eq!(held(db_a.clone(), t5, id(3)), 0);
+        assert_eq!(held(db_a, t7, id(3)), 0);
         let db_c = c.database_summaries().await;
-        assert_eq!(held(db_c.clone(), lsa::LSA_TYPE_NSSA, id(3)), 1);
-        assert_eq!(held(db_c, lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 0);
+        assert_eq!(held(db_c.clone(), t7, id(3)), 1);
+        assert_eq!(held(db_c, t5, id(2)), 0);
         let type7 = b
             .lsdb_for(area1)
             .await
@@ -6887,7 +7332,7 @@ pub(crate) mod tests {
             .await
             .all()
             .into_iter()
-            .find(|l| l.header.lsa_type == lsa::LSA_TYPE_NSSA && l.header.age < lsa::MAX_AGE)
+            .find(|l| l.header.lsa_type == t7 && l.header.age < lsa::MAX_AGE)
             .expect("NSSA-LSA on b");
         let LsaBody::AsExternal(body) = &type7.body else {
             panic!("expected an external body")
@@ -6923,10 +7368,7 @@ pub(crate) mod tests {
         // c stops redistributing: its NSSA-LSA is flushed and the route goes.
         c.apply_redistribute_update(redistribute(Vec::new())).await;
         settle(30).await;
-        assert_eq!(
-            held(c.database_summaries().await, lsa::LSA_TYPE_NSSA, id(3)),
-            0
-        );
+        assert_eq!(held(c.database_summaries().await, t7, id(3)), 0);
         assert!(a
             .compute_routes()
             .await

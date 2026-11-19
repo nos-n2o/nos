@@ -10,6 +10,7 @@ mod drivers;
 mod ospf;
 mod pam;
 mod pki;
+mod restconf;
 mod ssh;
 
 use anyhow::bail;
@@ -110,6 +111,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "routed-subinterface" => drivers::routed_subinterface(w).await,
         "source-address" => drivers::source_address(w).await,
         "rest" => drivers::rest(w).await,
+        "restconf-conformance" => restconf::restconf_conformance(w).await,
         "acl" => acl::acl(w).await,
         "flowspec-dataplane" => acl::flowspec_dataplane(w).await,
         "daemon-heartbeat" => drivers::daemon_heartbeat(w).await,
@@ -163,6 +165,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-p2mp" => ospf::ospfv3_p2mp(w).await,
         "ospfv3-bfd" => ospf::ospfv3_bfd(w).await,
         "ospfv3-dr" => ospf::ospfv3_dr(w).await,
+        "ospfv3-hybrid" => ospf::ospfv3_hybrid(w).await,
         "ospfv3-lfa" => ospf::ospfv3_lfa(w).await,
         "ospfv3-extended-lsa-sparse" => ospf::ospfv3_extended_lsa_sparse(w).await,
         "ospfv3-spf-ecmp" => ospf::ospfv3_spf_ecmp(w).await,
@@ -236,6 +239,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "routed-subinterface",
             "source-address",
             "rest",
+            "restconf-conformance",
             "syslog",
             "acl",
             "flowspec-dataplane",
@@ -305,6 +309,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3-p2mp",
             "ospfv3-bfd",
             "ospfv3-dr",
+            "ospfv3-hybrid",
             "ospfv3-lfa",
             "ospfv3-extended-lsa-sparse",
             "ospfv3-spf-ecmp",
@@ -417,6 +422,7 @@ pub const ALL: &[&str] = &[
     "routed-subinterface",
     "source-address",
     "rest",
+    "restconf-conformance",
     "syslog",
     "acl",
     "flowspec-dataplane",
@@ -520,6 +526,7 @@ pub const ALL: &[&str] = &[
     "ospfv3-p2mp",
     "ospfv3-bfd",
     "ospfv3-dr",
+    "ospfv3-hybrid",
     "ospfv3-lfa",
     "ospfv3-extended-lsa-sparse",
     "ospfv3-spf-ecmp",

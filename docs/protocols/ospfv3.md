@@ -217,6 +217,16 @@ RFC 8362 intends full mode to be enabled on every router of an area at once; use
 - NOS originates no extended LSA in sparse mode: it has no TE, SR or other TLV content a legacy LSA cannot hold, so the origination is the same as with both modes off. Extended LSAs of this router's earlier full mode are flushed on the switch, like any mode change.
 - Verified with router-a sparse, router-b full and router-c legacy-only on one bridge (`nos-e2e ospfv3-extended-lsa-sparse`).
 
+### Use a hybrid broadcast and point-to-multipoint link (RFC 6845)
+
+- Use it on a broadcast domain where each router pair needs its own path cost; hello, DR/BDR election and database sync stay as on a normal broadcast link.
+- Set `network-type hybrid` on the profile the broadcast domain's `ospfv3` field names: `set ospfv3 instance <name> area <area-id> profile <p> network-type hybrid`.
+- Every router on the segment must use it; a mixed segment still forms adjacencies but some router pairs carry no traffic.
+- The DR originates no Network-LSA. Routers describe the link as point-to-point links to their neighbors, and advertise their address as a `/128` plus the link's prefix.
+- A router that is not the DR lists a neighbor only once it is `Full` with the DR and the DR's Router-LSA links to that neighbor.
+- A hybrid profile on a subinterface or interface, a `passive` hybrid profile, and OSPFv2 hybrid are rejected at commit.
+- Check it with `show ospfv3 neighbors` (DR/BDR roles as for broadcast) and `show ospfv3 database` (no network LSA).
+
 ### Restart without dropping routes (RFC 5187)
 
 Set a grace period on the instance so that its neighbours keep the adjacency and this router's routes while its OSPFv3 daemon restarts:
@@ -341,7 +351,7 @@ commit
 
 ### Make an area an NSSA
 
-An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
+An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, or `0xa027` in extended mode; the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
 
 ```
 set ospfv3 instance v3 area 0.0.0.1 area-type nssa
@@ -353,7 +363,7 @@ set ospfv3 instance v3 area 0.0.0.1 nssa-default-originate enable
 - **Translation.** One ABR per NSSA translates the NSSA-LSAs that have the P option and a forwarding address into its own AS-external LSAs, and sets E in its other areas. It is the ABR with the highest router ID, unless another has the Nt bit (`nssa-translate-always enable` sets it and forces the role). The log line is `ospfv3 nssa translator role changed`. An NSSA-LSA that goes away flushes its translation.
 - **`nssa-default-originate enable`** makes an ABR originate a `::/0` NSSA-LSA (no P, so never translated) into the area at `stub-default-cost`.
 - `area-type nssa-no-summary` also sends only a `::/0` inter-area prefix LSA into the area. The ABR sends no Inter-Area-Router-LSA into any NSSA.
-- The two `nssa-*` settings are refused on a non-NSSA area. Only the legacy LSA forms are used for NSSA-LSAs: in extended-LSA mode they stay `0x2007` (no RFC 8362 form).
+- The two `nssa-*` settings are refused on a non-NSSA area. In extended-LSA mode NSSA-LSAs are originated as E-NSSA-LSAs (`0xa027`, RFC 8362) instead of `0x2007`, and both forms are accepted.
 
 ### Join an area to the backbone through another area (virtual link)
 
@@ -370,7 +380,7 @@ on router-c (`9.9.9.10` is router-b's router ID), and the mirror image on router
 - **What it runs.** A backbone adjacency, unicast between the two addresses (hop limit 64, the only sends that leave the link): Hellos, no DR, the link's own timers and authentication (`hello-interval`, `dead-interval`, `crypto-key`, as on a profile), the transit link's MTU and instance ID. A router with a configured virtual link counts as attached to the backbone (B bit, summaries).
 - **Check it.** `show ospfv3 neigh` lists `vlink-<transit-area>-<router-id>` in area 0.0.0.0, `Full`. In `GET /v1/ospfv3/database`, each end's area-0 Router-LSA lists the other in `virtual_links`, and its Router-LSA in the transit area has the V bit (`router_flags` & 4).
 - **Remove it.** `delete … virtual-link <router-id>`. The other end drops the neighbour after its dead interval (`ospfv3 neighbor state changed to down link=vlink-…`) unless it is removed there too.
-- **Not yet.** Routes across the virtual link (SPF over the type-4 link, transit summaries): #1159.
+- **Routes.** The backbone-less router routes the backbone through the link (RFC 5340 §4.8, RFC 2328 §16.1): the type-4 link is an SPF edge at its cost, with the first hops toward the far end taken from the transit area; the far end summarizes the backbone into its other areas. A backbone-attached ABR ignores summaries in its non-backbone areas, except that a transit area (V bit) may shorten an inter-area backbone route (§16.3). When the link drops, the routes go with it.
 
 ## Features and behaviour
 
@@ -392,7 +402,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), routes across virtual links (the adjacency itself works), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
 
 ## Configuration reference
 

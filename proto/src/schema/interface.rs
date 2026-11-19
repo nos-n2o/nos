@@ -3,7 +3,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_reference_valid,
+    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_point_to_point_valid,
     routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
     unique_key_in,
 };
@@ -89,7 +89,7 @@ pub struct Subinterface {
     /// run v2 and v3 simultaneously (real dual-stack routers do this
     /// routinely). Also requires `routing_table` set on this same
     /// subinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.
-    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_point_to_point_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 
@@ -280,7 +280,7 @@ pub struct Interface {
     /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
     /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
     /// separate field rather than a widened `ospf_profile`.
-    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_point_to_point_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 

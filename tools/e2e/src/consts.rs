@@ -558,6 +558,8 @@ pub const OSPFV3_ROUTER_ID_C: &str = "9.9.9.8";
 pub const OSPFV3_ROUTER_ID_B_NEW: &str = "9.9.9.11";
 pub const OSPFV3_AREA: &str = "0.0.0.0";
 pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
+/// `ospfv3-hybrid`'s second profile, forced to RFC 6845 hybrid.
+pub const OSPFV3_HYBRID_PROFILE: &str = "ospfv3-hybrid";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
 /// The second OSPFv3 link of `ospfv3` (#276): `eth1`, a direct veth pair.
@@ -599,6 +601,8 @@ pub const LSA_TYPE_AS_EXTERNAL_V3: u16 = 0x4005;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0xC025;
 /// RFC 5340 §A.4.8 NSSA-LSA (0x2007, RFC 3101 Type-7), as `lsa_type` prints.
 pub const LSA_TYPE_NSSA_V3: u16 = 0x2007;
+/// RFC 8362 §4.8 E-NSSA-LSA (0xA027), the TLV form of the above.
+pub const LSA_TYPE_E_NSSA: u16 = 0xA027;
 /// RFC 5340 Inter-Area-Prefix-LSA (0x2003) and E-Inter-Area-Prefix (0xA023).
 pub const LSA_TYPE_INTER_AREA_PREFIX_V3: u16 = 0x2003;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;
@@ -712,6 +716,8 @@ pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
 /// prefixes are the virtual link's addresses (prefixes no other phase uses).
 pub const OSPFV3_VLINK_LOOPBACK_B: &str = "2001:db8:a::2/128";
 pub const OSPFV3_VLINK_LOOPBACK_C: &str = "2001:db8:a::3/128";
+/// The backbone-only a-b segment (`OSPFV3_ADDRESS_A`/`_B`) router-c routes over the link.
+pub const OSPFV3_VLINK_BACKBONE: &str = "2001:db8:1::/64";
 
 /// `sandbox-nnp` (#1211): the effective capability mask each daemon must keep through
 /// `nos-sandbox-exec`, written out from the capability numbers (NET_BIND_SERVICE=10,
