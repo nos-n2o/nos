@@ -312,7 +312,7 @@ pub(super) fn send_hello_eof(
             (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
         }
         // RFC 2328 A.3.2: the fields carry interface addresses, not router IDs.
-        NetworkType::Broadcast => (
+        NetworkType::Broadcast | NetworkType::Hybrid => (
             dr_wire_addr(
                 current.dr,
                 local_router_id,
@@ -591,7 +591,7 @@ pub(super) fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::Broadcast
+        NetworkType::Broadcast | NetworkType::Hybrid
             if waiting
                 && (hello.designated_router == source
                     || hello.backup_designated_router == source) =>
@@ -599,14 +599,15 @@ pub(super) fn handle_hello(
             run_election(cfg, local_router_id, status);
             true
         }
-        NetworkType::Broadcast if !waiting => {
+        NetworkType::Broadcast | NetworkType::Hybrid if !waiting => {
             run_election(cfg, local_router_id, status);
             false
         }
         // `last_heard` was refreshed above; the sweep expires it.
-        NetworkType::Broadcast | NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
-            false
-        }
+        NetworkType::Broadcast
+        | NetworkType::Hybrid
+        | NetworkType::PointToPoint
+        | NetworkType::PointToMultipoint => false,
     }
 }
 

@@ -558,6 +558,8 @@ pub const OSPFV3_ROUTER_ID_C: &str = "9.9.9.8";
 pub const OSPFV3_ROUTER_ID_B_NEW: &str = "9.9.9.11";
 pub const OSPFV3_AREA: &str = "0.0.0.0";
 pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
+/// `ospfv3-hybrid`'s second profile, forced to RFC 6845 hybrid.
+pub const OSPFV3_HYBRID_PROFILE: &str = "ospfv3-hybrid";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
 /// The second OSPFv3 link of `ospfv3` (#276): `eth1`, a direct veth pair.

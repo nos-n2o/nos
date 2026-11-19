@@ -3950,7 +3950,8 @@
         "enum": [
           "PointToPoint",
           "Broadcast",
-          "PointToMultipoint"
+          "PointToMultipoint",
+          "Hybrid"
         ],
         "type": "string"
       },

@@ -396,7 +396,7 @@ impl LinkStatus {
                 NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                     InterfaceState::PointToPoint
                 }
-                NetworkType::Broadcast => InterfaceState::Waiting,
+                NetworkType::Broadcast | NetworkType::Hybrid => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
             dr: None,
@@ -498,7 +498,7 @@ pub async fn run(
     )));
     hello_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let is_broadcast = cfg.network_type == NetworkType::Broadcast;
+    let is_broadcast = elects_dr(cfg.network_type);
     let mut dead_sweep = tokio::time::interval(std::time::Duration::from_secs(1));
     dead_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let wait_deadline =
@@ -692,7 +692,7 @@ fn send_hello(
         NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
             (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
         }
-        NetworkType::Broadcast => (
+        NetworkType::Broadcast | NetworkType::Hybrid => (
             current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
             current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
         ),
@@ -833,8 +833,8 @@ fn handle_hello(
 
     // #957: a point-to-point / multipoint peer back under a new router ID from
     // the same address supersedes its old entry at once. Grace entries are
-    // kept (RFC 5187); broadcast never evicts.
-    if cfg.network_type != NetworkType::Broadcast {
+    // kept (RFC 5187); broadcast and hybrid never evict.
+    if !elects_dr(cfg.network_type) {
         evict_same_address(cfg, status, source, hello.router_id);
     }
 
@@ -911,18 +911,21 @@ fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::Broadcast if waiting && hello.designated_router == hello.router_id => {
+        NetworkType::Broadcast | NetworkType::Hybrid
+            if waiting && hello.designated_router == hello.router_id =>
+        {
             run_election(socket, cfg, local_router_id, status);
             true
         }
-        NetworkType::Broadcast if !waiting => {
+        NetworkType::Broadcast | NetworkType::Hybrid if !waiting => {
             run_election(socket, cfg, local_router_id, status);
             false
         }
         // `last_heard` was refreshed above; the sweep expires it.
-        NetworkType::Broadcast | NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
-            false
-        }
+        NetworkType::Broadcast
+        | NetworkType::Hybrid
+        | NetworkType::PointToPoint
+        | NetworkType::PointToMultipoint => false,
     }
 }
 
@@ -1471,7 +1474,7 @@ fn flush_pending_acks(
 /// group; the DR/Backup role picks which.
 fn current_dest(cfg: &LinkConfig, status: &StatusHandle) -> Dest {
     flood_dest(
-        cfg.network_type == NetworkType::Broadcast,
+        elects_dr(cfg.network_type),
         matches!(
             status.borrow().interface_state,
             InterfaceState::Dr | InterfaceState::Backup
@@ -2844,11 +2847,15 @@ impl LinkManager {
                 0 => None,
                 m => Some(m),
             };
-            let fragments = split_router_links(
-                &router_lsa_links(local_router_id, &links, max_metric),
-                budget,
-                max_links,
-            );
+            let mut all_links = router_lsa_links(local_router_id, &links, max_metric);
+            if links
+                .iter()
+                .any(|(c, _)| c.network_type == NetworkType::Hybrid)
+            {
+                let dr_view = router_lsa_targets(&lsdb, types.router, local_router_id);
+                all_links.extend(hybrid_router_links(&links, &dr_view, max_metric));
+            }
+            let fragments = split_router_links(&all_links, budget, max_links);
             if fragments.len() > 1 {
                 info!(area = %area_id, fragments = fragments.len(), "ospfv3 router-lsa split");
             }
@@ -2985,21 +2992,36 @@ impl LinkManager {
                         && (cfg.network_type != NetworkType::Broadcast
                             || !network_prefix_originated(status))
                 })
-                .map(|(cfg, _)| {
-                    if cfg.network_type == NetworkType::PointToMultipoint {
+                .flat_map(|(cfg, _)| {
+                    if cfg.network_type == NetworkType::Hybrid {
+                        // RFC 6845 §4.6.2: the address as a /128 (LA) as on
+                        // point-to-multipoint, and the interface's prefix too.
+                        vec![
+                            IntraAreaPrefixEntry {
+                                options: lsa::PREFIX_OPT_LA,
+                                metric: cfg.cost,
+                                prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
+                            },
+                            IntraAreaPrefixEntry {
+                                options: 0,
+                                metric: cfg.cost,
+                                prefix: cfg.prefix,
+                            },
+                        ]
+                    } else if cfg.network_type == NetworkType::PointToMultipoint {
                         // RFC 5340 §4.4.3.9: the router's own address as a
                         // /128 host prefix (LA), not the subnet.
-                        IntraAreaPrefixEntry {
+                        vec![IntraAreaPrefixEntry {
                             options: lsa::PREFIX_OPT_LA,
                             metric: cfg.cost,
                             prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
-                        }
+                        }]
                     } else {
-                        IntraAreaPrefixEntry {
+                        vec![IntraAreaPrefixEntry {
                             options: 0,
                             metric: cfg.cost,
                             prefix: cfg.prefix,
-                        }
+                        }]
                     }
                 })
                 .collect();
@@ -3867,7 +3889,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
     let interface_state = to_interface_state(status.interface_state);
 
     if status.neighbors.is_empty() {
-        if entry.config.network_type == NetworkType::Broadcast {
+        if elects_dr(entry.config.network_type) {
             return Vec::new();
         }
         return vec![Ospfv3NeighborSummary {
@@ -3910,6 +3932,99 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
 /// the DR neighbor is `Full`, or we are the DR and at least one neighbor is
 /// `Full` (a graceful-restarting neighbor still counts, as on p2p).
 /// ponytail: mirror of `ospf::link::originate::adjacent_to_dr`.
+/// Broadcast and RFC 6845 hybrid both run the DR/BDR election.
+const fn elects_dr(network_type: NetworkType) -> bool {
+    matches!(network_type, NetworkType::Broadcast | NetworkType::Hybrid)
+}
+
+/// Per advertising router (other than `local`), the neighbors its
+/// Router-LSA fragments in `lsdb` carry a point-to-point link to.
+fn router_lsa_targets(
+    lsdb: &Lsdb,
+    router_type: u16,
+    local: Ipv4Addr,
+) -> HashMap<Ipv4Addr, HashSet<Ipv4Addr>> {
+    let mut view: HashMap<Ipv4Addr, HashSet<Ipv4Addr>> = HashMap::new();
+    for l in lsdb.all() {
+        let h = &l.header;
+        if h.lsa_type != router_type || h.advertising_router == local || h.age >= lsa::MAX_AGE {
+            continue;
+        }
+        if let LsaBody::Router(b) = &l.body {
+            view.entry(h.advertising_router).or_default().extend(
+                b.links
+                    .iter()
+                    .filter(|x| x.link_type == LINK_TYPE_POINT_TO_POINT)
+                    .map(|x| x.neighbor_router_id),
+            );
+        }
+    }
+    view
+}
+
+/// RFC 6845 §4.6: a hybrid link is described as point-to-multipoint, but a
+/// DR lists every `Full` neighbor, and a non-DR lists nothing until it is
+/// `Full` with a DR that agrees on its role, then every neighbor at 2-Way or
+/// better that the DR's Router-LSA links to (`dr_view`, the DR itself
+/// included). Cost: the interface's (no per-neighbor output cost yet).
+fn hybrid_router_links(
+    links: &[(LinkConfig, LinkStatus)],
+    dr_view: &HashMap<Ipv4Addr, HashSet<Ipv4Addr>>,
+    max_metric: bool,
+) -> Vec<RouterLsaLink> {
+    let mut result = Vec::new();
+    for (cfg, status) in links {
+        if cfg.network_type != NetworkType::Hybrid || cfg.virtual_link.is_some() {
+            continue;
+        }
+        let Some(dr) = status.dr else { continue };
+        let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+        let mut peers: Vec<(&Ipv4Addr, &NeighborInfo)> =
+            if status.interface_state == InterfaceState::Dr {
+                status.neighbors.iter().filter(|(_, n)| up(n)).collect()
+            } else {
+                let agreed = status
+                    .neighbors
+                    .get(&dr)
+                    .is_some_and(|n| up(n) && n.declared_dr == dr);
+                let empty = HashSet::new();
+                let theirs = dr_view.get(&dr).unwrap_or(&empty);
+                if !agreed {
+                    continue;
+                }
+                status
+                    .neighbors
+                    .iter()
+                    .filter(|(id, n)| {
+                        matches!(
+                            n.state,
+                            NeighborState::TwoWay
+                                | NeighborState::ExStart
+                                | NeighborState::Exchange
+                                | NeighborState::Loading
+                                | NeighborState::Full
+                        ) && (**id == dr || theirs.contains(*id))
+                    })
+                    .collect()
+            };
+        peers.sort_by_key(|(id, _)| **id);
+        for (id, info) in peers {
+            result.push(RouterLsaLink {
+                link_type: LINK_TYPE_POINT_TO_POINT,
+                metric: if max_metric {
+                    MAX_LINK_METRIC
+                } else {
+                    cfg.cost
+                },
+                interface_id: cfg.interface_id,
+                neighbor_interface_id: info.interface_id,
+                neighbor_router_id: *id,
+            });
+        }
+    }
+    result
+}
+
 fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
     let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
     match status.dr {
@@ -3998,6 +4113,8 @@ fn router_lsa_links(
                     });
                 }
             }
+            // RFC 6845 §4.6: needs the DR's Router-LSA, see `hybrid_router_links`.
+            NetworkType::Hybrid => {}
             NetworkType::Broadcast => {
                 // RFC 5340 §4.4.3.2: the transit link only once adjacent to
                 // the DR. The prefix meanwhile rides the router-referenced
@@ -4790,6 +4907,192 @@ pub(crate) mod tests {
         assert_eq!(body.prefixes.len(), 1);
         assert_eq!(body.prefixes[0].prefix, "2001:db8::1/128".parse().unwrap());
         assert_eq!(body.prefixes[0].options, lsa::PREFIX_OPT_LA);
+    }
+
+    fn hybrid_link(
+        role: InterfaceState,
+        dr: Ipv4Addr,
+        neighbors: &[(u8, NeighborState)],
+    ) -> (LinkConfig, LinkStatus) {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Hybrid;
+        let mut status = LinkStatus::new(NetworkType::Hybrid);
+        status.interface_state = role;
+        status.dr = Some(dr);
+        for (i, state) in neighbors {
+            let id = Ipv4Addr::new(9, 9, 9, *i);
+            let mut n = neighbor_info(*state, "fe80::2".parse().unwrap(), u32::from(*i));
+            n.declared_dr = dr;
+            status.neighbors.insert(id, n);
+        }
+        (cfg, status)
+    }
+
+    /// RFC 6845 §4.1/§4.3: hybrid runs the election like broadcast, starts in
+    /// `Waiting`, and floods to the groups (a broadcast-model destination).
+    #[test]
+    fn hybrid_elects_and_floods_like_broadcast() {
+        assert_eq!(
+            LinkStatus::new(NetworkType::Hybrid).interface_state,
+            InterfaceState::Waiting
+        );
+        assert!(elects_dr(NetworkType::Hybrid) && elects_dr(NetworkType::Broadcast));
+        assert!(!elects_dr(NetworkType::PointToMultipoint));
+        let (cfg, status) = hybrid_link(InterfaceState::Dr, ME, &[]);
+        let (tx, _rx) = watch::channel(status);
+        assert_eq!(current_dest(&cfg, &tx), Dest::AllSpfRouters);
+    }
+
+    /// RFC 6845 §4.6: a DR lists every `Full` neighbor, the cost is the
+    /// interface's, and the broadcast arm adds no transit link.
+    #[test]
+    fn hybrid_router_links_dr_lists_every_full_neighbor() {
+        let (cfg, status) = hybrid_link(
+            InterfaceState::Dr,
+            ME,
+            &[
+                (12, NeighborState::Full),
+                (10, NeighborState::Full),
+                (11, NeighborState::TwoWay),
+            ],
+        );
+        let links = [(cfg, status)];
+        assert_eq!(router_lsa_links(ME, &links, false), []);
+        let got = hybrid_router_links(&links, &HashMap::new(), false);
+        let ids: Vec<_> = got.iter().map(|l| l.neighbor_router_id).collect();
+        assert_eq!(
+            ids,
+            [Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(9, 9, 9, 12)]
+        );
+        assert!(got.iter().all(|l| l.link_type == LINK_TYPE_POINT_TO_POINT));
+        assert_eq!(got[0].metric, links[0].0.cost);
+        assert_eq!(got[0].neighbor_interface_id, 10);
+    }
+
+    /// RFC 6845 §4.6: a non-DR needs a `Full`, agreeing DR, then lists the DR
+    /// and the 2-Way-or-better neighbors the DR's Router-LSA links to.
+    #[test]
+    fn hybrid_router_links_non_dr_follows_the_drs_router_lsa() {
+        let dr = Ipv4Addr::new(9, 9, 9, 10);
+        let other = Ipv4Addr::new(9, 9, 9, 11);
+        let stranger = Ipv4Addr::new(9, 9, 9, 12);
+        let view = HashMap::from([(dr, HashSet::from([ME, other]))]);
+        let nbrs = [
+            (10, NeighborState::Full),
+            (11, NeighborState::TwoWay),
+            (12, NeighborState::TwoWay),
+        ];
+        let (cfg, status) = hybrid_link(InterfaceState::DrOther, dr, &nbrs);
+        let ids = |l: Vec<RouterLsaLink>| -> Vec<Ipv4Addr> {
+            l.iter().map(|x| x.neighbor_router_id).collect()
+        };
+        let got = ids(hybrid_router_links(
+            &[(cfg.clone(), status.clone())],
+            &view,
+            false,
+        ));
+        assert_eq!(got, [dr, other], "{stranger} is not in the DR's LSA");
+        // No DR LSA yet: only the DR itself (it is the adjacency).
+        let got = ids(hybrid_router_links(
+            &[(cfg.clone(), status.clone())],
+            &HashMap::new(),
+            false,
+        ));
+        assert_eq!(got, [dr]);
+        // Not Full with the DR, or the DR disagrees on its role: nothing.
+        let mut bad = status.clone();
+        bad.neighbors.get_mut(&dr).unwrap().state = NeighborState::TwoWay;
+        assert_eq!(
+            hybrid_router_links(&[(cfg.clone(), bad)], &view, false),
+            Vec::<RouterLsaLink>::new()
+        );
+        let mut bad = status;
+        bad.neighbors.get_mut(&dr).unwrap().declared_dr = Ipv4Addr::UNSPECIFIED;
+        assert_eq!(
+            hybrid_router_links(&[(cfg, bad)], &view, false),
+            Vec::<RouterLsaLink>::new()
+        );
+    }
+
+    /// RFC 6845 §4.5/§4.6.2: no Network-LSA, and the Intra-Area-Prefix-LSA
+    /// carries both the /128 (LA) and the interface prefix.
+    #[tokio::test]
+    async fn hybrid_originates_no_network_lsa_and_both_prefixes() {
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = NetworkType::Hybrid;
+        cfg.prefix = "2001:db8::1/64".parse().unwrap();
+        manager
+            .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
+            .await;
+        manager.originate_all(router_id).await;
+        let lsdb = manager.lsdb_for(cfg.area_id).await;
+        let lsdb = lsdb.lock().await;
+        let types = manager.lsa_types();
+        assert!(lsdb
+            .all()
+            .iter()
+            .all(|l| l.header.lsa_type != types.network));
+        let key = LsaKey {
+            lsa_type: types.intra_area_prefix,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: router_id,
+        };
+        let installed = lsdb.get(&key).unwrap();
+        let LsaBody::IntraAreaPrefix(body) = &installed.body else {
+            panic!("expected intra-area-prefix lsa")
+        };
+        let got: Vec<_> = body
+            .prefixes
+            .iter()
+            .map(|p| (p.prefix, p.options))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("2001:db8::1/128".parse().unwrap(), lsa::PREFIX_OPT_LA),
+                ("2001:db8::1/64".parse().unwrap(), 0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_lsa_targets_collects_other_routers_point_to_point_links() {
+        let mut db = Lsdb::new();
+        let dr = Ipv4Addr::new(9, 9, 9, 10);
+        let types = LinkManager::new(1, None).lsa_types();
+        let link_to = |id| RouterLsaLink {
+            link_type: LINK_TYPE_POINT_TO_POINT,
+            metric: 1,
+            interface_id: 1,
+            neighbor_interface_id: 2,
+            neighbor_router_id: id,
+        };
+        install_self_originated(
+            &mut db,
+            dr,
+            types.router,
+            dr,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: vec![link_to(ME)],
+            }),
+        );
+        install_self_originated(
+            &mut db,
+            ME,
+            types.router,
+            ME,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: vec![link_to(dr)],
+            }),
+        );
+        let view = router_lsa_targets(&db, types.router, ME);
+        assert_eq!(view, HashMap::from([(dr, HashSet::from([ME]))]));
     }
 
     /// RFC 6987 §2: a stub router advertises every link at `MaxLinkMetric`.
