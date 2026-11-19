@@ -599,6 +599,8 @@ pub const LSA_TYPE_AS_EXTERNAL_V3: u16 = 0x4005;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0xC025;
 /// RFC 5340 §A.4.8 NSSA-LSA (0x2007, RFC 3101 Type-7), as `lsa_type` prints.
 pub const LSA_TYPE_NSSA_V3: u16 = 0x2007;
+/// RFC 8362 §4.8 E-NSSA-LSA (0xA027), the TLV form of the above.
+pub const LSA_TYPE_E_NSSA: u16 = 0xA027;
 /// RFC 5340 Inter-Area-Prefix-LSA (0x2003) and E-Inter-Area-Prefix (0xA023).
 pub const LSA_TYPE_INTER_AREA_PREFIX_V3: u16 = 0x2003;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;

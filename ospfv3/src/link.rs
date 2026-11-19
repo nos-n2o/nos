@@ -2175,7 +2175,7 @@ pub struct NssaSettings {
 
 /// Every LS type this router originates in either RFC 8362 mode — the only
 /// ones `withdraw_undesired` ever flushes (never a Grace-LSA).
-const OWNED_TYPES: [u16; 15] = [
+const OWNED_TYPES: [u16; 16] = [
     lsa::LSA_TYPE_ROUTER,
     lsa::LSA_TYPE_NETWORK,
     lsa::LSA_TYPE_LINK,
@@ -2191,6 +2191,7 @@ const OWNED_TYPES: [u16; 15] = [
     lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
     lsa::LSA_TYPE_E_AS_EXTERNAL,
     lsa::LSA_TYPE_NSSA,
+    lsa::LSA_TYPE_E_NSSA,
 ];
 
 /// See `LinkManager::lsids`: `(ID, asked for since the last prune)` per key.
@@ -2217,6 +2218,7 @@ struct LsaTypes {
     inter_area_prefix: u16,
     inter_area_router: u16,
     as_external: u16,
+    nssa: u16,
 }
 
 impl LsaTypes {
@@ -2230,6 +2232,7 @@ impl LsaTypes {
                 inter_area_prefix: lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
                 inter_area_router: lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
                 as_external: lsa::LSA_TYPE_E_AS_EXTERNAL,
+                nssa: lsa::LSA_TYPE_E_NSSA,
             }
         } else {
             Self {
@@ -2240,6 +2243,7 @@ impl LsaTypes {
                 inter_area_prefix: lsa::LSA_TYPE_INTER_AREA_PREFIX,
                 inter_area_router: lsa::LSA_TYPE_INTER_AREA_ROUTER,
                 as_external: lsa::LSA_TYPE_AS_EXTERNAL,
+                nssa: lsa::LSA_TYPE_NSSA,
             }
         }
     }
@@ -3343,7 +3347,7 @@ impl LinkManager {
                 done.insert(install_self_originated(
                     &mut lsdb,
                     local_router_id,
-                    lsa::LSA_TYPE_NSSA,
+                    types.nssa,
                     lsid,
                     LsaBody::AsExternal(AsExternalLsaBody {
                         type2: false,
@@ -5643,6 +5647,59 @@ pub(crate) mod tests {
         }
     }
 
+    /// #1157: toggling `extended-lsa` in an NSSA ages the other flavor of
+    /// the NSSA-LSA (`0x2007` <-> `0xA027`) with its sequence number kept.
+    #[tokio::test]
+    async fn extended_mode_toggle_flushes_the_other_nssa_flavor() {
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        manager.set_stub_areas(HashMap::from([(area1, (true, 1))]));
+        manager.set_nssa_areas(HashMap::from([(area1, NssaSettings::default())]));
+        let cfg = LinkConfig {
+            area_id: area1,
+            stub: true,
+            nssa: true,
+            ..link("eth0.0", 10)
+        };
+        manager
+            .reconcile(vec![cfg], HashMap::new(), router_id)
+            .await;
+        manager
+            .apply_redistribute_update(RedistributeUpdate::Full(vec![
+                nos_proto::RedistributedRoute {
+                    prefix: IpNet::V6("2001:db8:e::/48".parse().unwrap()),
+                    gateway: "2001:db8::99".parse().unwrap(),
+                },
+            ]))
+            .await;
+        let m = &manager;
+        let age_of = |t: u16| async move {
+            m.database_summaries()
+                .await
+                .into_iter()
+                .find(|s| s.lsa_type == t)
+                .map(|s| (s.sequence_number, s.age))
+        };
+        manager.originate_all(router_id).await;
+        let legacy = age_of(lsa::LSA_TYPE_NSSA).await.unwrap();
+        assert!(legacy.1 < lsa::MAX_AGE);
+        assert!(age_of(lsa::LSA_TYPE_E_NSSA).await.is_none());
+
+        manager.set_extended_lsa(true);
+        manager.originate_all(router_id).await;
+        assert_eq!(
+            age_of(lsa::LSA_TYPE_NSSA).await,
+            Some((legacy.0, lsa::MAX_AGE))
+        );
+        assert!(age_of(lsa::LSA_TYPE_E_NSSA).await.unwrap().1 < lsa::MAX_AGE);
+
+        manager.set_extended_lsa(false);
+        manager.originate_all(router_id).await;
+        assert_eq!(age_of(lsa::LSA_TYPE_E_NSSA).await.unwrap().1, lsa::MAX_AGE);
+        assert!(age_of(lsa::LSA_TYPE_NSSA).await.unwrap().1 < lsa::MAX_AGE);
+    }
+
     #[tokio::test]
     async fn originate_intra_area_prefix_lsas_includes_loopback_for_area_with_no_live_link() {
         let manager = LinkManager::new(1, None);
@@ -6889,10 +6946,29 @@ pub(crate) mod tests {
     /// the AS-External-LSA never enters the NSSA, and both go when c stops
     /// redistributing.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::too_many_lines)]
     async fn nssa_lsa_is_translated_into_the_backbone() {
+        nssa_translation(false).await;
+    }
+
+    /// The same with RFC 8362 full mode on every router (#1157): E-NSSA-LSA
+    /// `0xA027` translated into an E-AS-External-LSA `0xC025`.
+    #[tokio::test(start_paused = true)]
+    async fn e_nssa_lsa_is_translated_into_the_backbone() {
+        nssa_translation(true).await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn nssa_translation(extended: bool) {
+        let (t7, t5) = if extended {
+            (lsa::LSA_TYPE_E_NSSA, lsa::LSA_TYPE_E_AS_EXTERNAL)
+        } else {
+            (lsa::LSA_TYPE_NSSA, lsa::LSA_TYPE_AS_EXTERNAL)
+        };
         let wire = Arc::new(wire::Wire::default());
         let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        for r in [&a, &b, &c] {
+            r.set_extended_lsa(extended);
+        }
         let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
         for r in [&b, &c] {
             r.set_stub_areas(HashMap::from([(area1, (true, 1))]));
@@ -6940,12 +7016,12 @@ pub(crate) mod tests {
         // The backbone holds b's translation, no NSSA-LSA; the NSSA holds
         // c's NSSA-LSA and no AS-External-LSA.
         let db_a = a.database_summaries().await;
-        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 1);
-        assert_eq!(held(db_a.clone(), lsa::LSA_TYPE_AS_EXTERNAL, id(3)), 0);
-        assert_eq!(held(db_a, lsa::LSA_TYPE_NSSA, id(3)), 0);
+        assert_eq!(held(db_a.clone(), t5, id(2)), 1);
+        assert_eq!(held(db_a.clone(), t5, id(3)), 0);
+        assert_eq!(held(db_a, t7, id(3)), 0);
         let db_c = c.database_summaries().await;
-        assert_eq!(held(db_c.clone(), lsa::LSA_TYPE_NSSA, id(3)), 1);
-        assert_eq!(held(db_c, lsa::LSA_TYPE_AS_EXTERNAL, id(2)), 0);
+        assert_eq!(held(db_c.clone(), t7, id(3)), 1);
+        assert_eq!(held(db_c, t5, id(2)), 0);
         let type7 = b
             .lsdb_for(area1)
             .await
@@ -6953,7 +7029,7 @@ pub(crate) mod tests {
             .await
             .all()
             .into_iter()
-            .find(|l| l.header.lsa_type == lsa::LSA_TYPE_NSSA && l.header.age < lsa::MAX_AGE)
+            .find(|l| l.header.lsa_type == t7 && l.header.age < lsa::MAX_AGE)
             .expect("NSSA-LSA on b");
         let LsaBody::AsExternal(body) = &type7.body else {
             panic!("expected an external body")
@@ -6989,10 +7065,7 @@ pub(crate) mod tests {
         // c stops redistributing: its NSSA-LSA is flushed and the route goes.
         c.apply_redistribute_update(redistribute(Vec::new())).await;
         settle(30).await;
-        assert_eq!(
-            held(c.database_summaries().await, lsa::LSA_TYPE_NSSA, id(3)),
-            0
-        );
+        assert_eq!(held(c.database_summaries().await, t7, id(3)), 0);
         assert!(a
             .compute_routes()
             .await

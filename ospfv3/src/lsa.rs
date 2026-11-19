@@ -95,7 +95,7 @@ pub fn is_as_scope(lsa_type: u16) -> bool {
 pub fn in_area_scope(lsa_type: u16, stub: bool, nssa: bool) -> bool {
     nos_ospf_common::areas::in_area_scope(
         is_as_scope(lsa_type),
-        lsa_type == LSA_TYPE_NSSA,
+        lsa_type == LSA_TYPE_NSSA || lsa_type == LSA_TYPE_E_NSSA,
         stub,
         nssa,
     )
@@ -192,6 +192,9 @@ pub const LSA_TYPE_E_INTRA_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x29;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x23;
 pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0x8000 | SCOPE_AREA | 0x24;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0x8000 | SCOPE_AS | 0x25;
+/// RFC 8362 §4.8 E-NSSA-LSA (E-Type-7, `0xA027`): the TLV form of the
+/// NSSA-LSA, with the same body as `0xC025`; only ever held in an NSSA.
+pub const LSA_TYPE_E_NSSA: u16 = 0x8000 | SCOPE_AREA | 0x27;
 
 /// RFC 8362 §3.2's top-level TLV types (the only ones this crate uses).
 const TLV_ROUTER_LINK: u16 = 1;
@@ -609,6 +612,7 @@ fn is_extended(lsa_type: u16) -> bool {
             | LSA_TYPE_E_INTER_AREA_PREFIX
             | LSA_TYPE_E_INTER_AREA_ROUTER
             | LSA_TYPE_E_AS_EXTERNAL
+            | LSA_TYPE_E_NSSA
     )
 }
 
@@ -851,7 +855,7 @@ fn decode_ext_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
         LSA_TYPE_E_INTER_AREA_ROUTER => {
             return decode_inter_area_router(single_tlv(data, TLV_INTER_AREA_ROUTER)?);
         }
-        LSA_TYPE_E_AS_EXTERNAL => return decode_ext_external(data),
+        LSA_TYPE_E_AS_EXTERNAL | LSA_TYPE_E_NSSA => return decode_ext_external(data),
         _ => {}
     }
     let fixed_len = if lsa_type == LSA_TYPE_E_INTRA_AREA_PREFIX {
@@ -1565,6 +1569,11 @@ mod tests {
                 LSA_TYPE_E_AS_EXTERNAL,
                 external(false, false, false, false),
             ),
+            (
+                LSA_TYPE_NSSA,
+                LSA_TYPE_E_NSSA,
+                external(true, true, true, false),
+            ),
         ] {
             for t in [legacy, e_type] {
                 let wire = encode_lsa(&with_body(t, body.clone()));
@@ -1586,6 +1595,9 @@ mod tests {
         assert_eq!(LSA_TYPE_E_INTER_AREA_PREFIX, 0xA023);
         assert_eq!(LSA_TYPE_E_INTER_AREA_ROUTER, 0xA024);
         assert_eq!(LSA_TYPE_E_AS_EXTERNAL, 0xC025);
+        assert_eq!(LSA_TYPE_E_NSSA, 0xA027);
+        assert!(is_known_type(LSA_TYPE_E_NSSA));
+        assert!(!is_as_scope(LSA_TYPE_E_NSSA) && !is_link_local_scope(LSA_TYPE_E_NSSA));
         for t in [LSA_TYPE_AS_EXTERNAL, LSA_TYPE_E_AS_EXTERNAL] {
             assert!(is_as_scope(t) && !is_link_local_scope(t));
         }
@@ -1790,6 +1802,7 @@ mod tests {
             assert_eq!(in_area_scope(LSA_TYPE_AS_EXTERNAL, stub, nssa), as_scope);
             assert_eq!(in_area_scope(LSA_TYPE_E_AS_EXTERNAL, stub, nssa), as_scope);
             assert_eq!(in_area_scope(LSA_TYPE_NSSA, stub, nssa), nssa_lsa);
+            assert_eq!(in_area_scope(LSA_TYPE_E_NSSA, stub, nssa), nssa_lsa);
             assert!(in_area_scope(LSA_TYPE_ROUTER, stub, nssa));
         }
     }
@@ -2077,7 +2090,8 @@ mod tests {
             ])
             .chain([LSA_TYPE_E_ROUTER, LSA_TYPE_E_NETWORK, LSA_TYPE_E_LINK])
             .chain([LSA_TYPE_E_INTRA_AREA_PREFIX, LSA_TYPE_E_INTER_AREA_PREFIX])
-            .chain([LSA_TYPE_E_INTER_AREA_ROUTER, LSA_TYPE_E_AS_EXTERNAL]);
+            .chain([LSA_TYPE_E_INTER_AREA_ROUTER, LSA_TYPE_E_AS_EXTERNAL])
+            .chain([LSA_TYPE_E_NSSA]);
         for ty in types {
             for fill in [0x00u8, 0xff, 0x01] {
                 for n in 0..=80 {
