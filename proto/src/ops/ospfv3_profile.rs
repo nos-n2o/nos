@@ -560,6 +560,7 @@ mod tests {
             stub_default_cost: None,
             nssa_translate_always: false,
             nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 

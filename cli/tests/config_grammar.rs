@@ -53,6 +53,7 @@ fn populated() -> Config {
         stub_default_cost: None,
         nssa_translate_always: false,
         nssa_default_originate: false,
+        virtual_links: Vec::new(),
     };
     let iface = |name: &str| Interface {
         name: name.into(),

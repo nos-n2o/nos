@@ -355,6 +355,23 @@ set ospfv3 instance v3 area 0.0.0.1 nssa-default-originate enable
 - `area-type nssa-no-summary` also sends only a `::/0` inter-area prefix LSA into the area. The ABR sends no Inter-Area-Router-LSA into any NSSA.
 - The two `nssa-*` settings are refused on a non-NSSA area. Only the legacy LSA forms are used for NSSA-LSAs: in extended-LSA mode they stay `0x2007` (no RFC 8362 form).
 
+### Join an area to the backbone through another area (virtual link)
+
+An area must touch the backbone (0.0.0.0). When it can't, a virtual link (RFC 5340 §4.7, RFC 2328 §15) runs a backbone adjacency across a normal transit area between two of its ABRs. Here router-c has only area 0.0.0.1 (shared with router-b, which also has area 0.0.0.0). Configure the link on the transit area of both ends, with the other end's router ID:
+
+```
+set ospfv3 instance v3 area 0.0.0.1 virtual-link 9.9.9.10
+```
+
+on router-c (`9.9.9.10` is router-b's router ID), and the mirror image on router-b. Over REST, `PUT {"router_id":"9.9.9.10"}` on `…/ospfv3-instance/v3/area/0.0.0.1/virtual-link/9.9.9.10`. Not allowed on the backbone, a stub area or an NSSA.
+
+- **Each end needs a global address in the transit area.** Add a loopback with a `/128` in the transit area (`set interface loopback-rt1 ospfv3 <profile>` with a profile of that area): its LA prefix in the Intra-Area-Prefix-LSA is the link's address (RFC 5340 §4.4.3.9). Our own `/128` there is the source; without one the link stays down.
+- **When it comes up.** Every 2 seconds each end checks that the other is reachable inside the transit area and advertises such an address. If so, the link comes up with that path's cost (`ospfv3 virtual link up link=vlink-0.0.0.1-9.9.9.10 neighbor=… local=… cost=…`), and down again when it isn't (`ospfv3 virtual link down`).
+- **What it runs.** A backbone adjacency, unicast between the two addresses (hop limit 64, the only sends that leave the link): Hellos, no DR, the link's own timers and authentication (`hello-interval`, `dead-interval`, `crypto-key`, as on a profile), the transit link's MTU and instance ID. A router with a configured virtual link counts as attached to the backbone (B bit, summaries).
+- **Check it.** `show ospfv3 neigh` lists `vlink-<transit-area>-<router-id>` in area 0.0.0.0, `Full`. In `GET /v1/ospfv3/database`, each end's area-0 Router-LSA lists the other in `virtual_links`, and its Router-LSA in the transit area has the V bit (`router_flags` & 4).
+- **Remove it.** `delete … virtual-link <router-id>`. The other end drops the neighbour after its dead interval (`ospfv3 neighbor state changed to down link=vlink-…`) unless it is removed there too.
+- **Not yet.** Routes across the virtual link (SPF over the type-4 link, transit summaries): #1159.
+
 ## Features and behaviour
 
 Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU override and database exchange, LSA ageing and withdrawal, and loop-free alternates behave as in [OSPF](ospf.md#features-and-behaviour). The differences:
@@ -375,7 +392,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), routes across virtual links (the adjacency itself works), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
 
 ## Configuration reference
 
@@ -397,6 +414,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | max-metric on-shutdown | `set ospfv3 instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router for this long before the process exits | `reason="on-shutdown"` |
 | routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
 | area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas, one the backbone, make an ABR (`range <cidr> [not-advertise]` summarizes the area, see [ranges](#summarize-an-area-with-ranges)) | `show ospfv3 database` |
+| virtual link | `set ospfv3 instance <name> area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | the area is the transit area; router ID unique per area, not the instance's own | not on `0.0.0.0`, a stub area or an NSSA; dead interval above hello interval; keys as on a profile | backbone adjacency to that ABR across the area, needs an area-1 `/128` loopback at both ends | `show ospfv3 neigh` |
 | redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |

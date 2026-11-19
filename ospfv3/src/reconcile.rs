@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::interface_client;
-use crate::link::{LinkConfig, LinkManager, DEFAULT_HELPER_MAX_GRACE_PERIOD};
+use crate::link::{LinkConfig, LinkManager, VirtualLinkConfig, DEFAULT_HELPER_MAX_GRACE_PERIOD};
 use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
 use nos_daemon::config;
@@ -306,6 +306,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             stub: area.area_type.is_stub(),
             ipv4_af: is_ipv4_af(cfg, instance),
             nssa: area.area_type.is_nssa(),
+            virtual_link: None,
         });
     }
 }
@@ -455,6 +456,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             stub: area.area_type.is_stub(),
             ipv4_af: is_ipv4_af(cfg, instance),
             nssa: area.area_type.is_nssa(),
+            virtual_link: None,
         });
     }
 }
@@ -603,6 +605,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         desired_loopback_prefixes,
     } = wanted;
     links.set_bfd(bfd_wants);
+    links
+        .set_virtual_links(virtual_links(&own.areas, &cfg, instance))
+        .await;
     links.set_stub_areas(
         own.areas
             .iter()
@@ -1070,6 +1075,38 @@ async fn resolve_local_address(
 
 const DEFAULT_OSPF_MTU: u16 = 1500;
 
+/// Every area's virtual links (the area is the transit area), with the
+/// Appendix C.3 defaults for unset timers. Fail closed like a profile: a
+/// link whose key label dangles (commit validation prevents it) is left out.
+fn virtual_links(
+    areas: &[nos_proto::Ospfv3Area],
+    cfg: &nos_proto::Config,
+    instance: &str,
+) -> Vec<VirtualLinkConfig> {
+    let mut out = Vec::new();
+    for a in areas {
+        for v in &a.virtual_links {
+            let auth = match resolve_keys(v.auth.as_deref(), cfg) {
+                Ok(a) => a,
+                Err(label) => {
+                    error!(instance = %instance, endpoint = %v.router_id, label = %label, "ospfv3 virtual link references an unknown admin key, not starting it");
+                    continue;
+                }
+            };
+            out.push(VirtualLinkConfig {
+                transit_area: a.area_id,
+                endpoint: v.router_id,
+                hello_interval: v
+                    .hello_interval
+                    .unwrap_or(nos_proto::HELLO_INTERVAL_DEFAULT),
+                dead_interval: v.dead_interval.unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT),
+                auth,
+            });
+        }
+    }
+    out
+}
+
 /// Translates `Ospfv3Profile.auth` into `packet::TrailerAuth` — mirrors
 /// `ospf::reconcile::resolve_auth`. `current_key_id` needs no fallback:
 /// commit-time validation guarantees exactly one `is_current` key, and no
@@ -1078,7 +1115,15 @@ fn resolve_auth(
     profile: &nos_proto::Ospfv3Profile,
     cfg: &nos_proto::Config,
 ) -> Result<Option<packet::TrailerAuth>, String> {
-    let Some(keys) = profile.auth.as_ref() else {
+    resolve_keys(profile.auth.as_deref(), cfg)
+}
+
+/// `resolve_auth` for any RFC 7166 key list (a virtual link's too).
+fn resolve_keys(
+    keys: Option<&[nos_proto::OspfCryptoKey]>,
+    cfg: &nos_proto::Config,
+) -> Result<Option<packet::TrailerAuth>, String> {
+    let Some(keys) = keys else {
         return Ok(None);
     };
     let mut resolved = Vec::new();
@@ -1348,6 +1393,47 @@ mod tests {
         assert_eq!(points[0].interface, "loopback-rt1");
     }
 
+    /// The transit area is the area holding the link; unset timers take the
+    /// defaults, and a link whose key label dangles is left out.
+    #[test]
+    fn virtual_links_default_timers_and_fail_closed() {
+        let area = |keys| nos_proto::Ospfv3Area {
+            area_id: "0.0.0.1".parse().unwrap(),
+            virtual_links: vec![nos_proto::Ospfv3VirtualLink {
+                router_id: "3.3.3.3".parse().unwrap(),
+                hello_interval: None,
+                dead_interval: Some(60),
+                auth: keys,
+            }],
+            ..Default::default()
+        };
+        let cfg = Config::default();
+        let ok = virtual_links(&[area(None)], &cfg, "i");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(
+            ok[0].transit_area,
+            "0.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(
+            (
+                ok[0].hello_interval,
+                ok[0].dead_interval,
+                ok[0].auth.is_none()
+            ),
+            (nos_proto::HELLO_INTERVAL_DEFAULT, 60, true)
+        );
+        let dangling = nos_proto::OspfCryptoKey {
+            key_id: 1,
+            algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+            key: "nope".into(),
+            is_current: true,
+        };
+        assert_eq!(
+            virtual_links(&[area(Some(vec![dangling]))], &cfg, "i"),
+            Vec::<VirtualLinkConfig>::new()
+        );
+    }
+
     fn running() -> LinkConfig {
         LinkConfig {
             attach_point: "eth0.0".into(),
@@ -1370,6 +1456,7 @@ mod tests {
             stub: false,
             ipv4_af: false,
             nssa: false,
+            virtual_link: None,
         }
     }
 

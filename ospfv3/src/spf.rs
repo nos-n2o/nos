@@ -384,6 +384,62 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> IntraA
     }
 }
 
+/// RFC 5340 §4.7: a virtual link's far end, as seen in its transit area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualEndpoint {
+    /// The endpoint's intra-area distance: the virtual link's cost.
+    pub cost: u32,
+    /// The endpoint's global address in the transit area: where the virtual
+    /// link's packets go.
+    pub address: Ipv6Addr,
+}
+
+/// Whether `a` can serve as a virtual link endpoint address (RFC 5340
+/// §4.4.3.9): a global unicast address, never link-local, loopback or
+/// multicast.
+pub fn is_virtual_address(a: Ipv6Addr) -> bool {
+    !(a.is_unspecified() || a.is_loopback() || a.is_multicast() || a.is_unicast_link_local())
+}
+
+/// RFC 5340 §4.7 for one virtual link: `endpoint`'s intra-area distance from
+/// `root` over the transit area's `lsas`, and its address, or `None` while it
+/// has no path or advertises none (the link is down). The address is the
+/// lowest `/128` prefix with the LA-bit in the endpoint's own router-referenced
+/// Intra-Area-Prefix-LSAs (§4.4.3.9) that `is_virtual_address`.
+pub fn virtual_link_endpoint(
+    root: Ipv4Addr,
+    lsas: &[std::sync::Arc<Lsa>],
+    endpoint: Ipv4Addr,
+) -> Option<VirtualEndpoint> {
+    if endpoint == root {
+        return None;
+    }
+    let live = live_lsas(lsas);
+    let (routers, networks, _) = routers_networks_links(&live);
+    let (dist, _) = run_dijkstra(root, &routers, &networks, None);
+    let cost = *dist.get(&Vertex::Router(endpoint))?;
+    let address = bodies(&live, |b| match b {
+        LsaBody::IntraAreaPrefix(p) => Some(p),
+        _ => None,
+    })
+    .into_iter()
+    .filter(|&(adv, p)| {
+        adv == endpoint
+            && p.referenced_advertising_router == endpoint
+            && matches!(p.referenced_ls_type, LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER)
+    })
+    .flat_map(|(_, p)| p.prefixes.iter())
+    .filter(|e| {
+        e.prefix.prefix_len() == 128
+            && e.options & lsa::PREFIX_OPT_LA != 0
+            && e.options & lsa::PREFIX_OPT_NU == 0
+            && is_virtual_address(e.prefix.addr())
+    })
+    .map(|e| e.prefix.addr())
+    .min()?;
+    Some(VirtualEndpoint { cost, address })
+}
+
 /// The backbone as RFC 2328 §12.4.3 re-summarizes it into non-backbone areas:
 /// what `intra_area_routes` shows plus what only Inter-Area-Prefix/Router-LSAs
 /// from other ABRs reveal (#610).
@@ -1545,6 +1601,61 @@ mod tests {
             with_flags(&router_lsa(r2, vec![p2p(r1, 2, 1, 5)]), lsa::ROUTER_FLAG_B),
             link_lsa(r2, 2, "fe80::2".parse().unwrap()),
         ]
+    }
+
+    /// RFC 5340 §4.7: the endpoint's cost and its lowest global LA `/128`; a
+    /// plain, link-local, NU or non-`/128` prefix is no address, no path (or
+    /// root itself) is no endpoint.
+    #[test]
+    fn virtual_link_endpoint_is_cost_and_la_address() {
+        let (root, mid, end) = (router_id(1), router_id(2), router_id(3));
+        let chain = vec![
+            router_lsa(root, vec![p2p(mid, 1, 2, 2)]),
+            router_lsa(mid, vec![p2p(root, 2, 1, 2), p2p(end, 3, 4, 3)]),
+            router_lsa(end, vec![p2p(mid, 4, 3, 3)]),
+        ];
+        let prefixes = |list: &[(&str, u8)]| {
+            Arc::new(Lsa {
+                header: header(lsa::LSA_TYPE_INTRA_AREA_PREFIX, Ipv4Addr::UNSPECIFIED, end),
+                body: LsaBody::IntraAreaPrefix(IntraAreaPrefixLsaBody {
+                    referenced_ls_type: LSA_TYPE_ROUTER,
+                    referenced_link_state_id: end,
+                    referenced_advertising_router: end,
+                    prefixes: list
+                        .iter()
+                        .map(|(p, options)| IntraAreaPrefixEntry {
+                            options: *options,
+                            metric: 1,
+                            prefix: p.parse().unwrap(),
+                        })
+                        .collect(),
+                }),
+            })
+        };
+        let la = lsa::PREFIX_OPT_LA;
+        let mut lsas = chain.clone();
+        lsas.push(prefixes(&[
+            ("2001:db8:1::/64", 0),
+            ("2001:db8:ff::9/128", 0),
+            ("fe80::9/128", la),
+            ("2001:db8:ff::8/128", la | lsa::PREFIX_OPT_NU),
+        ]));
+        assert_eq!(virtual_link_endpoint(root, &lsas, end), None);
+        lsas.push(prefixes(&[
+            ("2001:db8:ff::7/128", la),
+            ("2001:db8:ff::5/128", la),
+        ]));
+        assert_eq!(
+            virtual_link_endpoint(root, &lsas, end),
+            Some(VirtualEndpoint {
+                cost: 5,
+                address: "2001:db8:ff::5".parse().unwrap(),
+            })
+        );
+        assert_eq!(virtual_link_endpoint(root, &lsas, root), None);
+        // The middle router gone: no intra-area path.
+        let cut = vec![chain[0].clone(), chain[2].clone(), lsas[4].clone()];
+        assert_eq!(virtual_link_endpoint(root, &cut, end), None);
     }
 
     fn only(routes: &[RouteEntry]) -> (u32, Ipv6Addr) {

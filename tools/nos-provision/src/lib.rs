@@ -1649,6 +1649,15 @@ pub struct Args {
     /// Removes that range from `--ospfv3-area` (`Ospfv3AreaOp::RemoveRange`).
     #[arg(long, requires = "ospfv3_area")]
     pub ospfv3_clear_area_range: Option<Ipv6Net>,
+    /// `<transit-area>:<router-id>`, with `--ospfv3-instance`: an RFC 5340
+    /// §4.7 virtual link through that area (`Ospfv3AreaOp::SetVirtualLink`,
+    /// upserted).
+    #[arg(long, requires = "ospfv3_instance")]
+    pub ospfv3_virtual_link: Option<String>,
+    /// `<transit-area>:<router-id>`, with `--ospfv3-instance`: removes that
+    /// virtual link (`Ospfv3AreaOp::RemoveVirtualLink`).
+    #[arg(long, requires = "ospfv3_instance")]
+    pub ospfv3_clear_virtual_link: Option<String>,
     /// Same shape as `--ospf-profile` (requires `--ospfv3-area`).
     #[arg(long)]
     pub ospfv3_profile: Option<String>,
@@ -4493,6 +4502,28 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         bail!("--ospfv3-router-id requires --ospfv3-instance to also be set");
     }
 
+    if let Some(spec) = &args.ospfv3_virtual_link {
+        let instance = args.ospfv3_instance.clone().unwrap_or_default();
+        let (area_id, router_id) = virtual_link_spec("--ospfv3-virtual-link", spec)?;
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+            instance: instance.clone(),
+            area_id,
+        }));
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetVirtualLink {
+            instance,
+            area_id,
+            router_id,
+        }));
+    }
+    if let Some(spec) = &args.ospfv3_clear_virtual_link {
+        let (area_id, router_id) = virtual_link_spec("--ospfv3-clear-virtual-link", spec)?;
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::RemoveVirtualLink {
+            instance: args.ospfv3_instance.clone().unwrap_or_default(),
+            area_id,
+            router_id,
+        }));
+    }
+
     if let Some(area_id) = args.ospfv3_area {
         let instance = args
             .ospfv3_instance
@@ -5134,6 +5165,34 @@ mod tests {
             }),
         );
         assert!(err(&["--ospfv3-area-type", "stub"]).contains("--ospfv3-area"));
+    }
+
+    #[test]
+    fn ospfv3_virtual_link_flags() {
+        let base = ["--ospfv3-instance", "o", "--ospfv3-router-id", "1.1.1.1"];
+        let with = |flag: &str| {
+            let mut v = base.to_vec();
+            v.extend([flag, "0.0.0.1:2.2.2.2"]);
+            ops(&v).unwrap()
+        };
+        let (area_id, router_id) = ("0.0.0.1".parse().unwrap(), "2.2.2.2".parse().unwrap());
+        has(
+            &with("--ospfv3-virtual-link"),
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetVirtualLink {
+                instance: "o".into(),
+                area_id,
+                router_id,
+            }),
+        );
+        has(
+            &with("--ospfv3-clear-virtual-link"),
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::RemoveVirtualLink {
+                instance: "o".into(),
+                area_id,
+                router_id,
+            }),
+        );
+        assert!(err(&["--ospfv3-virtual-link", "0.0.0.1:2.2.2.2"]).contains("ospfv3-instance"));
     }
 
     #[test]

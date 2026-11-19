@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use ipnet::Ipv6Net;
 
 use super::ospfv3_profile;
-use super::{Config, OspfAreaType, Ospfv3Profile};
+use super::{Config, OspfAreaType, OspfCryptoKey, Ospfv3Profile};
+use crate::schema::sugar;
 use nos_proto_derive::Cli;
 
 /// One `OSPFv3` area within an `Ospfv3Instance`, keyed by its dotted-quad area
@@ -76,6 +77,46 @@ pub struct Ospfv3Area {
     #[garde(skip)]
     #[cli(topic = OspfAreaNssaDefaultOriginate, words = "nssa-default-originate enable", alias = "nssa-default-originate")]
     pub nssa_default_originate: bool,
+
+    /// RFC 5340 §4.4.3 / RFC 2328 §15 virtual links whose transit area is
+    /// this one, keyed by the far endpoint's router id: a backbone adjacency
+    /// tunnelled across this area to a router that is also attached to area
+    /// 0.0.0.0. Not allowed on the backbone or on a stub area or NSSA.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = OspfAreaVirtualLink)]
+    pub virtual_links: Vec<Ospfv3VirtualLink>,
+}
+
+/// One virtual link, configured on its transit area and keyed by the far
+/// endpoint's router id. Timers and authentication are the link's own, not a
+/// profile's: a virtual link has no attach point.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
+#[garde(context(Config as ctx))]
+pub struct Ospfv3VirtualLink {
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    /// The far endpoint's router id; the key.
+    pub router_id: Ipv4Addr,
+    /// `None` defaults to 10s, as for a profile.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfVirtualLinkHelloInterval)]
+    pub hello_interval: Option<u16>,
+    /// `None` defaults to 40s. Strictly greater than `hello_interval` when
+    /// both are set.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfVirtualLinkDeadInterval)]
+    pub dead_interval: Option<u16>,
+    /// RFC 7166 authentication trailer keys, as `Ospfv3Profile.auth`; `None`
+    /// means unauthenticated.
+    #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, ctx: &Config| ospfv3_profile::valid_auth(a.as_deref(), ctx)))]
+    #[serde(default)]
+    #[cli(topic = Ospfv3ProfileAuth, render = sugar::render_ospfv3_auth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
+    pub auth: Option<Vec<OspfCryptoKey>>,
 }
 
 /// `area_type`/`stub_default_cost` checks, run from the owning instance's
@@ -96,8 +137,35 @@ pub(crate) fn valid_area_settings(area: &Ospfv3Area) -> garde::Result {
             "stub-default-cost is only allowed on a stub area or an nssa",
         )),
         Some(0) => Err(garde::Error::new("stub-default-cost must be 1 or more")),
-        _ => Ok(()),
+        _ => valid_virtual_links(area),
     }
+}
+
+fn valid_virtual_links(area: &Ospfv3Area) -> garde::Result {
+    if !area.virtual_links.is_empty() && (area.area_id.is_unspecified() || area.area_type.is_stub())
+    {
+        return Err(garde::Error::new(
+            "virtual links can't cross the backbone, a stub area or an nssa",
+        ));
+    }
+    for (i, v) in area.virtual_links.iter().enumerate() {
+        if area.virtual_links[..i]
+            .iter()
+            .any(|o| o.router_id == v.router_id)
+        {
+            return Err(garde::Error::new(
+                "virtual link router ids must be unique within an area",
+            ));
+        }
+        if let (Some(h), Some(d)) = (v.hello_interval, v.dead_interval)
+            && d <= h
+        {
+            return Err(garde::Error::new(
+                "dead-interval must be greater than hello-interval when both are set",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// One RFC 5340 §4.4.3.3 area address range, keyed by `cidr`.
@@ -127,6 +195,18 @@ fn valid_ranges(ranges: &[Ospfv3AreaRange]) -> garde::Result {
     Ok(())
 }
 
+/// The placeholder a new `Ospfv3VirtualLink` starts from.
+impl Default for Ospfv3VirtualLink {
+    fn default() -> Self {
+        Ospfv3VirtualLink {
+            router_id: Ipv4Addr::UNSPECIFIED,
+            hello_interval: None,
+            dead_interval: None,
+            auth: None,
+        }
+    }
+}
+
 /// The placeholder a new `Ospfv3Area` starts from (`edit` on a missing one).
 impl Default for Ospfv3Area {
     fn default() -> Self {
@@ -138,6 +218,7 @@ impl Default for Ospfv3Area {
             stub_default_cost: None,
             nssa_translate_always: false,
             nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 }
@@ -240,6 +321,46 @@ mod tests {
         let mut c = area("0.0.0.1");
         c.stub_default_cost = Some(5);
         assert!(!check(c));
+    }
+
+    #[test]
+    fn virtual_link_rules() {
+        use super::Ospfv3VirtualLink;
+        use crate::schema::OspfAreaType;
+        let link = |id: &str| Ospfv3VirtualLink {
+            router_id: id.parse().unwrap(),
+            ..Default::default()
+        };
+        let check = |a: Ospfv3Area| {
+            let cfg = config_with(vec![instance("r1", vec![a])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let mut a = area("0.0.0.1");
+        a.virtual_links = vec![link("2.2.2.2")];
+        assert!(check(a.clone()));
+        let mut backbone = a.clone();
+        backbone.area_id = "0.0.0.0".parse().unwrap();
+        assert!(!check(backbone));
+        for t in [OspfAreaType::Stub, OspfAreaType::Nssa] {
+            let mut stub = a.clone();
+            stub.area_type = t;
+            assert!(!check(stub));
+        }
+        let mut dup = a.clone();
+        dup.virtual_links.push(link("2.2.2.2"));
+        assert!(!check(dup));
+        let mut own = a.clone();
+        own.virtual_links = vec![link("1.1.1.1")];
+        assert!(!check(own));
+        let mut timers = a.clone();
+        timers.virtual_links[0].hello_interval = Some(10);
+        timers.virtual_links[0].dead_interval = Some(10);
+        assert!(!check(timers.clone()));
+        timers.virtual_links[0].dead_interval = Some(11);
+        assert!(check(timers));
+        let mut keys = a;
+        keys.virtual_links[0].auth = Some(Vec::new());
+        assert!(!check(keys));
     }
 
     #[test]
