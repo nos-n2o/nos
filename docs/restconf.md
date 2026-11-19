@@ -26,6 +26,7 @@ RESTCONF (RFC 8040) over the running config, served by `nos-restd` next to `/v1`
 | DELETE | 204, 404 if absent |
 | OPTIONS | `Allow`, `Accept-Patch` |
 
+- GET omits unset (`null`) leaves and the derived `#[cli(hidden)]` fields, so the document is valid instance data of the module (`nos_proto::yang::strip_hidden`; checked by the `restconf-conformance` phase, #1177).
 - Bodies are `{"nos-config:<node>": value}`; a list entry is a one-element array.
 - Each write is one implicit transaction (open on the current config, edit, commit). Any failure discards it, so none leaks.
 

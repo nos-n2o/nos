@@ -340,9 +340,15 @@ fn strip_nulls(v: &mut Value) {
     match v {
         Value::Object(m) => {
             m.retain(|_, c| !c.is_null());
-            m.values_mut().for_each(strip_nulls);
+            for c in m.values_mut() {
+                strip_nulls(c);
+            }
         }
-        Value::Array(a) => a.iter_mut().for_each(strip_nulls),
+        Value::Array(a) => {
+            for c in a {
+                strip_nulls(c);
+            }
+        }
         _ => {}
     }
 }
@@ -434,9 +440,9 @@ async fn read(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiResu
     {
         return Ok((StatusCode::NOT_MODIFIED, [etag(generation)]).into_response());
     }
-    let mut v = config_path::get(&cfg.redacted(), &t.segs)
-        .map_err(path_err)?
-        .clone();
+    let mut doc = cfg.redacted();
+    nos_proto::yang::strip_hidden(&mut doc);
+    let mut v = config_path::get(&doc, &t.segs).map_err(path_err)?.clone();
     strip_nulls(&mut v);
     if q.nonconfig {
         // No operational state lives in this datastore.

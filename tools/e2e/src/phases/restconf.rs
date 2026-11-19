@@ -185,13 +185,16 @@ async fn read_only_user(a: &Router) -> anyhow::Result<()> {
         .rest_with(&client, Method::GET, "/restconf/data", None)
         .await?;
     let mut codes = vec![];
-    for (m, path) in [
-        (Method::POST, "/restconf/data"),
-        (Method::PUT, host),
-        (Method::PATCH, host),
-        (Method::DELETE, host),
+    // The POST body names a leaf that does not exist yet: an existing one is
+    // 409 before RBAC, which `nos-configd` applies at the edit.
+    let new = json!({"nos-config:bgp_instances": [{"name": "rc-new", "asn": 65099, "router_id": "9.9.9.9"}]}).to_string();
+    for (m, path, b) in [
+        (Method::POST, "/restconf/data", &new),
+        (Method::PUT, host, &body),
+        (Method::PATCH, host, &body),
+        (Method::DELETE, host, &body),
     ] {
-        let (s, _) = a.rest_with(&client, m.clone(), path, Some(&body)).await?;
+        let (s, _) = a.rest_with(&client, m.clone(), path, Some(b)).await?;
         codes.push((m, s));
     }
     // Always remove the user again, whatever the checks say.
