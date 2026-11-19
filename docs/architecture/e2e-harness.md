@@ -65,3 +65,7 @@ A container cannot `modprobe`, so the docker host must have every module the lab
   - Result: the `Results summary` job writes, per group, the soak format (`<i> PASS|FAIL <secs>s <phase> | <error>`, from `tools/ci/e2e-result-line.sh`, which `e2e-soak.sh` shares) and the per-check failure counts to the run's summary page. Cells use `fail-fast: false`, so one red run never cancels the rest.
   - Cost: every cell is a full runner-job (image build from the gha cache, then the group), so `runs=10` of `ospf-suite` is 10 runner-jobs; use `base` x 3 to check a change to the workflow itself.
   - Versus the local lab: a runner is a stock Ubuntu VM, so its kernel may lack modules the host loads by hand; the `tools/ci/e2e-preflight.sh` step (the `make e2e-preflight` script) fails the cell naming them before the group runs, so a preflight failure is not a flake. Timings differ from the local host (2 vCPU), so a check that is flaky only on runners is a real timing finding, not a runner bug. `multi` is allowed here (the local soak refuses it, #839); a hang runs to the 6 h job default.
+
+## Host tools
+
+- `restconf-conformance` (#1177) runs `yanglint` (`libyang2-tools`) on the host as an independent oracle against `docs/yang/nos-config.yang`; it is never in the runtime image. A missing binary fails the phase (no silent skip). CI installs it in `verify-e2e.yml`; locally `apt-get install libyang2-tools`.

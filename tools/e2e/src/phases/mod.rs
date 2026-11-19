@@ -10,6 +10,7 @@ mod drivers;
 mod ospf;
 mod pam;
 mod pki;
+mod restconf;
 mod ssh;
 
 use anyhow::bail;
@@ -110,6 +111,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "routed-subinterface" => drivers::routed_subinterface(w).await,
         "source-address" => drivers::source_address(w).await,
         "rest" => drivers::rest(w).await,
+        "restconf-conformance" => restconf::restconf_conformance(w).await,
         "acl" => acl::acl(w).await,
         "flowspec-dataplane" => acl::flowspec_dataplane(w).await,
         "daemon-heartbeat" => drivers::daemon_heartbeat(w).await,
@@ -236,6 +238,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "routed-subinterface",
             "source-address",
             "rest",
+            "restconf-conformance",
             "syslog",
             "acl",
             "flowspec-dataplane",
@@ -417,6 +420,7 @@ pub const ALL: &[&str] = &[
     "routed-subinterface",
     "source-address",
     "rest",
+    "restconf-conformance",
     "syslog",
     "acl",
     "flowspec-dataplane",
