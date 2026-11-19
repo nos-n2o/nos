@@ -145,6 +145,9 @@ pub const LSA_TYPE_NSSA: u16 = SCOPE_AREA | 7;
 /// boundary router).
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 5340 §A.4.3: V, an endpoint of a fully adjacent virtual link, set in
+/// the transit area's Router-LSA.
+pub const ROUTER_FLAG_V: u8 = 0x04;
 /// RFC 5340 §A.4.3 / RFC 3101: Nt, an NSSA border router that always
 /// translates.
 pub const ROUTER_FLAG_NT: u8 = 0x10;
@@ -208,6 +211,8 @@ const TLV_IPV6_LINK_LOCAL: u16 = 7;
 /// type in v3: a Router-LSA link never carries a prefix at all.
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
 pub const LINK_TYPE_TRANSIT_NETWORK: u8 = 2;
+/// RFC 5340 §A.4.3: a virtual link, in the backbone's Router-LSA.
+pub const LINK_TYPE_VIRTUAL: u8 = 4;
 
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (§A.4.3): Type(1) + Reserved(1) +

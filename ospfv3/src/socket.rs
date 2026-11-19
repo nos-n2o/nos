@@ -94,7 +94,14 @@ pub struct OspfSocket {
     instance_id: u8,
     /// `FF02::6` membership, driven by the election outcome (`link::run_election`).
     drouters: nos_ospf_common::drouters::AllDRouters,
+    /// A virtual link's far end (`open_virtual`): every send, Hello
+    /// included, is unicast there with no scope id.
+    virtual_dest: Option<Ipv6Addr>,
 }
+
+/// RFC 5340 §4.4.3.1: a virtual link's packets cross routers, so unlike
+/// every other send they leave with a hop limit above 1.
+pub const VIRTUAL_HOP_LIMIT: u32 = 64;
 
 /// Wall-clock floor for the outgoing sequence number — mirrors
 /// `ospf::link::crypto_seq_floor`.
@@ -126,7 +133,7 @@ impl OspfSocket {
         if auth.is_none() {
             nos_tcp_auth::set_ipv6_checksum(socket.as_raw_fd(), CHECKSUM_OFFSET)?;
         }
-        // Link-local scope only (conventional; no virtual links here).
+        // Link-local scope only (a virtual link has its own socket, below).
         socket.set_unicast_hops_v6(1)?;
         socket.set_multicast_hops_v6(1)?;
         socket.set_nonblocking(true)?;
@@ -135,7 +142,47 @@ impl OspfSocket {
             auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
             instance_id,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),
+            virtual_dest: None,
         })
+    }
+
+    /// A virtual link's socket (RFC 5340 §4.4.3.1): unicast only, so no
+    /// multicast group, scoped to the VRF device (the endpoint is several
+    /// hops away, over any transit-area interface) and bound to `local`, so
+    /// the kernel only hands it packets addressed to us. Sends go to `dest`
+    /// with hop limit `VIRTUAL_HOP_LIMIT`; `auth` and `instance_id` as in
+    /// `open`.
+    pub fn open_virtual(
+        vrf: &str,
+        local: Ipv6Addr,
+        dest: Ipv6Addr,
+        auth: Option<(TrailerAuth, Ipv6Addr)>,
+        instance_id: u8,
+    ) -> io::Result<Self> {
+        let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
+        socket.bind_device(Some(vrf.as_bytes()))?;
+        socket.bind(&SockAddr::from(SocketAddrV6::new(local, 0, 0, 0)))?;
+        if auth.is_none() {
+            nos_tcp_auth::set_ipv6_checksum(socket.as_raw_fd(), CHECKSUM_OFFSET)?;
+        }
+        socket.set_unicast_hops_v6(VIRTUAL_HOP_LIMIT)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            inner: register_fd(socket)?,
+            auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
+            instance_id,
+            drouters: nos_ospf_common::drouters::AllDRouters::default(),
+            virtual_dest: Some(dest),
+        })
+    }
+
+    /// Where a send to `dest` on `ifindex` really goes: a virtual link's one
+    /// unicast peer, scope-less.
+    fn target(&self, dest: Ipv6Addr, ifindex: u32) -> SockAddr {
+        match self.virtual_dest {
+            Some(far) => SockAddr::from(SocketAddrV6::new(far, 0, 0, 0)),
+            None => SockAddr::from(SocketAddrV6::new(dest, 0, 0, ifindex)),
+        }
     }
 
     /// Join/leave `FF02::6` so membership equals `want`; whether it changed.
@@ -172,7 +219,7 @@ impl OspfSocket {
     /// `crate::packet`) to `FF02::5` — Hello is always multicast, including
     /// on point-to-point links.
     pub fn send_multicast(&self, ifindex: u32, payload: &[u8]) -> io::Result<()> {
-        let dest = SockAddr::from(SocketAddrV6::new(ALL_SPF_ROUTERS, 0, 0, ifindex));
+        let dest = self.target(ALL_SPF_ROUTERS, ifindex);
         self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
         Ok(())
     }
@@ -182,12 +229,7 @@ impl OspfSocket {
     /// like every send; the trailer binds only the source, so one packet is
     /// valid for every receiver.
     pub fn send_all_drouters(&self, ifindex: u32, payload: &[u8]) -> io::Result<()> {
-        let dest = SockAddr::from(SocketAddrV6::new(
-            nos_ospf_common::drouters::ALL_D_ROUTERS_V6,
-            0,
-            0,
-            ifindex,
-        ));
+        let dest = self.target(nos_ospf_common::drouters::ALL_D_ROUTERS_V6, ifindex);
         self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
         Ok(())
     }
@@ -195,7 +237,7 @@ impl OspfSocket {
     /// Sends `payload` directly to `dest` — DBD/LSR/LSU/LSAck are unicast to
     /// one specific neighbor's link-local address, unlike Hello.
     pub fn send_unicast(&self, dest: Ipv6Addr, ifindex: u32, payload: &[u8]) -> io::Result<()> {
-        let dest = SockAddr::from(SocketAddrV6::new(dest, 0, 0, ifindex));
+        let dest = self.target(dest, ifindex);
         self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
         Ok(())
     }

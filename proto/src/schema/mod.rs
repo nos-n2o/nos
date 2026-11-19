@@ -100,7 +100,7 @@ pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,
     HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,
 };
-pub use ospfv3_area::{Ospfv3Area, Ospfv3AreaRange};
+pub use ospfv3_area::{Ospfv3Area, Ospfv3AreaRange, Ospfv3VirtualLink};
 pub use ospfv3_instance::{Ospfv3AddressFamily, Ospfv3Instance};
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
