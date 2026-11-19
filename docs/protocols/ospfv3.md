@@ -217,6 +217,16 @@ RFC 8362 intends full mode to be enabled on every router of an area at once; use
 - NOS originates no extended LSA in sparse mode: it has no TE, SR or other TLV content a legacy LSA cannot hold, so the origination is the same as with both modes off. Extended LSAs of this router's earlier full mode are flushed on the switch, like any mode change.
 - Verified with router-a sparse, router-b full and router-c legacy-only on one bridge (`nos-e2e ospfv3-extended-lsa-sparse`).
 
+### Use a hybrid broadcast and point-to-multipoint link (RFC 6845)
+
+- Use it on a broadcast domain where each router pair needs its own path cost; hello, DR/BDR election and database sync stay as on a normal broadcast link.
+- Set `network-type hybrid` on the profile the broadcast domain's `ospfv3` field names: `set ospfv3 instance <name> area <area-id> profile <p> network-type hybrid`.
+- Every router on the segment must use it; a mixed segment still forms adjacencies but some router pairs carry no traffic.
+- The DR originates no Network-LSA. Routers describe the link as point-to-point links to their neighbors, and advertise their address as a `/128` plus the link's prefix.
+- A router that is not the DR lists a neighbor only once it is `Full` with the DR and the DR's Router-LSA links to that neighbor.
+- A hybrid profile on a subinterface or interface, a `passive` hybrid profile, and OSPFv2 hybrid are rejected at commit.
+- Check it with `show ospfv3 neighbors` (DR/BDR roles as for broadcast) and `show ospfv3 database` (no network LSA).
+
 ### Restart without dropping routes (RFC 5187)
 
 Set a grace period on the instance so that its neighbours keep the adjacency and this router's routes while its OSPFv3 daemon restarts:
@@ -392,7 +402,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
 
 ## Configuration reference
 
