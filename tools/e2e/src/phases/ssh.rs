@@ -36,6 +36,8 @@ pub async fn ssh_hostkey(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(FP, before, 60).await?;
     a.wait("ssh listening").await?;
     a.wait("spawned process=nos-sshd.* mdwe=true").await?; // #1210
+                                                           // #1211: nos-sshd runs as root, drops its own caps and is exempt from the trampoline.
+    super::drivers::assert_sandbox(w, "nos-sshd", 0, None).await?;
     let f1 = fingerprint(a)?;
 
     log("ssh-hostkey: hidden from REST and logs");

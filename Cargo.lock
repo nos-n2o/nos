@@ -2332,6 +2332,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "nos-ssh"
 version = "0.1.0"
 dependencies = [
