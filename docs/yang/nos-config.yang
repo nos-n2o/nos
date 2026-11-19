@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-21 {
+  revision 2026-11-22 {
     description "Generated.";
   }
 
@@ -1137,6 +1137,46 @@ module nos-config {
       leaf nssa_default_originate {
         type boolean;
         description "Send a default route into this NSSA, as its area border router.";
+      }
+      list virtual_links {
+        key "router_id";
+        description "Join the backbone across this area with an OSPF virtual link (RFC 2328 §15).";
+        leaf router_id {
+          type inet:ipv4-address;
+        }
+        leaf hello_interval {
+          type uint16;
+          description "Set a virtual link's Hello interval, in seconds.";
+        }
+        leaf dead_interval {
+          type uint16;
+          description "Set a virtual link's dead interval, in seconds.";
+        }
+        list auth {
+          key "key_id";
+          description "An OSPFv3 profile's RFC 7166 authentication-trailer keys.";
+          leaf key_id {
+            type uint16;
+          }
+          leaf algorithm {
+            type enumeration {
+              enum "Md5";
+              enum "HmacSha1";
+              enum "HmacSha256";
+              enum "HmacSha384";
+              enum "HmacSha512";
+            }
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf key {
+            type string;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf is_current {
+            type boolean;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+        }
       }
     }
     leaf extended_lsa {

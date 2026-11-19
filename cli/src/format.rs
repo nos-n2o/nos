@@ -3458,6 +3458,8 @@ mod tests {
             age: 3,
             checksum: 0x1234,
             link: link.map(str::to_string),
+            router_flags: None,
+            virtual_links: Vec::new(),
         };
         assert_eq!(
             render_ospfv3_database("v3", &[lsa(Some("eth0.0")), lsa(None)]),

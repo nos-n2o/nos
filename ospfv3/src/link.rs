@@ -38,7 +38,7 @@ use crate::lsa::{
     self, AsExternalLsaBody, GraceLsaBody, InterAreaPrefixLsaBody, InterAreaRouterLsaBody,
     IntraAreaPrefixEntry, IntraAreaPrefixLsaBody, LinkLsaBody, LinkPrefixEntry, Lsa, LsaBody,
     LsaHeader, LsaKey, NetworkLsaBody, RouterLsaBody, RouterLsaLink, LINK_TYPE_POINT_TO_POINT,
-    LINK_TYPE_TRANSIT_NETWORK,
+    LINK_TYPE_TRANSIT_NETWORK, LINK_TYPE_VIRTUAL,
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
@@ -190,6 +190,96 @@ pub struct LinkConfig {
     /// The link's area is an NSSA (RFC 3101; `stub` is set too): the N-bit
     /// replaces the E-bit in Options, and only here are Type-7s exchanged.
     pub nssa: bool,
+    /// `Some` for an RFC 5340 §4.7 virtual link: area 0, unicast to
+    /// `neighbor`, a type-4 Router-LSA link, no Link-LSA. Resolved from the
+    /// transit area's SPF (`resolve_virtual_link`), never from an attach
+    /// point. `link_local_address` then holds our own global source address.
+    pub virtual_link: Option<VirtualLinkEnd>,
+}
+
+/// A virtual link's transit area, far endpoint's router id and its global
+/// address in the transit area (where every packet is unicast to).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualLinkEnd {
+    pub transit_area: Ipv4Addr,
+    pub endpoint: Ipv4Addr,
+    pub neighbor: Ipv6Addr,
+}
+
+/// One configured virtual link (`Ospfv3Area.virtual_links`), before §4.7 has
+/// resolved it to a `LinkConfig`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VirtualLinkConfig {
+    pub transit_area: Ipv4Addr,
+    pub endpoint: Ipv4Addr,
+    pub hello_interval: u16,
+    pub dead_interval: u16,
+    pub auth: Option<packet::TrailerAuth>,
+}
+
+/// The attach-point name of a virtual link.
+fn virtual_link_name(transit_area: Ipv4Addr, endpoint: Ipv4Addr) -> String {
+    format!("vlink-{transit_area}-{endpoint}")
+}
+
+/// RFC 5340 §4.7: `v` as a running link while its endpoint has an intra-area
+/// path in the transit area (`lsas` is that area's LSDB) and advertises a
+/// global address there, with the path's distance as cost; `None` (down)
+/// otherwise. Our own source address is our first global `/128` loopback in
+/// the transit area (`loopbacks`), the neighbor's the endpoint's (RFC 5340
+/// §4.4.3.9). The transit area's first link in `physical` supplies the VRF,
+/// MTU and Instance ID. ponytail: the Interface ID is the endpoint's router
+/// id (unique per link, never an ifindex); RFC 5340 §A.3.1's Interface MTU 0
+/// in the virtual link's DBDs is skipped (`mtu_ignore`).
+fn resolve_virtual_link(
+    v: &VirtualLinkConfig,
+    local_router_id: Ipv4Addr,
+    lsas: &[Arc<Lsa>],
+    physical: &[LinkConfig],
+    loopbacks: &[(Ipv6Net, u16)],
+) -> Option<LinkConfig> {
+    let end = spf::virtual_link_endpoint(local_router_id, lsas, v.endpoint)?;
+    let local = loopbacks
+        .iter()
+        .filter(|(p, _)| p.prefix_len() == 128 && spf::is_virtual_address(p.addr()))
+        .map(|(p, _)| p.addr())
+        .min()?;
+    let transit = physical.iter().find(|c| c.area_id == v.transit_area)?;
+    Some(LinkConfig {
+        attach_point: virtual_link_name(v.transit_area, v.endpoint),
+        area_id: Ipv4Addr::UNSPECIFIED,
+        hello_interval: v.hello_interval,
+        dead_interval: v.dead_interval,
+        vrf: transit.vrf.clone(),
+        kernel_interface: transit.vrf.clone(),
+        interface_id: u32::from(v.endpoint),
+        link_local_address: local,
+        prefix: Ipv6Net::new(local, 128).expect("128 is valid"),
+        cost: u16::try_from(end.cost).unwrap_or(u16::MAX),
+        network_type: NetworkType::PointToPoint,
+        priority: 0,
+        mtu: transit.mtu,
+        mtu_ignore: true,
+        auth: v.auth.clone(),
+        instance_id: transit.instance_id,
+        helper_max_grace_period: transit.helper_max_grace_period,
+        stub: false,
+        ipv4_af: transit.ipv4_af,
+        nssa: false,
+        virtual_link: Some(VirtualLinkEnd {
+            transit_area: v.transit_area,
+            endpoint: v.endpoint,
+            neighbor: end.address,
+        }),
+    })
+}
+
+/// Equal in every field but `cost`, which `apply_links` updates in place.
+fn same_but_cost(a: &LinkConfig, b: &LinkConfig) -> bool {
+    *a == LinkConfig {
+        cost: a.cost,
+        ..b.clone()
+    }
 }
 
 /// `helper_max_grace_period` when the instance sets none.
@@ -629,6 +719,15 @@ fn send_hello(
 /// RFC 5340 §4.2.2: every packet is sent from a link-local address; anything
 /// else is off-link or spoofed and is dropped (`debug!` only, #394).
 fn drops_non_link_local(cfg: &LinkConfig, source: Ipv6Addr) -> bool {
+    // A virtual link's packets come from the endpoint's global address,
+    // and nothing else.
+    if let Some(v) = cfg.virtual_link {
+        let drop = source != v.neighbor;
+        if drop {
+            debug!(link = %cfg.attach_point, source = %source, "ospfv3 packet from other than the virtual neighbor, dropping");
+        }
+        return drop;
+    }
     let drop = !source.is_unicast_link_local();
     if drop {
         debug!(link = %cfg.attach_point, source = %source, "ospfv3 packet from non-link-local source, dropping");
@@ -665,6 +764,13 @@ fn handle_hello(
     waiting: bool,
     limiter: &mut nos_ospf_common::ratelimit::WarnLimiter,
 ) -> bool {
+    // A virtual link has exactly one neighbor: its endpoint.
+    if cfg
+        .virtual_link
+        .is_some_and(|v| v.endpoint != hello.router_id)
+    {
+        return false;
+    }
     if hello.area_id != cfg.area_id {
         warn_limited!(
             limiter,
@@ -1932,6 +2038,13 @@ struct LinkEntry {
 /// AS-wide store for its AS-scoped ones.
 pub struct LinkManager {
     links: Mutex<HashMap<String, LinkEntry>>,
+    /// The attach-point links of the last `reconcile`; `apply_links` adds
+    /// the resolved virtual links to them.
+    physical: Mutex<Vec<LinkConfig>>,
+    /// Configured virtual links (`set_virtual_links`, every resync).
+    virtual_links: Mutex<Vec<VirtualLinkConfig>>,
+    /// The virtual links §4.7 last found up (`resolve_virtual_links`).
+    resolved_virtual: Mutex<Vec<LinkConfig>>,
     /// Area-scoped LSAs (Router/Network/Intra-Area-Prefix and their RFC
     /// 8362 counterparts), per area id, shared by every link in that area.
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
@@ -2334,6 +2447,16 @@ impl LinkManager {
             dbd_max_headers,
             Arc::new(|cfg: &LinkConfig| {
                 let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
+                if let Some(v) = cfg.virtual_link {
+                    return OspfSocket::open_virtual(
+                        &cfg.kernel_interface,
+                        cfg.link_local_address,
+                        v.neighbor,
+                        auth,
+                        cfg.instance_id,
+                    )
+                    .map(LinkSocket::Os);
+                }
                 OspfSocket::open(
                     &cfg.kernel_interface,
                     cfg.interface_id,
@@ -2356,6 +2479,9 @@ impl LinkManager {
         let reoriginate = Arc::new(tokio::sync::Notify::new());
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
+            physical: Mutex::new(Vec::new()),
+            virtual_links: Mutex::new(Vec::new()),
+            resolved_virtual: Mutex::new(Vec::new()),
             lsdbs: Mutex::new(HashMap::new()),
             link_local_lsdbs: Mutex::new(HashMap::new()),
             as_lsdb: Arc::new(Mutex::new(
@@ -2577,6 +2703,10 @@ impl LinkManager {
             .map(|e| e.config.area_id)
             .collect();
         areas.extend(self.loopback_prefixes.lock().await.keys().copied());
+        // RFC 5340 §4.7: a configured virtual link attaches us to the backbone.
+        if !self.virtual_links.lock().await.is_empty() {
+            areas.insert(Ipv4Addr::UNSPECIFIED);
+        }
         areas
     }
 
@@ -2639,6 +2769,20 @@ impl LinkManager {
         let translating = !self.nssa_translating.lock().unwrap().is_empty();
         let types = self.lsa_types();
         let max_metric = self.max_metric_tick();
+        // RFC 5340 §A.4.3: V in each transit area of a fully adjacent virtual
+        // link.
+        let virtual_transit: HashSet<Ipv4Addr> = by_area
+            .values()
+            .flatten()
+            .filter_map(|(cfg, status)| {
+                let v = cfg.virtual_link?;
+                status
+                    .neighbors
+                    .values()
+                    .any(|n| n.state == NeighborState::Full)
+                    .then_some(v.transit_area)
+            })
+            .collect();
         debug_assert!(!lsa::is_link_local_scope(types.router));
         debug_assert!(!lsa::is_link_local_scope(types.network));
         for area_id in area_ids {
@@ -2656,6 +2800,9 @@ impl LinkManager {
             };
             if nssa_cfg.is_some_and(|c| c.translate_always) && flags & lsa::ROUTER_FLAG_B != 0 {
                 flags |= lsa::ROUTER_FLAG_NT;
+            }
+            if virtual_transit.contains(&area_id) {
+                flags |= lsa::ROUTER_FLAG_V;
             }
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             // ponytail: one AF per instance, read off the area's first link;
@@ -2754,7 +2901,8 @@ impl LinkManager {
             .collect();
         let types = self.lsa_types();
         debug_assert!(lsa::is_link_local_scope(types.link));
-        for cfg in snapshot {
+        // A virtual link has no Link-LSA: it is no link-local segment.
+        for cfg in snapshot.into_iter().filter(|c| c.virtual_link.is_none()) {
             let lsdb = self.link_local_lsdb_for(&cfg.attach_point).await;
             let mut lsdb = lsdb.lock().await;
             let key = install_self_originated(
@@ -2815,9 +2963,9 @@ impl LinkManager {
             let mut router_prefixes: Vec<IntraAreaPrefixEntry> = links
                 .iter()
                 .filter(|(cfg, status)| {
-                    cfg.network_type != NetworkType::Broadcast
-                        || (cfg.network_type == NetworkType::Broadcast
-                            && !network_prefix_originated(status))
+                    cfg.virtual_link.is_none()
+                        && (cfg.network_type != NetworkType::Broadcast
+                            || !network_prefix_originated(status))
                 })
                 .map(|(cfg, _)| {
                     if cfg.network_type == NetworkType::PointToMultipoint {
@@ -3260,6 +3408,7 @@ impl LinkManager {
             let keys = store.lock().await.reflected_keys();
             marked.push((store, keys));
         }
+        self.resolve_virtual_links(router_id).await;
         self.originate_all(router_id).await;
         for (store, keys) in marked {
             let mut lsdb = store.lock().await;
@@ -3328,7 +3477,78 @@ impl LinkManager {
             .await
             .set_limit(local_router_id, Arc::clone(&self.max_lsa));
         *self.loopback_prefixes.lock().await = desired_loopback_prefixes;
+        *self.physical.lock().await = desired;
+        self.apply_links(local_router_id).await;
+    }
 
+    /// Configured virtual links, every resync; §4.7 brings each one up or
+    /// down on the origination tick (`resolve_virtual_links`).
+    pub async fn set_virtual_links(&self, virtual_links: Vec<VirtualLinkConfig>) {
+        *self.virtual_links.lock().await = virtual_links;
+    }
+
+    /// RFC 5340 §4.7, after the transit areas' SPF (rerun here, on every
+    /// origination tick): a virtual link whose endpoint is reachable and
+    /// advertises a global address is up at the path's cost, else down. A
+    /// change starts, restarts (address) or stops its link task; a cost
+    /// change alone is applied in place.
+    async fn resolve_virtual_links(&self, local_router_id: Ipv4Addr) {
+        let configured = self.virtual_links.lock().await.clone();
+        if !configured.is_empty() {
+            // Backbone-attached as soon as one is configured.
+            self.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        }
+        let physical = self.physical.lock().await.clone();
+        let loopbacks = self.loopback_prefixes.lock().await.clone();
+        let mut resolved = Vec::new();
+        for v in &configured {
+            let Some(lsdb) = self.lsdbs.lock().await.get(&v.transit_area).cloned() else {
+                continue;
+            };
+            let mut lsas = lsdb.lock().await.all();
+            for (_, link_lsdb) in self.link_local_lsdbs_in(v.transit_area).await {
+                lsas.extend(link_lsdb.lock().await.all());
+            }
+            let own = loopbacks
+                .get(&v.transit_area)
+                .map_or(&[][..], Vec::as_slice);
+            resolved.extend(resolve_virtual_link(
+                v,
+                local_router_id,
+                &lsas,
+                &physical,
+                own,
+            ));
+        }
+        let mut previous = self.resolved_virtual.lock().await;
+        if *previous == resolved {
+            return;
+        }
+        for r in &resolved {
+            if !previous.iter().any(|p| same_but_cost(p, r))
+                && let Some(v) = r.virtual_link
+            {
+                info!(
+                    link = %r.attach_point, neighbor = %v.neighbor, local = %r.link_local_address, cost = r.cost,
+                    "ospfv3 virtual link up"
+                );
+            }
+        }
+        for p in previous.iter() {
+            if !resolved.iter().any(|r| r.attach_point == p.attach_point) {
+                info!(link = %p.attach_point, "ospfv3 virtual link down");
+            }
+        }
+        *previous = resolved;
+        drop(previous);
+        self.apply_links(local_router_id).await;
+    }
+
+    /// Diffs the attach-point links plus the resolved virtual links against
+    /// the running ones (see `reconcile`).
+    async fn apply_links(&self, local_router_id: Ipv4Addr) {
+        let mut desired = self.physical.lock().await.clone();
+        desired.extend(self.resolved_virtual.lock().await.iter().cloned());
         let mut links = self.links.lock().await;
         links.retain(|_, entry| !entry.task.is_finished());
 
@@ -3346,6 +3566,13 @@ impl LinkManager {
             if let Some(entry) = links.remove(key) {
                 info!(link = %key, "ospfv3 link stopped");
                 entry.task.abort();
+            }
+        }
+        // A cost-only change (a virtual link's SPF distance, a profile's
+        // cost) is a Router-LSA metric, not a reason to restart the link.
+        for (key, entry) in links.iter_mut() {
+            if let Some(wanted) = desired_map.get(key) {
+                entry.config.cost = wanted.cost;
             }
         }
         for cfg in to_spawn {
@@ -3405,8 +3632,8 @@ impl LinkManager {
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
         for (area_id, lsdb) in areas {
-            for header in lsdb.lock().await.headers() {
-                result.push(to_lsa_summary(area_id, None, &header));
+            for lsa in lsdb.lock().await.all() {
+                result.push(to_lsa_summary(area_id, None, &lsa.header, Some(&lsa.body)));
             }
         }
         let links: Vec<(String, Ipv4Addr)> = self
@@ -3419,11 +3646,16 @@ impl LinkManager {
         for (attach_point, area_id) in links {
             let lsdb = self.link_local_lsdb_for(&attach_point).await;
             for header in lsdb.lock().await.headers() {
-                result.push(to_lsa_summary(area_id, Some(attach_point.clone()), &header));
+                result.push(to_lsa_summary(
+                    area_id,
+                    Some(attach_point.clone()),
+                    &header,
+                    None,
+                ));
             }
         }
         for header in self.as_lsdb.lock().await.headers() {
-            result.push(to_lsa_summary(Ipv4Addr::UNSPECIFIED, None, &header));
+            result.push(to_lsa_summary(Ipv4Addr::UNSPECIFIED, None, &header, None));
         }
         result
     }
@@ -3527,7 +3759,23 @@ impl LinkManager {
     }
 }
 
-fn to_lsa_summary(area_id: Ipv4Addr, link: Option<String>, header: &LsaHeader) -> Ospfv3LsaSummary {
+fn to_lsa_summary(
+    area_id: Ipv4Addr,
+    link: Option<String>,
+    header: &LsaHeader,
+    body: Option<&LsaBody>,
+) -> Ospfv3LsaSummary {
+    let (router_flags, virtual_links) = match body {
+        Some(LsaBody::Router(r)) => (
+            Some(r.flags),
+            r.links
+                .iter()
+                .filter(|l| l.link_type == LINK_TYPE_VIRTUAL)
+                .map(|l| l.neighbor_router_id)
+                .collect(),
+        ),
+        _ => (None, Vec::new()),
+    };
     Ospfv3LsaSummary {
         area_id,
         lsa_type: header.lsa_type,
@@ -3537,6 +3785,8 @@ fn to_lsa_summary(area_id: Ipv4Addr, link: Option<String>, header: &LsaHeader) -
         age: header.age,
         checksum: header.checksum,
         link,
+        router_flags,
+        virtual_links,
     }
 }
 
@@ -3653,6 +3903,25 @@ fn router_lsa_links(
     };
     let mut result = Vec::new();
     for (cfg, status) in links {
+        // RFC 5340 §A.4.3: a type-4 link while the virtual neighbor is fully
+        // adjacent, nothing else.
+        if cfg.virtual_link.is_some() {
+            if let Some((neighbor_id, info)) = status
+                .neighbors
+                .iter()
+                .filter(|(_, n)| n.state == NeighborState::Full)
+                .min_by_key(|(id, _)| **id)
+            {
+                result.push(RouterLsaLink {
+                    link_type: LINK_TYPE_VIRTUAL,
+                    metric: metric_of(cfg),
+                    interface_id: cfg.interface_id,
+                    neighbor_interface_id: info.interface_id,
+                    neighbor_router_id: *neighbor_id,
+                });
+            }
+            continue;
+        }
         match cfg.network_type {
             NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                 // RFC 5340 §4.4.3.2: only a fully adjacent neighbor (a
@@ -3854,7 +4123,7 @@ fn diff_links(
     for (key, running) in current {
         match desired.get(key) {
             None => to_stop.push(key.clone()),
-            Some(wanted) if wanted != running => {
+            Some(wanted) if !same_but_cost(wanted, running) => {
                 to_stop.push(key.clone());
                 to_spawn.push(wanted.clone());
             }
@@ -3935,6 +4204,7 @@ pub(crate) mod tests {
             stub: false,
             ipv4_af: false,
             nssa: false,
+            virtual_link: None,
         }
     }
 
@@ -5731,7 +6001,12 @@ pub(crate) mod tests {
             pub fn opener(self: &Arc<Self>) -> Opener {
                 let wire = Arc::clone(self);
                 Arc::new(move |cfg: &LinkConfig| {
-                    let net = cfg.prefix.trunc();
+                    // A virtual link's ports share one net, whatever their addresses.
+                    let net = if cfg.virtual_link.is_some() {
+                        Ipv6Net::default()
+                    } else {
+                        cfg.prefix.trunc()
+                    };
                     let (tx, rx) = mpsc::unbounded_channel();
                     let mut ports = wire.ports.lock().unwrap();
                     ports.retain(|(_, a, _)| *a != cfg.link_local_address);
@@ -6315,6 +6590,230 @@ pub(crate) mod tests {
             "{routes:?}"
         );
         assert_eq!(router_flags(&b, area1, id(3)).await, Some(0));
+    }
+
+    // --- RFC 5340 §4.7 virtual links (#1158) ---
+
+    fn vlink_config(endpoint: Ipv4Addr) -> VirtualLinkConfig {
+        VirtualLinkConfig {
+            transit_area: Ipv4Addr::new(0, 0, 0, 1),
+            endpoint,
+            hello_interval: 10,
+            dead_interval: 40,
+            auth: None,
+        }
+    }
+
+    fn virtual_cfg(neighbor: &str) -> LinkConfig {
+        LinkConfig {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            cost: 7,
+            virtual_link: Some(VirtualLinkEnd {
+                transit_area: Ipv4Addr::new(0, 0, 0, 1),
+                endpoint: id(3),
+                neighbor: neighbor.parse().unwrap(),
+            }),
+            ..link("vlink", 10)
+        }
+    }
+
+    /// A virtual link takes packets from its endpoint's global address only;
+    /// every other link only from link-local ones.
+    #[test]
+    fn virtual_link_accepts_only_its_neighbor_address() {
+        let cfg = virtual_cfg("2001:db8:ff::3");
+        assert!(!drops_non_link_local(
+            &cfg,
+            "2001:db8:ff::3".parse().unwrap()
+        ));
+        assert!(drops_non_link_local(
+            &cfg,
+            "2001:db8:ff::4".parse().unwrap()
+        ));
+        assert!(drops_non_link_local(&cfg, "fe80::3".parse().unwrap()));
+        assert!(drops_non_link_local(
+            &link("eth0", 10),
+            "2001:db8:ff::3".parse().unwrap()
+        ));
+    }
+
+    /// A cost change keeps the link running; a new neighbor address restarts it.
+    #[test]
+    fn diff_ignores_cost_but_not_the_virtual_neighbor() {
+        let running = virtual_cfg("2001:db8:ff::3");
+        let current = HashMap::from([("vlink".to_string(), running.clone())]);
+        let cheaper = LinkConfig {
+            cost: 3,
+            ..running.clone()
+        };
+        let (stop, spawn) = diff_links(&current, &HashMap::from([("vlink".to_string(), cheaper)]));
+        assert_eq!((stop.len(), spawn.len()), (0, 0));
+        let moved = virtual_cfg("2001:db8:ff::9");
+        let (stop, spawn) = diff_links(&current, &HashMap::from([("vlink".to_string(), moved)]));
+        assert_eq!((stop.len(), spawn.len()), (1, 1));
+    }
+
+    /// RFC 5340 §A.4.3: a type-4 link only while the virtual neighbor is Full.
+    #[test]
+    fn router_lsa_links_virtual_link_only_when_full() {
+        let cfg = virtual_cfg("2001:db8:ff::3");
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        status.neighbors.insert(
+            id(3),
+            neighbor_info(NeighborState::Loading, "2001:db8:ff::3".parse().unwrap(), 9),
+        );
+        let links =
+            |status: &LinkStatus| router_lsa_links(id(2), &[(cfg.clone(), status.clone())], false);
+        assert_eq!(links(&status), []);
+        status.neighbors.get_mut(&id(3)).unwrap().state = NeighborState::Full;
+        assert_eq!(
+            links(&status),
+            [RouterLsaLink {
+                link_type: LINK_TYPE_VIRTUAL,
+                metric: 7,
+                interface_id: 3,
+                neighbor_interface_id: 9,
+                neighbor_router_id: id(3),
+            }]
+        );
+    }
+
+    /// §4.7: up at the path's cost with the endpoint's LA address and our own
+    /// loopback as source; down without a path, a loopback of ours or a
+    /// transit-area link.
+    #[tokio::test(start_paused = true)]
+    async fn resolve_virtual_link_up_and_down() {
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let wire = Arc::new(wire::Wire::default());
+        let (b, c) = (router(&wire), router(&wire));
+        let seg = |n: u8| LinkConfig {
+            area_id: area1,
+            prefix: format!("2001:db8:2::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let lo = |n: u8| {
+            HashMap::from([(
+                area1,
+                vec![(format!("2001:db8:ff::{n}/128").parse().unwrap(), 1)],
+            )])
+        };
+        b.reconcile(vec![seg(3)], lo(2), id(2)).await;
+        c.reconcile(vec![seg(4)], lo(3), id(3)).await;
+        settle(60).await;
+        let lsas = b.lsdb_for(area1).await.lock().await.all();
+        let physical = [seg(3)];
+        let own = [("2001:db8:ff::2/128".parse::<Ipv6Net>().unwrap(), 1)];
+        let up = resolve_virtual_link(&vlink_config(id(3)), id(2), &lsas, &physical, &own)
+            .expect("endpoint reachable");
+        assert_eq!(up.attach_point, "vlink-0.0.0.1-3.3.3.3");
+        assert_eq!(up.area_id, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(up.cost, 1);
+        assert_eq!(
+            up.link_local_address,
+            "2001:db8:ff::2".parse::<Ipv6Addr>().unwrap()
+        );
+        assert_eq!(
+            up.virtual_link.map(|v| v.neighbor),
+            Some("2001:db8:ff::3".parse().unwrap())
+        );
+        assert_eq!(up.vrf, up.kernel_interface);
+        assert!(up.mtu_ignore);
+        // No such endpoint, no loopback of ours, no link in the transit area.
+        assert!(
+            resolve_virtual_link(&vlink_config(id(7)), id(2), &lsas, &physical, &own).is_none()
+        );
+        assert!(resolve_virtual_link(&vlink_config(id(3)), id(2), &lsas, &physical, &[]).is_none());
+        assert!(resolve_virtual_link(&vlink_config(id(3)), id(2), &lsas, &[], &own).is_none());
+    }
+
+    /// RFC 5340 §4.7 over the in-memory wire: a (area 0) - b (areas 0 and 1)
+    /// - c (area 1 only), loopbacks in area 1 for the endpoint addresses. The
+    /// virtual link b-c comes up from area 1's SPF, reaches Full, puts a
+    /// type-4 link in both area-0 Router-LSAs (seen at a) and V in both
+    /// area-1 ones, and goes (type-4 link and V) when c drops its end.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn virtual_link_reaches_full_with_v_bit_and_type_4_link() {
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
+            area_id,
+            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let lo = |n: u8| {
+            HashMap::from([(
+                area1,
+                vec![(format!("2001:db8:ff::{n}/128").parse().unwrap(), 1)],
+            )])
+        };
+        a.reconcile(
+            vec![seg(1, 1, Ipv4Addr::UNSPECIFIED)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.set_virtual_links(vec![vlink_config(id(3))]).await;
+        b.reconcile(
+            vec![seg(2, 1, Ipv4Addr::UNSPECIFIED), seg(3, 2, area1)],
+            lo(2),
+            id(2),
+        )
+        .await;
+        c.set_virtual_links(vec![vlink_config(id(2))]).await;
+        c.reconcile(vec![seg(4, 2, area1)], lo(3), id(3)).await;
+        settle(120).await;
+
+        let vlink_state = |m: Arc<LinkManager>, name: &'static str| async move {
+            m.neighbor_summaries()
+                .await
+                .into_iter()
+                .find(|n| n.link == name)
+                .map(|n| (n.area_id, n.state))
+        };
+        assert_eq!(
+            vlink_state(Arc::clone(&b), "vlink-0.0.0.1-3.3.3.3").await,
+            Some((Ipv4Addr::UNSPECIFIED, OspfNeighborState::Full))
+        );
+        assert_eq!(
+            vlink_state(Arc::clone(&c), "vlink-0.0.0.1-2.2.2.2").await,
+            Some((Ipv4Addr::UNSPECIFIED, OspfNeighborState::Full))
+        );
+        let at_a = |router: Ipv4Addr| {
+            let a = Arc::clone(&a);
+            async move {
+                a.database_summaries().await.into_iter().find(|l| {
+                    l.area_id.is_unspecified()
+                        && l.lsa_type == lsa::LSA_TYPE_ROUTER
+                        && l.advertising_router == router
+                })
+            }
+        };
+        assert_eq!(at_a(id(2)).await.unwrap().virtual_links, [id(3)]);
+        assert_eq!(at_a(id(3)).await.unwrap().virtual_links, [id(2)]);
+        for (m, router) in [(&b, id(2)), (&c, id(3))] {
+            let flags = router_flags(m, area1, router).await.unwrap();
+            assert_ne!(flags & lsa::ROUTER_FLAG_V, 0, "{router}");
+        }
+        // The backbone-less end is an ABR through its virtual link.
+        assert_ne!(
+            router_flags(&a, Ipv4Addr::UNSPECIFIED, id(3))
+                .await
+                .unwrap()
+                & lsa::ROUTER_FLAG_B,
+            0
+        );
+
+        // c drops its end: b's virtual neighbor dies, V and the type-4 link go.
+        c.set_virtual_links(Vec::new()).await;
+        settle(120).await;
+        let flags = router_flags(&b, area1, id(2)).await.unwrap();
+        assert_eq!(flags & lsa::ROUTER_FLAG_V, 0);
+        assert_eq!(
+            at_a(id(2)).await.unwrap().virtual_links,
+            Vec::<Ipv4Addr>::new()
+        );
     }
 
     /// RFC 3101 (#1156) over the in-memory wire: a (area 0) — b (ABR) — c

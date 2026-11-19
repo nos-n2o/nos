@@ -103,6 +103,7 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
         stub_default_cost: None,
         nssa_translate_always: false,
         nssa_default_originate: false,
+        virtual_links: Vec::new(),
     }
 }
 

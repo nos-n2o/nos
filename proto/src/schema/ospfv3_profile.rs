@@ -117,7 +117,7 @@ fn valid_instance_id(id: Option<u8>) -> garde::Result {
     }
 }
 
-fn valid_auth(keys: Option<&[OspfCryptoKey]>, cfg: &Config) -> garde::Result {
+pub(crate) fn valid_auth(keys: Option<&[OspfCryptoKey]>, cfg: &Config) -> garde::Result {
     let Some(keys) = keys else { return Ok(()) };
     valid_crypto_keys(keys, cfg)?;
     if keys.iter().any(|k| k.algorithm == OspfCryptoAlgorithm::Md5) {
@@ -246,6 +246,7 @@ mod tests {
             stub_default_cost: None,
             nssa_translate_always: false,
             nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 

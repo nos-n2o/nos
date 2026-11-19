@@ -532,6 +532,18 @@ pub enum OpError {
         /// Range prefix that was looked up.
         cidr: ipnet::Ipv6Net,
     },
+    /// No `OSPFv3` virtual link matches the key (`instance`, `area_id`, `router_id`).
+    #[error(
+        "virtual link to '{router_id}' not found in area '{area_id}' of ospfv3 instance '{instance}'"
+    )]
+    Ospfv3VirtualLinkNotFound {
+        /// Name of the owning instance that was looked up.
+        instance: String,
+        /// Transit area ID that was looked up.
+        area_id: Ipv4Addr,
+        /// Endpoint router id that was looked up.
+        router_id: Ipv4Addr,
+    },
     #[error(
         "virtual link to '{router_id}' not found in area '{area_id}' of ospf instance '{instance}'"
     )]

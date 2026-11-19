@@ -700,3 +700,7 @@ pub const FORGED_V6_CONTROL: &str = "2001:db8:98::/64";
 pub const OSPFV3_AREA_2: &str = "0.0.0.2";
 pub const OSPFV3_PROFILE_AREA2: &str = "ospfv3-profile-area2";
 pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
+/// `ospfv3-virtual-link`: the two ends' area-1 loopbacks, whose `/128` LA
+/// prefixes are the virtual link's addresses (prefixes no other phase uses).
+pub const OSPFV3_VLINK_LOOPBACK_B: &str = "2001:db8:a::2/128";
+pub const OSPFV3_VLINK_LOOPBACK_C: &str = "2001:db8:a::3/128";

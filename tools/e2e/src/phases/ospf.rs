@@ -4644,6 +4644,243 @@ pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
     flushed
 }
 
+/// Polls `r`'s `GET /v1/ospfv3/database` until one LSA satisfies `pred` (60s).
+async fn wait_lsa3(
+    r: &Router,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        if report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(&pred)
+        {
+            return Ok(());
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("{}: no {what} in its database: {last}", r.name())
+}
+
+/// RFC 5340 §4.7 virtual link (#1158), self-contained, three routers (the
+/// `ospfv3-abr-transit` topology): router-a in the backbone only (eth0.0),
+/// router-b the ABR (eth0.0 in area 0, eth1 in area 1), router-c on eth1 in
+/// area 1 only, detached from the backbone until a virtual link b<->c through
+/// area 1 joins it. Each end advertises an area-1 loopback: its `/128` LA
+/// prefix is the virtual link's address. The virtual adjacency must reach Full
+/// over the real VRF raw sockets (unicast to the far loopback, hop limit 64),
+/// both Router-LSAs carry the type-4 link in area 0 (seen at router-a) and the
+/// V bit in area 1, and router-c dropping its end takes the adjacency down on
+/// router-b within the dead interval, with the type-4 link and the V bit.
+pub async fn ospfv3_virtual_link(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
+            .await?;
+    }
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
+        .await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
+        .await?;
+    let result = ospfv3_virtual_link_run(w).await;
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn ospfv3_virtual_link_run(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let area1 = |id: Id, v4: &str, v6: &str, router_id: &str| {
+        strings(&[
+            "--interface",
+            "eth1",
+            "--address",
+            v4,
+            "--address6",
+            v6,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ])
+    };
+    // The area-1 loopback (the endpoint address) and the virtual link.
+    let vlink = |router_id: &str, loopback: &str, endpoint: &str| {
+        strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-loopback-address",
+            loopback,
+            "--ospfv3-loopback-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-virtual-link",
+            &format!("{OSPFV3_AREA_1}:{endpoint}"),
+        ])
+    };
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&area1(
+        B,
+        &format!("{OSPFV3_A1_IP_B}/24"),
+        OSPFV3_A1_ADDRESS_B.s(),
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+    b.provision(&vlink(
+        OSPFV3_ROUTER_ID_B,
+        OSPFV3_VLINK_LOOPBACK_B,
+        OSPFV3_ROUTER_ID_C,
+    ))
+    .await?;
+    c.provision_flags(&with_base(C, vec![])).await?;
+    c.provision_flags(&area1(
+        C,
+        &format!("{OSPFV3_A1_IP_C}/24"),
+        OSPFV3_A1_ADDRESS_C.s(),
+        OSPFV3_ROUTER_ID_C,
+    ))
+    .await?;
+    c.provision(&vlink(
+        OSPFV3_ROUTER_ID_C,
+        OSPFV3_VLINK_LOOPBACK_C,
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+
+    a.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        90,
+    )
+    .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+        0,
+        90,
+    )
+    .await?;
+
+    log("the virtual link b<->c comes up from area 1's spf and reaches full");
+    let b_link = format!("vlink-{OSPFV3_AREA_1}-{OSPFV3_ROUTER_ID_C}");
+    let c_link = format!("vlink-{OSPFV3_AREA_1}-{OSPFV3_ROUTER_ID_B}");
+    b.wait(&format!("ospfv3 virtual link up link={b_link} "))
+        .await?;
+    c.wait(&format!("ospfv3 virtual link up link={c_link} "))
+        .await?;
+    b.wait(&format!(
+        "ospfv3 neighbor reached full link={b_link} neighbor={OSPFV3_ROUTER_ID_C}"
+    ))
+    .await?;
+    c.wait(&format!(
+        "ospfv3 neighbor reached full link={c_link} neighbor={OSPFV3_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    // Router-LSA (legacy 0x2001, or RFC 8362 E-Router 0xA021) of `router`.
+    let router_lsa = |l: &serde_json::Value, router: &str, area: &str| {
+        l["area_id"] == area
+            && l["advertising_router"] == router
+            && matches!(l["lsa_type"].as_u64(), Some(0x2001 | 0xA021))
+            && l["age"].as_u64().is_some_and(|a| a < 3600)
+    };
+    log("type-4 links in area 0 (at router-a) and V bits in area 1");
+    for (router, far) in [
+        (OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C),
+        (OSPFV3_ROUTER_ID_C, OSPFV3_ROUTER_ID_B),
+    ] {
+        wait_lsa3(a, &format!("{router}'s type-4 link to {far}"), |l| {
+            router_lsa(l, router, OSPFV3_AREA)
+                && l["virtual_links"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|x| x == far))
+        })
+        .await?;
+    }
+    for (holder, router) in [(c, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID_C)] {
+        wait_lsa3(holder, &format!("{router}'s area-1 V bit"), |l| {
+            router_lsa(l, router, OSPFV3_AREA_1)
+                && l["router_flags"].as_u64().is_some_and(|f| f & 0x04 != 0)
+        })
+        .await?;
+    }
+
+    log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
+    c.provision(&strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_C,
+        "--ospfv3-clear-virtual-link",
+        &format!("{OSPFV3_AREA_1}:{OSPFV3_ROUTER_ID_B}"),
+    ]))
+    .await?;
+    c.wait(&format!("ospfv3 virtual link down link={c_link}"))
+        .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor state changed to down link={b_link}"),
+        0,
+        60,
+    )
+    .await?;
+    log("router-b withdraws its type-4 link and V bit");
+    wait_lsa3(
+        a,
+        "router-b's backbone Router-LSA without its type-4 link",
+        |l| {
+            router_lsa(l, OSPFV3_ROUTER_ID_B, OSPFV3_AREA)
+                && l["virtual_links"].as_array().is_some_and(Vec::is_empty)
+        },
+    )
+    .await?;
+    wait_lsa3(c, "router-b's area-1 Router-LSA without the V bit", |l| {
+        router_lsa(l, OSPFV3_ROUTER_ID_B, OSPFV3_AREA_1)
+            && l["router_flags"].as_u64().is_some_and(|f| f & 0x04 == 0)
+    })
+    .await
+}
+
 /// RFC 3101 NSSA over OSPFv3 (#1156), self-contained, the `ospfv3-abr-transit`
 /// topology with area 1 an NSSA: router-c (ASBR, eth1) redistributes an IPv6
 /// static as an NSSA-LSA (0x2007) that router-b, the only ABR and so the
