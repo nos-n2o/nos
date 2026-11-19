@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "tc", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "pam", "nss", "ssh", "radius"]
+members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "sandbox", "tc", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "pam", "nss", "ssh", "radius"]
 resolver = "3"
 
 [workspace.package]

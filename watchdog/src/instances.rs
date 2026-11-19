@@ -77,6 +77,8 @@ pub struct Managed {
     pub pki: Arc<Pki>,
     /// `--child-uid`/`--child-gid`, applied to every spawned instance.
     pub child_gid: Option<u32>,
+    /// The `nos-sandbox-exec` trampoline (`--sandbox-exec`); `None` only in tests.
+    pub sandbox_exec: Option<PathBuf>,
 }
 
 /// Warn interval while a respawn waits on its predecessor (#639).
@@ -285,7 +287,8 @@ async fn spawn_instance(instances: &mut Instances, name: &str, m: &Managed) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let spec = ProcessSpec::new(format!("{}[{name}]", m.daemon), m.bin.clone(), args)
         .with_identity(m.pki.clone(), m.role, name)
-        .with_role_uid(m.child_gid);
+        .with_role_uid(m.child_gid)
+        .with_sandbox(m.sandbox_exec.as_deref());
     info!(name = %name, "spawning {} for new {}", m.daemon, m.noun);
     let task = tokio::spawn(supervise_one(spec, m.policy, shutdown_rx));
     instances
@@ -351,6 +354,7 @@ mod tests {
             )
             .unwrap(),
             child_gid: None,
+            sandbox_exec: None,
         }
     }
 

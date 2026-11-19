@@ -4888,3 +4888,48 @@ pub async fn daemon_heartbeat(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(starting, base, 60).await?;
     Ok(())
 }
+
+/// `/proc/<pid>/status` of router-a's first process whose `comm` is `comm` (no `ps` or
+/// `pgrep` in the image; status is world-readable).
+pub(super) async fn proc_status(w: &World, comm: &str) -> anyhow::Result<String> {
+    let script = format!(
+        "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = {comm} ] && cat $p/status && break; done"
+    );
+    let (_, out) = w.dock.exec("router-a", &["sh", "-c", &script]).await?;
+    if !out.contains("NoNewPrivs:") {
+        bail!("no running process {comm} on router-a");
+    }
+    Ok(out)
+}
+
+/// `comm` must run with `NoNewPrivs` `nnp` and, if given, exactly the effective capabilities `cap_eff`.
+pub(super) async fn assert_sandbox(
+    w: &World,
+    comm: &str,
+    nnp: u8,
+    cap_eff: Option<&str>,
+) -> anyhow::Result<()> {
+    let st = proc_status(w, comm).await?;
+    let want_nnp = format!("NoNewPrivs:\t{nnp}");
+    let want_cap = cap_eff.map_or(String::new(), |c| format!("CapEff:\t{c}"));
+    if !st.contains(&want_nnp) || !st.contains(&want_cap) {
+        bail!("{comm}: wanted `{want_nnp}` and `{want_cap}`, got:\n{st}");
+    }
+    log(format!("{comm}: {want_nnp}, {want_cap}"));
+    Ok(())
+}
+
+/// #1211: every daemon is exec'd through `nos-sandbox-exec`, which sets `NO_NEW_PRIVS` and
+/// keeps exactly the target's file capabilities (the same `CapEff` as a direct exec).
+/// `nos-ospfd` is checked in `ospf`, `nos-sshd` (exempt, `NoNewPrivs: 0`) in `ssh-hostkey`.
+pub async fn sandbox_nnp(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    a.wait("starting process=nos-ribd.*sandbox=/usr/local/bin/nos-sandbox-exec")
+        .await?;
+    assert_sandbox(w, "nos-ribd", 1, Some(CAP_EFF_NET_ADMIN_RAW)).await?;
+    assert_sandbox(w, "nos-interfaced", 1, Some(CAP_EFF_NET_ADMIN_RAW)).await?;
+    assert_sandbox(w, "nos-bgpd", 1, Some(CAP_EFF_NET_RAW_BIND)).await?;
+    assert_sandbox(w, "nos-configd", 1, Some(CAP_EFF_NONE)).await?;
+    assert_sandbox(w, "nos-logd", 1, Some(CAP_EFF_NONE)).await?;
+    Ok(())
+}
