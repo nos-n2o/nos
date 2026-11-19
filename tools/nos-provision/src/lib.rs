@@ -1699,17 +1699,17 @@ pub struct Args {
     #[arg(long)]
     pub ospfv3_crypto_key: Option<String>,
     /// Same shape as `--ospf-interface-profile`, joining `OSPFv3` instead
-    /// (`SubinterfaceOp::SetOspfv3Profile`).
+    /// (`SubinterfaceOp::AddOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_interface_profile: Option<String>,
     /// Same shape as `--ospf-broadcast-domain-profile`, joining `OSPFv3`
-    /// instead (`BroadcastDomainOp::SetOspfv3Profile`).
+    /// instead (`BroadcastDomainOp::AddOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_broadcast_domain_profile: Option<String>,
-    /// Detaches `OSPFv3` from `--broadcast-domain`
-    /// (`BroadcastDomainOp::ClearOspfv3Profile`).
+    /// Detaches the named `OSPFv3` profile from `--broadcast-domain`
+    /// (`BroadcastDomainOp::RemoveOspfv3Profile`).
     #[arg(long, conflicts_with = "ospfv3_broadcast_domain_profile")]
-    pub clear_ospfv3_broadcast_domain_profile: bool,
+    pub clear_ospfv3_broadcast_domain_profile: Option<String>,
 
     /// If set, adds this IPv6 address to `--routing-table`'s loopback
     /// interface (`loopback-<routing-table>`) alongside `--loopback-address`
@@ -1722,10 +1722,10 @@ pub struct Args {
     #[arg(long)]
     pub ospfv3_loopback_profile: Option<String>,
 
-    /// Same shape as `--clear-ospf-loopback-profile`, joining `OSPFv3`
-    /// instead. Mutually exclusive with `--ospfv3-loopback-profile`.
+    /// Detaches the named `OSPFv3` profile from the loopback
+    /// (`InterfaceOp::RemoveOspfv3Profile`). Mutually exclusive with `--ospfv3-loopback-profile`.
     #[arg(long)]
-    pub clear_ospfv3_loopback_profile: bool,
+    pub clear_ospfv3_loopback_profile: Option<String>,
 
     /// If set, adds this IPv6 address to `--broadcast-domain`'s SVI
     /// alongside `--broadcast-domain-svi-address`.
@@ -3463,7 +3463,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     // `--ospfv3-loopback-address` adds a second (IPv6) address to the same
     // loopback interface `--loopback-address` (typically IPv4) already
     // ensures, since `OSPFv3` only ever advertises IPv6 prefixes.
-    if args.ospfv3_loopback_profile.is_some() && args.clear_ospfv3_loopback_profile {
+    if args.ospfv3_loopback_profile.is_some() && args.clear_ospfv3_loopback_profile.is_some() {
         bail!(
             "--ospfv3-loopback-profile and --clear-ospfv3-loopback-profile are mutually exclusive"
         );
@@ -3483,14 +3483,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: loopback_name.clone(),
             routing_table: args.routing_table.clone(),
         }));
-        ops.push(ConfigOp::Interface(InterfaceOp::SetOspfv3Profile {
+        ops.push(ConfigOp::Interface(InterfaceOp::AddOspfv3Profile {
             name: loopback_name.clone(),
             ospfv3_profile: profile,
         }));
     }
-    if args.clear_ospfv3_loopback_profile {
-        ops.push(ConfigOp::Interface(InterfaceOp::ClearOspfv3Profile {
+    if let Some(profile) = args.clear_ospfv3_loopback_profile.clone() {
+        ops.push(ConfigOp::Interface(InterfaceOp::RemoveOspfv3Profile {
             name: loopback_name,
+            ospfv3_profile: profile,
         }));
     }
 
@@ -4689,7 +4690,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
 
     if let Some(profile) = args.ospfv3_interface_profile.clone() {
-        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
             interface: args.interface.clone(),
             tag: args.subinterface_tag,
             ospfv3_profile: profile,
@@ -4698,16 +4699,17 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     if let Some(profile) = args.ospfv3_broadcast_domain_profile.clone() {
         ops.push(ConfigOp::BroadcastDomain(
-            BroadcastDomainOp::SetOspfv3Profile {
+            BroadcastDomainOp::AddOspfv3Profile {
                 name: args.broadcast_domain.clone(),
                 ospfv3_profile: profile,
             },
         ));
     }
-    if args.clear_ospfv3_broadcast_domain_profile {
+    if let Some(profile) = args.clear_ospfv3_broadcast_domain_profile.clone() {
         ops.push(ConfigOp::BroadcastDomain(
-            BroadcastDomainOp::ClearOspfv3Profile {
+            BroadcastDomainOp::RemoveOspfv3Profile {
                 name: args.broadcast_domain.clone(),
+                ospfv3_profile: profile,
             },
         ));
     }
@@ -5933,7 +5935,9 @@ mod tests {
             "--delete-loopback",
             "--clear-ospf-loopback-profile",
             "--clear-ospfv3-loopback-profile",
+            "p3",
             "--clear-ospfv3-broadcast-domain-profile",
+            "p3",
             "--delete-broadcast-domain-svi",
             "--clear-ssh-server",
             "--evpn-clear",
@@ -5977,8 +5981,9 @@ mod tests {
         );
         has(
             &all,
-            &ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfv3Profile {
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveOspfv3Profile {
                 name: "bd-svi".into(),
+                ospfv3_profile: "p3".into(),
             }),
         );
         assert!(!all
@@ -6096,6 +6101,7 @@ mod tests {
                     "--ospfv3-loopback-profile",
                     "p",
                     "--clear-ospfv3-loopback-profile",
+                    "p",
                 ],
                 "mutually exclusive",
             ),

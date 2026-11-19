@@ -56,7 +56,7 @@ fn sub(tag: u16, addrs: &[&str], rt: Option<&str>, profile: Option<&str>) -> Sub
         tag,
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         routing_table: rt.map(Into::into),
-        ospfv3_profile: profile.map(Into::into),
+        ospfv3_profiles: profile.map(Into::into).into_iter().collect(),
         ..Default::default()
     }
 }
@@ -72,7 +72,7 @@ fn iface(name: &str, subs: Vec<Subinterface>) -> Interface {
 fn loopback(name: &str, profile: &str) -> Interface {
     Interface {
         name: name.into(),
-        ospfv3_profile: Some(profile.into()),
+        ospfv3_profiles: vec![profile.into()],
         ..Default::default()
     }
 }
@@ -81,7 +81,7 @@ fn domain(name: &str, rt: Option<&str>, addrs: &[&str]) -> BroadcastDomain {
     BroadcastDomain {
         name: name.into(),
         routing_table: rt.map(Into::into),
-        ospfv3_profile: Some("p1".into()),
+        ospfv3_profiles: vec!["p1".into()],
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         ..Default::default()
     }
@@ -502,7 +502,7 @@ async fn resync_loopback_feeds_the_prefix_map() {
         loopback("loopback-gone", "p1"),
         // Not a loopback: carries the profile but is never a stub network.
         Interface {
-            ospfv3_profile: Some("p1".into()),
+            ospfv3_profiles: vec!["p1".into()],
             ..iface("eth9", vec![])
         },
     ];
@@ -878,7 +878,7 @@ fn attach_points_mixed_config_in_order() {
     let mut cfg = Config {
         interfaces: vec![
             Interface {
-                ospfv3_profile: Some("p1".into()),
+                ospfv3_profiles: vec!["p1".into()],
                 ..iface(
                     "loopback-a",
                     vec![
@@ -888,12 +888,12 @@ fn attach_points_mixed_config_in_order() {
                 )
             },
             Interface {
-                ospfv3_profile: Some("other".into()),
+                ospfv3_profiles: vec!["other".into()],
                 ..iface("eth1", vec![])
             },
             // Carries the profile but is no loopback.
             Interface {
-                ospfv3_profile: Some("p1".into()),
+                ospfv3_profiles: vec!["p1".into()],
                 ..iface("eth2", vec![])
             },
         ],
@@ -901,7 +901,7 @@ fn attach_points_mixed_config_in_order() {
         ..Default::default()
     };
     cfg.broadcast_domains.push(BroadcastDomain {
-        ospfv3_profile: Some("other".into()),
+        ospfv3_profiles: vec!["other".into()],
         ..domain("bd2", None, &[])
     });
 

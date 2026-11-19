@@ -3,7 +3,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profile_reference_valid,
+    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_valid,
     routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
     unique_key_in,
 };
@@ -89,9 +89,13 @@ pub struct Subinterface {
     /// run v2 and v3 simultaneously (real dual-stack routers do this
     /// routinely). Also requires `routing_table` set on this same
     /// subinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.
-    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    ///
+    /// A list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4
+    /// multiple instances on one link), distinct effective Instance IDs.
+    #[serde(default)]
+    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_valid(p, ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
-    pub ospfv3_profile: Option<String>,
+    pub ospfv3_profiles: Vec<String>,
 
     /// Overrides the MTU of this VLAN sub-link, in bytes. `None` follows the
     /// parent's MTU. Must not exceed the parent's effective MTU and is
@@ -171,7 +175,7 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
                 "ospf profile requires a routing-table on the same subinterface",
             ));
         }
-        if sub.ospfv3_profile.is_some() && sub.routing_table.is_none() {
+        if !sub.ospfv3_profiles.is_empty() && sub.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospfv3 profile requires a routing-table on the same subinterface",
             ));
@@ -278,11 +282,15 @@ pub struct Interface {
     pub ospf_profile: Option<String>,
 
     /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
-    /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
+    /// `Subinterface.ospfv3_profiles`'s doc comment for why this is a
     /// separate field rather than a widened `ospf_profile`.
-    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    ///
+    /// A list: at most one profile per `OSPFv3` instance (RFC 5340 §2.4
+    /// multiple instances on one link), distinct effective Instance IDs.
+    #[serde(default)]
+    #[garde(custom(|p: &Vec<String>, ctx: &Config| ospfv3_profiles_valid(p, ctx)))]
     #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
-    pub ospfv3_profile: Option<String>,
+    pub ospfv3_profiles: Vec<String>,
 
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     #[cli(topic = InterfaceSwitchingProfile)]
@@ -482,7 +490,7 @@ fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
                     "ospf profile requires a routing-table on the same interface",
                 ));
             }
-            if iface.ospfv3_profile.is_some() && iface.routing_table.is_none() {
+            if !iface.ospfv3_profiles.is_empty() && iface.routing_table.is_none() {
                 return Err(garde::Error::new(
                     "ospfv3 profile requires a routing-table on the same interface",
                 ));
@@ -490,7 +498,7 @@ fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
         } else if !iface.addresses.is_empty()
             || iface.routing_table.is_some()
             || iface.ospf_profile.is_some()
-            || iface.ospfv3_profile.is_some()
+            || !iface.ospfv3_profiles.is_empty()
         {
             return Err(garde::Error::new(
                 "physical interface must configure addresses/routing-table/ospf-profile on a subinterface (e.g. '.0'), not directly on the interface",
@@ -609,7 +617,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             name: name.to_string(),
             addresses: addresses
                 .iter()
@@ -644,7 +652,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 0,
             addresses: addresses
@@ -848,7 +856,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 0,
             addresses: vec![
@@ -876,7 +884,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 100,
             addresses: Vec::new(),
@@ -911,7 +919,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 100,
                 addresses: Vec::new(),
@@ -923,7 +931,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 100,
                 addresses: Vec::new(),
@@ -943,7 +951,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 4095,
             addresses: Vec::new(),
@@ -963,7 +971,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 0,
                 addresses: Vec::new(),
@@ -975,7 +983,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 4094,
                 addresses: Vec::new(),
@@ -1007,7 +1015,7 @@ mod tests {
 
     fn domain(name: &str) -> crate::schema::BroadcastDomain {
         crate::schema::BroadcastDomain {
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             vni: None,
             rd: None,
             route_targets_import: Vec::new(),

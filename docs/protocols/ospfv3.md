@@ -74,7 +74,7 @@ $C -X PUT -H 'Content-Type: application/json' \
   -d '{"name":"v3","router_id":"2.2.2.2","areas":[{"area_id":"0.0.0.0","profiles":[{"name":"p6"}]}]}' \
   $B/v1/transactions/v3/ospfv3-instance/v3
 $C -X PUT -H 'Content-Type: application/json' -d '"v3"' $B/v1/transactions/v3/routing-table/rt1/ospfv3-instance
-$C -X PUT -H 'Content-Type: application/json' -d '"p6"' $B/v1/transactions/v3/interface/eth0/subinterface/0/ospfv3-profile
+$C -X PUT -H 'Content-Type: application/json' -d '["p6"]' $B/v1/transactions/v3/interface/eth0/subinterface/0/ospfv3-profiles
 $C -X POST $B/v1/transactions/v3/commit
 ```
 
@@ -122,7 +122,7 @@ The REST equivalent on router-b adds an address to its loopback and attaches the
 $C -X POST $B/v1/transactions/v3lo
 $C -X PUT -H 'Content-Type: application/json' -d '{"address":"2001:db8:4::1/128","label":null}' \
   $B/v1/transactions/v3lo/interface/loopback-rt1/address/2001:db8:4::1%2F128
-$C -X PUT -H 'Content-Type: application/json' -d '"p6"' $B/v1/transactions/v3lo/interface/loopback-rt1/ospfv3-profile
+$C -X PUT -H 'Content-Type: application/json' -d '["p6"]' $B/v1/transactions/v3lo/interface/loopback-rt1/ospfv3-profiles
 $C -X POST $B/v1/transactions/v3lo/commit
 ```
 
@@ -424,7 +424,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | address family | `set ospfv3 instance <name> address-family <ipv6-unicast\|ipv4-unicast>`; `delete … address-family` | `ospfv3-instance/<name>/address-family` | `Ipv6Unicast` (default), `Ipv4Unicast` | every profile's instance ID within the family's range | `ipv4-unicast` sets the AF-bit and requires it from neighbours | `show this` in the instance |
 | instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31 or 64 to 95; unset means 0 | in the instance's address family range | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/profile/<p>/auth` | default | | | |
-| subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3` | `interface/<if>/subinterface/<tag>/ospfv3-profile`, `interface/loopback-<table>/ospfv3-profile` | | the attach point needs `routing-table` | runs OSPFv3 on the link | `show ospfv3 neigh` |
-| broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profile` | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |
+| subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3 <p>` | `interface/<if>/subinterface/<tag>/ospfv3-profiles`, `interface/loopback-<table>/ospfv3-profiles` (a list) | | the attach point needs `routing-table`; at most one profile per instance, distinct effective Instance IDs | runs OSPFv3 on the link | `show ospfv3 neigh` |
+| broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3 <p>` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profiles` (a list) | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |
 
 OSPFv3 profiles have no `simple-password` and no `extended-sequence-numbers`. The instance's `routing_table` and `redistribute_policy` JSON fields are filled in by the router and are read-only.

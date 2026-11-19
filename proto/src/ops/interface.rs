@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{Config, Interface, InterfaceAddress, LldpDestination};
 
-use super::OpError;
+use super::{add_ospfv3_profile, remove_ospfv3_profile, OpError};
 
 /// An edit to a single named `Interface` within a transaction's in-progress
 /// config. Applied without validation — `garde` validation only runs at
@@ -103,17 +103,19 @@ pub enum InterfaceOp {
         /// Name of the interface this op targets.
         name: String,
     },
-    /// Sets the `OSPFv3` profile of the interface to `ospfv3_profile`.
-    SetOspfv3Profile {
+    /// Idempotently attaches one more `OSPFv3` profile to the interface.
+    AddOspfv3Profile {
         /// Name of the interface this op targets.
         name: String,
         /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
-    /// Clears the `OSPFv3` profile of the interface so it reverts to the default.
-    ClearOspfv3Profile {
+    /// Detaches one `OSPFv3` profile from the interface (error when not attached).
+    RemoveOspfv3Profile {
         /// Name of the interface this op targets.
         name: String,
+        /// Name of the `OSPFv3` profile to detach.
+        ospfv3_profile: String,
     },
     /// Sets the switching profile of the interface to `switching_profile`.
     SetSwitchingProfile {
@@ -260,15 +262,24 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.ospf_profile = None;
                 Ok(())
             }
-            InterfaceOp::SetOspfv3Profile {
+            InterfaceOp::AddOspfv3Profile {
                 name,
                 ospfv3_profile,
             } => {
-                find_interface_mut(config, name)?.ospfv3_profile = Some(ospfv3_profile.clone());
+                add_ospfv3_profile(
+                    &mut find_interface_mut(config, name)?.ospfv3_profiles,
+                    ospfv3_profile,
+                );
                 Ok(())
             }
-            InterfaceOp::ClearOspfv3Profile { name } => {
-                find_interface_mut(config, name)?.ospfv3_profile = None;
+            InterfaceOp::RemoveOspfv3Profile {
+                name,
+                ospfv3_profile,
+            } => {
+                remove_ospfv3_profile(
+                    &mut find_interface_mut(config, name)?.ospfv3_profiles,
+                    ospfv3_profile,
+                )?;
                 Ok(())
             }
             InterfaceOp::SetSwitchingProfile {
@@ -350,7 +361,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             switching_profile: None,
             port_aggregate: None,
             stp_port_profile: None,
@@ -396,7 +407,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,

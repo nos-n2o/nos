@@ -96,7 +96,7 @@ Over REST, the EVPN fields are fields of the broadcast domain. Here the whole do
 $C -X POST "$B/v1/transactions/bd?base=current"
 $C -X PUT -H 'Content-Type: application/json' -d '{
   "name": "bd100", "addresses": [], "routing_table": null,
-  "ospf_profile": null, "ospfv3_profile": null,
+  "ospf_profile": null, "ospfv3_profiles": [],
   "vni": 10100, "rd": "65001:100",
   "route_targets_import": ["65000:10100"], "route_targets_export": ["65000:10100"],
   "vtep_source": {"Interface": {"interface": "eth0", "label": null}},
