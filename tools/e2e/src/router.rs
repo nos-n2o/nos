@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use clap::Parser;
-use nos_proto::Config;
+use nos_proto::{BroadcastDomainOp, Config, ConfigOp, InterfaceOp, SubinterfaceOp};
 use nos_provision::{apply_bfd, build_ops, Args};
 use reqwest::Method;
 use serde_json::Value;
@@ -15,6 +15,34 @@ use crate::docker::{ContainerSpec, Dock};
 use crate::lab::Addr;
 use crate::logs::Logs;
 use crate::rest::Rest;
+
+/// An `--ospfv3-*-profile` flag used to replace the attach point's profile;
+/// since #1278 the op only adds. Every phase before the second-instance one
+/// (#1280) wants the old meaning, so empty the list before the add.
+fn replace_ospfv3_profiles(config: &mut Config, op: &ConfigOp) {
+    let list = match op {
+        ConfigOp::Interface(InterfaceOp::AddOspfv3Profile { name, .. }) => config
+            .interfaces
+            .iter_mut()
+            .find(|i| &i.name == name)
+            .map(|i| &mut i.ospfv3_profiles),
+        ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile { interface, tag, .. }) => config
+            .interfaces
+            .iter_mut()
+            .find(|i| &i.name == interface)
+            .and_then(|i| i.subinterfaces.iter_mut().find(|s| s.tag == *tag))
+            .map(|s| &mut s.ospfv3_profiles),
+        ConfigOp::BroadcastDomain(BroadcastDomainOp::AddOspfv3Profile { name, .. }) => config
+            .broadcast_domains
+            .iter_mut()
+            .find(|d| &d.name == name)
+            .map(|d| &mut d.ospfv3_profiles),
+        _ => None,
+    };
+    if let Some(list) = list {
+        list.clear();
+    }
+}
 
 pub fn log(msg: impl AsRef<str>) {
     eprintln!("[nos-e2e] {}", msg.as_ref());
@@ -503,6 +531,7 @@ impl Router {
         let ops = build_ops(&args)?;
         self.edit(|config| {
             for op in &ops {
+                replace_ospfv3_profiles(config, op);
                 op.apply(config).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             apply_bfd(&args, config);

@@ -5639,7 +5639,8 @@ pub async fn ospfv3_hybrid(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&loopback, loop_a, 60).await?;
     b.wait_new(&loopback, loop_b, 60).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
 
     log("no Network-LSA is held (rfc 6845 4.5)");
     let mut left = String::new();
