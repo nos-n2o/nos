@@ -201,6 +201,56 @@ fn element_key(fs: &[Field]) -> Option<&'static str> {
     crate::config_path::key_field(fs.iter().map(|f| f.name))
 }
 
+/// Removes from a serialized `Config` every `#[cli(hidden)]` field (the
+/// derived mirrors the module does not declare), so the data is valid
+/// instance data of [`render`]'s module (#1177).
+pub fn strip_hidden(root: &mut serde_json::Value) {
+    fn fields(v: &mut serde_json::Value, fs: &[Field]) {
+        let serde_json::Value::Object(m) = v else {
+            return;
+        };
+        for f in fs {
+            if f.hidden {
+                m.remove(f.name);
+            } else if let Some(c) = m.get_mut(f.name) {
+                kind(c, &(f.kind)());
+            }
+        }
+    }
+    fn variant(c: &mut serde_json::Value, p: &Payload) {
+        match p {
+            Payload::Newtype(k) => kind(c, &k()),
+            Payload::Struct(fs) => fields(c, fs),
+            Payload::Unit => {}
+        }
+    }
+    fn kind(v: &mut serde_json::Value, k: &Kind) {
+        match k {
+            Kind::Option(i) => kind(v, &i()),
+            Kind::Struct(n) => fields(v, n.fields),
+            Kind::List(i) => {
+                let inner = i();
+                if let serde_json::Value::Array(a) = v {
+                    for e in a {
+                        kind(e, &inner);
+                    }
+                }
+            }
+            Kind::Enum(vs) => {
+                if let serde_json::Value::Object(m) = v {
+                    for var in *vs {
+                        if let Some(c) = m.get_mut(var.name) {
+                            variant(c, &var.payload);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    fields(root, cli::root().fields);
+}
+
 fn unwrap_option(k: Kind) -> Kind {
     match k {
         Kind::Option(i) => unwrap_option(i()),
@@ -211,6 +261,17 @@ fn unwrap_option(k: Kind) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_fields_are_stripped_from_data() {
+        let mut v = serde_json::json!({"bgp_instances": [
+            {"name": "r1", "routing_table": "rt1", "redistribute_policy": null, "asn": 1}]});
+        strip_hidden(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({"bgp_instances": [{"name": "r1", "asn": 1}]})
+        );
+    }
 
     #[test]
     fn renders_deterministically_with_expected_shapes() {

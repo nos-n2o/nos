@@ -78,6 +78,9 @@ jobs:
           cache-to: type=gha,mode=min
       # Kernel modules the routers need + file capabilities on nos-ribd
       # (the same script `make e2e-preflight` runs locally).
+      # `yanglint` is the independent oracle of the `restconf-conformance` phase (#1177);
+      # run on the host, never in the image.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyang2-tools
       - run: df -h /
       - run: tools/ci/e2e-preflight.sh
       - name: Run group

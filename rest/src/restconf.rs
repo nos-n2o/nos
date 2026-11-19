@@ -334,6 +334,25 @@ fn select(v: &Value, sels: &[Sel]) -> Value {
     }
 }
 
+/// An unset optional field serializes as `null`, which RFC 7951 does not allow
+/// for a leaf: drop it (absent means unset; found by the yanglint oracle, #1177).
+fn strip_nulls(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.retain(|_, c| !c.is_null());
+            for c in m.values_mut() {
+                strip_nulls(c);
+            }
+        }
+        Value::Array(a) => {
+            for c in a {
+                strip_nulls(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `depth=n`: the target is level 1; a container or list at the last level
 /// is returned empty (its children are level `n + 1`).
 fn prune(v: Value, depth: usize) -> Value {
@@ -421,9 +440,10 @@ async fn read(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiResu
     {
         return Ok((StatusCode::NOT_MODIFIED, [etag(generation)]).into_response());
     }
-    let mut v = config_path::get(&cfg.redacted(), &t.segs)
-        .map_err(path_err)?
-        .clone();
+    let mut doc = cfg.redacted();
+    nos_proto::yang::strip_hidden(&mut doc);
+    let mut v = config_path::get(&doc, &t.segs).map_err(path_err)?.clone();
+    strip_nulls(&mut v);
     if q.nonconfig {
         // No operational state lives in this datastore.
         return Ok((StatusCode::NO_CONTENT, [etag(generation)]).into_response());
@@ -830,6 +850,13 @@ mod tests {
 
     fn segs(p: &str) -> Vec<String> {
         parse_path(p).unwrap().segs
+    }
+
+    #[test]
+    fn unset_fields_are_absent_not_null() {
+        let mut v = json!({"a": null, "b": [{"c": null, "d": 1}], "e": {"f": null}});
+        strip_nulls(&mut v);
+        assert_eq!(v, json!({"b": [{"d": 1}], "e": {}}));
     }
 
     #[test]
