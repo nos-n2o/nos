@@ -11,6 +11,7 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
   - [Authenticate a link (RFC 7166)](#authenticate-a-link-rfc-7166)
   - [Set the instance ID](#set-the-instance-id)
   - [Use extended LSAs (RFC 8362)](#use-extended-lsas-rfc-8362)
+  - [Use sparse mode (RFC 8362 §3)](#use-sparse-mode-rfc-8362-3)
   - [Restart without dropping routes (RFC 5187)](#restart-without-dropping-routes-rfc-5187)
   - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
   - [Add a second area (ABR)](#add-a-second-area-abr)
@@ -207,7 +208,14 @@ What happens when you switch:
 - The router then flushes the LSAs of the mode it left (they reach age 3600), so neighbours drop them within about 10 seconds instead of keeping them for an hour.
 - `show ospfv3 database` can show the old LSAs at age 3600 for those few seconds.
 
-RFC 8362 intends full mode to be enabled on every router of an area at once, and that is how it has been tested in NOS; running an area with some routers in each mode is not tested.
+RFC 8362 intends full mode to be enabled on every router of an area at once; use sparse mode (next section) when the area mixes routers with and without extended-LSA support.
+
+### Use sparse mode (RFC 8362 §3)
+
+`set ospfv3 instance <name> extended-lsa-sparse` keeps the RFC 5340 LSAs as the topology and prefix carriers, so full-mode and legacy-only routers in the same area still interoperate with this one. It still reads extended LSAs from full-mode neighbours and merges them into SPF; a link or prefix present in both a legacy LSA and its extended form counts once. It is mutually exclusive with `extended-lsa`: the commit is refused when both are on. `delete ospfv3 instance <name> extended-lsa-sparse` turns it off.
+
+- NOS originates no extended LSA in sparse mode: it has no TE, SR or other TLV content a legacy LSA cannot hold, so the origination is the same as with both modes off. Extended LSAs of this router's earlier full mode are flushed on the switch, like any mode change.
+- Verified with router-a sparse, router-b full and router-c legacy-only on one bridge (`nos-e2e ospfv3-extended-lsa-sparse`).
 
 ### Restart without dropping routes (RFC 5187)
 
@@ -384,7 +392,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, routes across virtual links (the adjacency itself works), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), routes across virtual links (the adjacency itself works), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
 
 ## Configuration reference
 
@@ -395,6 +403,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | instance | `edit ospfv3 instance <name>`; `delete ospfv3 instance <name>` | `ospfv3-instance/<name>` | string, 1 to 64 characters | unique among OSPFv3 instances | names the instance | `show config` |
 | router ID | `set ospfv3 instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospfv3-instance/<name>/router-id` | dotted quad | | router ID in Hellos and LSAs | `show ospfv3 neigh` on the neighbour |
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
+| extended LSAs, sparse | `set ospfv3 instance <name> extended-lsa-sparse`; `delete ospfv3 instance <name> extended-lsa-sparse` (absolute only) | `ospfv3-instance/<name>/extended-lsa-sparse` | boolean; default `false`; exclusive with `extended-lsa` | | RFC 8362 sparse mode: legacy LSAs, extended ones merged from neighbours | `show ospfv3 database` |
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
 | LSDB overload limit | `set ospfv3 instance <name> max-lsa <n>`; `delete ospfv3 instance <name> max-lsa` | `ospfv3-instance/<name>/max-lsa` | 1 to 1000000; 100000 when unset | | LSAs not originated by this router that one store (each area, the AS scope, each link's Link-LSAs) holds; a new LSA past it is discarded unacknowledged, held ones stay updatable, own and MaxAge LSAs never count, no neighbour is reset, links do not restart | `ospfv3 lsdb limit reached` (rate-limited, with `refused` total) |

@@ -498,6 +498,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
+        extended_lsa_sparse = own.extended_lsa_sparse,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
         max_metric_on_startup = ?own.max_metric_on_startup,
@@ -506,7 +507,12 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
-    links.set_extended_lsa(own.extended_lsa);
+    // RFC 8362 Sparse mode originates exactly the legacy set (the validator
+    // keeps it exclusive with Full mode), so only Full mode flips the flavor.
+    // ponytail: no E-LSA TLV generation: NOS has no TE/SR/multi-TLV content a
+    // legacy LSA cannot hold; add it when such a consumer exists. Received
+    // E-LSAs are already merged into SPF (`spf::merge_router_fragments`).
+    links.set_extended_lsa(own.extended_lsa && !own.extended_lsa_sparse);
     links.set_graceful_restart(own.graceful_restart_grace_period);
     links.set_max_lsa(own.max_lsa);
     links.set_max_metric(

@@ -1599,6 +1599,9 @@ pub struct Args {
     /// RFC 8362 Full mode for that instance (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_extended_lsa: bool,
+    /// RFC 8362 Sparse mode for that instance (requires `--ospfv3-instance`).
+    #[arg(long)]
+    pub ospfv3_extended_lsa_sparse: bool,
     /// RFC 5187 graceful-restart grace period (seconds) for that instance
     /// (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -4416,11 +4419,21 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
-        if args.ospfv3_extended_lsa {
+        if args.ospfv3_extended_lsa && args.ospfv3_extended_lsa_sparse {
+            bail!("--ospfv3-extended-lsa and --ospfv3-extended-lsa-sparse are mutually exclusive");
+        }
+        // Each mode flag switches the other off: provisioning is cumulative.
+        if args.ospfv3_extended_lsa || args.ospfv3_extended_lsa_sparse {
             ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
                 name: name.clone(),
-                enabled: true,
+                enabled: args.ospfv3_extended_lsa,
             }));
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetExtendedLsaSparse {
+                    name: name.clone(),
+                    enabled: args.ospfv3_extended_lsa_sparse,
+                },
+            ));
         }
         if let Some(af) = &args.ospfv3_address_family {
             let address_family = match af.as_str() {
@@ -5693,6 +5706,32 @@ mod tests {
                 enabled: true,
             }),
         );
+    }
+
+    #[test]
+    fn ospfv3_sparse_switches_full_mode_off() {
+        let base = ["--ospfv3-instance", "o3", "--ospfv3-router-id", "1.1.1.1"];
+        let ops = ops(&[&base[..], &["--ospfv3-extended-lsa-sparse"]].concat()).unwrap();
+        let set = |full, enabled| {
+            if full {
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
+                    name: "o3".into(),
+                    enabled,
+                })
+            } else {
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsaSparse {
+                    name: "o3".into(),
+                    enabled,
+                })
+            }
+        };
+        assert!(ops.contains(&set(true, false)) && ops.contains(&set(false, true)));
+        assert!(err(&[
+            &base[..],
+            &["--ospfv3-extended-lsa", "--ospfv3-extended-lsa-sparse"]
+        ]
+        .concat())
+        .contains("mutually exclusive"));
     }
 
     #[test]

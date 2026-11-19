@@ -1403,6 +1403,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Originate RFC 8362 extended LSAs (Full mode).",
             "Makes the instance originate and use the RFC 8362 E-Router/E-Link/E-Intra-Area-Prefix LSAs instead of the legacy formats. Every router in the area must agree. `delete` returns to legacy LSAs.",
         ),
+        Topic::Ospfv3InstanceExtendedLsaSparse => (
+            "Use RFC 8362 Sparse mode (legacy LSAs plus extended LSAs from neighbors).",
+            "Makes the instance originate the legacy RFC 5340 LSAs, which carry topology and prefixes, so full-mode and legacy-only routers in the same area interoperate, and merge any extended LSAs of neighbors into SPF. Exclusive with extended-lsa. `delete` turns it off.",
+        ),
         Topic::Ospfv3InstanceGracefulRestart => (
             "Announce an RFC 5187 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",

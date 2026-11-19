@@ -64,6 +64,15 @@ pub struct Ospfv3Instance {
     #[cli(topic = Ospfv3InstanceExtendedLsa)]
     pub extended_lsa: bool,
 
+    /// RFC 8362 Sparse mode: the RFC 5340 legacy LSAs carry topology and
+    /// prefixes (so full-mode and legacy-only routers in the area still
+    /// interoperate); E-LSAs from neighbors are merged into SPF. Mutually
+    /// exclusive with `extended_lsa`. Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceExtendedLsaSparse, words = "extended-lsa-sparse")]
+    pub extended_lsa_sparse: bool,
+
     /// RFC 5187 graceful restart: on a planned shutdown, send a Grace-LSA
     /// asking every `Full` neighbor to keep the adjacency (and this router's
     /// routes) for this many seconds while the daemon restarts. `None`
@@ -156,6 +165,11 @@ impl Ospfv3AddressFamily {
 /// range (RFC 5838 §2.1), so an IPv4-unicast instance needs an explicit one.
 pub(crate) fn valid_address_families(instances: &[Ospfv3Instance]) -> garde::Result {
     for i in instances {
+        if i.extended_lsa && i.extended_lsa_sparse {
+            return Err(garde::Error::new(
+                "extended-lsa and extended-lsa-sparse are mutually exclusive (RFC 8362 Full vs Sparse mode)",
+            ));
+        }
         let range = i.address_family.instance_ids();
         let bad = i
             .areas
@@ -183,6 +197,7 @@ impl Default for Ospfv3Instance {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
@@ -233,6 +248,7 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
@@ -266,6 +282,20 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a"), instance("vrf-b")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn sparse_and_full_extended_lsa_are_exclusive() {
+        let with = |full, sparse| {
+            let mut i = instance("o1");
+            i.extended_lsa = full;
+            i.extended_lsa_sparse = sparse;
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(false, true));
+        assert!(with(true, false));
+        assert!(!with(true, true));
     }
 
     #[test]

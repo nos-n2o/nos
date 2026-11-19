@@ -540,6 +540,15 @@ async fn resync_applies_the_instance_knobs() {
 }
 
 #[tokio::test]
+async fn resync_sparse_mode_originates_the_legacy_flavor() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].extended_lsa_sparse = true;
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    assert!(!e.links.extended_lsa());
+}
+
+#[tokio::test]
 async fn resync_own_instance_missing_clears_the_routing_table() {
     let mut e = Env::ready(Config::default());
     e.ctx.routing_table_tx.send(Some("stale".into())).unwrap();

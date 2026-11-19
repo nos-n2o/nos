@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-23 {
+  revision 2026-11-24 {
     description "Generated.";
   }
 
@@ -1182,6 +1182,10 @@ module nos-config {
     leaf extended_lsa {
       type boolean;
       description "Originate RFC 8362 extended LSAs (Full mode).";
+    }
+    leaf extended_lsa_sparse {
+      type boolean;
+      description "Use RFC 8362 Sparse mode (legacy LSAs plus extended LSAs from neighbors).";
     }
     leaf graceful_restart_grace_period {
       type uint16;

@@ -1982,6 +1982,37 @@ mod tests {
         assert_eq!(routes, sorted(&legacy));
     }
 
+    /// RFC 8362 §3 Sparse mode: a router may originate both a legacy LSA and
+    /// its E-form with the same content; links and prefixes count once.
+    #[test]
+    fn legacy_and_extended_forms_of_one_router_are_not_double_counted() {
+        let root = router_id(1);
+        let w = router_id(2);
+        let stub: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let legacy = [
+            router_lsa(root, vec![p2p(w, 1, 2, 5)]),
+            router_lsa(w, vec![p2p(root, 2, 1, 5)]),
+            link_lsa(w, 2, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(w, vec![(stub, 10)]),
+        ];
+        let mut both: Vec<Arc<Lsa>> = legacy.to_vec();
+        let mut e_router = (*legacy[1]).clone();
+        e_router.header.lsa_type = lsa::LSA_TYPE_E_ROUTER;
+        both.push(Arc::new(e_router));
+        let mut e_prefix = (*legacy[3]).clone();
+        e_prefix.header.lsa_type = lsa::LSA_TYPE_E_INTRA_AREA_PREFIX;
+        if let LsaBody::IntraAreaPrefix(p) = &mut e_prefix.body {
+            p.referenced_ls_type = lsa::LSA_TYPE_E_ROUTER;
+        }
+        both.push(Arc::new(e_prefix));
+        let routes = compute(root, &both);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].metric, 15);
+        assert_eq!(routes[0].prefix, stub);
+        let (merged, _, _) = routers_networks_links(&both);
+        assert_eq!(merged[&w].links.len(), 1);
+    }
+
     /// A flushed (`MaxAge`) Router-LSA of w's other flavor — here with no link
     /// back to root — is ignored, whichever order it comes in (#149).
     #[test]

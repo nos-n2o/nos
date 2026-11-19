@@ -582,6 +582,14 @@ pub const OSPFV3_VLAN_MOVED_COST: u16 = 5;
 pub const OSPFV3_VLAN_OTHER_COST: u16 = 1000;
 /// router-c's loopback for the `ospfv3-dr` multicast data-plane proof (#879).
 pub const OSPFV3_DR_LOOPBACK_ADDRESS_C: &str = "2001:db8:4::8/128";
+/// `ospfv3-extended-lsa-sparse`: one loopback per router (a, b, c).
+pub const OSPFV3_SPARSE_LOOPBACKS: [&str; 3] = [
+    "2001:db8:a::1/128",
+    "2001:db8:a::2/128",
+    "2001:db8:a::3/128",
+];
+/// 0x2001 (legacy Router-LSA) as `lsa_type` prints in the logs.
+pub const LSA_TYPE_ROUTER_V3: u16 = 0x2001;
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
 pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 /// RFC 5340 AS-External-LSA (0x4005) and RFC 8362 E-AS-External-LSA (0xC025),
