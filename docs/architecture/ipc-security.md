@@ -47,6 +47,14 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 - The kernel then refuses a writable+executable mapping and `mprotect` of a writable mapping to executable; inherited across fork and exec, never liftable by the daemon.
 - `nos-sshd`'s children (`sshd -i`, login shells) inherit it too: JIT-based tools (node, JVM, PyPy) fail in an ssh session. Accepted (owner decision, #1210).
 
+## Sandbox (#1211, part of #1186)
+
+- Every daemon but `nos-sshd` runs `NO_NEW_PRIVS`: the watchdog execs `nos-sandbox-exec` (crate `sandbox/`), which sets it and execs the daemon. Container-level `no-new-privileges` stays off: it would also strip the watchdog's own file capabilities.
+- The clip rule: under `NO_NEW_PRIVS` the exec'd file's permitted set is intersected with the caller's permitted set. So the trampoline holds, as file capabilities, the union of what daemons need (`cap_net_admin,cap_net_raw,cap_net_bind_service`; keep equal to the other `setcap` lines in the `Dockerfile`), reads the target's `security.capability` xattr and trims itself to exactly that before `NO_NEW_PRIVS` and `execv`. The daemon then gets its own file capabilities, identical to a direct exec (the `sandbox-nnp` phase asserts `CapEff` per daemon).
+- Exposure: any process can exec the trampoline, but under `NO_NEW_PRIVS` it gets only the target's xattr capabilities, never more than a direct exec of that target. Targets are confined to regular files directly in `/usr/local/bin` (canonicalised, so a symlink out is refused). It never execs unsandboxed: any error exits 126.
+- `nos-sshd` is exempt: it runs as root and `NO_NEW_PRIVS` would break its login `setuid`. A root-run daemon would also lose root's implicit capabilities under the clip rule: exempt it or give it xattr caps.
+- Pending (#1217): a per-role seccomp filter between `NO_NEW_PRIVS` and `execv` (the `--profile` argument is already passed).
+
 ## uid model (#512, #513)
 
 - **Who runs as whom.** `nos-watchdogd` runs as `nos-wd` (uid 990); it starts each daemon as its role's own user `nos-<role>` (uids 10001+ in `Role` declaration order, table in `watchdog/src/uids.rs`: `role_uid`, an exhaustive `match`, so a new `Role` won't compile until it has a uid). The image's `ENTRYPOINT` passes `--child-gid` (group `nos`), which also turns per-role uids on; unset (tests, non-container runs) every child keeps the watchdog's uid. `nos` (uid 991) is the shared client user: the `nos` shell, `nos-provision`, `nos-e2e` execs. Everyone has primary group `nos`.

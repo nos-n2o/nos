@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -36,6 +36,9 @@ pub struct ProcessSpec {
     /// Extra variables for this child only, applied after the scrubbed
     /// `CHILD_ENV` allowlist (which stays untouched for everyone else).
     pub env: Vec<(String, String)>,
+    /// `Some(path)`: the child is exec'd through `nos-sandbox-exec` at `path`
+    /// (`NO_NEW_PRIVS`, #1211). `None` only for tests and the sshd exemption.
+    pub sandbox: Option<PathBuf>,
 }
 
 /// Which certificate a child is issued: `nos://<role>/<name>`.
@@ -61,7 +64,39 @@ impl ProcessSpec {
             identity: None,
             uid: None,
             env: Vec::new(),
+            sandbox: None,
         }
+    }
+
+    /// Routes the child through the `nos-sandbox-exec` trampoline at `exec`
+    /// (`None`: no trampoline, for tests). A no-op for `Role::Sshd`: it runs as
+    /// root and `NO_NEW_PRIVS` would break its login `setuid`. Call after
+    /// `with_identity`, like `with_role_uid`.
+    #[must_use]
+    pub fn with_sandbox(mut self, exec: Option<&Path>) -> Self {
+        let sshd = self.identity.as_ref().is_some_and(|i| i.role == Role::Sshd);
+        self.sandbox = exec.filter(|_| !sshd).map(Path::to_path_buf);
+        self
+    }
+
+    /// The program and argument vector actually exec'd: the daemon itself, or
+    /// the trampoline followed by `--profile <role> -- <daemon> <args...>`.
+    #[must_use]
+    pub fn command_line(&self) -> (PathBuf, Vec<String>) {
+        let Some(exec) = &self.sandbox else {
+            return (self.program.clone(), self.args.clone());
+        };
+        let profile = self
+            .identity
+            .as_ref()
+            .map_or("none", |i| i.role.as_str())
+            .to_string();
+        let args = ["--profile".to_string(), profile, "--".to_string()]
+            .into_iter()
+            .chain([self.program.display().to_string()])
+            .chain(self.args.iter().cloned())
+            .collect();
+        (exec.clone(), args)
     }
 
     /// Adds one environment variable to this child (on top of the allowlist).
@@ -209,6 +244,7 @@ pub async fn supervise_one(
         info!(
             process = %spec.name,
             program = %spec.program.display(),
+            sandbox = %spec.sandbox.as_ref().map_or("none".into(), |p| p.display().to_string()),
             uid = spec.uid.map(|i| i.0),
             gid = spec.uid.map(|i| i.1),
             env = %spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","),
@@ -216,8 +252,9 @@ pub async fn supervise_one(
         );
         let start = Instant::now();
 
-        let mut command = Command::new(&spec.program);
-        command.args(&spec.args);
+        let (program, args) = spec.command_line();
+        let mut command = Command::new(program);
+        command.args(args);
         command.env_clear().envs(allowed_env(std::env::vars_os()));
         command.envs(spec.env.iter().cloned());
         if let Some((uid, gid)) = spec.uid {
@@ -530,6 +567,53 @@ mod backoff_tests {
         // No identity, no role, no uid.
         let bare = ProcessSpec::new("x", "/bin/true", vec![]);
         assert_eq!(bare.with_role_uid(Some(992)).uid, None);
+    }
+
+    #[test]
+    fn sandbox_wraps_the_command_line_except_for_sshd() {
+        let pki = Pki::start(
+            tempfile::tempdir().unwrap().path(),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let exec = PathBuf::from("/usr/local/bin/nos-sandbox-exec");
+        let spec = |role| {
+            ProcessSpec::new(
+                "x",
+                "/usr/local/bin/nos-ribd",
+                vec!["--a".into(), "b".into()],
+            )
+            .with_identity(pki.clone(), role, "t")
+        };
+        // Off: the daemon itself.
+        let plain = spec(Role::Ribd).with_sandbox(None);
+        assert_eq!(plain.sandbox, None);
+        assert_eq!(
+            plain.command_line(),
+            (
+                "/usr/local/bin/nos-ribd".into(),
+                vec!["--a".into(), "b".into()]
+            )
+        );
+        // On: trampoline, profile, separator, daemon, its args in order.
+        let s = spec(Role::Ribd).with_sandbox(Some(&exec));
+        let (prog, args) = s.command_line();
+        assert_eq!(prog, exec);
+        assert_eq!(
+            args,
+            [
+                "--profile",
+                "ribd",
+                "--",
+                "/usr/local/bin/nos-ribd",
+                "--a",
+                "b"
+            ]
+        );
+        // sshd is exempt.
+        assert_eq!(spec(Role::Sshd).with_sandbox(Some(&exec)).sandbox, None);
     }
 
     #[allow(unsafe_code, reason = "raw mmap/mprotect probe (#1210)")]
