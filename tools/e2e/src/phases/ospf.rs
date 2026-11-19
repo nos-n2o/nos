@@ -5517,6 +5517,10 @@ pub async fn ospfv3_hybrid(w: &mut World) -> anyhow::Result<()> {
             OSPFV3_HYBRID_PROFILE,
             "--ospfv3-profile-network-type",
             "hybrid",
+            "--routing-table",
+            "rt1",
+            "--broadcast-domain",
+            BD,
             "--ospfv3-broadcast-domain-profile",
             OSPFV3_HYBRID_PROFILE,
         ])
