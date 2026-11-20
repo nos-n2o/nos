@@ -3478,7 +3478,20 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
         IP_B.s(),
         "--delete-subinterface",
     ]))
-    .await
+    .await?;
+    // The profile would otherwise stay in the area and trip #1161's
+    // "every profile's instance-id must be 64-95" in `ospfv3-instance-id`.
+    a.edit(|c| {
+        nos_proto::Ospfv3ProfileOp::Delete {
+            instance: OSPFV3_INSTANCE.into(),
+            area_id: OSPFV3_AREA.parse()?,
+            name: passive_p.into(),
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    Ok(())
 }
 
 /// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its
@@ -3486,6 +3499,32 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
 /// both reaches Full with a non-zero id on the wire both ways. Requires
 /// `ospfv3` to have run; leaves both back at 0 for `ospfv3-dr`'s router-c.
 pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
+    let result = ospfv3_instance_id_steps(w).await;
+    if result.is_err() {
+        // A failed step must not leave instance-id != 0 on a/b: `ospfv3-dr`'s
+        // router-c would never two-way with them. Best effort; the original
+        // error wins.
+        let (a, b) = (w.a()?, w.b()?);
+        for (r, id, addr, rid) in [
+            (a, A, OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            (b, B, OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+        ] {
+            let mut f = ospfv3(addr, rid);
+            f.extend(strings(&[
+                "--ospfv3-instance-id",
+                "0",
+                "--ospfv3-address-family",
+                "ipv6-unicast",
+            ]));
+            if let Err(e) = r.provision_flags(&with_base(id, f)).await {
+                log(format!("instance-id restore failed: {e:#}"));
+            }
+        }
+    }
+    result
+}
+
+async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let full =
         |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
