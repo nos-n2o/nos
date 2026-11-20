@@ -35,7 +35,7 @@ fn yanglint(data: &Value) -> anyhow::Result<()> {
     let out = match out {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
-            "yanglint not found in PATH: install it (`apt-get install libyang2-tools`); \
+            "yanglint not found in PATH: install it (`apt-get install libyang3-tools`, `libyang2-tools` on older Ubuntu/Debian); \
              this phase has no silent skip"
         ),
         Err(e) => bail!("running yanglint: {e}"),
