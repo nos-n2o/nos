@@ -2083,7 +2083,7 @@ pub struct LinkManager {
     router_id: Mutex<Option<Ipv4Addr>>,
     /// `max-lsa`, shared with every store (`set_max_lsa`).
     max_lsa: Arc<AtomicU32>,
-    /// Loopback (`Interface.ospfv3_profile`) attach points' own prefixes,
+    /// Loopback (`Interface.ospfv3_profiles`) attach points' own prefixes,
     /// per area — no live `LinkConfig`/socket for these (see
     /// `reconcile.rs`'s "log-only" loopback handling), so threaded in
     /// directly, purely so `originate_intra_area_prefix_lsas` can advertise

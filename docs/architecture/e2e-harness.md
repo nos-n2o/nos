@@ -20,6 +20,10 @@ Two labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..1); l
 
 - **Slots.** `tools/ci/e2e-lab.sh acquire` takes the first free slot (`/tmp/nos-e2e.lock.<k>`, `NOS_E2E_LABS`, default 2), records worktree/pid/start time and prints `k`; `release <k>` frees it; `status` lists the slots and flags one whose pid is gone as STALE. Run every `nos-e2e` command of one session with `NOS_E2E_LAB=$k`. The lock spans several `cargo run -p nos-e2e` invocations (`up`, phases, `down`), so it is a script convention, not harness code. A caller whose shell exits between commands (an agent) is flagged STALE too: check `docker ps` for `l<k>-` containers before releasing.
 - **Failure dump.** A failed group dumps `docker logs` of the one container the error names, from the start of the failing phase (10x the tail); with no culprit in the message, every container's tail.
+- **Keep going (`NOS_E2E_KEEP_GOING=1`).** Set by the nightly only (`schedule`; PRs, dispatch and local runs stay fail-fast). A failing phase is recorded, its docker logs are dumped right then (from that phase's start) and the next phase runs; `up`/`established` stay fatal.
+  - After the group a summary lists every phase `OK`/`FAILED`; exit is non-zero with `N phase(s) failed, first <phase>: <err>`. `all` then runs every group.
+  - Failures after the first are tagged `may be a cascade` (a failed phase skips its cleanup and leaks state): fix the first failure and re-run.
+  - `tools/ci/e2e-result-line.sh` reports the first failed phase.
 - **Names.** At the `Dock` boundary (`tools/e2e/src/docker.rs`) every container, network and volume name gets the prefix `l<k>-` for `k>0` (`l1-router-a`, `l1-nos-verify-net`); phases keep writing `"router-a"`. `router-r`'s `docker logs` and the `nos` uid rule see the unprefixed name.
 - **Labels.** Every container, network and volume carries `nos-e2e.lab=<k>`, and `down` / group teardown remove everything with that label, so one lab's `down` never touches the other's. A container from before #1049 has no label: remove it by hand once.
 - **Subnets.** Docker rejects overlapping pools, so each network with explicit IPAM moves with `k` (`tools/e2e/src/lab.rs`, the `Addr` constants in `consts.rs`; use `.s()` for a `&'static str`, `{ADDR}` in `format!`): `10.50/51/52.x` becomes `10.60/61/62.x`, `fd00:10:50::` `fd00:10:60::`, the CE/L3 networks `198.18.x` `198.19.x`, `fd18:`/`fd19:` `fd28:`/`fd29:`. A new explicit subnet must be an `Addr`, never a literal. Auto-allocated networks and addresses inside containers need nothing.
@@ -68,4 +72,4 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 
 ## Host tools
 
-- `restconf-conformance` (#1177) runs `yanglint` (`libyang2-tools`) on the host as an independent oracle against `docs/yang/nos-config.yang`; it is never in the runtime image. A missing binary fails the phase (no silent skip). CI installs it in `verify-e2e.yml`; locally `apt-get install libyang2-tools`.
+- `restconf-conformance` (#1177) runs `yanglint` (`libyang3-tools`; `libyang2-tools` on older Ubuntu/Debian) on the host as an independent oracle against `docs/yang/nos-config.yang`; it is never in the runtime image. A missing binary fails the phase (no silent skip). CI installs it in `verify-e2e.yml`; locally `apt-get install libyang3-tools`.

@@ -63,7 +63,7 @@ $ $C -X POST $B/v1/transactions/vlan300
 $ $C -X PUT -H 'Content-Type: application/json' \
     -d '{"tag":300,"addresses":[{"address":"192.0.2.1/24","label":null}],"routing_table":"rt1"}' \
     $B/v1/transactions/vlan300/interface/eth0/subinterface/300
-{"addresses":[{"address":"192.0.2.1/24","label":null}],"ospf_profile":null,"ospfv3_profile":null,"routing_table":"rt1","tag":300}
+{"addresses":[{"address":"192.0.2.1/24","label":null}],"ospf_profile":null,"ospfv3_profiles":[],"routing_table":"rt1","tag":300}
 $ $C -X POST $B/v1/transactions/vlan300/commit
 {"committed":"vlan300"}
 $ $C $B/v1/interfaces/eth0 | jq -c '.subinterfaces[]'
@@ -182,7 +182,7 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 |---|---|---|---|---|---|---|
 | address | `set interface <if>[.<tag>] address <cidr> [label <text>]` / `set address <cidr> [label <text>]`; `delete … address <cidr>` | `interface/<if>/subinterface/<tag>/address/<cidr, / as %2F>`, body `{"address":"<cidr>","label":null}` | IPv4 or IPv6 `addr/len`; list, default empty | no repeated address | adds the address; the label is stored only | `show interface <if>`, `show route <table>` |
 | routing-table | `set interface <if>[.<tag>] routing-table <t>` / `set routing-table <t>`; `delete … routing-table` | `interface/<if>/subinterface/<tag>/routing-table` | name; default unset | table exists | joins the table's VRF; addresses become connected routes | `show interface <if>`, `show route <t>` |
-| ospf, ospfv3 | `set interface <if>[.<tag>] ospf <profile>`, `… ospfv3 <profile>`; `delete … ospf`, `… ospfv3` | `interface/<if>/subinterface/<tag>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs a routing-table on the same subinterface | runs OSPF / OSPFv3 on it | `show ospf neigh`, `show ospfv3 neigh` |
+| ospf, ospfv3 | `set interface <if>[.<tag>] ospf <profile>`, `… ospfv3 <profile>`; `delete … ospf`, `… ospfv3 <profile>` (ospfv3 is a list: `set` adds, `delete <profile>` removes) | `interface/<if>/subinterface/<tag>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs a routing-table on the same subinterface | runs OSPF / OSPFv3 on it | `show ospf neigh`, `show ospfv3 neigh` |
 
 ### `interface <lo>` (loopback)
 

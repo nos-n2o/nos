@@ -80,10 +80,13 @@ jobs:
       # (the same script `make e2e-preflight` runs locally).
       # `yanglint` is the independent oracle of the `restconf-conformance` phase (#1177);
       # run on the host, never in the image.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyang2-tools
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyang3-tools
       - run: df -h /
       - run: tools/ci/e2e-preflight.sh
       - name: Run group
+        env:
+          # nightly only (#1294): run every phase, report all failures; dispatch/PRs stay fail-fast
+          NOS_E2E_KEEP_GOING: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: |
           start=$(date +%s)
           set +e

@@ -4134,6 +4134,7 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         OSPFV3_ABR_LOOPBACK_ADDRESS,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
     ])
     .await?;
     b.wait_new(&aged, aged0, 30).await?;
@@ -4212,6 +4213,7 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         l1,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
     ])
     .await
 }
@@ -5254,8 +5256,11 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // The loopback address stays on router-b (flags cannot remove one) and
     // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
     // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
-    b.provision_flags(&helper_cap(&["--clear-ospfv3-loopback-profile"]))
-        .await
+    b.provision_flags(&helper_cap(&[
+        "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]))
+    .await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
@@ -5396,7 +5401,8 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&lsa_c, a0, 60).await?;
     b.wait_new(&lsa_c, b0, 60).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
 
     log("router-c holds only the bridge's own link-lsas (rfc 5340 §4.5.1)");
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;
@@ -5468,16 +5474,23 @@ pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
     }
 
     // Leave full mode on both (what `ospfv3` left) and no loopback behind.
-    a.provision(&["--ospfv3-extended-lsa", "--clear-ospfv3-loopback-profile"])
+    a.provision(&[
+        "--ospfv3-extended-lsa",
+        "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ])
+    .await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
         .await?;
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     for (r, mine) in [(a, lo_a), (b, lo_b), (c, lo_c)] {
         r.provision(&["--loopback-remove-address", mine]).await?;
     }
     // Give router-b `ospfv3-lfa`'s address back (`ospfv3-spf-ecmp` removes it).
     b.provision(&lo(OSPFV3_LFA_LOOPBACK_ADDRESS, "")).await?;
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await
 }
 
 /// RFC 5286 loop-free alternate over OSPFv3 (requires `ospfv3-dr`, which puts
@@ -5504,7 +5517,8 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
 
     let removed = format!("removed route prefix={prefix}.*backup=true");
     let r0 = a.count(&removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     a.wait_new(&removed, r0, 60).await
 }
 
@@ -5677,7 +5691,8 @@ pub async fn ospfv3_hybrid(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&loopback, loop_a, 60).await?;
     b.wait_new(&loopback, loop_b, 60).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
 
     log("no Network-LSA is held (rfc 6845 4.5)");
     let mut left = String::new();
@@ -5777,6 +5792,7 @@ pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         prefix,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
     ])
     .await?;
     a.wait_new(&removed, r0, 60).await
@@ -5943,7 +5959,8 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     b.wait_new("ospfv3 link driver started link=eth0.0", fb0, 60)
         .await?;
     let removed0 = a.count(&primary_removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     a.wait_new(&primary_removed, removed0, 60).await
 }
 
@@ -6053,7 +6070,8 @@ pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(&replaced, r1, 20).await?;
 
     // Cleanup so the following phases see the lab they expect.
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     for tag in OSPFV3_VLAN_TAGS {
         a.provision_flags(&vlan(A, OSPFV3_ROUTER_ID, tag, 1, true))
             .await?;
@@ -6083,6 +6101,7 @@ pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
         "--broadcast-domain",
         BD,
         "--clear-ospfv3-broadcast-domain-profile",
+        OSPFV3_PROFILE,
     ]);
     a.provision(&leave).await?;
     c.provision_flags(&with_base(crate::router::C, leave))
@@ -6752,8 +6771,13 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     }
     // Leave no loopback behind: `ospfv3-lfa` re-provisions this very prefix
     // and waits for a *new* route add, which an identical config never gives.
-    b.provision(&[&format!("--clear-{}-loopback-profile", s.daemon)])
-        .await?;
+    let clear = format!("--clear-{}-loopback-profile", s.daemon);
+    // The OSPFv3 flag names the profile to remove (#1278); the OSPFv2 one is a switch.
+    let mut flags = vec![clear.as_str()];
+    if s.v6 {
+        flags.push(OSPFV3_PROFILE);
+    }
+    b.provision(&flags).await?;
     if !s.v6 {
         // The address left on the loopback made `ospf-graceful-restart`'s
         // second loopback address vanish from router-b's LSA (#1293).
@@ -7285,6 +7309,7 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
         "--broadcast-domain",
         BD,
         "--clear-ospfv3-broadcast-domain-profile",
+        OSPFV3_PROFILE,
     ]);
     a.provision_flags(&with_base(A, leave.clone())).await?;
     b.provision_flags(&with_base(B, leave)).await?;

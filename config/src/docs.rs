@@ -801,7 +801,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::InterfaceOspfv3Profile => (
             "Run OSPFv3 on this attach point under a profile.",
-            "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. Needs a routing-table on the same attach point. `delete` leaves OSPFv3 there.",
+            "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. `set` adds a profile (at most one per OSPFv3 instance, with distinct instance IDs); `delete <profile>` removes that one. Needs a routing-table on the same attach point.",
         ),
         Topic::InterfaceBfdUnsolicited => (
             "Answer unsolicited BFD on this subinterface.",

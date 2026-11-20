@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::schema::{Config, Interface, InterfaceAddress, Subinterface};
 
 use super::interface::find_interface_mut;
-use super::OpError;
+use super::{add_ospfv3_profile, remove_ospfv3_profile, OpError};
 
 /// An edit to a single `Subinterface` (keyed by `tag`) nested under a named
 /// `Interface`, within a transaction's in-progress config. Applied without
@@ -82,7 +82,7 @@ pub enum SubinterfaceOp {
     },
     /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
     /// (RFC 5340) instead.
-    SetOspfv3Profile {
+    AddOspfv3Profile {
         /// Name of the parent interface.
         interface: String,
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
@@ -90,12 +90,14 @@ pub enum SubinterfaceOp {
         /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
-    /// Clears the `OSPFv3` profile of the subinterface so it reverts to the default.
-    ClearOspfv3Profile {
+    /// Detaches one `OSPFv3` profile from the subinterface (error when not attached).
+    RemoveOspfv3Profile {
         /// Name of the parent interface.
         interface: String,
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the `OSPFv3` profile to detach.
+        ospfv3_profile: String,
     },
     /// RFC 9468 unsolicited BFD under the named `BfdProfile`.
     SetBfdUnsolicited {
@@ -205,17 +207,26 @@ impl SubinterfaceOp {
                 find_subinterface_mut(config, interface, *tag)?.ospf_profile = None;
                 Ok(())
             }
-            SubinterfaceOp::SetOspfv3Profile {
+            SubinterfaceOp::AddOspfv3Profile {
                 interface,
                 tag,
                 ospfv3_profile,
             } => {
-                ensure_subinterface_mut(config, interface, *tag)?.ospfv3_profile =
-                    Some(ospfv3_profile.clone());
+                add_ospfv3_profile(
+                    &mut ensure_subinterface_mut(config, interface, *tag)?.ospfv3_profiles,
+                    ospfv3_profile,
+                );
                 Ok(())
             }
-            SubinterfaceOp::ClearOspfv3Profile { interface, tag } => {
-                find_subinterface_mut(config, interface, *tag)?.ospfv3_profile = None;
+            SubinterfaceOp::RemoveOspfv3Profile {
+                interface,
+                tag,
+                ospfv3_profile,
+            } => {
+                remove_ospfv3_profile(
+                    &mut find_subinterface_mut(config, interface, *tag)?.ospfv3_profiles,
+                    ospfv3_profile,
+                )?;
                 Ok(())
             }
             SubinterfaceOp::SetBfdUnsolicited {
@@ -290,7 +301,7 @@ fn ensure_subinterface_mut<'a>(
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             switching_profile: None,
             port_aggregate: None,
             stp_port_profile: None,
@@ -315,7 +326,7 @@ fn ensure_subinterface_mut<'a>(
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
         });
     }
@@ -340,7 +351,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             switching_profile: None,
             port_aggregate: None,
             stp_port_profile: None,
@@ -408,7 +419,7 @@ mod tests {
                     }],
                     routing_table: None,
                     ospf_profile: None,
-                    ospfv3_profile: None,
+                    ospfv3_profiles: Vec::new(),
                     bfd_unsolicited: None,
                 }],
             )],
@@ -649,7 +660,7 @@ mod tests {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
-                        ospfv3_profile: None,
+                        ospfv3_profiles: Vec::new(),
                         bfd_unsolicited: None,
                     },
                     Subinterface {
@@ -661,7 +672,7 @@ mod tests {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
-                        ospfv3_profile: None,
+                        ospfv3_profiles: Vec::new(),
                         bfd_unsolicited: None,
                     },
                 ],
