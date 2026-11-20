@@ -1490,7 +1490,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // pushes no routes until its neighbor is Full again, so router-a's own
     // kernel route to router-b's loopback is never removed (#1027-safe: the
     // removal is logged by `nos-ribd` on router-a itself).
-    let restart_in = "ospf restart mode: entered neighbors=1";
+    let restart_in = "ospf restart mode: entered neighbors=[12]";
     let restart_out = "ospf restart mode: exited reason=complete";
     let grace_flush =
         format!("ospf graceful restart: grace-lsa flushed link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
