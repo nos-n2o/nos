@@ -6719,8 +6719,13 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     }
     // Leave no loopback behind: `ospfv3-lfa` re-provisions this very prefix
     // and waits for a *new* route add, which an identical config never gives.
-    b.provision(&[&format!("--clear-{}-loopback-profile", s.daemon)])
-        .await
+    let clear = format!("--clear-{}-loopback-profile", s.daemon);
+    // The OSPFv3 flag names the profile to remove (#1278); the OSPFv2 one is a switch.
+    let mut flags = vec![clear.as_str()];
+    if s.v6 {
+        flags.push(OSPFV3_PROFILE);
+    }
+    b.provision(&flags).await
 }
 
 /// `ospf-bfd` (#288), on the `ospf` lab.
