@@ -203,52 +203,89 @@ fn element_key(fs: &[Field]) -> Option<&'static str> {
 
 /// Removes from a serialized `Config` every `#[cli(hidden)]` field (the
 /// derived mirrors the module does not declare), so the data is valid
-/// instance data of [`render`]'s module (#1177).
+/// instance data of [`render`]'s module (#1177). Also renders a unit variant
+/// of a payload enum as `{"X":[null]}` (RFC 7951 `empty`), the shape of the
+/// `leaf X { type empty }` inside its container; serde's bare `"X"` is not
+/// valid there (#1300). [`from_instance`] is the inverse.
 pub fn strip_hidden(root: &mut serde_json::Value) {
-    fn fields(v: &mut serde_json::Value, fs: &[Field]) {
-        let serde_json::Value::Object(m) = v else {
+    walk(root, true);
+}
+
+/// Inverse of the unit-variant rendering of [`strip_hidden`]: `{"X":[null]}`
+/// back to serde's `"X"` for every payload enum in `root` (#1300).
+pub fn from_instance(root: &mut serde_json::Value) {
+    walk(root, false);
+}
+
+fn walk(root: &mut serde_json::Value, out: bool) {
+    use serde_json::Value;
+    fn fields(v: &mut Value, fs: &[Field], out: bool) {
+        let Value::Object(m) = v else {
             return;
         };
         for f in fs {
             if f.hidden {
-                m.remove(f.name);
+                if out {
+                    m.remove(f.name);
+                }
             } else if let Some(c) = m.get_mut(f.name) {
-                kind(c, &(f.kind)());
+                kind(c, &(f.kind)(), out);
             }
         }
     }
-    fn variant(c: &mut serde_json::Value, p: &Payload) {
+    fn variant(c: &mut Value, p: &Payload, out: bool) {
         match p {
-            Payload::Newtype(k) => kind(c, &k()),
-            Payload::Struct(fs) => fields(c, fs),
+            Payload::Newtype(k) => kind(c, &k(), out),
+            Payload::Struct(fs) => fields(c, fs, out),
             Payload::Unit => {}
         }
     }
-    fn kind(v: &mut serde_json::Value, k: &Kind) {
+    fn unit_variant(vs: &[crate::cli::Variant], name: &str) -> bool {
+        vs.iter()
+            .any(|v| v.name == name && matches!(v.payload, Payload::Unit))
+    }
+    fn kind(v: &mut Value, k: &Kind, out: bool) {
         match k {
-            Kind::Option(i) => kind(v, &i()),
-            Kind::Struct(n) => fields(v, n.fields),
+            Kind::Option(i) => kind(v, &i(), out),
+            Kind::Struct(n) => fields(v, n.fields, out),
             Kind::List(i) => {
                 let inner = i();
-                if let serde_json::Value::Array(a) = v {
+                if let Value::Array(a) = v {
                     for e in a {
-                        kind(e, &inner);
+                        kind(e, &inner, out);
                     }
                 }
             }
             Kind::Enum(vs) => {
-                if let serde_json::Value::Object(m) = v {
-                    for var in *vs {
-                        if let Some(c) = m.get_mut(var.name) {
-                            variant(c, &var.payload);
+                let mixed = vs.iter().any(|x| !matches!(x.payload, Payload::Unit));
+                match v {
+                    Value::String(s) if out && mixed && unit_variant(vs, s) => {
+                        *v = serde_json::json!({ s.as_str(): [null] });
+                    }
+                    Value::Object(m) => {
+                        let empty = m.len() == 1
+                            && m.iter().next().is_some_and(|(n, c)| {
+                                unit_variant(vs, n) && *c == serde_json::json!([null])
+                            });
+                        if !out && empty {
+                            if let Some(n) = m.keys().next().cloned() {
+                                *v = Value::String(n);
+                            }
+                            return;
+                        }
+                        for var in *vs {
+                            if let Some(c) = m.get_mut(var.name) {
+                                variant(c, &var.payload, out);
+                            }
                         }
                     }
+                    _ => {}
                 }
             }
             _ => {}
         }
     }
-    fields(root, cli::root().fields);
+    fields(root, cli::root().fields, out);
 }
 
 fn unwrap_option(k: Kind) -> Kind {
@@ -271,6 +308,30 @@ mod tests {
             v,
             serde_json::json!({"bgp_instances": [{"name": "r1", "asn": 1}]})
         );
+    }
+
+    #[test]
+    fn unit_variant_of_payload_enum_round_trips() {
+        let doc = serde_json::json!({"switching_profiles": [{"name": "sp", "members": [
+            {"broadcast_domain": "a", "tag": "Untagged"},
+            {"broadcast_domain": "b", "tag": {"Dot1q": 5}}]}]});
+        let mut v = doc.clone();
+        strip_hidden(&mut v);
+        let m = &v["switching_profiles"][0]["members"];
+        assert_eq!(m[0]["tag"], serde_json::json!({"Untagged": [null]}));
+        assert_eq!(m[1]["tag"], serde_json::json!({"Dot1q": 5}));
+        from_instance(&mut v);
+        assert_eq!(v, doc);
+    }
+
+    #[test]
+    fn unit_only_enums_are_left_alone() {
+        let doc = serde_json::json!({"bgp_instances": [{"name": "r1", "asn": 1}],
+            "interfaces": [{"name": "e0", "mode": "Dummy"}]});
+        let mut v = doc.clone();
+        strip_hidden(&mut v);
+        from_instance(&mut v);
+        assert_eq!(v["bgp_instances"], doc["bgp_instances"]);
     }
 
     #[test]

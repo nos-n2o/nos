@@ -70,6 +70,18 @@ pub async fn restconf_conformance(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a serves a nos-config.yang that differs from docs/yang/nos-config.yang");
     }
 
+    // An Untagged switching-profile member: the unit variant of a payload enum
+    // (#1300), which RESTCONF must render as `{"Untagged":[null]}`.
+    a.provision(&[
+        "--link-interface",
+        "eth2",
+        "--switching-profile",
+        "rc-sp",
+        "--switching-profile-member",
+        "rc-d:untagged",
+    ])
+    .await?;
+
     // GET of the whole, provisioned config is valid instance data. The bare
     // `/restconf/data` wraps it as `ietf-restconf:data`; top-level nodes of a
     // module must be module-qualified (RFC 7951 §4) for the oracle.
@@ -123,6 +135,33 @@ pub async fn restconf_conformance(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(sessions, baseline, 5).await?;
     a.established().await?;
     log("router-a: PUT of the GET document is a no-op");
+
+    // PUT of the tag leaf itself: Dot1q, then the RFC 7951 `empty` form of
+    // Untagged, which must store the serde unit variant (the GET document
+    // is identical to the one validated above).
+    let tag = "/restconf/data/nos-config:switching_profiles=rc-sp/members=rc-d/tag";
+    for (body, want) in [
+        (json!({"nos-config:tag": {"Dot1q": 7}}), json!({"Dot1q": 7})),
+        (
+            json!({"nos-config:tag": {"Untagged": [null]}}),
+            json!({"Untagged": [null]}),
+        ),
+    ] {
+        a.rest_expect_full(Method::PUT, tag, Some(&body.to_string()), None, 204)
+            .await?;
+        let got = a.rest_expect(Method::GET, tag, None, 200).await?;
+        let got: Value = serde_json::from_str(&got)?;
+        if got["nos-config:tag"] != want {
+            bail!("router-a: tag after PUT {body} is {got}, want {want}");
+        }
+    }
+    let (after, _) = a
+        .rest_expect_full(Method::GET, "/restconf/data", None, None, 200)
+        .await?;
+    if after.as_deref() != Some(etag.as_str()) {
+        bail!("router-a: Untagged round trip did not restore the config ({etag} -> {after:?})");
+    }
+    log("router-a: PUT of an Untagged tag as {\"Untagged\":[null]} round-trips");
 
     // POST of an existing list entry: 409 data-exists, as an ietf-restconf body.
     let r1 = a
