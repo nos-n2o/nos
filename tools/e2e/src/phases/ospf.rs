@@ -1096,6 +1096,7 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
 /// RFC 5709 HMAC-SHA-256: matching keys reach/stay Full with real per-packet
 /// digest checks; a mismatched key on router-a logs a real verification failure
 /// on router-b and blocks a new Full; restoring it lets Full form again.
+/// Restores no authentication and ext-seq off at the end.
 pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let key = |k: &str| {
@@ -1212,7 +1213,28 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.assert_quiet("crypto sequence number not increasing", replays, 5)
-        .await
+        .await?;
+
+    // Restore: leaked auth/ext-seq broke the phases after this one (#1292).
+    log("restoring no authentication and extended sequence numbers off on both routers");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    for r in [a, b] {
+        r.edit(|c| {
+            for p in c
+                .ospf_instances
+                .iter_mut()
+                .flat_map(|i| i.areas.iter_mut())
+                .flat_map(|ar| ar.profiles.iter_mut())
+            {
+                p.auth = None;
+                p.extended_sequence_numbers = false;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    both_full_p2p(a, b).await
 }
 
 /// RFC 5613 Link-Local Signaling (requires `ospf`, runs before `ospf-auth` so
@@ -1363,6 +1385,7 @@ pub async fn ospf_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
 #[allow(clippy::too_many_lines)]
 pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    both_full_p2p(a, b).await?;
     let instance = |extra: &[&str]| {
         let mut f = strings(&[
             "--ospf-instance",
@@ -1408,6 +1431,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         with_base(B, f)
     };
+    let peer_route0 = a.count(&format!(
+        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ));
     let full_again0 = b.count(&full_p2p(OSPF_ROUTER_ID));
     let full_again_a0 = a.count(&full_p2p(OSPF_ROUTER_ID_B));
     let cap60 = "ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)";
@@ -1423,9 +1449,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     .await?;
     b.wait_new(cap60, cap60_0, 60).await?;
     // router-a holds an OSPF route to router-b's loopback before it restarts.
-    a.wait(&format!(
-        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
-    ))
+    a.wait_new(
+        &format!("added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"),
+        peer_route0,
+        60,
+    )
     .await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
         .await?;
@@ -1462,7 +1490,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // pushes no routes until its neighbor is Full again, so router-a's own
     // kernel route to router-b's loopback is never removed (#1027-safe: the
     // removal is logged by `nos-ribd` on router-a itself).
-    let restart_in = "ospf restart mode: entered neighbors=1";
+    let restart_in = "ospf restart mode: entered neighbors=[12]";
     let restart_out = "ospf restart mode: exited reason=complete";
     let grace_flush =
         format!("ospf graceful restart: grace-lsa flushed link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
@@ -6749,7 +6777,14 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     if s.v6 {
         flags.push(OSPFV3_PROFILE);
     }
-    b.provision(&flags).await
+    b.provision(&flags).await?;
+    if !s.v6 {
+        // The address left on the loopback made `ospf-graceful-restart`'s
+        // second loopback address vanish from router-b's LSA (#1293).
+        b.provision(&["--loopback-remove-address", s.prefix])
+            .await?;
+    }
+    Ok(())
 }
 
 /// `ospf-bfd` (#288), on the `ospf` lab.
@@ -7189,8 +7224,9 @@ async fn ospf_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     let full_b = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID}");
     let before_b = b.count(&full_b);
     let dr = format!("ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}");
-    let backup =
-        format!("ospf interface became backup {link} dr={OSPF_ROUTER_ID_B} bdr={OSPF_ROUTER_ID}");
+    // router-c (ospf-lfa onward) may already be the BDR, and BDR is not
+    // preempted (RFC 2328 §9.4): router-a then settles as dr-other (#1293).
+    let backup = format!("ospf interface became [bd][a-z-]* {link} dr={OSPF_ROUTER_ID_B}");
     let (dr0, backup0) = (b.count(&dr), a.count(&backup));
     a.provision_flags(&fa(&["--clear-mtu"])).await?;
     b.provision_flags(&fb(&["--clear-mtu"])).await?;
