@@ -1083,6 +1083,31 @@ mod tests {
         );
     }
 
+    /// Two `to ospfv3` rules share the CLI key `to`; the diff pairs by key
+    /// (first wins, as for every keyed list), so it must stay panic-free and
+    /// typed == value diff, never invent or mis-pair a section.
+    #[test]
+    fn duplicate_to_key_rules_diff_without_panic_and_typed_equals_value() {
+        let rule = |instance: &str, policy: &str| Redistribute {
+            to: RedistributeTarget::Ospfv3,
+            instance: Some(instance.into()),
+            policy: Some(policy.into()),
+            ..redistribute()
+        };
+        let mut a = table("rt1", None, Some("sri1"));
+        a.ospfv3_instances = vec!["o1".into(), "o2".into()];
+        a.redistribute = vec![rule("o1", "p"), rule("o2", "p")];
+        let mut b = a.clone();
+        b.redistribute[1].policy = Some("q".into());
+        let (base, cand) = (v3_config(vec![a]), v3_config(vec![b]));
+        let typed = crate::diff::diff_configs(&base, &cand);
+        let value = crate::diff::diff_values(
+            &serde_json::to_value(&base).unwrap(),
+            &serde_json::to_value(&cand).unwrap(),
+        );
+        assert_eq!(typed, value);
+    }
+
     fn config_with_policy(
         rt: RoutingTable,
         policies: Vec<crate::schema::PolicyDefinition>,
