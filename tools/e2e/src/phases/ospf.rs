@@ -1096,6 +1096,7 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
 /// RFC 5709 HMAC-SHA-256: matching keys reach/stay Full with real per-packet
 /// digest checks; a mismatched key on router-a logs a real verification failure
 /// on router-b and blocks a new Full; restoring it lets Full form again.
+/// Restores no authentication and ext-seq off at the end.
 pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let key = |k: &str| {
@@ -1212,7 +1213,28 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.assert_quiet("crypto sequence number not increasing", replays, 5)
-        .await
+        .await?;
+
+    // Restore: leaked auth/ext-seq broke the phases after this one (#1292).
+    log("restoring no authentication and extended sequence numbers off on both routers");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    for r in [a, b] {
+        r.edit(|c| {
+            for p in c
+                .ospf_instances
+                .iter_mut()
+                .flat_map(|i| i.areas.iter_mut())
+                .flat_map(|ar| ar.profiles.iter_mut())
+            {
+                p.auth = None;
+                p.extended_sequence_numbers = false;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    both_full_p2p(a, b).await
 }
 
 /// RFC 5613 Link-Local Signaling (requires `ospf`, runs before `ospf-auth` so
@@ -1363,6 +1385,7 @@ pub async fn ospf_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
 #[allow(clippy::too_many_lines)]
 pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    both_full_p2p(a, b).await?;
     let instance = |extra: &[&str]| {
         let mut f = strings(&[
             "--ospf-instance",
@@ -1408,6 +1431,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         with_base(B, f)
     };
+    let peer_route0 = a.count(&format!(
+        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ));
     let full_again0 = b.count(&full_p2p(OSPF_ROUTER_ID));
     let full_again_a0 = a.count(&full_p2p(OSPF_ROUTER_ID_B));
     let cap60 = "ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)";
@@ -1423,9 +1449,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     .await?;
     b.wait_new(cap60, cap60_0, 60).await?;
     // router-a holds an OSPF route to router-b's loopback before it restarts.
-    a.wait(&format!(
-        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
-    ))
+    a.wait_new(
+        &format!("added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"),
+        peer_route0,
+        60,
+    )
     .await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
         .await?;
