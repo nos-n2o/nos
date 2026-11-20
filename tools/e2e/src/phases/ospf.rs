@@ -3526,6 +3526,19 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
 
 async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    // `ospfv3-abr`/`-area-range` leave router-b's area-1 profile (instance-id
+    // 0) behind; #1161's validator then refuses the ipv4-unicast step below
+    // ("every profile's instance-id must be 64-95"). Drop the area if present.
+    b.edit(|c| {
+        // Absent area is fine (standalone run): the error is ignored.
+        let _ = nos_proto::Ospfv3AreaOp::Delete {
+            instance: OSPFV3_INSTANCE.into(),
+            area_id: OSPFV3_AREA_1.parse()?,
+        }
+        .apply(c);
+        Ok(())
+    })
+    .await?;
     let full =
         |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
     let with_id = |id: &str, addr: &str, rid: &str| {
