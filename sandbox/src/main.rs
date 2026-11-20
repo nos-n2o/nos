@@ -15,7 +15,9 @@ fn run() -> Result<std::convert::Infallible, nos_sandbox::Error> {
     sys::set_caps(caps.permitted)?;
     sys::clear_ambient()?;
     sys::no_new_privs()?;
-    // #1217 inserts the per-profile seccomp filter here, after NO_NEW_PRIVS.
+    // Built before install, so a build failure never leaves a half-sandboxed process.
+    let filter = nos_sandbox::seccomp::deny_list()?;
+    nos_sandbox::seccomp::install(&filter)?;
     Err(sys::exec(&target, &inv.args))
 }
 

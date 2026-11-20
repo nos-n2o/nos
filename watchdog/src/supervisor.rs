@@ -223,6 +223,15 @@ pub fn enable_mdwe() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Extra `exited` field when the child died of `SIGSYS`: that is `nos-sandbox`'s seccomp
+/// deny-list killing a daemon that called a denied syscall (#1217).
+fn sigsys_hint(status: std::process::ExitStatus) -> Option<&'static str> {
+    use std::os::unix::process::ExitStatusExt;
+    (status.signal() == Some(libc::SIGSYS)).then_some(
+        "seccomp deny-list violation (nos-sandbox); see docs/architecture/ipc-security.md",
+    )
+}
+
 /// Consecutive rapid crashes at which (and every 10th after) an alarm is logged.
 const CRASH_LOOP_ALARM: u32 = 5;
 
@@ -299,7 +308,7 @@ pub async fn supervise_one(
             tokio::select! {
                 status = child.wait() => {
                     match status {
-                        Ok(status) => warn!(process = %spec.name, %status, "exited"),
+                        Ok(status) => warn!(process = %spec.name, %status, hint = sigsys_hint(status), "exited"),
                         Err(e) => error!(process = %spec.name, error = %e, "wait() failed"),
                     }
                     break true;
@@ -828,5 +837,16 @@ mod backoff_tests {
         );
         let (without, out) = spec("without");
         assert_eq!(seen(without, &out).await, "x");
+    }
+
+    #[test]
+    fn sigsys_gets_the_seccomp_hint_only() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        assert!(
+            sigsys_hint(ExitStatus::from_raw(libc::SIGSYS)).is_some_and(|h| h.contains("seccomp"))
+        );
+        assert_eq!(sigsys_hint(ExitStatus::from_raw(libc::SIGKILL)), None);
+        assert_eq!(sigsys_hint(ExitStatus::from_raw(0)), None);
     }
 }

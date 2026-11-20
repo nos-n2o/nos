@@ -95,6 +95,7 @@ cargo fmt --all
 - A duplicate that a NOS manifest causes (a pinned older major, a second crate for the same job) gets fixed; duplicates reached only through third-party crates are left alone.
 - An advisory that NOS cannot fix is ignored in `deny.toml` with a `reason` (today: `atomic-polyfill`, via `postcard` 1).
 - YAML is `serde_norway` (maintained fork of `serde_yaml` 0.9, same on-disk format); timestamps use `time`, not `chrono`.
+- `seccompiler` (rust-vmm, used by Firecracker) is the only seccomp BPF generator, pinned exactly, used by `nos-sandbox` only; hand-rolled BPF for security code is rejected (#1217).
 - `tokio` has no `full`: the workspace entry lists the common features, crates add `signal`/`process`.
 
 ## Pinned GitHub Actions
