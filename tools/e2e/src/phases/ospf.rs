@@ -3986,6 +3986,26 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     });
     let route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
     let v2_route = format!("added route prefix={ASBR_PREFIX} .*source=Some(Ospf)");
+    // #1297/#1306: own the v2 base on both routers (no dependence on earlier
+    // v2 phases or a leftover bridge profile); replacing each config clears
+    // any such leftover, and router-b keeps its v3 instance.
+    let (full_a0, full_b0) = (
+        a.count(&full_p2p(OSPF_ROUTER_ID_B)),
+        b.count(&full_p2p(OSPF_ROUTER_ID)),
+    );
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(
+        B,
+        [
+            ospf(OSPF_ROUTER_ID_B),
+            ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+        ]
+        .concat(),
+    ))
+    .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_a0, 90).await?;
+    b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_b0, 90).await?;
     let (v2_o0, v2_i0, v2_r0) = (
         a.count("ospf lsa originated.*lsa_type=5"),
         b.count("ospf lsa installed.*lsa_type=5"),
