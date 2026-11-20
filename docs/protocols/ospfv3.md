@@ -245,7 +245,9 @@ $C -X POST $B/v1/transactions/v3gr/commit
 
 How it behaves:
 
-- **Restarting router.** Only a planned restart announces a grace period: `nos-ospfv3d` receiving SIGTERM sends a Grace-LSA to every Full neighbour (log `ospfv3 graceful restart: grace-lsa sent`), then exits and is restarted by the watchdog. Stopping the router or removing the instance (SIGINT) announces nothing, since nothing comes back. A crash announces nothing either.
+- **Restarting router, planned.** `nos-ospfv3d` receiving SIGTERM sends a Grace-LSA to every Full neighbour (log `ospfv3 graceful restart: grace-lsa sent`), then exits and is restarted by the watchdog. Stopping the router or removing the instance (SIGINT) announces nothing, since nothing comes back, and deletes the marker.
+- **Restarting router, unplanned (a crash or `kill -9`).** While a grace period is configured the daemon keeps `/var/lib/nos/ospfv3d/<instance>.gr` fresh (deadline now + grace, the Full neighbours, rewritten every grace/4 seconds; log `ospfv3 running marker written` once). The respawn that finds an unexpired marker sends a Grace-LSA with restart reason 0 (unknown; planned uses 1) on every link before its first Hello (`ospfv3 graceful restart: grace-lsa sent at startup`). Without a grace period no marker exists and a crash is a cold start. A crash during restart mode, or one right after a neighbour went Full, is waited for only as far as the last refresh.
+- **Restart mode** (planned and unplanned respawns, `ospfv3 restart mode: entered` / `exited reason=<complete|timeout|topology-change>`): the respawn originates nothing and pushes no routes to `nos-ribd`, so its kernel routes stay, until every neighbour that was Full is Full again, the remaining grace runs out, or another router changes an LSA it already held (strict LSA checking). It then flushes its Grace-LSA and resumes normally.
 - **Helping neighbour.** Every OSPFv3 instance helps; there is nothing to enable. On a Grace-LSA from a Full neighbour it logs `ospfv3 helper: grace period entered`, keeps that neighbour Full through missing Hellos and through Hellos that don't list it yet, and keeps the neighbour's LSAs, so its routes stay installed.
 - **How long it helps.** What the Grace-LSA has left (RFC 3623 §3.1): its grace period minus its age, at most the instance's `graceful-restart helper max-grace-period` (default 1800, 1 to 3600). The line carries `effective_grace=<seconds>`. A Grace-LSA whose age is already at or past its grace period is not honoured (`ospfv3 helper: no grace left, exiting grace`).
 - **Strict LSA checking.** While helping, a change to a topology LSA in the link's area (or AS-wide for AS-External) ends it (RFC 3623 §3.2 item 3): Router, Network, Inter-Area-Prefix, Inter-Area-Router, AS-External and Intra-Area-Prefix LSAs and their RFC 8362 extended forms, never link-local ones (Link-LSAs). A new LSA, one whose contents changed, or one flushed (MaxAge) counts; a refresh with identical contents never does, nor do the restarting router's own LSAs; this router's own originations do. The helper logs `ospfv3 helper: topology change, exiting grace` (checked on the 1 second aging tick), then the ordinary dead interval applies. Always on.
@@ -402,7 +404,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
+Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), and BFD.
 
 ## Configuration reference
 

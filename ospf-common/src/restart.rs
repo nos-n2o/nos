@@ -36,6 +36,9 @@ pub struct Marker {
     pub deadline: u64,
     /// Router ids of the neighbors that were `Full` when it stopped.
     pub neighbors: BTreeSet<Ipv4Addr>,
+    /// Written by the running-marker refresh (RFC 5187 §2.1 unplanned
+    /// restart), not by a planned shutdown: the previous process crashed.
+    pub unplanned: bool,
 }
 
 /// `deadline` on the first line, the `Full` neighbors comma-separated on the
@@ -44,6 +47,13 @@ pub struct Marker {
 pub fn encode_marker(deadline: u64, neighbors: &BTreeSet<Ipv4Addr>) -> String {
     let ids: Vec<String> = neighbors.iter().map(ToString::to_string).collect();
     format!("{deadline}\n{}", ids.join(","))
+}
+
+/// Like `encode_marker`, for the running marker a daemon keeps fresh while it
+/// is up (#1163): a respawn that finds it knows the process died unannounced.
+#[must_use]
+pub fn encode_running_marker(deadline: u64, neighbors: &BTreeSet<Ipv4Addr>) -> String {
+    format!("{}\nunplanned", encode_marker(deadline, neighbors))
 }
 
 /// `None` for garbage or a deadline not ahead of `now` or further than a
@@ -61,9 +71,11 @@ pub fn parse_marker(content: &str, now: u64) -> Option<Marker> {
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
+    let unplanned = lines.next().is_some_and(|l| l.trim() == "unplanned");
     Some(Marker {
         deadline,
         neighbors,
+        unplanned,
     })
 }
 
@@ -105,6 +117,16 @@ mod tests {
         assert!(parse_marker(&m, 1120).is_none());
         assert!(parse_marker(&encode_marker(1000 + 65_536, &ids(&[])), 1000).is_none());
         assert!(parse_marker("garbage", 1000).is_none());
+        assert!(!parsed.unplanned);
+        let running = encode_running_marker(1120, &ids(&[1]));
+        let m = parse_marker(&running, 1000).unwrap();
+        assert_eq!((m.unplanned, m.neighbors), (true, ids(&[1])));
+        // No neighbors: the empty second line must still keep the flag.
+        assert!(
+            parse_marker(&encode_running_marker(1120, &ids(&[])), 1000)
+                .unwrap()
+                .unplanned
+        );
         // A bad id is skipped, not fatal.
         assert_eq!(
             parse_marker("1120\n1.1.1.1,x", 1000).unwrap().neighbors,
