@@ -376,6 +376,9 @@ pub enum OpError {
     /// `RemoveOspfv3Profile` named a profile the attach point does not list.
     #[error("ospfv3 profile '{0}' is not attached")]
     Ospfv3ProfileNotAttached(String),
+    /// `RemoveOspfv3Instance` named an instance the table does not claim.
+    #[error("ospfv3 instance '{0}' is not claimed by the table")]
+    Ospfv3InstanceNotClaimed(String),
     /// No broadcast domain matches the given name.
     #[error("broadcast domain '{0}' not found")]
     BroadcastDomainNotFound(String),

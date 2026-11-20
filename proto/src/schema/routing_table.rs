@@ -97,6 +97,14 @@ pub struct Redistribute {
     #[serde(default)]
     #[cli(topic = RoutingTableRedistribute)]
     pub metric_type: Option<u8>,
+    /// `to ospfv3` only: the one claimed instance this rule feeds; `None`
+    /// feeds every claimed instance without a rule naming it. At most one
+    /// rule per `(to, instance)`.
+    // ponytail: the CLI/REST address a rule by `to` alone (single `#[cli(key)]`),
+    // so only ops can hold several ospfv3 rules; composite keys when needed.
+    #[serde(default)]
+    #[cli(topic = RoutingTableRedistribute)]
+    pub instance: Option<String>,
 }
 
 /// Where `nos-restd` listens for a routing table: one specific address
@@ -290,14 +298,15 @@ pub struct RoutingTable {
     /// `OSPFv2` instance bound to this table, if any.
     pub ospf_instance: Option<String>,
 
-    /// Same shape as `ospf_instance`, associating this table with an
-    /// `Ospfv3Instance` (RFC 5340) instead — a separate field, not a
-    /// widened `ospf_instance`, since `nos-ospfd`/`nos-ospfv3d` are two
-    /// independent daemons that can both legitimately claim the same table
-    /// (dual-stack OSPF on one VRF).
-    #[garde(custom(|oi: &Option<String>, ctx: &Config| ospfv3_instance_reference_valid(oi.as_ref(), ctx)))]
-    #[cli(topic = RoutingTableOspfv3Instance)]
-    pub ospfv3_instance: Option<String>,
+    /// Associates this table with `Ospfv3Instance`s (RFC 5340): a separate
+    /// field, not a widened `ospf_instance`, since `nos-ospfd`/`nos-ospfv3d`
+    /// are independent daemons that can both claim the same table (dual-stack
+    /// OSPF on one VRF). A list: several instances may share one table (RFC
+    /// 5340 section 2.4), each instance belongs to at most one table.
+    #[serde(default)]
+    #[garde(custom(|oi: &Vec<String>, ctx: &Config| ospfv3_instances_reference_valid(oi, ctx)))]
+    #[cli(topic = RoutingTableOspfv3Instance, words = "ospfv3-instance")]
+    pub ospfv3_instances: Vec<String>,
 
     /// `#[garde(skip)]`: the cross-field constraint (the referenced
     /// `bgp_instance`/`static_routing_instance` must actually be set on this
@@ -391,29 +400,27 @@ fn ospf_instance_reference_valid(ospf_instance: Option<&String>, ctx: &Config) -
     Ok(())
 }
 
-/// Same shape as `ospf_instance_reference_valid`, checked against
-/// `ctx.ospfv3_instances` instead.
-fn ospfv3_instance_reference_valid(
-    ospfv3_instance: Option<&String>,
-    ctx: &Config,
-) -> garde::Result {
-    let Some(name) = ospfv3_instance else {
-        return Ok(());
-    };
-    if !ctx.ospfv3_instances.iter().any(|i| &i.name == name) {
-        return Err(garde::Error::new(
-            "referenced ospfv3 instance does not exist",
-        ));
-    }
-    let claims = ctx
-        .routing_tables
-        .iter()
-        .filter(|t| t.ospfv3_instance.as_deref() == Some(name.as_str()))
-        .count();
-    if claims > 1 {
-        return Err(garde::Error::new(
-            "ospfv3 instance is already associated with another routing table",
-        ));
+/// Each name exists, appears once in the list and in no other table's list.
+fn ospfv3_instances_reference_valid(names: &[String], ctx: &Config) -> garde::Result {
+    for (i, name) in names.iter().enumerate() {
+        if !ctx.ospfv3_instances.iter().any(|x| &x.name == name) {
+            return Err(garde::Error::new(
+                "referenced ospfv3 instance does not exist",
+            ));
+        }
+        if names[..i].contains(name) {
+            return Err(garde::Error::new("duplicate ospfv3 instance"));
+        }
+        let claims = ctx
+            .routing_tables
+            .iter()
+            .filter(|t| t.ospfv3_instances.contains(name))
+            .count();
+        if claims > 1 {
+            return Err(garde::Error::new(
+                "ospfv3 instance is already associated with another routing table",
+            ));
+        }
     }
     Ok(())
 }
@@ -458,7 +465,10 @@ fn static_routing_instance_reference_valid(
 pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) -> garde::Result {
     for table in tables {
         for (i, rule) in table.redistribute.iter().enumerate() {
-            if table.redistribute[..i].iter().any(|r| r.to == rule.to) {
+            if table.redistribute[..i]
+                .iter()
+                .any(|r| r.to == rule.to && r.instance == rule.instance)
+            {
                 return Err(garde::Error::new("duplicate redistribute target"));
             }
             valid_redistribute_rule(table, rule, ctx)?;
@@ -527,10 +537,22 @@ fn valid_redistribute_rule(
                 "redistribute to ospf is not allowed on an ospf instance with host-router set",
             ));
         }
-        if redistribute.to == RedistributeTarget::Ospfv3 && table.ospfv3_instance.is_none() {
+        if redistribute.to == RedistributeTarget::Ospfv3 && table.ospfv3_instances.is_empty() {
             return Err(garde::Error::new(
                 "redistribute to ospfv3 requires ospfv3-instance to be set",
             ));
+        }
+        if let Some(instance) = &redistribute.instance {
+            if redistribute.to != RedistributeTarget::Ospfv3 {
+                return Err(garde::Error::new(
+                    "redistribute instance applies to 'to ospfv3' only",
+                ));
+            }
+            if !table.ospfv3_instances.contains(instance) {
+                return Err(garde::Error::new(
+                    "redistribute instance must be one of the table's ospfv3-instances",
+                ));
+            }
         }
         redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
         if (redistribute.metric.is_some() || redistribute.metric_type.is_some())
@@ -696,7 +718,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,
@@ -881,6 +903,7 @@ mod tests {
 
     fn redistribute() -> Redistribute {
         Redistribute {
+            instance: None,
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
             policy: None,
@@ -985,13 +1008,79 @@ mod tests {
         }];
         let cfg = config_with(vec![rt.clone()], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
-        rt.ospfv3_instance = Some("o1".to_string());
+        rt.ospfv3_instances = vec!["o1".to_string()];
         let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         cfg.ospfv3_instances = vec![crate::schema::Ospfv3Instance {
             name: "o1".to_string(),
             ..Default::default()
         }];
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn v3_config(tables: Vec<RoutingTable>) -> Config {
+        let mut cfg = config_with(tables, vec![], vec![static_instance("sri1")]);
+        cfg.ospfv3_instances = ["o1", "o2"]
+            .map(|n| crate::schema::Ospfv3Instance {
+                name: n.to_string(),
+                ..Default::default()
+            })
+            .to_vec();
+        cfg
+    }
+
+    #[test]
+    fn table_may_claim_several_ospfv3_instances() {
+        let mut rt = table("rt1", None, None);
+        rt.ospfv3_instances = vec!["o1".into(), "o2".into()];
+        v3_config(vec![rt.clone()])
+            .validate_with(&v3_config(vec![rt.clone()]))
+            .unwrap();
+        for bad in [
+            vec!["o1".to_string(), "o1".to_string()],
+            vec!["nope".to_string()],
+        ] {
+            let mut r = rt.clone();
+            r.ospfv3_instances = bad;
+            let cfg = v3_config(vec![r]);
+            assert!(cfg.validate_with(&cfg).is_err());
+        }
+        // An instance claimed by two tables.
+        let mut other = table("rt2", None, None);
+        other.ospfv3_instances = vec!["o2".into()];
+        let cfg = v3_config(vec![rt, other]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_instance_rules() {
+        let mut rt = table("rt1", None, Some("sri1"));
+        rt.ospfv3_instances = vec!["o1".into(), "o2".into()];
+        let rule = |to, instance: Option<&str>| Redistribute {
+            to,
+            instance: instance.map(str::to_string),
+            ..redistribute()
+        };
+        let ok = |rules: Vec<Redistribute>| {
+            let mut r = rt.clone();
+            r.redistribute = rules;
+            let cfg = v3_config(vec![r]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let v3 = RedistributeTarget::Ospfv3;
+        assert!(ok(vec![
+            rule(v3, None),
+            rule(v3, Some("o1")),
+            rule(v3, Some("o2"))
+        ]));
+        assert!(
+            !ok(vec![rule(v3, Some("o1")), rule(v3, Some("o1"))]),
+            "duplicate"
+        );
+        assert!(!ok(vec![rule(v3, Some("o3"))]), "not claimed");
+        assert!(
+            !ok(vec![rule(RedistributeTarget::Bgp, Some("o1"))]),
+            "not ospfv3"
+        );
     }
 
     fn config_with_policy(

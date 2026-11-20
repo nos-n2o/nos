@@ -620,8 +620,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             ),
         ),
         Topic::RoutingTableOspfv3Instance => (
-            "Associate an OSPFv3 instance with a routing table.",
-            "The OSPFv3 instance's routes are installed into this routing table (its VRF). An instance can be claimed by at most one routing table. `delete` removes the association.",
+            "Associate OSPFv3 instances with a routing table.",
+            "The OSPFv3 instances' routes are installed into this routing table (its VRF). A table may claim several instances; an instance can be claimed by at most one table. `set` adds one, `delete <instance>` removes it (and the redistribute rules naming it).",
         ),
         Topic::RoutingTableRedistribute => (
             "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.",
@@ -636,7 +636,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              redistributed routes through; omitted, redistribution stays unfiltered \
              (accept-all), unlike a peer-group's import-policy/export-policy, which default to \
              deny-all. For 'ospf' only, 'metric <1-16777215>' (default 20) and 'metric-type \
-             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs.",
+             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs. For 'ospfv3' only, 'instance <name>' names one claimed instance the rule feeds; unset, the rule feeds every claimed instance without a rule of its own.",
                 " ",
                 "`delete redistribute <target>` removes that rule.",
             ),

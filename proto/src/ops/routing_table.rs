@@ -51,12 +51,14 @@ pub enum RoutingTableOp {
         /// Which protocols are redistributed into the table.
         redistribute: Redistribute,
     },
-    /// Removes the rule for target `to`.
+    /// Removes the rule for exactly `(to, instance)`.
     ClearRedistribute {
         /// Name of the routing table this op targets.
         name: String,
         /// Destination protocol of the redistribution.
         to: RedistributeTarget,
+        /// The `OSPFv3` instance the rule names (`None` = the unset rule).
+        instance: Option<String>,
     },
     /// Deletes the routing table and everything nested under it.
     Delete {
@@ -75,17 +77,20 @@ pub enum RoutingTableOp {
         /// Name of the routing table this op targets.
         name: String,
     },
-    /// Sets the `OSPFv3` instance of the routing table to `ospfv3_instance`.
-    SetOspfv3Instance {
+    /// Idempotently makes the table claim one more `OSPFv3` instance.
+    AddOspfv3Instance {
         /// Name of the routing table this op targets.
         name: String,
-        /// Name of the `OSPFv3` instance to bind.
+        /// Name of the `OSPFv3` instance to claim.
         ospfv3_instance: String,
     },
-    /// Clears the `OSPFv3` instance of the routing table so it reverts to the default.
-    ClearOspfv3Instance {
+    /// Releases one `OSPFv3` instance (error when not claimed) and drops the
+    /// redistribute rules naming it.
+    RemoveOspfv3Instance {
         /// Name of the routing table this op targets.
         name: String,
+        /// Name of the `OSPFv3` instance to release.
+        ospfv3_instance: String,
     },
     /// Pins `nos-restd` to this table, listening on `address:port` in its VRF.
     SetRestApi {
@@ -155,7 +160,7 @@ impl RoutingTableOp {
                         name: name.clone(),
                         bgp_instance: None,
                         ospf_instance: None,
-                        ospfv3_instance: None,
+                        ospfv3_instances: Vec::new(),
                         static_routing_instance: None,
                         redistribute: Vec::new(),
                     });
@@ -184,16 +189,19 @@ impl RoutingTableOp {
             }
             RoutingTableOp::SetRedistribute { name, redistribute } => {
                 let rules = &mut find_table_mut(config, name)?.redistribute;
-                match rules.iter_mut().find(|r| r.to == redistribute.to) {
+                match rules
+                    .iter_mut()
+                    .find(|r| r.to == redistribute.to && r.instance == redistribute.instance)
+                {
                     Some(r) => *r = redistribute.clone(),
                     None => rules.push(redistribute.clone()),
                 }
                 Ok(())
             }
-            RoutingTableOp::ClearRedistribute { name, to } => {
+            RoutingTableOp::ClearRedistribute { name, to, instance } => {
                 find_table_mut(config, name)?
                     .redistribute
-                    .retain(|r| r.to != *to);
+                    .retain(|r| !(r.to == *to && r.instance == *instance));
                 Ok(())
             }
             RoutingTableOp::Delete { name } => {
@@ -215,15 +223,29 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.ospf_instance = None;
                 Ok(())
             }
-            RoutingTableOp::SetOspfv3Instance {
+            RoutingTableOp::AddOspfv3Instance {
                 name,
                 ospfv3_instance,
             } => {
-                find_table_mut(config, name)?.ospfv3_instance = Some(ospfv3_instance.clone());
+                let list = &mut find_table_mut(config, name)?.ospfv3_instances;
+                if !list.contains(ospfv3_instance) {
+                    list.push(ospfv3_instance.clone());
+                }
                 Ok(())
             }
-            RoutingTableOp::ClearOspfv3Instance { name } => {
-                find_table_mut(config, name)?.ospfv3_instance = None;
+            RoutingTableOp::RemoveOspfv3Instance {
+                name,
+                ospfv3_instance,
+            } => {
+                let table = find_table_mut(config, name)?;
+                let before = table.ospfv3_instances.len();
+                table.ospfv3_instances.retain(|i| i != ospfv3_instance);
+                if table.ospfv3_instances.len() == before {
+                    return Err(OpError::Ospfv3InstanceNotClaimed(ospfv3_instance.clone()));
+                }
+                table
+                    .redistribute
+                    .retain(|r| r.instance.as_ref() != Some(ospfv3_instance));
                 Ok(())
             }
             RoutingTableOp::SetRestApi {
@@ -297,7 +319,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -327,7 +349,7 @@ mod tests {
                 ssh_server: None,
                 evpn: crate::schema::RoutingTableEvpn::default(),
                 vpn: crate::schema::RoutingTableVpn::default(),
-                ospfv3_instance: None,
+                ospfv3_instances: Vec::new(),
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
                 ospf_instance: None,
@@ -538,6 +560,7 @@ mod tests {
         RoutingTableOp::SetRedistribute {
             name: "rt1".to_string(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -550,6 +573,7 @@ mod tests {
         assert_eq!(
             cfg.routing_tables[0].redistribute,
             vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -566,6 +590,7 @@ mod tests {
             RoutingTableOp::SetRedistribute {
                 name: "rt1".to_string(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to,
                     policy,
@@ -582,6 +607,7 @@ mod tests {
         assert_eq!(rules[1].to, RedistributeTarget::Ospf);
 
         RoutingTableOp::ClearRedistribute {
+            instance: None,
             name: "rt1".to_string(),
             to: RedistributeTarget::Bgp,
         }
@@ -595,6 +621,60 @@ mod tests {
     }
 
     #[test]
+    fn add_remove_ospfv3_instance_and_cascade() {
+        use crate::schema::{Redistribute, RedistributeTarget};
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        let add = |i: &str| RoutingTableOp::AddOspfv3Instance {
+            name: "rt1".to_string(),
+            ospfv3_instance: i.to_string(),
+        };
+        add("o1").apply(&mut cfg).unwrap();
+        add("o1").apply(&mut cfg).unwrap();
+        add("o2").apply(&mut cfg).unwrap();
+        assert_eq!(cfg.routing_tables[0].ospfv3_instances, ["o1", "o2"]);
+        let rule = |instance: Option<&str>| RoutingTableOp::SetRedistribute {
+            name: "rt1".to_string(),
+            redistribute: Redistribute {
+                to: RedistributeTarget::Ospfv3,
+                instance: instance.map(str::to_string),
+                ..Default::default()
+            },
+        };
+        for i in [None, Some("o1"), Some("o2")] {
+            rule(i).apply(&mut cfg).unwrap();
+        }
+        assert_eq!(cfg.routing_tables[0].redistribute.len(), 3);
+        RoutingTableOp::ClearRedistribute {
+            name: "rt1".to_string(),
+            to: RedistributeTarget::Ospfv3,
+            instance: Some("o2".to_string()),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].redistribute.len(), 2);
+        // Releasing o1 drops the rule naming it, keeps the unset one.
+        RoutingTableOp::RemoveOspfv3Instance {
+            name: "rt1".to_string(),
+            ospfv3_instance: "o1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].ospfv3_instances, ["o2"]);
+        assert_eq!(cfg.routing_tables[0].redistribute.len(), 1);
+        assert_eq!(cfg.routing_tables[0].redistribute[0].instance, None);
+        let err = RoutingTableOp::RemoveOspfv3Instance {
+            name: "rt1".to_string(),
+            ospfv3_instance: "o1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::Ospfv3InstanceNotClaimed(n) if n == "o1"));
+    }
+
+    #[test]
     fn set_redistribute_with_policy() {
         use crate::schema::{RedistributeSource, RedistributeTarget};
 
@@ -605,6 +685,7 @@ mod tests {
         RoutingTableOp::SetRedistribute {
             name: "rt1".to_string(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: Some("p1".to_string()),

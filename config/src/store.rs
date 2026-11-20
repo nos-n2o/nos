@@ -1833,7 +1833,7 @@ mod tests {
                     ssh_server: None,
                     evpn: nos_proto::RoutingTableEvpn::default(),
                     vpn: nos_proto::RoutingTableVpn::default(),
-                    ospfv3_instance: None,
+                    ospfv3_instances: Vec::new(),
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
                     ospf_instance: None,

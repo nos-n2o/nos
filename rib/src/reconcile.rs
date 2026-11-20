@@ -106,7 +106,7 @@ fn configured_ospf_owners(cfg: &Config, table: &str) -> HashSet<OspfOwner> {
         if let Some(i) = &t.ospf_instance {
             s.insert(OspfOwner::new(false, i.clone()));
         }
-        if let Some(i) = &t.ospfv3_instance {
+        for i in &t.ospfv3_instances {
             s.insert(OspfOwner::new(true, i.clone()));
         }
     }
@@ -456,7 +456,7 @@ async fn resync(
             drop(gate);
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
             for (to, tx) in ospf_redistribute_tx {
-                let _ = tx.send(compute_redistribute_target_ospf(&cfg, table, &routes, *to));
+                let _ = tx.send(compute_redistribute_targets_ospf(&cfg, table, &routes, *to));
             }
             let _ = evpn_tx.send(evpn_target(&*rib.read().await));
         }
@@ -780,50 +780,74 @@ pub type VpnFeed = (watch::Sender<VpnTarget>, PathBuf);
 
 pub type OspfFeed = (
     RedistributeTarget,
-    watch::Sender<ospf_client::RedistributeTarget>,
+    watch::Sender<Vec<ospf_client::RedistributeTarget>>,
 );
 
 /// The OSPF-redistribution analogue of `compute_redistribute_target` — same
 /// shape, matching `to` (`Ospf` or `Ospfv3`) instead of `to: Bgp` and
 /// populating `ospf_client::RedistributeTarget` with the table's
 /// `ospf_instance` or `ospfv3_instance`. `OSPFv3` gets the IPv6 routes only.
+///
+/// One target per claimed instance: `OSPFv3` may claim several, each fed by
+/// the rule naming it, else by the unset (`instance: None`) rule; an instance
+/// with no matching rule gets no routes (so it withdraws).
+fn compute_redistribute_targets_ospf(
+    cfg: &Config,
+    table_name: &str,
+    routes: &HashMap<IpNet, RibEntry>,
+    to: RedistributeTarget,
+) -> Vec<ospf_client::RedistributeTarget> {
+    let Some(table) = cfg.routing_tables.iter().find(|t| t.name == table_name) else {
+        return Vec::new();
+    };
+    let v3 = to == RedistributeTarget::Ospfv3;
+    let instances: Vec<String> = if v3 {
+        table.ospfv3_instances.clone()
+    } else {
+        table.ospf_instance.iter().cloned().collect()
+    };
+    let rule = |r: &&nos_proto::Redistribute| r.from == RedistributeSource::Static && r.to == to;
+    instances
+        .into_iter()
+        .map(|name| {
+            let active_rule = table
+                .redistribute
+                .iter()
+                .filter(rule)
+                .any(|r| r.instance.is_none() || r.instance.as_ref() == Some(&name));
+            let redistributed = if active_rule {
+                routes
+                    .values()
+                    .filter(|entry| entry.source == RouteSource::Static)
+                    .filter(|entry| !v3 || matches!(entry.prefix, IpNet::V6(_)))
+                    .map(|entry| RedistributedRoute {
+                        prefix: entry.prefix,
+                        gateway: entry.next_hops[0].gateway,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            ospf_client::RedistributeTarget {
+                instance: Some(name),
+                routes: redistributed,
+            }
+        })
+        .collect()
+}
+
+/// Test convenience: the first target, or the idle default.
+#[cfg(test)]
 fn compute_redistribute_target_ospf(
     cfg: &Config,
     table_name: &str,
     routes: &HashMap<IpNet, RibEntry>,
     to: RedistributeTarget,
 ) -> ospf_client::RedistributeTarget {
-    let Some(table) = cfg.routing_tables.iter().find(|t| t.name == table_name) else {
-        return ospf_client::RedistributeTarget::default();
-    };
-    let v3 = to == RedistributeTarget::Ospfv3;
-    let active_rule = table
-        .redistribute
-        .iter()
-        .any(|r| r.from == RedistributeSource::Static && r.to == to);
-
-    let redistributed = if active_rule {
-        routes
-            .values()
-            .filter(|entry| entry.source == RouteSource::Static)
-            .filter(|entry| !v3 || matches!(entry.prefix, IpNet::V6(_)))
-            .map(|entry| RedistributedRoute {
-                prefix: entry.prefix,
-                gateway: entry.next_hops[0].gateway,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    ospf_client::RedistributeTarget {
-        instance: if v3 {
-            table.ospfv3_instance.clone()
-        } else {
-            table.ospf_instance.clone()
-        },
-        routes: redistributed,
-    }
+    compute_redistribute_targets_ospf(cfg, table_name, routes, to)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 /// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not
@@ -1013,7 +1037,7 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
@@ -1037,12 +1061,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -1072,12 +1097,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -1111,12 +1137,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -1165,7 +1192,7 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
@@ -1190,12 +1217,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
@@ -1218,6 +1246,7 @@ mod tests {
     #[test]
     fn rules_for_every_target_feed_independently() {
         let rule = |to| Redistribute {
+            instance: None,
             from: RedistributeSource::Static,
             to,
             policy: None,
@@ -1229,7 +1258,7 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: Some("o3".into()),
+            ospfv3_instances: vec!["o3".into()],
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: Some("ospf1".into()),
@@ -1268,12 +1297,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
@@ -1308,12 +1338,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: Some("v3".into()),
+            ospfv3_instances: vec!["v3".into()],
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: None,
@@ -1347,12 +1378,13 @@ mod tests {
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
             vpn: nos_proto::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
@@ -1368,6 +1400,57 @@ mod tests {
         let target =
             compute_redistribute_target_ospf(&cfg, "rt1", &routes, RedistributeTarget::Ospf);
         assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
+    }
+
+    #[test]
+    fn ospfv3_feed_is_per_claimed_instance_with_named_rule_override() {
+        let rule = |instance: Option<&str>| Redistribute {
+            instance: instance.map(str::to_string),
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Ospfv3,
+            policy: None,
+            metric: None,
+            metric_type: None,
+        };
+        let mut table = RoutingTable {
+            name: "rt1".into(),
+            ospfv3_instances: vec!["a".into(), "b".into(), "c".into()],
+            ..Default::default()
+        };
+        let mut routes = HashMap::new();
+        let e = static_entry("2001:db8:e::/48", "2001:db8::1");
+        routes.insert(e.prefix, e);
+        let feed = |table: &RoutingTable| {
+            compute_redistribute_targets_ospf(
+                &cfg_with_table(table.clone()),
+                "rt1",
+                &routes,
+                RedistributeTarget::Ospfv3,
+            )
+            .into_iter()
+            .map(|t| (t.instance.unwrap(), t.routes.len()))
+            .collect::<Vec<_>>()
+        };
+        // No rule: every instance is told to withdraw (empty routes).
+        assert_eq!(
+            feed(&table),
+            [("a".into(), 0), ("b".into(), 0), ("c".into(), 0)]
+        );
+        // The unset rule feeds all of them.
+        table.redistribute = vec![rule(None)];
+        assert_eq!(
+            feed(&table),
+            [("a".into(), 1), ("b".into(), 1), ("c".into(), 1)]
+        );
+        // Only a named rule: just that instance is fed.
+        table.redistribute = vec![rule(Some("b"))];
+        assert_eq!(
+            feed(&table),
+            [("a".into(), 0), ("b".into(), 1), ("c".into(), 0)]
+        );
+        // An instance dropped from the table leaves the feed set.
+        table.ospfv3_instances.retain(|i| i != "b");
+        assert_eq!(feed(&table), [("a".into(), 0), ("c".into(), 0)]);
     }
 }
 

@@ -2900,6 +2900,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: args.redistribute_policy.clone(),
@@ -2920,6 +2921,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
@@ -2935,6 +2937,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: args.redistribute_to_ospfv3_policy.clone(),
@@ -2948,6 +2951,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospfv3 is mutually exclusive with --redistribute-to-ospfv3");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: None,
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospfv3,
         }));
@@ -2957,6 +2961,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute-to-ospf");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: None,
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospf,
         }));
@@ -4495,7 +4500,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
-        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
             name: args.routing_table.clone(),
             ospfv3_instance: name,
         }));
@@ -5847,6 +5852,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospf,
                     policy: None,
@@ -5902,6 +5908,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospfv3,
                     policy: Some("p".into()),
@@ -5913,6 +5920,7 @@ mod tests {
         has(
             &ops(&["--clear-redistribute-to-ospfv3"]).unwrap(),
             &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+                instance: None,
                 name: "rt1".into(),
                 to: RedistributeTarget::Ospfv3,
             }),

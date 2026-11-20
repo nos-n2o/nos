@@ -3592,7 +3592,7 @@ mod tests {
                 }]
             }],
             "routing_tables": [{
-                "name": "rt1", "ospfv3_instance": "o3",
+                "name": "rt1", "ospfv3_instances": ["o3"],
                 "evpn": {"l3_vni": 5000, "rd": "1:1"}
             }],
             "users": [{"name": "admin", "password": "$argon2id$secret"}]
