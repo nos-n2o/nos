@@ -84,6 +84,9 @@ jobs:
       - run: df -h /
       - run: tools/ci/e2e-preflight.sh
       - name: Run group
+        env:
+          # nightly only (#1294): run every phase, report all failures; dispatch/PRs stay fail-fast
+          NOS_E2E_KEEP_GOING: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: |
           start=$(date +%s)
           set +e

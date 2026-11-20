@@ -11,5 +11,8 @@ fi
 # The phase is the last "=== name ===" banner; the error is the harness's own
 # "FAILED: ..." line (first line only, anyhow chains continue below it).
 phase=$(grep -v 'docker logs' "$log" | sed -n 's/.*=== \(.*\) ===.*/\1/p' | tail -1)
+# keep-going (#1294): the group summary names the first failed phase.
+first=$(sed -n 's/.*phase(s) failed, first \([^:]*\):.*/\1/p' "$log" | head -1)
+[ -n "$first" ] && phase=$first
 err=$(sed -n 's/.*\] [^ ]*: FAILED: //p' "$log" | head -1 | cut -c1-200)
 echo "$i FAIL ${secs}s $phase | $err"

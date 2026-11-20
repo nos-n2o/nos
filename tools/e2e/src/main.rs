@@ -27,15 +27,92 @@ use std::process::ExitCode;
 
 use world::World;
 
-/// `phase_start` tracks the unix second the running phase began.
-async fn run_all(w: &mut World, names: &[&str], phase_start: &mut i32) -> anyhow::Result<()> {
-    for name in names {
+/// A phase's result in keep-going mode.
+struct Outcome<'a> {
+    phase: &'a str,
+    error: Option<String>,
+}
+
+/// `NOS_E2E_KEEP_GOING=1` (the nightly only, #1294): run every phase, report at the end.
+fn keep_going() -> bool {
+    std::env::var("NOS_E2E_KEEP_GOING").as_deref() == Ok("1")
+}
+
+fn first_line(err: &str) -> String {
+    err.lines().next().unwrap_or("").chars().take(200).collect()
+}
+
+/// `phase_start` tracks the unix second the running phase began. Fail-fast by
+/// default (first error returns). With `keep_going` a phase error is recorded and
+/// its docker logs dumped at once; only `up`/`established` stay fatal (nothing
+/// later can run without the lab).
+async fn run_all<'a>(
+    w: &mut World,
+    names: &[&'a str],
+    phase_start: &mut i32,
+    keep_going: bool,
+    n: usize,
+) -> anyhow::Result<Vec<Outcome<'a>>> {
+    let mut outcomes = Vec::new();
+    for &name in names {
         *phase_start = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i32::try_from(d.as_secs()).unwrap_or(0));
-        phases::run(name, w).await?;
+        match phases::run(name, w).await {
+            Ok(()) => outcomes.push(Outcome {
+                phase: name,
+                error: None,
+            }),
+            Err(e) if keep_going && !matches!(name, "up" | "established") => {
+                let err = format!("{e:#}");
+                eprintln!("[nos-e2e] phase {name} FAILED: {}", first_line(&err));
+                w.dump_docker_logs(n, &err, *phase_start).await;
+                outcomes.push(Outcome {
+                    phase: name,
+                    error: Some(err),
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
-    Ok(())
+    Ok(outcomes)
+}
+
+/// The keep-going summary text and, when any phase failed, the group's error.
+/// A failure after the first "may be a cascade": a failed phase skips its own
+/// cleanup, so its leftovers are visible to every later phase.
+fn summarize(group: &str, outcomes: &[Outcome]) -> (String, Option<anyhow::Error>) {
+    use std::fmt::Write;
+    let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
+    let mut text = format!(
+        "[nos-e2e] {group} summary: {} run, {failed} failed\n",
+        outcomes.len()
+    );
+    let mut first: Option<(&str, &str)> = None;
+    for o in outcomes {
+        match &o.error {
+            None => {
+                let _ = writeln!(text, "[nos-e2e]   OK      {}", o.phase);
+            }
+            Some(e) => {
+                let note = if first.is_some() {
+                    "   (after an earlier failure: may be a cascade)"
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    text,
+                    "[nos-e2e]   FAILED  {}: {}{note}",
+                    o.phase,
+                    first_line(e)
+                );
+                first.get_or_insert((o.phase, e));
+            }
+        }
+    }
+    let err = first
+        .map(|(p, e)| anyhow::anyhow!("{failed} phase(s) failed, first {p}: {}", first_line(e)));
+    (text, err)
 }
 
 /// The groups `nos-e2e all` runs (CI's matrix minus the slow `pki-crl`, own job).
@@ -45,14 +122,24 @@ const ALL_GROUPS: &[&str] = &["base", "drivers", "rpl", "ospf-suite", "multi", "
 /// either way (`VERIFY_E2E_KEEP=1` keeps the containers for `nos-e2e logs`).
 async fn run_group(w: &mut World, group: &str, n: usize) -> anyhow::Result<()> {
     let mut since = 0;
-    let result = run_all(w, phases::group(group).unwrap_or_default(), &mut since).await;
+    let keep = keep_going();
+    let names = phases::group(group).unwrap_or_default();
+    let result = run_all(w, names, &mut since, keep, n).await;
     if let Err(e) = &result {
         w.dump_docker_logs(n, &format!("{e:#}"), since).await;
     }
     if std::env::var("VERIFY_E2E_KEEP").as_deref() != Ok("1") {
         w.down().await;
     }
-    result
+    let outcomes = result?;
+    if keep {
+        let (text, err) = summarize(group, &outcomes);
+        eprint!("{text}");
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
@@ -68,10 +155,19 @@ async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
         // #887: `all` = the CI groups in sequence, each on a fresh `up` (what CI
         // proves); one shared lab across every phase piles up stale log lines.
         "all" => {
+            let keep = keep_going();
+            let mut errs = Vec::new();
             for g in ALL_GROUPS {
-                run_group(&mut w, g, n).await?;
+                match run_group(&mut w, g, n).await {
+                    Err(e) if keep => errs.push(format!("{g}: {e:#}")),
+                    r => r?,
+                }
             }
-            Ok(())
+            if errs.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{}", errs.join("; ")))
+            }
         }
         group if phases::group(group).is_some() => run_group(&mut w, group, n).await,
         phase => phases::run(phase, &mut w).await,
@@ -96,5 +192,48 @@ async fn main() -> ExitCode {
             modules::report_missing(&cmd);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn o<'a>(phase: &'a str, error: Option<&str>) -> Outcome<'a> {
+        Outcome {
+            phase,
+            error: error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn all_ok() {
+        let (t, e) = summarize("g", &[o("a", None), o("b", None)]);
+        assert!(e.is_none() && !t.contains("FAILED") && t.contains("2 run, 0 failed"));
+    }
+
+    #[test]
+    fn one_failure_keeps_first_line() {
+        let (t, e) = summarize("g", &[o("a", None), o("b", Some("boom\nchain"))]);
+        assert_eq!(e.unwrap().to_string(), "1 phase(s) failed, first b: boom");
+        assert!(t.contains("FAILED  b: boom\n") && !t.contains("cascade"));
+    }
+
+    #[test]
+    fn cascade_only_after_first() {
+        let (t, e) = summarize("g", &[o("a", Some("x")), o("b", Some("y"))]);
+        assert!(e
+            .unwrap()
+            .to_string()
+            .contains("2 phase(s) failed, first a: x"));
+        assert!(t.contains("FAILED  a: x\n"));
+        assert!(t.contains("FAILED  b: y   (after an earlier failure: may be a cascade)"));
+    }
+
+    #[test]
+    fn long_error_truncated() {
+        let long = "z".repeat(500);
+        let (t, _) = summarize("g", &[o("a", Some(&long))]);
+        assert!(t.contains(&"z".repeat(200)) && !t.contains(&"z".repeat(201)));
     }
 }
