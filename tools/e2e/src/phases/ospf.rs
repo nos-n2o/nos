@@ -1976,7 +1976,7 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     let range = OSPF_STUB_RANGE;
     let range_id = range.split('/').next().unwrap_or(range);
     let area = |router_id: &str, extra: &[&str]| {
-        let mut f = strings(&[
+        let mut flags = strings(&[
             "--ospf-instance",
             OSPF_INSTANCE,
             "--ospf-router-id",
@@ -1984,8 +1984,8 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
             "--ospf-area",
             OSPF_AREA_1,
         ]);
-        f.extend(strings(extra));
-        f
+        flags.extend(strings(extra));
+        flags
     };
     let on_eth0 = |router_id: &str, area_type: &str| {
         area(
