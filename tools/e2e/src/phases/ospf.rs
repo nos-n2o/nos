@@ -6753,7 +6753,14 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     // Leave no loopback behind: `ospfv3-lfa` re-provisions this very prefix
     // and waits for a *new* route add, which an identical config never gives.
     b.provision(&[&format!("--clear-{}-loopback-profile", s.daemon)])
-        .await
+        .await?;
+    if !s.v6 {
+        // The address left on the loopback made `ospf-graceful-restart`'s
+        // second loopback address vanish from router-b's LSA (#1293).
+        b.provision(&["--loopback-remove-address", s.prefix])
+            .await?;
+    }
+    Ok(())
 }
 
 /// `ospf-bfd` (#288), on the `ospf` lab.
@@ -7193,8 +7200,9 @@ async fn ospf_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     let full_b = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID}");
     let before_b = b.count(&full_b);
     let dr = format!("ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}");
-    let backup =
-        format!("ospf interface became backup {link} dr={OSPF_ROUTER_ID_B} bdr={OSPF_ROUTER_ID}");
+    // router-c (ospf-lfa onward) may already be the BDR, and BDR is not
+    // preempted (RFC 2328 §9.4): router-a then settles as dr-other (#1293).
+    let backup = format!("ospf interface became [bd][a-z-]* {link} dr={OSPF_ROUTER_ID_B}");
     let (dr0, backup0) = (b.count(&dr), a.count(&backup));
     a.provision_flags(&fa(&["--clear-mtu"])).await?;
     b.provision_flags(&fb(&["--clear-mtu"])).await?;
