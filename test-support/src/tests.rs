@@ -229,7 +229,12 @@ async fn ribd_defaults_values_and_pushed() {
 
     let (mut tx, mut rx) = dial::<RibRequest, RibEvent>(r.path(), "ribd", "rt1").await;
     tx.send(RibRequest::PushBgpRoutes(vec![])).await.unwrap();
-    tx.send(RibRequest::PushOspfRoutes(vec![])).await.unwrap();
+    tx.send(RibRequest::PushOspfRoutes {
+        instance: "o".into(),
+        updates: vec![],
+    })
+    .await
+    .unwrap();
     tx.send(RibRequest::GetVrfName).await.unwrap();
     // The query reply proves the pushes before it were read.
     next(&mut rx).await;

@@ -47,6 +47,7 @@ pub fn spawn(
     links: Arc<LinkManager>,
     routing_table_rx: watch::Receiver<Option<String>>,
     shutdown: watch::Receiver<bool>,
+    instance: String,
     chunk: usize,
 ) -> JoinHandle<()> {
     tokio::spawn(run(
@@ -54,6 +55,7 @@ pub fn spawn(
         links,
         routing_table_rx,
         shutdown,
+        instance,
         chunk,
     ))
 }
@@ -63,6 +65,7 @@ async fn run(
     links: Arc<LinkManager>,
     routing_table_rx: watch::Receiver<Option<String>>,
     mut shutdown: watch::Receiver<bool>,
+    instance: String,
     chunk: usize,
 ) {
     while !*shutdown.borrow() {
@@ -117,6 +120,7 @@ async fn run(
         let routes = compute_routes(&links).await;
         if !push(
             &mut writer,
+            &instance,
             vec![OspfRouteUpdate::Full(to_routes(&routes))],
             chunk,
         )
@@ -148,12 +152,18 @@ async fn run(
                 // Withdraw everything from this connection before switching
                 // away — best-effort, we're tearing this connection down
                 // regardless of the outcome.
-                push(&mut writer, vec![OspfRouteUpdate::Full(Vec::new())], chunk).await;
+                push(
+                    &mut writer,
+                    &instance,
+                    vec![OspfRouteUpdate::Full(Vec::new())],
+                    chunk,
+                )
+                .await;
                 break;
             }
             let new_routes = compute_routes(&links).await;
             let updates = diff_routes(&last_sent, &new_routes);
-            if !push(&mut writer, updates, chunk).await {
+            if !push(&mut writer, &instance, updates, chunk).await {
                 warn!(table = %table, "write failure sending ospf route update, reconnecting");
                 break;
             }
@@ -168,12 +178,26 @@ async fn run(
 /// (`OspfRouteUpdate::frames_with`: a big `Full` becomes `FullPart`s plus a
 /// closing `Full`), in order, stopping on the first error. Nothing is sent
 /// for an empty push. `false` means the connection is gone.
-async fn push<S>(writer: &mut S, updates: Vec<OspfRouteUpdate>, chunk: usize) -> bool
+async fn push<S>(
+    writer: &mut S,
+    instance: &str,
+    updates: Vec<OspfRouteUpdate>,
+    chunk: usize,
+) -> bool
 where
     S: futures::Sink<RibRequest> + Unpin,
 {
     let frames = OspfRouteUpdate::frames_with(updates, chunk);
-    nos_proto::chunk::send_all(writer, frames.into_iter().map(RibRequest::PushOspfRoutes)).await
+    nos_proto::chunk::send_all(
+        writer,
+        frames
+            .into_iter()
+            .map(|updates| RibRequest::PushOspfRoutes {
+                instance: instance.to_string(),
+                updates,
+            }),
+    )
+    .await
 }
 
 /// Waits for the next reason to recompute routes: an LSDB change (then a
@@ -467,8 +491,16 @@ mod tests {
             })
             .collect();
 
-        assert!(push(&mut writer, Vec::new(), 4).await);
-        assert!(push(&mut writer, vec![OspfRouteUpdate::Full(all.clone())], 4).await);
+        assert!(push(&mut writer, "i1", Vec::new(), 4).await);
+        assert!(
+            push(
+                &mut writer,
+                "i1",
+                vec![OspfRouteUpdate::Full(all.clone())],
+                4
+            )
+            .await
+        );
         // The query's reply proves every push before it was read.
         writer.send(RibRequest::GetVrfName).await.unwrap();
         reader.next().await.unwrap().unwrap();
@@ -477,7 +509,10 @@ mod tests {
             .take_pushed()
             .into_iter()
             .map(|r| match r {
-                RibRequest::PushOspfRoutes(f) => f,
+                RibRequest::PushOspfRoutes { instance, updates } => {
+                    assert_eq!(instance, "i1");
+                    updates
+                }
                 other => panic!("unexpected {other:?}"),
             })
             .collect();
@@ -494,7 +529,10 @@ mod tests {
 
     fn frames_of(r: RibRequest) -> Vec<OspfRouteUpdate> {
         match r {
-            RibRequest::PushOspfRoutes(f) => f,
+            RibRequest::PushOspfRoutes { instance, updates } => {
+                assert_eq!(instance, "i1");
+                updates
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -515,7 +553,7 @@ mod tests {
         );
         let (_rt_tx, rt) = watch::channel(Some("rt1".to_string()));
         let (_stop, shutdown) = watch::channel(false);
-        let task = spawn(f.watchdog_socket(), links, rt, shutdown, 4);
+        let task = spawn(f.watchdog_socket(), links, rt, shutdown, "i1".into(), 4);
         let ribd = &f.ribd["rt1"];
         let full = vec![vec![OspfRouteUpdate::Full(Vec::new())]];
         let pushed_on = |conns: usize| async move {
@@ -559,7 +597,14 @@ mod tests {
         );
         let (_rt_tx, rt) = watch::channel(Some("rt1".to_string()));
         let (_stop, shutdown) = watch::channel(false);
-        let task = spawn(f.watchdog_socket(), links.clone(), rt, shutdown, 4);
+        let task = spawn(
+            f.watchdog_socket(),
+            links.clone(),
+            rt,
+            shutdown,
+            "i1".into(),
+            4,
+        );
         let ribd = &f.ribd["rt1"];
         tokio::time::sleep(Duration::from_millis(600)).await;
         assert_eq!(ribd.connections(), 0);

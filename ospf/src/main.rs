@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         links.clone(),
         routing_table_rx,
         shutdown_rx,
+        args.instance.clone(),
         args.dev
             .push_chunk
             .filter(|&n| n > 0)

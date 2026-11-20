@@ -1132,7 +1132,11 @@ fn configured_sources_follow_the_table() {
     let mut cfg = base_cfg();
     assert_eq!(
         configured_sources(&cfg, "rt1"),
-        HashSet::from([RouteSource::Bgp, RouteSource::Ospf])
+        HashSet::from([
+            Pending::Source(RouteSource::Bgp),
+            Pending::Ospf(OspfOwner::new(false, "o1")),
+            Pending::Ospf(OspfOwner::new(true, "o3")),
+        ])
     );
     cfg.routing_tables[0].bgp_instance = None;
     cfg.routing_tables[0].ospf_instance = None;
@@ -1140,7 +1144,11 @@ fn configured_sources_follow_the_table() {
     cfg.routing_tables[0].vpn.bgp_instance = Some("b1".into());
     assert_eq!(
         configured_sources(&cfg, "rt1"),
-        HashSet::from([RouteSource::Ospf, RouteSource::Evpn, RouteSource::Vpn])
+        HashSet::from([
+            Pending::Ospf(OspfOwner::new(true, "o3")),
+            Pending::Source(RouteSource::Evpn),
+            Pending::Source(RouteSource::Vpn),
+        ])
     );
     assert!(configured_sources(&cfg, "nope").is_empty());
 }
@@ -1156,8 +1164,16 @@ async fn the_first_resync_holds_until_every_source_pushed() {
 
     let applies = e.rec.applies.lock().unwrap().len();
     let gate = e.kernel.lock().await;
-    assert!(!e.kernel.source_done(&gate, RouteSource::Bgp));
-    assert!(e.kernel.source_done(&gate, RouteSource::Ospf));
+    assert!(!e
+        .kernel
+        .source_done(&gate, &Pending::Source(RouteSource::Bgp)));
+    // A v2 `Full` alone does not release: the v3 instance is awaited too.
+    assert!(!e
+        .kernel
+        .source_done(&gate, &Pending::Ospf(OspfOwner::new(false, "o1"))));
+    assert!(e
+        .kernel
+        .source_done(&gate, &Pending::Ospf(OspfOwner::new(true, "o3"))));
     e.kernel
         .release_hold("rt1", &e.rib, &gate, e.rec.as_ref(), "test")
         .await;
@@ -1191,4 +1207,26 @@ async fn the_hold_expires_at_its_deadline() {
     assert!(e
         .kernel
         .hold_expired(Instant::now() + Duration::from_secs(6)));
+}
+
+#[tokio::test]
+async fn a_resync_withdraws_only_unconfigured_ospf_owners() {
+    let e = Env::ready(base_cfg());
+    let route = |p: &str| RibEntry {
+        prefix: net(p),
+        next_hops: vec![("10.0.0.2".parse::<IpAddr>().unwrap(), None).into()],
+        source: RouteSource::Ospf,
+        backup: None,
+        backup_interface_id: None,
+        backup_tunnel: false,
+    };
+    {
+        let mut rib = e.rib.write().await;
+        rib.replace_ospf(&OspfOwner::new(false, "o1"), [(route("10.1.0.0/24"), 1)]);
+        rib.replace_ospf(&OspfOwner::new(true, "gone"), [(route("10.2.0.0/24"), 1)]);
+    }
+    e.resync().await;
+    let best = e.best().await;
+    assert!(best.contains_key(&net("10.1.0.0/24")));
+    assert!(!best.contains_key(&net("10.2.0.0/24")));
 }

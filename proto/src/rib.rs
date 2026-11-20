@@ -520,8 +520,16 @@ pub enum RibRequest {
     /// Fire-and-forget, no reply — sent continuously by the owning
     /// `nos-ospfd` instance over one long-lived connection, the OSPF
     /// analogue of `PushBgpRoutes` above (its own SPF computation, not BGP
-    /// best-path selection, is what changes here).
-    PushOspfRoutes(Vec<OspfRouteUpdate>),
+    /// best-path selection, is what changes here). `instance` is the pushing
+    /// daemon's instance name: `nos-ribd` keeps one route set per
+    /// `(daemon family, instance)`, so a `Full` replaces only that instance's
+    /// routes (#1277).
+    PushOspfRoutes {
+        /// The OSPF instance name (`ospf_instance`/`ospfv3_instance`).
+        instance: String,
+        /// The batch, applied in order.
+        updates: Vec<OspfRouteUpdate>,
+    },
     /// One-shot: the IGP cost of every prefix whose best non-BGP candidate
     /// is known (`Static` = 0, `Ospf` = its SPF metric). BGP resolves each
     /// path's `NEXT_HOP` against this for decision step (d); `Bgp`-sourced
@@ -942,7 +950,10 @@ mod tests {
             let f =
                 OspfRouteUpdate::frames_with(vec![OspfRouteUpdate::Full(routes)], OSPF_PUSH_CHUNK);
             assert_eq!(f.len(), 1);
-            let frame = RibRequest::PushOspfRoutes(f.into_iter().next().unwrap());
+            let frame = RibRequest::PushOspfRoutes {
+                instance: "i".into(),
+                updates: f.into_iter().next().unwrap(),
+            };
             let len = postcard::to_allocvec(&frame).unwrap().len();
             assert!(len < MAX_FRAME, "{len} bytes");
             let mut buf = bytes::BytesMut::new();
