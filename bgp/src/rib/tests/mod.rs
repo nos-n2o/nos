@@ -25,6 +25,7 @@ mod flowspec;
 mod flowspec_select;
 mod flowspec_validation;
 mod flowspec_vpn;
+mod flowspec_vpn_add_path;
 mod flowspec_vpn_select;
 mod gr;
 mod graceful_shutdown;

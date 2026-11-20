@@ -157,6 +157,7 @@ impl BgpRib {
                 .get(&peer)
                 .into_iter()
                 .flat_map(HashMap::iter)
+                .flat_map(|(k, m)| m.values().map(move |a| (k, a)))
                 .map(|(k, a)| OutboundUpdate::AnnounceVpnFlowspec((k.1).0, a.clone())),
         );
         snap
@@ -199,7 +200,10 @@ impl BgpRib {
                 .vpn_adj_rib_out
                 .get(&peer)
                 .map_or(0, |t| t.values().map(HashMap::len).sum())
-            + self.vpn_flow_adj_rib_out.get(&peer).map_or(0, HashMap::len);
+            + self
+                .vpn_flow_adj_rib_out
+                .get(&peer)
+                .map_or(0, |t| t.values().map(HashMap::len).sum());
         OutCounts {
             pre: pre.map_or(0, HashSet::len) as u64,
             pre_v4,
