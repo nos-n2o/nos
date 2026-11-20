@@ -29,6 +29,8 @@ use nos_daemon::watchdog::resolve_once;
 
 // ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
 // an LSDB (neighbor state, area reconcile); upgrade by notifying from them.
+/// How often restart mode is re-checked while the push is held back.
+const RESTART_POLL: Duration = Duration::from_millis(200);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Pause after a change before recomputing, so an LSU burst runs one SPF.
 const HOLD_DOWN: Duration = Duration::from_millis(50);
@@ -63,6 +65,14 @@ async fn run(
     chunk: usize,
 ) {
     while !*shutdown.borrow() {
+        // RFC 5187 restart mode: push nothing, so `nos-ribd` keeps the routes
+        // of the previous process until the first, complete `Full` after exit.
+        if links.restart_active() {
+            if wait_or_shutdown(RESTART_POLL, &mut shutdown).await {
+                break;
+            }
+            continue;
+        }
         let Some(table) = routing_table_rx.borrow().clone() else {
             if wait_or_shutdown(POLL_INTERVAL, &mut shutdown).await {
                 break;

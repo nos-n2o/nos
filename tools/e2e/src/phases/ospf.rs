@@ -5221,6 +5221,11 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "ospfv3 helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
     ))
     .await?;
+    // The respawn is a restarting router (#1163): restart mode, then done.
+    a.wait("ospfv3 restart mode: entered neighbors=[0-9]* remaining_secs=[0-9]* unplanned=false")
+        .await?;
+    a.wait("ospfv3 restart mode: exited reason=complete")
+        .await?;
     quiet_settled(b, &torn, torn_before).await?;
     b.assert_quiet(&removed, removed_before, 5).await?;
 
@@ -5238,6 +5243,7 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         b.count(&full_on_b),
         a.count(&full_on_a),
     );
+    let running0 = a.count("ospfv3 running marker written");
     log("second SIGTERM to router-a's nos-ospfv3d; router-b changes topology meanwhile");
     w.dock
         .signal_process("router-a", "nos-ospfv3d", "-TERM")
@@ -5256,11 +5262,59 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // The loopback address stays on router-b (flags cannot remove one) and
     // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
     // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
+    let clear = helper_cap(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE]);
+
+    // RFC 5187 unplanned restart (#1163): router-a, which keeps a running
+    // marker while a grace period is configured, is SIGKILLed. The respawn
+    // announces itself before its first Hello, enters restart mode and keeps
+    // router-a's own kernel route to router-b's loopback.
+    let running = "ospfv3 running marker written";
+    a.wait_new(running, running0, 90).await?;
     b.provision_flags(&helper_cap(&[
-        "--clear-ospfv3-loopback-profile",
+        "--ospfv3-loopback-address",
+        OSPFV3_LFA_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
         OSPFV3_PROFILE,
     ]))
-    .await
+    .await?;
+    for _ in 0..60 {
+        if a.rt1_has(OSPFV3_LFA_LOOPBACK_ADDRESS, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let (in_p, out_p) = (
+        "ospfv3 restart mode: entered neighbors=[0-9]* remaining_secs=[0-9]* unplanned=true",
+        "ospfv3 restart mode: exited reason=complete",
+    );
+    let startup = "ospfv3 graceful restart: grace-lsa sent at startup link=eth0.0 grace_period=[0-9]* reason=0";
+    let helper = format!(
+        "ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID} grace_period=[0-9]* restart_reason=0 effective_grace="
+    );
+    let removed_a = format!("removed route prefix={OSPFV3_LFA_LOOPBACK_ADDRESS}");
+    let (in0, out0, st0, helper0, removed0, torn0, full_b0, full_a0) = (
+        a.count(in_p),
+        a.count(out_p),
+        a.count(startup),
+        b.count(&helper),
+        a.count(&removed_a),
+        b.count_fresh(&torn).await,
+        b.count(&full_on_b),
+        a.count(&full_on_a),
+    );
+    log("SIGKILL to router-a's nos-ospfv3d: an unplanned restart");
+    w.dock
+        .signal_process("router-a", "nos-ospfv3d", "-KILL")
+        .await?;
+    a.wait_new(in_p, in0, 90).await?;
+    a.wait_new(startup, st0, 90).await?;
+    b.wait_new(&helper, helper0, 90).await?;
+    a.wait_new(out_p, out0, 90).await?;
+    b.wait_new(&full_on_b, full_b0, 90).await?;
+    a.wait_new(&full_on_a, full_a0, 90).await?;
+    quiet_settled(b, &torn, torn0).await?;
+    a.assert_quiet(&removed_a, removed0, 5).await?;
+    b.provision_flags(&clear).await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
