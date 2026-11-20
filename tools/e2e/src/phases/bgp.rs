@@ -5054,6 +5054,22 @@ async fn flowspec_vpn_add_path_send(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&b_flags("65000:7")).await?;
     a.wait_new(&gone, gone_base, 60).await?;
     a.assert_quiet(&gone, gone_base + 1, 5).await?;
+
+    log("restoring the membership and resetting the session replays both copies");
+    b.provision_flags(&b_flags(VPN_RT)).await?;
+    let adv = format!(
+        "flowspec route advertised peer={IP_B} family=vpnv4-flowspec rd=65001:5 .*path_id="
+    );
+    let (adv1, adv2) = (a.count(&format!("{adv}1")), a.count(&format!("{adv}2")));
+    a.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_B}/clear"),
+        None,
+        200,
+    )
+    .await?;
+    a.wait_new(&format!("{adv}1"), adv1, 90).await?;
+    a.wait_new(&format!("{adv}2"), adv2, 90).await?;
     Ok(())
 }
 
