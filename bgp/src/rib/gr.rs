@@ -393,17 +393,14 @@ impl BgpRib {
         for k in vpn {
             self.sync_vpn_to(peer, &k, false);
         }
-        let vpn_flow: HashSet<_> = self
-            .vpn_flow_loc
-            .keys()
-            .chain(
-                self.vpn_flow_adj_rib_out
-                    .get(&peer)
-                    .into_iter()
-                    .flat_map(std::collections::HashMap::keys),
-            )
-            .cloned()
-            .collect();
+        let mut vpn_flow = self.vpn_flow_keys_where(|_| true);
+        vpn_flow.extend(
+            self.vpn_flow_adj_rib_out
+                .get(&peer)
+                .into_iter()
+                .flat_map(std::collections::HashMap::keys)
+                .cloned(),
+        );
         for k in vpn_flow {
             self.sync_vpn_flow_to(peer, &k, false);
         }

@@ -462,6 +462,8 @@ pub(crate) type VpnFlowKey = (AddressFamily, VpnKey<FlowSpec>);
 /// One received copy of a SAFI 134 rule: the rule and its RFC 7911 path id
 /// (0 for a peer without Add-Path), #1126.
 pub(crate) type VpnFlowCopy = (VpnFlowKey, u32);
+/// What one peer was sent of one SAFI 134 rule, by source copy (peer, path id).
+type SentVpnFlows = HashMap<(IpAddr, u32), AdvertisedFlowspec>;
 
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,7 +631,7 @@ pub enum OutboundUpdate {
     WithdrawRtc(RtcKey),
     /// A selected VPN Flowspec rule under its RD (see `flowspec_vpn`).
     AnnounceVpnFlowspec(crate::vpn::Rd, AdvertisedFlowspec),
-    /// The second field is the RFC 7911 path id (`None` until #1127).
+    /// The second field is the RFC 7911 path id (`Some` toward an Add-Path peer, #1127).
     WithdrawVpnFlowspec(VpnFlowKey, Option<u32>),
 }
 
@@ -855,7 +857,9 @@ pub struct BgpRib {
     /// advertisement needs Add-Path for SAFI 134 (#1124).
     vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, u32, FlowspecRoute)>,
     /// What each peer was last sent per SAFI 134 rule (`sync_vpn_flow_to`).
-    vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,
+    vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, SentVpnFlows>>,
+    /// Next fresh Add-Path id per (peer, SAFI 134 rule) (`sync_vpn_flow_to`).
+    vpn_flow_next_id: HashMap<(IpAddr, VpnFlowKey), u32>,
     /// The SAFI 134 twin of `flowspec_stale`.
     vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowCopy>>,
     /// Per key, the selected copy: where it came from, its path id (`select_vpn`).
@@ -1045,6 +1049,7 @@ impl BgpRib {
             vpn_flow_visits: 0,
             vpn_flow_loc: HashMap::new(),
             vpn_flow_adj_rib_out: HashMap::new(),
+            vpn_flow_next_id: HashMap::new(),
             vpn_flow_stale: HashMap::new(),
             vpn_vrfs: crate::vpn::VrfSet::default(),
             rtc_adj_rib_in: HashMap::new(),
@@ -1879,6 +1884,7 @@ impl BgpRib {
         self.vpn_adj_rib_out.remove(&peer);
         self.vpn_next_id.retain(|(p, _), _| *p != peer);
         self.vpn_flow_adj_rib_out.remove(&peer);
+        self.vpn_flow_next_id.retain(|(p, _), _| *p != peer);
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
