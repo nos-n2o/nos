@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-25 {
+  revision 2026-11-26 {
     description "Generated.";
   }
 
@@ -1268,7 +1268,7 @@ module nos-config {
       type string;
       description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
     }
-    leaf ospfv3_profile {
+    leaf-list ospfv3_profiles {
       type string;
       description "Run OSPFv3 on this attach point under a profile.";
     }
@@ -1356,7 +1356,7 @@ module nos-config {
         type string;
         description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
       }
-      leaf ospfv3_profile {
+      leaf-list ospfv3_profiles {
         type string;
         description "Run OSPFv3 on this attach point under a profile.";
       }
@@ -1470,7 +1470,7 @@ module nos-config {
       type string;
       description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
     }
-    leaf ospfv3_profile {
+    leaf-list ospfv3_profiles {
       type string;
       description "Run OSPFv3 on this attach point under a profile.";
     }
@@ -1728,7 +1728,7 @@ module nos-config {
         type string;
         description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
       }
-      leaf ospfv3_profile {
+      leaf-list ospfv3_profiles {
         type string;
         description "Run OSPFv3 on this attach point under a profile.";
       }

@@ -373,6 +373,9 @@ pub enum OpError {
         /// Prefix-list entry that was looked up.
         entry: PrefixListEntry,
     },
+    /// `RemoveOspfv3Profile` named a profile the attach point does not list.
+    #[error("ospfv3 profile '{0}' is not attached")]
+    Ospfv3ProfileNotAttached(String),
     /// No broadcast domain matches the given name.
     #[error("broadcast domain '{0}' not found")]
     BroadcastDomainNotFound(String),
@@ -556,6 +559,23 @@ pub enum OpError {
         /// Remote router ID of the virtual link that was looked up.
         router_id: Ipv4Addr,
     },
+}
+
+/// Idempotent push of one `OSPFv3` profile onto an attach point's list.
+fn add_ospfv3_profile(list: &mut Vec<String>, profile: &str) {
+    if !list.iter().any(|p| p == profile) {
+        list.push(profile.to_string());
+    }
+}
+
+/// Removes one `OSPFv3` profile from an attach point's list; absent is an error.
+fn remove_ospfv3_profile(list: &mut Vec<String>, profile: &str) -> Result<(), OpError> {
+    let before = list.len();
+    list.retain(|p| p != profile);
+    if list.len() == before {
+        return Err(OpError::Ospfv3ProfileNotAttached(profile.to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

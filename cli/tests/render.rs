@@ -124,9 +124,10 @@ fn fix_interfaces(config: &mut Value) {
             iface["subinterfaces"] = json!([]);
         } else {
             iface["addresses"] = json!([]);
-            for f in ["routing_table", "ospf_profile", "ospfv3_profile"] {
+            for f in ["routing_table", "ospf_profile"] {
                 iface[f] = Value::Null;
             }
+            iface["ospfv3_profiles"] = json!([]);
         }
     }
 }

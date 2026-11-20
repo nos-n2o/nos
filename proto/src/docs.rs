@@ -199,7 +199,7 @@ topics! {
     InterfaceRoutingTable,
     /// `Interface.ospf_profile` (also a subinterface's and a broadcast domain's)
     InterfaceOspfProfile,
-    /// `Interface.ospfv3_profile` (also a subinterface's and a broadcast domain's)
+    /// `Interface.ospfv3_profiles` (also a subinterface's and a broadcast domain's)
     InterfaceOspfv3Profile,
     /// `Subinterface.bfd_unsolicited`
     InterfaceBfdUnsolicited,

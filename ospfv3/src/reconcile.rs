@@ -933,17 +933,17 @@ fn resolve_redistribute_policy(
 fn attach_points_for(cfg: &nos_proto::Config, profile: &str) -> Vec<String> {
     let mut points = Vec::new();
     for iface in &cfg.interfaces {
-        if iface.ospfv3_profile.as_deref() == Some(profile) {
+        if iface.ospfv3_profiles.iter().any(|p| p == profile) {
             points.push(iface.name.clone());
         }
         for sub in &iface.subinterfaces {
-            if sub.ospfv3_profile.as_deref() == Some(profile) {
+            if sub.ospfv3_profiles.iter().any(|p| p == profile) {
                 points.push(format!("{}.{}", iface.name, sub.tag));
             }
         }
     }
     for domain in &cfg.broadcast_domains {
-        if domain.ospfv3_profile.as_deref() == Some(profile) {
+        if domain.ospfv3_profiles.iter().any(|p| p == profile) {
             points.push(format!("broadcast-domain:{}", domain.name));
         }
     }
@@ -972,7 +972,7 @@ fn subinterface_attach_points(
     let mut points = Vec::new();
     for iface in &cfg.interfaces {
         for sub in &iface.subinterfaces {
-            if sub.ospfv3_profile.as_deref() == Some(profile) {
+            if sub.ospfv3_profiles.iter().any(|p| p == profile) {
                 points.push(SubinterfaceAttachPoint {
                     interface: iface.name.clone(),
                     tag: sub.tag,
@@ -1004,7 +1004,7 @@ fn broadcast_domain_attach_points(
 ) -> Vec<BroadcastDomainAttachPoint> {
     cfg.broadcast_domains
         .iter()
-        .filter(|d| d.ospfv3_profile.as_deref() == Some(profile))
+        .filter(|d| d.ospfv3_profiles.iter().any(|p| p == profile))
         .map(|d| BroadcastDomainAttachPoint {
             name: d.name.clone(),
             routing_table: d.routing_table.clone(),
@@ -1022,7 +1022,7 @@ fn loopback_attach_points(cfg: &nos_proto::Config, profile: &str) -> Vec<Loopbac
         .iter()
         .filter(|i| {
             nos_proto::loopback_table_name(&i.name).is_some()
-                && i.ospfv3_profile.as_deref() == Some(profile)
+                && i.ospfv3_profiles.iter().any(|p| p == profile)
         })
         .map(|i| LoopbackAttachPoint {
             interface: i.name.clone(),
@@ -1247,7 +1247,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: ospfv3_profile.map(str::to_string),
+            ospfv3_profiles: ospfv3_profile.map(str::to_string).into_iter().collect(),
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,
@@ -1283,7 +1283,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: Some("p1".to_string()),
+            ospfv3_profiles: vec!["p1".to_string()],
             bfd_unsolicited: None,
         }];
         let cfg = Config {
@@ -1301,7 +1301,7 @@ mod tests {
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
-                ospfv3_profile: Some("p1".to_string()),
+                ospfv3_profiles: vec!["p1".to_string()],
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1340,7 +1340,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
-            ospfv3_profile: Some("p1".to_string()),
+            ospfv3_profiles: vec!["p1".to_string()],
             bfd_unsolicited: None,
         }];
         let cfg = Config {
@@ -1361,7 +1361,7 @@ mod tests {
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),
                 ospf_profile: None,
-                ospfv3_profile: Some("p1".to_string()),
+                ospfv3_profiles: vec!["p1".to_string()],
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1558,7 +1558,7 @@ mod tests {
             addresses,
             routing_table: Some("rt1".into()),
             ospf_profile: None,
-            ospfv3_profile: Some("p1".into()),
+            ospfv3_profiles: vec!["p1".into()],
             bfd_unsolicited: None,
         };
         let mut iface = interface("eth0", None);

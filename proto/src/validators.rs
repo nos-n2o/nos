@@ -157,38 +157,57 @@ pub fn ospf_profile_reference_valid(
     Ok(())
 }
 
-/// If set, `ospfv3_profile` must name an existing `Ospfv3Profile`, flattened
-/// across every instance's areas — mirrors `ospf_profile_reference_valid`
-/// exactly, over `ctx.ospfv3_instances` instead.
-pub fn ospfv3_profile_reference_valid(
-    ospfv3_profile: Option<&String>,
-    ctx: &crate::schema::Config,
-) -> garde::Result {
-    let Some(name) = ospfv3_profile else {
-        return Ok(());
-    };
-    let exists = ctx
-        .ospfv3_instances
-        .iter()
-        .flat_map(|i| &i.areas)
-        .flat_map(|a| &a.profiles)
-        .any(|p| &p.name == name);
-    if !exists {
-        return Err(garde::Error::new(
-            "referenced ospfv3 profile does not exist",
-        ));
+/// Every name in `ospfv3_profiles` must name an existing `Ospfv3Profile`
+/// (flattened across every instance's areas), appear once, and an attach
+/// point carries at most one profile per instance with pairwise distinct
+/// effective Instance IDs (RFC 5340 §2.4: that ID is what tells the
+/// instances apart on one link).
+pub fn ospfv3_profiles_valid(names: &[String], ctx: &crate::schema::Config) -> garde::Result {
+    // (profile name, owning instance, effective instance id)
+    let mut seen: Vec<(&str, &str, u8)> = Vec::new();
+    for name in names {
+        let found = ctx.ospfv3_instances.iter().find_map(|i| {
+            i.areas
+                .iter()
+                .flat_map(|a| &a.profiles)
+                .find(|p| &p.name == name)
+                .map(|p| (i.name.as_str(), p.instance_id.unwrap_or(0)))
+        });
+        let Some((inst, id)) = found else {
+            return Err(garde::Error::new(
+                "referenced ospfv3 profile does not exist",
+            ));
+        };
+        for (other, other_inst, other_id) in &seen {
+            if other == name {
+                return Err(garde::Error::new(format!(
+                    "ospfv3 profile {name} listed twice"
+                )));
+            }
+            if *other_inst == inst {
+                return Err(garde::Error::new(format!(
+                    "ospfv3 profiles {other} and {name} belong to the same instance {inst}"
+                )));
+            }
+            if *other_id == id {
+                return Err(garde::Error::new(format!(
+                    "ospfv3 profiles {other} and {name} share effective instance-id {id}"
+                )));
+            }
+        }
+        seen.push((name, inst, id));
     }
     Ok(())
 }
 
-/// `ospfv3_profile_reference_valid`, plus RFC 6845 hybrid needs a broadcast
+/// `ospfv3_profiles_valid`, plus RFC 6845 hybrid needs a broadcast
 /// attach point: a subinterface or interface may not name a `Hybrid` profile.
-pub fn ospfv3_profile_point_to_point_valid(
-    ospfv3_profile: Option<&String>,
+pub fn ospfv3_profiles_point_to_point_valid(
+    names: &[String],
     ctx: &crate::schema::Config,
 ) -> garde::Result {
-    ospfv3_profile_reference_valid(ospfv3_profile, ctx)?;
-    let hybrid = ospfv3_profile.is_some_and(|name| {
+    ospfv3_profiles_valid(names, ctx)?;
+    let hybrid = names.iter().any(|name| {
         ctx.ospfv3_instances
             .iter()
             .flat_map(|i| &i.areas)

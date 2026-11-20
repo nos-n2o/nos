@@ -768,7 +768,7 @@ mod tests {
             }],
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
         }];
         let mut cfg = config_with(vec![agg]);
@@ -804,7 +804,7 @@ mod tests {
                 }],
                 routing_table: None,
                 ospf_profile: None,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
             }];
         }

@@ -291,7 +291,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,

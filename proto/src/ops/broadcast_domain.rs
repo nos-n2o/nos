@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{BroadcastDomain, Config, InterfaceAddress, SourceAddress};
 
-use super::OpError;
+use super::{add_ospfv3_profile, remove_ospfv3_profile, OpError};
 
 /// An edit to a single named `BroadcastDomain` within a transaction's
 /// in-progress config. Applied without validation, matching every other
@@ -62,16 +62,18 @@ pub enum BroadcastDomainOp {
     },
     /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
     /// (RFC 5340) instead.
-    SetOspfv3Profile {
+    AddOspfv3Profile {
         /// Name of the broadcast domain this op targets.
         name: String,
         /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
-    /// Clears the `OSPFv3` profile of the broadcast domain so it reverts to the default.
-    ClearOspfv3Profile {
+    /// Detaches one `OSPFv3` profile from the broadcast domain (error when not attached).
+    RemoveOspfv3Profile {
         /// Name of the broadcast domain this op targets.
         name: String,
+        /// Name of the `OSPFv3` profile to detach.
+        ospfv3_profile: String,
     },
     /// Deletes the broadcast domain and everything nested under it.
     Delete {
@@ -196,8 +198,8 @@ impl BroadcastDomainOp {
             | BroadcastDomainOp::ClearRoutingTable { .. }
             | BroadcastDomainOp::SetOspfProfile { .. }
             | BroadcastDomainOp::ClearOspfProfile { .. }
-            | BroadcastDomainOp::SetOspfv3Profile { .. }
-            | BroadcastDomainOp::ClearOspfv3Profile { .. }
+            | BroadcastDomainOp::AddOspfv3Profile { .. }
+            | BroadcastDomainOp::RemoveOspfv3Profile { .. }
             | BroadcastDomainOp::Delete { .. } => self.apply_part1(config),
             BroadcastDomainOp::SetVni { .. }
             | BroadcastDomainOp::ClearVni { .. }
@@ -229,7 +231,7 @@ impl BroadcastDomainOp {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
-                        ospfv3_profile: None,
+                        ospfv3_profiles: Vec::new(),
                         vni: None,
                         rd: None,
                         route_targets_import: Vec::new(),
@@ -295,15 +297,24 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.ospf_profile = None;
                 Ok(())
             }
-            BroadcastDomainOp::SetOspfv3Profile {
+            BroadcastDomainOp::AddOspfv3Profile {
                 name,
                 ospfv3_profile,
             } => {
-                find_domain_mut(config, name)?.ospfv3_profile = Some(ospfv3_profile.clone());
+                add_ospfv3_profile(
+                    &mut find_domain_mut(config, name)?.ospfv3_profiles,
+                    ospfv3_profile,
+                );
                 Ok(())
             }
-            BroadcastDomainOp::ClearOspfv3Profile { name } => {
-                find_domain_mut(config, name)?.ospfv3_profile = None;
+            BroadcastDomainOp::RemoveOspfv3Profile {
+                name,
+                ospfv3_profile,
+            } => {
+                remove_ospfv3_profile(
+                    &mut find_domain_mut(config, name)?.ospfv3_profiles,
+                    ospfv3_profile,
+                )?;
                 Ok(())
             }
             BroadcastDomainOp::Delete { name } => {
@@ -437,7 +448,7 @@ mod tests {
 
     fn domain(name: &str) -> BroadcastDomain {
         BroadcastDomain {
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -752,7 +763,7 @@ mod tests {
             route_target: "65000:1".to_string(),
         };
         for op in [
-            BroadcastDomainOp::SetOspfv3Profile {
+            BroadcastDomainOp::AddOspfv3Profile {
                 name: n(),
                 ospfv3_profile: "p3".to_string(),
             },
@@ -775,7 +786,7 @@ mod tests {
             op.apply(&mut cfg).unwrap();
         }
         let d = &cfg.broadcast_domains[0];
-        assert_eq!(d.ospfv3_profile.as_deref(), Some("p3"));
+        assert_eq!(d.ospfv3_profiles, ["p3"]);
         assert_eq!(d.rd.as_deref(), Some("1.1.1.1:1"));
         assert!(d.vtep_source.is_some());
         assert_eq!(d.route_targets_import, ["65000:1"], "no duplicate");
@@ -786,7 +797,10 @@ mod tests {
             route_target: "65000:1".to_string(),
         };
         for op in [
-            BroadcastDomainOp::ClearOspfv3Profile { name: n() },
+            BroadcastDomainOp::RemoveOspfv3Profile {
+                name: n(),
+                ospfv3_profile: "p3".to_string(),
+            },
             BroadcastDomainOp::ClearVni { name: n() },
             BroadcastDomainOp::ClearRd { name: n() },
             BroadcastDomainOp::ClearVtepSource { name: n() },
@@ -799,6 +813,14 @@ mod tests {
             op.apply(&mut cfg).unwrap();
         }
         assert_eq!(cfg.broadcast_domains[0], domain("bd1"));
+        assert!(matches!(
+            BroadcastDomainOp::RemoveOspfv3Profile {
+                name: n(),
+                ospfv3_profile: "p3".to_string(),
+            }
+            .apply(&mut cfg),
+            Err(OpError::Ospfv3ProfileNotAttached(_))
+        ));
         assert!(matches!(
             BroadcastDomainOp::ClearVni {
                 name: "nope".to_string()
