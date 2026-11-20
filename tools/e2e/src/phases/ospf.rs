@@ -7323,9 +7323,15 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
 /// to the initial delay after a quiet period.
 pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     const FLAPS: usize = 8;
+    // Fresh lab (#1303): `ospf-aging` leaves `--lsa-age-multiplier` on, whose
+    // refresh-driven SPFs would keep the throttle from ever going quiet.
+    w.up(&[]).await?;
     let (a, b) = (w.a()?, w.b()?);
     let base = with_base(A, asbr(ospf(OSPF_ROUTER_ID)));
     a.provision_flags(&base).await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    both_full_p2p(a, b).await?;
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
     let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
     a.wait(&reorig_pat).await?;
