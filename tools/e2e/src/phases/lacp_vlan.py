@@ -7,6 +7,7 @@
                                    straight out of eth2 (the peer's eth2 then
                                    sees a conversation mapped to eth1).
 """
+import os
 import socket
 import struct
 import sys
@@ -17,6 +18,10 @@ mode, vlan, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 if mode == "udp":
     me = int(sys.argv[4])
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # The sub-interface sits in a VRF, so its address is only local there:
+    # bind to the device (<bond>.<vlan>, the bond's name varies) first.
+    dev = next(n for n in os.listdir("/sys/class/net") if n.endswith(f".{vlan}"))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, dev.encode())
     s.bind((f"10.{vlan}.0.{me}", 0))
     for _ in range(count):
         s.sendto(b"x" * 64, (f"10.{vlan}.0.{3 - me}", 9))

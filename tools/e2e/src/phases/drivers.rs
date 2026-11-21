@@ -1108,7 +1108,7 @@ async fn lacp_vlan(w: &World, router: &str, args: &[&str]) -> anyhow::Result<()>
 /// (untagged) are the proof it is unaffected: both ports stay Distributing.
 async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let flags = |me: u8, algorithm: &str| {
+    let flags = |me: u8, algorithm: &str, mapped: bool| {
         let mut f = lacp_flags(&[
             "--lacp-rate",
             "fast",
@@ -1119,7 +1119,12 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
             "--lacp-link-number",
             "1",
             "--lacp-conversation-map",
-            "0-15:eth1,16-4095:eth2",
+            // a map needs an algorithm: unspecified clears it (empty value)
+            if algorithm == "unspecified" || !mapped {
+                ""
+            } else {
+                "0-15:eth1,16-4095:eth2"
+            },
         ]);
         f.extend(strings(both));
         for vlan in [10, 20] {
@@ -1144,8 +1149,8 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
     log("c-vlan + identical explicit maps: both routers install the steering with the collection filter");
     let full = format!("{} discard_wrong=true", installed(2));
     let bases = [a.count(&full), b.count(&full)];
-    a.provision(&flags(1, "c-vlan")).await?;
-    b.provision(&flags(2, "c-vlan")).await?;
+    a.provision(&flags(1, "c-vlan", true)).await?;
+    b.provision(&flags(2, "c-vlan", true)).await?;
     a.wait_new(&full, bases[0], 90).await?;
     b.wait_new(&full, bases[1], 90).await?;
     for r in [a, b] {
@@ -1224,6 +1229,9 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
         "eth2",
         "--clear-port-aggregate-member",
         "eth1",
+        // the map may not name a non-member
+        "--lacp-conversation-map",
+        "0-4095:eth2",
     ]));
     b.provision(&withdraw).await?;
     a.wait_new(&one, one_base, 60).await?;
@@ -1242,7 +1250,7 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
         bail!("VLAN 10 did not move to eth2 when eth1 left: {rows:?}");
     }
     let back_base = a.count(&full);
-    b.provision(&flags(2, "c-vlan")).await?;
+    b.provision(&flags(2, "c-vlan", true)).await?;
     a.wait_new(&full, back_base, 90).await?;
     wait_lacp_aggregate(a, "Agreed and Distributing again", |s| {
         s["agreement"] == "Agreed" && distributing(s)
@@ -1252,8 +1260,8 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
     log("lacp-port-algorithm unspecified removes the steering on both routers");
     let removed = format!("lacp conversation steering removed aggregate={LACP_AGGREGATE}");
     let bases = [a.count(&removed), b.count(&removed)];
-    a.provision(&flags(1, "unspecified")).await?;
-    b.provision(&flags(2, "unspecified")).await?;
+    a.provision(&flags(1, "unspecified", true)).await?;
+    b.provision(&flags(2, "unspecified", true)).await?;
     a.wait_new(&removed, bases[0], 60).await?;
     b.wait_new(&removed, bases[1], 60).await?;
     for r in [a, b] {
@@ -1262,6 +1270,9 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
             bail!("{}: steering rows left after removal: {rows:?}", r.name());
         }
     }
+    // Leave router-a as `lacp_v2` did (c-vlan, no map) for the next step.
+    a.provision(&flags(1, "c-vlan", false)).await?;
+    wait_lacp_aggregate(a, "Distributing again", distributing).await?;
     Ok(())
 }
 
