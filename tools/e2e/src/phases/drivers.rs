@@ -1298,16 +1298,31 @@ async fn lacp_linux_peer(w: &World, a: &Router, b: &Router, off: &[String]) -> a
     log("a kernel 802.3ad bond as router-a's peer on eth1: v1 only, tolerated");
     let down = "lacp sent version changed interface=eth1 version=1";
     let down_base = a.count(down);
-    b.provision(off).await?;
+    // Delete router-b's eth1/eth2 `Interface`s too: `nos-interfaced` re-applies
+    // every configured interface's master each 10 s and would release the
+    // kernel bond's slave (#1332).
+    let released = "removed interface from master enslavement interface=eth1";
+    let released_base = b.count(released);
+    let mut b_flags = off.to_vec();
+    b_flags.extend(strings(&[
+        "--delete-interface",
+        "eth1",
+        "--delete-interface",
+        "eth2",
+    ]));
+    b.provision(&b_flags).await?;
     b.wait(&format!(
         "deleted port aggregate bond port_aggregate={LACP_AGGREGATE} bond="
     ))
     .await?;
-    // One shell in one container: nos-interfaced on router-b keeps eth1 up
-    // between separate `ip` calls, and a slave must be down when enslaved.
+    // The resync that drops the interfaces may still release eth1; let it
+    // finish before the script enslaves it (the line is absent if the
+    // aggregate delete already released it, so a miss is fine).
+    let _ = b.wait_new(released, released_base, 5).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // A bond slave must be down when enslaved; nothing brings eth1 up again.
     let script = "ip link add bond0 type bond mode 802.3ad lacp_rate fast && \
-        for i in 1 2 3 4 5 6 7 8; do \
-        ip link set eth1 down && ip link set eth1 master bond0 && break; sleep 0.2; done && \
+        ip link set eth1 down && ip link set eth1 master bond0 && \
         ip link set bond0 up && ip link set eth1 up";
     w.dock
         .in_netns(NETNS_HELPER_IMAGE, "router-b", &["sh", "-c", script])

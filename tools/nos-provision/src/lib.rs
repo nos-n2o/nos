@@ -1317,6 +1317,13 @@ pub struct Args {
     #[arg(long = "clear-port-aggregate-member")]
     pub clear_port_aggregate_members: Vec<String>,
 
+    /// One interface name per repetition: deletes that `Interface`
+    /// (`InterfaceOp::Delete`), applied after the port-aggregate ops so a
+    /// member's reference is cleared first. Hands the port to a helper:
+    /// `nos-interfaced` stops re-applying its master (#1332).
+    #[arg(long = "delete-interface")]
+    pub delete_interfaces: Vec<String>,
+
     /// One `<name>=<clear password>` per repetition: creates the user or sets
     /// its password (`UserOp::SetPassword`). `nos-configd` hashes it on load /
     /// on apply. The first `=` separates the two, so a password may contain `=`.
@@ -3930,6 +3937,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    for name in &args.delete_interfaces {
+        ops.push(ConfigOp::Interface(InterfaceOp::Delete {
+            name: name.clone(),
+        }));
+    }
+
     if let Some(hostname) = args.hostname.clone() {
         ops.push(ConfigOp::SetHostname(hostname));
     }
@@ -6199,6 +6212,32 @@ mod tests {
             err(&[&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2"]].concat())
                 .contains("expected")
         );
+    }
+
+    #[test]
+    fn delete_interface_is_repeatable_and_after_the_aggregate_ops() {
+        let o = ops(&[
+            "--port-aggregate",
+            "bond0",
+            "--delete-port-aggregate",
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--delete-interface",
+            "eth1",
+            "--delete-interface",
+            "eth2",
+        ])
+        .unwrap();
+        let pos = |f: &dyn Fn(&ConfigOp) -> bool| o.iter().position(f).unwrap();
+        let clear = pos(
+            &|op| matches!(op, ConfigOp::Interface(InterfaceOp::ClearPortAggregate { name }) if name == "eth1"),
+        );
+        let del = |n: &'static str| {
+            pos(
+                &move |op| matches!(op, ConfigOp::Interface(InterfaceOp::Delete { name }) if name == n),
+            )
+        };
+        assert!(clear < del("eth1") && del("eth1") < del("eth2"));
     }
 
     #[test]

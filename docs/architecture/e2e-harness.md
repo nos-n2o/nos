@@ -75,6 +75,7 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 - A failed `assert_quiet`, `wait_lacp_ports` timeout or the looped-LACPDU check appends every `nos_lacp::`/`nos_interface`/`bond` line of the window with `+<ms>ms` offsets (`Router::lacp_dump`), because the pattern's own matches never show the dip behind them.
 - Steps that follow a convergence use `lacp_settled` (all ports Distributing, in sync, no churn, held across one coalescing window), never a count of log lines that stopped growing.
 - The `lacp` timers (3s fast `Current_While`, 8s churn) assume the routers get real CPU: do not run the phase below 2 full vCPUs per router container.
+- A helper that takes over a veth (the kernel 802.3ad bond in `lacp_linux_peer`) must first delete the port's `Interface` (`nos-provision --delete-interface <name>`, repeatable): `nos-interfaced` re-applies every configured interface's master each 10 s and would release the helper's enslavement (#1332).
 
 ## Host tools
 
