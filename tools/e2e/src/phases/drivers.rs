@@ -1399,6 +1399,16 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
     b.assert_quiet(rx, rx_b, 0).await?;
 
     log("router-a back to active: the pair converges again");
+    // The bond refills after the push (coalesced, and under CPU starvation
+    // `nos-interfaced` lags): enslaving cycles the link, which costs a fast
+    // LACPDU window. Wait for both enslavements so the next step starts after
+    // that flap, not during it (#1337, run8: eth1 enslaved at +2ms of the
+    // min-links window, Expired 2s later).
+    let enslaved = |i: &str| format!("enslaved interface to bond interface={i} bond=bond");
+    let enslave_bases: Vec<_> = [a, b]
+        .into_iter()
+        .flat_map(|r| ["eth1", "eth2"].map(|i| (r, i, r.count(&enslaved(i)))))
+        .collect();
     a.provision(&flags("active")).await?;
     for r in [a, b] {
         wait_lacp_ports(r, "Distributing again", distributing).await?;
@@ -1410,7 +1420,12 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
             distributing(p) && p["mode"] == "Active"
         })
         .await?;
-        lacp_settled(r, 0).await?;
+    }
+    for (r, i, base) in enslave_bases {
+        r.wait_new(&enslaved(i), base, 30).await?;
+    }
+    for r in [a, b] {
+        lacp_settled(r, 1500).await?;
     }
     Ok(())
 }
