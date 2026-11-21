@@ -127,6 +127,23 @@ pub struct PortAggregateStatus {
     /// Observed: held administratively down by `nos-stpd`'s BPDU guard
     /// (err-disabled). Read back by a restarting `nos-stpd`.
     pub err_disabled: bool,
+    /// Observed: the conversation steering `nos-interfaced` has installed
+    /// (#895), one row per member link; empty when none. Appended last.
+    pub steering: Vec<LacpLinkSteering>,
+}
+
+/// One member link's installed conversation steering and its tc counters.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpLinkSteering {
+    /// Member interface name.
+    pub member: String,
+    /// Conversations redirected to this link on the bond's egress.
+    pub conversations: u32,
+    /// Packets the bond-egress redirects sent to this link.
+    pub redirected_packets: u64,
+    /// Packets this link's ingress filters dropped (conversations mapped elsewhere).
+    pub dropped_packets: u64,
 }
 
 /// One `PortAggregate`'s current 802.1AX-negotiated active-member set,

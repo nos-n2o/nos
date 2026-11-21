@@ -3312,6 +3312,7 @@ mod tests {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
         };
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),

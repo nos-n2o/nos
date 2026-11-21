@@ -81,8 +81,8 @@ pub use fdb::{
 };
 pub use interface::{
     BfdAggregateMembers, BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus,
-    LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LinkState,
-    PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
+    LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LacpLinkSteering,
+    LinkState, PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
 };
 pub use ipc::{Event, HistoryEntry, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;

@@ -3159,6 +3159,40 @@
         ],
         "type": "string"
       },
+      "LacpLinkSteering": {
+        "description": "One member link's installed conversation steering and its tc counters.",
+        "properties": {
+          "conversations": {
+            "description": "Conversations redirected to this link on the bond's egress.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dropped_packets": {
+            "description": "Packets this link's ingress filters dropped (conversations mapped elsewhere).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "member": {
+            "description": "Member interface name.",
+            "type": "string"
+          },
+          "redirected_packets": {
+            "description": "Packets the bond-egress redirects sent to this link.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "member",
+          "conversations",
+          "redirected_packets",
+          "dropped_packets"
+        ],
+        "type": "object"
+      },
       "LacpMode": {
         "description": "A member port's 802.1AX `LACP_Activity`: `Active` ports send LACPDUs\nwhenever the link is up; `Passive` ones stay silent until they hear an\n`Active` partner (two `Passive` ends never form a bundle).",
         "enum": [
@@ -5063,6 +5097,13 @@
             "description": "Name of the aggregate.",
             "type": "string"
           },
+          "steering": {
+            "description": "Observed: the conversation steering `nos-interfaced` has installed\n(#895), one row per member link; empty when none. Appended last.",
+            "items": {
+              "$ref": "#/components/schemas/LacpLinkSteering"
+            },
+            "type": "array"
+          },
           "subinterfaces": {
             "description": "Subinterfaces (VLAN-tagged).",
             "items": {
@@ -5083,7 +5124,8 @@
           "mode",
           "mtu",
           "subinterfaces",
-          "err_disabled"
+          "err_disabled",
+          "steering"
         ],
         "type": "object"
       },

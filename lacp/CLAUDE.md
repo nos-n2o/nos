@@ -32,7 +32,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 - A partner's Synchronization/Collecting count only when its Partner block matches our Actor (`link::partner_matches_actor`, §6.4.9); a changed partner identity drops the mux out of Distributing.
 - Selection is config-scoped, permanently: it only checks the wire agrees with the configured aggregate (`selection.rs`); it never discovers membership.
 - Actor System ID is derived (FNV-1a of hostname + machine-id, `aggregate::local_system_id`), never from a member port (bonding rewrites slave MACs), overridable by `lacp-system-id`; no persisted registry. Internal state types are never `nos_proto::lacp`'s wire types.
-- LACP v2 (#894, 802.1AX-2020 6.6, details in `docs/internals/lacp-v2.md`): default `lacp-version 1`, `2` opt-in (downgrades per port on a v1 PDU). The digest is of the config-only admin map (never link state); `cscd::resolve` over the Collecting ports gives agreement, `Link_Number` adoption and the per-link masks; steering whenever a map exists, `discard_wrong` only when agreed. No mask TLVs.
+- LACP v2 (#894, 6.6, `docs/internals/lacp-v2.md`): default `lacp-version 1`, `2` opt-in (downgrades per port on a v1 PDU). The digest is of the config-only admin map (never link state); `cscd::resolve` over the Collecting ports gives agreement, `Link_Number` adoption and the per-link masks; steering whenever a map exists, `discard_wrong` only when agreed. `nos-interfaced` applies the masks (#895).
 - Changing rate, system id, system priority, version or algorithm restarts every member link (a link number: that member); a port priority or `lacp-mode` change restarts only that member; `min-links` restarts nothing.
 
 ## Modules

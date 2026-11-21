@@ -14,6 +14,7 @@ pub mod linux;
 pub mod noop;
 pub mod port_aggregate_registry;
 pub mod rib_client;
+pub mod steering;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -21,6 +22,7 @@ use thiserror::Error;
 pub use links::LinkWatch;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
+pub use steering::SteeringState;
 
 use nos_proto::{StpPortState, VlanTag};
 
@@ -171,6 +173,16 @@ pub trait InterfaceDriver: Send + Sync {
     /// Flushes the dynamic FDB entries learned on one bridge port
     /// (`InterfaceRequest::FlushFdb`).
     async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError>;
+
+    /// Makes the tc steering of `desired.aggregate` exactly `desired`
+    /// (#895): the whole set, empty `links` removes everything this driver
+    /// installed for it. Idempotent; installs and removals are ordered so a
+    /// conversation is never collectable on two links (`steering::plan`).
+    async fn apply_conversation_steering(&self, desired: &SteeringState)
+        -> Result<(), DriverError>;
+
+    /// Installed steering of `aggregate` with its tc counters, per member.
+    async fn steering_stats(&self, aggregate: &str) -> Vec<nos_proto::LacpLinkSteering>;
 
     /// Snapshot of the kernel's link table plus a receiver for later changes,
     /// for `InterfaceRequest::SubscribeLinks`. The noop driver reports

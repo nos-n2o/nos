@@ -215,6 +215,7 @@ mod tests {
             link_local_address: None,
             bond_name: None,
             err_disabled: d,
+            steering: Vec::new(),
         };
         let held = held_names(
             &InterfaceEvent::Interfaces(vec![i("eth1", true), i("eth2", false)]),
