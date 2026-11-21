@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_daemon::{bootstrap, watchdog};
+use nos_lacp::interface_client::LacpPush;
 use nos_lacp::{interface_client, reconcile, server};
-use nos_proto::{LacpAggregateMembers, ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let (push_tx, push_rx) = mpsc::channel::<LacpAggregateMembers>(16);
+    let (push_tx, push_rx) = mpsc::channel::<LacpPush>(16);
 
     let aggregates = reconcile::SharedAggregates::default();
     let server_task = server::start(&args.listen_socket, aggregates.clone(), &identity)

@@ -187,7 +187,7 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             None
         }
         InterfaceRequest::PushLacpConversations(msg) => {
-            // #892: accepted and dropped; the steering lands with #895.
+            // #894: validated and logged, no state, no driver call; the steering lands with #895.
             if msg
                 .links
                 .iter()
@@ -195,7 +195,7 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             {
                 warn!(aggregate = %msg.aggregate, "lacp conversations push has a malformed mask, dropped");
             } else {
-                debug!(aggregate = %msg.aggregate, links = msg.links.len(), "lacp conversations push ignored");
+                info!(aggregate = %msg.aggregate, links = msg.links.len(), discard_wrong = msg.discard_wrong, "lacp conversations received, not applied until #895");
             }
             None
         }
@@ -420,6 +420,7 @@ mod authz_tests {
         let push = InterfaceRequest::PushLacpConversations(nos_proto::LacpAggregateConversations {
             aggregate: String::new(),
             links: Vec::new(),
+            discard_wrong: false,
         });
         for role in Role::ALL {
             assert_eq!(allowed(role, &push), role == Role::Lacpd, "{role:?}");

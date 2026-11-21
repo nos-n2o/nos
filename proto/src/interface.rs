@@ -149,7 +149,9 @@ pub struct LacpAggregateMembers {
     pub active_members: Vec<String>,
 }
 
-/// Bytes of one link's conversation mask: 4096 conversation ids, one bit each.
+/// Bytes of one link's conversation mask: 4096 conversation ids, one bit each
+/// (conversation `c` is bit `0x80 >> (c % 8)` of byte `c / 8`; a NOS-internal
+/// order, nothing on the wire depends on it).
 pub const LACP_CONVERSATION_MASK_LEN: usize = 512;
 
 /// One member link's share of an aggregate's conversations (#865).
@@ -173,8 +175,13 @@ pub struct LacpLinkConversations {
 pub struct LacpAggregateConversations {
     /// Name of the port aggregate.
     pub aggregate: String,
-    /// One entry per link carrying mapped conversations.
+    /// One entry per `Distributing` link carrying mapped conversations.
     pub links: Vec<LacpLinkConversations>,
+    /// `Discard_Wrong_Conversation` (802.1AX 6.6.3, p.99): `true` only when
+    /// the partner agreed on algorithm, digest and `Link_Numbers`, so the
+    /// collection filter may drop frames on the wrong link. Steering (`links`)
+    /// applies either way. Appended last: postcard is positional.
+    pub discard_wrong: bool,
 }
 
 /// What `nos-bfdd` pushes to `nos-interfaced` (`InterfaceRequest::
@@ -417,6 +424,7 @@ mod tests {
                 link_number: 1,
                 mask: vec![0xff; LACP_CONVERSATION_MASK_LEN],
             }],
+            discard_wrong: true,
         });
         let bytes = postcard::to_allocvec(&req).unwrap();
         let InterfaceRequest::PushLacpConversations(back) = postcard::from_bytes(&bytes).unwrap()
@@ -425,5 +433,6 @@ mod tests {
         };
         assert_eq!(back.links[0].mask.len(), 512);
         assert_eq!(back.aggregate, "bond1");
+        assert!(back.discard_wrong);
     }
 }

@@ -267,6 +267,11 @@ pub struct LacpV2Args {
     /// aggregate (`InterfaceOp::SetLacpLinkNumber`).
     #[arg(long)]
     pub lacp_link_number: Option<u16>,
+
+    /// With `--lacp-link-number`: number the members in reverse order (the last
+    /// gets N), so two ends can be given swapped numbering (#894).
+    #[arg(long)]
+    pub lacp_link_number_descending: bool,
 }
 
 #[derive(Parser)]
@@ -3843,6 +3848,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
             if let Some(base) = args.lacp_v2.lacp_link_number {
+                let index = if args.lacp_v2.lacp_link_number_descending {
+                    args.port_aggregate_members.len() - 1 - index
+                } else {
+                    index
+                };
                 let offset = u16::try_from(index).context("too many members")?;
                 ops.push(ConfigOp::Interface(InterfaceOp::SetLacpLinkNumber {
                     name: member.clone(),
@@ -7606,6 +7616,30 @@ mod tests {
             shows(&lo, m);
         }
         assert!(!format!("{:?}", ops(&[]).unwrap()).contains("Vpn"));
+    }
+
+    #[test]
+    fn descending_link_numbers_swap_the_members() {
+        let o = ops(&[
+            "--port-aggregate",
+            "bond0",
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--enslave-interface-into-port-aggregate",
+            "eth2",
+            "--lacp-link-number",
+            "1",
+            "--lacp-link-number-descending",
+        ]);
+        let dbg = format!("{o:?}");
+        assert!(
+            dbg.contains("SetLacpLinkNumber { name: \"eth1\", link_number: 2 }"),
+            "{dbg}"
+        );
+        assert!(
+            dbg.contains("SetLacpLinkNumber { name: \"eth2\", link_number: 1 }"),
+            "{dbg}"
+        );
     }
 
     #[test]
