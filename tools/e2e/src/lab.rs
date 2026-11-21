@@ -1,4 +1,4 @@
-//! The lab id (#1049): `NOS_E2E_LAB=<k>`, `k` in {0, 1}, lets two labs from two
+//! The lab id (#1049): `NOS_E2E_LAB=<k>`, `k` in {0, 1, 2}, lets three labs from two
 //! worktrees run on one docker host at once. `k=0` (the default, and what CI
 //! uses) is byte-for-byte the historical lab. For `k>0` container, network and
 //! volume names get an `l<k>-` prefix (at the `Dock` boundary, so phase literals
@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 /// Label on every container, network and volume a lab creates; `down` removes by it.
 pub const LAB_LABEL: &str = "nos-e2e.lab";
 /// Labs the host has slots for (`tools/ci/e2e-lab.sh`'s default `NOS_E2E_LABS`).
-pub const LABS: u8 = 2;
+pub const LABS: u8 = 3;
 
 /// Parses `NOS_E2E_LAB` (unset or empty is lab 0).
 pub fn lab_from(v: Option<&str>) -> Result<u8, String> {
@@ -115,7 +115,8 @@ mod tests {
         assert_eq!(lab_from(None), Ok(0));
         assert_eq!(lab_from(Some("")), Ok(0));
         assert_eq!(lab_from(Some("1")), Ok(1));
-        assert!(lab_from(Some("2")).is_err());
+        assert_eq!(lab_from(Some("2")), Ok(2));
+        assert!(lab_from(Some("3")).is_err());
         assert!(lab_from(Some("x")).is_err());
     }
 
@@ -143,9 +144,9 @@ mod tests {
     }
 
     /// Every docker network with explicit IPAM sits in a different subnet in
-    /// lab 1 (docker refuses overlapping pools), by prefix at least.
+    /// every lab (docker refuses overlapping pools), by prefix at least.
     #[test]
-    fn lab1_subnets_disjoint_from_lab0() {
+    fn labs_subnets_pairwise_disjoint() {
         let subnets = [
             SUBNET,
             SUBNET6,
@@ -157,14 +158,16 @@ mod tests {
             L3V6_SUBNET_A,
             L3V6_SUBNET_B,
         ];
-        let lab1: Vec<String> = subnets.iter().map(|a| shift(a.0, 1)).collect();
         // Every lab-0 subnet is its own /24 or /64, so inequality is disjointness.
-        for b in &lab1 {
-            assert!(
-                subnets.iter().all(|a| a.0 != b),
-                "lab 1 {b} is a lab 0 subnet"
-            );
+        let all: Vec<String> = (0..LABS)
+            .flat_map(|k| subnets.iter().map(move |a| shift(a.0, k)))
+            .collect();
+        for (i, a) in all.iter().enumerate() {
+            assert!(all[i + 1..].iter().all(|b| a != b), "{a} is in two labs");
         }
+        assert_eq!(shift("10.50.0.0/24", 2), "10.70.0.0/24");
+        assert_eq!(shift("198.18.1.0/24", 2), "198.20.1.0/24");
+        assert_eq!(shift("fd18:1::/64", 2), "fd38:1::/64");
         assert_eq!(shift("10.50.0.0/24", 1), "10.60.0.0/24");
         assert_eq!(shift("fd00:10:50::/64", 1), "fd00:10:60::/64");
         assert_eq!(shift("198.18.1.0/24", 1), "198.19.1.0/24");
