@@ -151,7 +151,7 @@ pub async fn restconf_conformance(w: &mut World) -> anyhow::Result<()> {
             .await?;
         let got = a.rest_expect(Method::GET, tag, None, 200).await?;
         let got: Value = serde_json::from_str(&got)?;
-        if got["nos-config:tag"] != want {
+        if got["tag"] != want {
             bail!("router-a: tag after PUT {body} is {got}, want {want}");
         }
     }
