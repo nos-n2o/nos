@@ -77,6 +77,15 @@ pub struct Ospfv3LsaSummary {
     /// §4.5.1: Link-LSA/E-Link-LSA, held per link and never flooded past
     /// it); `None` for an area-scoped one.
     pub link: Option<String>,
+    /// A Router-LSA's flags (RFC 5340 A.4.3: B 0x01, E 0x02, V 0x04, Nt
+    /// 0x10); `None` for every other type.
+    #[serde(default)]
+    pub router_flags: Option<u8>,
+    /// A Router-LSA's virtual links (type-4 links): the far endpoints'
+    /// router ids.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub virtual_links: Vec<Ipv4Addr>,
 }
 
 /// Messages sent from a client to one `nos-ospfv3d` instance's IPC socket.

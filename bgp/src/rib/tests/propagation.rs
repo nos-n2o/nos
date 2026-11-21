@@ -420,7 +420,7 @@ fn peer_disconnected_withdraws_every_route_it_contributed() {
         | OutboundUpdate::AnnounceFlowspec(_)
         | OutboundUpdate::WithdrawFlowspec(..)
         | OutboundUpdate::AnnounceVpn(_)
-        | OutboundUpdate::WithdrawVpn(_)
+        | OutboundUpdate::WithdrawVpn(..)
         | OutboundUpdate::AnnounceRtc(_)
         | OutboundUpdate::WithdrawRtc(_)
         | OutboundUpdate::AnnounceVpnFlowspec(..)

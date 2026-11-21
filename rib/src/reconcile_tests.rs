@@ -183,6 +183,7 @@ fn static_route(subnet: &str, gateway: &str, bfd: Option<&str>) -> StaticRoute {
 
 fn redistribute(to: RedistributeTarget) -> nos_proto::Redistribute {
     nos_proto::Redistribute {
+        instance: None,
         from: RedistributeSource::Static,
         to,
         policy: None,
@@ -200,7 +201,7 @@ fn base_cfg() -> Config {
             bgp_instance: Some("b1".into()),
             static_routing_instance: Some("s1".into()),
             ospf_instance: Some("o1".into()),
-            ospfv3_instance: Some("o3".into()),
+            ospfv3_instances: vec!["o3".into()],
             redistribute: vec![
                 redistribute(RedistributeTarget::Bgp),
                 redistribute(RedistributeTarget::Ospf),
@@ -248,7 +249,7 @@ struct Env {
     bgp_tx: watch::Sender<bgp_client::RedistributeTarget>,
     bgp_rx: watch::Receiver<bgp_client::RedistributeTarget>,
     ospf: Vec<OspfFeed>,
-    ospf_rx: Vec<watch::Receiver<ospf_client::RedistributeTarget>>,
+    ospf_rx: Vec<watch::Receiver<Vec<ospf_client::RedistributeTarget>>>,
     evpn_tx: watch::Sender<EvpnTarget>,
     evpn_rx: watch::Receiver<EvpnTarget>,
     vpn: VpnFeed,
@@ -263,8 +264,8 @@ struct Env {
 impl Env {
     fn with(which: &[Fake]) -> Self {
         let (bgp_tx, bgp_rx) = watch::channel(bgp_client::RedistributeTarget::default());
-        let (ospf_tx, ospf_r) = watch::channel(ospf_client::RedistributeTarget::default());
-        let (ospfv3_tx, ospfv3_r) = watch::channel(ospf_client::RedistributeTarget::default());
+        let (ospf_tx, ospf_r) = watch::channel(Vec::new());
+        let (ospfv3_tx, ospfv3_r) = watch::channel(Vec::new());
         let (evpn_tx, evpn_rx) = watch::channel(EvpnTarget::default());
         let (vpn_tx, vpn_rx) = watch::channel(VpnTarget::default());
         let registry = tempfile::tempdir().unwrap();
@@ -371,10 +372,10 @@ async fn resync_builds_the_rib_programs_the_kernel_and_feeds_every_target() {
         sorted_prefixes(&bgp.routes),
         [net("10.9.0.0/24"), net("2001:db8:9::/48")]
     );
-    let ospf = e.ospf_rx[0].borrow().clone();
+    let ospf = e.ospf_rx[0].borrow()[0].clone();
     assert_eq!(ospf.instance.as_deref(), Some("o1"));
     assert_eq!(ospf.routes.len(), 2);
-    let ospfv3 = e.ospf_rx[1].borrow().clone();
+    let ospfv3 = e.ospf_rx[1].borrow()[0].clone();
     assert_eq!(ospfv3.instance.as_deref(), Some("o3"));
     assert_eq!(sorted_prefixes(&ospfv3.routes), [net("2001:db8:9::/48")]);
     assert_eq!(*e.evpn_rx.borrow(), EvpnTarget::default(), "no evpn");
@@ -423,10 +424,7 @@ async fn resync_of_a_table_missing_from_config_clears_the_statics() {
         *e.bgp_rx.borrow(),
         bgp_client::RedistributeTarget::default()
     );
-    assert_eq!(
-        *e.ospf_rx[0].borrow(),
-        ospf_client::RedistributeTarget::default()
-    );
+    assert!(e.ospf_rx[0].borrow().is_empty());
 }
 
 #[tokio::test]
@@ -1132,7 +1130,11 @@ fn configured_sources_follow_the_table() {
     let mut cfg = base_cfg();
     assert_eq!(
         configured_sources(&cfg, "rt1"),
-        HashSet::from([RouteSource::Bgp, RouteSource::Ospf])
+        HashSet::from([
+            Pending::Source(RouteSource::Bgp),
+            Pending::Ospf(OspfOwner::new(false, "o1")),
+            Pending::Ospf(OspfOwner::new(true, "o3")),
+        ])
     );
     cfg.routing_tables[0].bgp_instance = None;
     cfg.routing_tables[0].ospf_instance = None;
@@ -1140,7 +1142,11 @@ fn configured_sources_follow_the_table() {
     cfg.routing_tables[0].vpn.bgp_instance = Some("b1".into());
     assert_eq!(
         configured_sources(&cfg, "rt1"),
-        HashSet::from([RouteSource::Ospf, RouteSource::Evpn, RouteSource::Vpn])
+        HashSet::from([
+            Pending::Ospf(OspfOwner::new(true, "o3")),
+            Pending::Source(RouteSource::Evpn),
+            Pending::Source(RouteSource::Vpn),
+        ])
     );
     assert!(configured_sources(&cfg, "nope").is_empty());
 }
@@ -1156,8 +1162,16 @@ async fn the_first_resync_holds_until_every_source_pushed() {
 
     let applies = e.rec.applies.lock().unwrap().len();
     let gate = e.kernel.lock().await;
-    assert!(!e.kernel.source_done(&gate, RouteSource::Bgp));
-    assert!(e.kernel.source_done(&gate, RouteSource::Ospf));
+    assert!(!e
+        .kernel
+        .source_done(&gate, &Pending::Source(RouteSource::Bgp)));
+    // A v2 `Full` alone does not release: the v3 instance is awaited too.
+    assert!(!e
+        .kernel
+        .source_done(&gate, &Pending::Ospf(OspfOwner::new(false, "o1"))));
+    assert!(e
+        .kernel
+        .source_done(&gate, &Pending::Ospf(OspfOwner::new(true, "o3"))));
     e.kernel
         .release_hold("rt1", &e.rib, &gate, e.rec.as_ref(), "test")
         .await;
@@ -1175,7 +1189,7 @@ async fn a_table_without_producers_never_holds() {
     let mut cfg = base_cfg();
     cfg.routing_tables[0].bgp_instance = None;
     cfg.routing_tables[0].ospf_instance = None;
-    cfg.routing_tables[0].ospfv3_instance = None;
+    cfg.routing_tables[0].ospfv3_instances.clear();
     let e = Env::ready(cfg);
     e.resync().await;
     assert!(e.rec.keep.lock().unwrap().is_empty());
@@ -1191,4 +1205,26 @@ async fn the_hold_expires_at_its_deadline() {
     assert!(e
         .kernel
         .hold_expired(Instant::now() + Duration::from_secs(6)));
+}
+
+#[tokio::test]
+async fn a_resync_withdraws_only_unconfigured_ospf_owners() {
+    let e = Env::ready(base_cfg());
+    let route = |p: &str| RibEntry {
+        prefix: net(p),
+        next_hops: vec![("10.0.0.2".parse::<IpAddr>().unwrap(), None).into()],
+        source: RouteSource::Ospf,
+        backup: None,
+        backup_interface_id: None,
+        backup_tunnel: false,
+    };
+    {
+        let mut rib = e.rib.write().await;
+        rib.replace_ospf(&OspfOwner::new(false, "o1"), [(route("10.1.0.0/24"), 1)]);
+        rib.replace_ospf(&OspfOwner::new(true, "gone"), [(route("10.2.0.0/24"), 1)]);
+    }
+    e.resync().await;
+    let best = e.best().await;
+    assert!(best.contains_key(&net("10.1.0.0/24")));
+    assert!(!best.contains_key(&net("10.2.0.0/24")));
 }

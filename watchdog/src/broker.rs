@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
-    IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET,
-    LOGIN_BUSY, LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT, SESSION_EXPIRED,
+    IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent, WatchdogRequest,
+    INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT,
+    RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
+    RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -16,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, trace, warn};
 
+use crate::accounting::{self, Record};
 use crate::pki::Pki;
 use crate::registry::EndpointRegistry;
 use crate::users_client;
@@ -77,6 +80,8 @@ struct Ctx {
     anonymous_idle: Duration,
     /// `LoginPolicy.max_failures`, live (#1148).
     max_failures: Arc<AtomicU8>,
+    /// Accounting records for the worker (#1153); bounded, never waited on.
+    acct: accounting::Sender,
     /// When the over-cap warning last fired (at most one per second).
     last_cap_warn: Mutex<Option<Instant>>,
 }
@@ -114,6 +119,7 @@ pub fn start_with_limits(
         sockets.config.clone(),
         max_failures.clone(),
     ));
+    let (acct, acct_rx) = accounting::queue();
     let ctx = Arc::new(Ctx {
         registry,
         sockets,
@@ -122,8 +128,10 @@ pub fn start_with_limits(
         anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
         anonymous_idle: limits.anonymous_idle,
         max_failures,
+        acct,
         last_cap_warn: Mutex::new(None),
     });
+    tokio::spawn(account_worker(ctx.clone(), acct_rx));
     Ok(tokio::spawn(async move {
         loop {
             let incoming = listener.accept_resilient().await;
@@ -156,6 +164,7 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
         None
     };
     let serial = stream.peer_serial();
+    let claim = stream.peer_claim();
     let (read_half, write_half) = split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<WatchdogRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<WatchdogEvent>::default());
@@ -193,7 +202,14 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
         // An anonymous peer may only log in: answer its first other request
         // (one warn in `dispatch`) and hang up, so it can't flood the log.
         let hang_up = peer.is_none() && !allowed(None, &request);
-        let event = dispatch(&ctx, peer.as_ref(), serial.as_deref(), request).await;
+        let event = dispatch(
+            &ctx,
+            peer.as_ref(),
+            serial.as_deref(),
+            claim.as_deref(),
+            request,
+        )
+        .await;
         let rejected_login = is_login
             && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS || m == INVALID_TICKET);
         if rejected_login {
@@ -224,6 +240,7 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
         | WatchdogRequest::LoginTicket { .. }
         | WatchdogRequest::RedeemTicket { .. } => true,
         WatchdogRequest::ResolveEndpoint { .. } => peer.is_some(),
+        WatchdogRequest::AccountCommit { .. } => role == Some(Role::Configd.as_str()),
         WatchdogRequest::RenewCert { .. } => role == Some(Role::User.as_str()),
         // `nos-restd` vouches for REST clients: it has verified their certificate
         // (or, for a login, forwards the password it was given).
@@ -240,6 +257,7 @@ async fn dispatch(
     ctx: &Ctx,
     peer: Option<&PeerId>,
     serial: Option<&str>,
+    claim: Option<&str>,
     request: WatchdogRequest,
 ) -> WatchdogEvent {
     if !allowed(peer, &request) {
@@ -283,7 +301,7 @@ async fn dispatch(
             };
             match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
                 Ok(users) if users.iter().any(|u| u.name == user) => {
-                    let event = issue(ctx, &user, &csr_der, Realm::Ipc, Instant::now());
+                    let event = issue(ctx, &user, &csr_der, Realm::Ipc, Instant::now(), None);
                     if matches!(event, WatchdogEvent::Issued { .. }) {
                         info!(user = ?user, "login ticket redeemed");
                     }
@@ -298,6 +316,10 @@ async fn dispatch(
                     WatchdogEvent::Denied("login unavailable".to_string())
                 }
             }
+        }
+        WatchdogRequest::AccountCommit { actor, transaction } => {
+            accounting::offer(&ctx.acct, Record::Commit { actor, transaction });
+            WatchdogEvent::Ok
         }
         WatchdogRequest::ResolveEndpoint { service } => {
             let s = &ctx.sockets;
@@ -329,7 +351,7 @@ async fn dispatch(
             // from the client; renewals inherit the login time (#637).
             let user = peer.map_or("", |p| &p.name);
             if let Some(started) = serial.and_then(|s| ctx.pki.ipc_session(s, user)) {
-                renew(ctx, user, &csr_der, Realm::Ipc, started).await
+                renew(ctx, user, &csr_der, Realm::Ipc, started, claim).await
             } else {
                 info!(user = ?user, "renewal refused, ipc certificate unknown or past the session cap");
                 WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
@@ -348,7 +370,7 @@ async fn dispatch(
             // The renewed certificate inherits the login time, so renewals
             // cannot outlast `--pki-rest-session-max`.
             if let Some(started) = ctx.pki.rest_session(&serial, &user) {
-                renew(ctx, &user, &csr_der, Realm::Rest, started).await
+                renew(ctx, &user, &csr_der, Realm::Rest, started, None).await
             } else {
                 info!(user = ?user, "renewal refused, rest certificate revoked or past the session cap");
                 WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
@@ -412,14 +434,239 @@ async fn login(
     csr_der: &[u8],
     realm: Realm,
 ) -> WatchdogEvent {
-    if let Err(denied) = verify_password(ctx, user, password).await {
-        return denied;
-    }
-    let event = issue(ctx, user, csr_der, realm, Instant::now());
+    // RADIUS serves direct IPC logins only: the REST and ticket paths stay
+    // local-only (the role claim would have to cross `nos-restd` / the ticket).
+    let claim = if matches!(realm, Realm::Ipc) {
+        match authenticate(ctx, user, password).await {
+            Ok(claim) => claim,
+            Err(denied) => return denied,
+        }
+    } else {
+        if let Err(denied) = verify_password(ctx, user, password).await {
+            return denied;
+        }
+        None
+    };
+    let started = Instant::now();
+    let event = issue(ctx, user, csr_der, realm, started, claim.as_deref());
     if matches!(event, WatchdogEvent::Issued { .. }) {
         info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
+        if matches!(realm, Realm::Ipc) {
+            account_session(ctx, user, started);
+        }
     }
     event
+}
+
+/// How often an accounting session is checked for its end.
+const SESSION_POLL: Duration = Duration::from_secs(5);
+
+/// Queues a Start now and, from a task, the Stop once no certificate of this
+/// login is live any more (expired, or revoked by a password change or a
+/// deleted user). The Stop is therefore up to `SESSION_POLL` late.
+fn account_session(ctx: &Ctx, user: &str, started: Instant) {
+    let session = accounting::session_id();
+    let user = user.to_string();
+    accounting::offer(
+        &ctx.acct,
+        Record::Start {
+            user: user.clone(),
+            session: session.clone(),
+        },
+    );
+    let (tx, pki) = (ctx.acct.clone(), ctx.pki.clone());
+    tokio::spawn(async move {
+        while pki.session_live(&user, started) {
+            tokio::time::sleep(SESSION_POLL).await;
+        }
+        let secs = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
+        accounting::offer(
+            &tx,
+            Record::Stop {
+                user,
+                session,
+                secs,
+            },
+        );
+    });
+}
+
+/// Sends queued records one at a time, so a slow server backs the bounded
+/// queue up (and drops) instead of delaying anything else.
+async fn account_worker(ctx: Arc<Ctx>, mut rx: tokio::sync::mpsc::Receiver<Record>) {
+    while let Some(record) = rx.recv().await {
+        let Ok(cfg) = users_client::fetch_config(&ctx.pki.identity, &ctx.sockets.config).await
+        else {
+            debug!("accounting record dropped: the config is not readable");
+            continue;
+        };
+        if !cfg.aaa.accounting {
+            continue;
+        }
+        let servers = radius_servers(&ctx, &cfg, true).await;
+        if servers.is_empty() {
+            continue;
+        }
+        if nos_radius::account(&servers, accounting::attrs(&record)).await {
+            debug!(?record, "radius accounting acknowledged");
+        } else {
+            warn!(?record, "radius accounting not acknowledged by any server");
+        }
+    }
+}
+
+/// Walks `aaa login-order` (#1153). `Ok(Some(role))` is a RADIUS accept (the
+/// role goes into the certificate), `Ok(None)` a local one. A reject ends the
+/// walk; the next backend runs only when no RADIUS server answered, or, after
+/// `local`, when the name is no local user.
+async fn authenticate(
+    ctx: &Ctx,
+    user: &str,
+    password: String,
+) -> Result<Option<String>, WatchdogEvent> {
+    let cfg = match users_client::fetch_config(&ctx.pki.identity, &ctx.sockets.config).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(error = %e, "cannot read the config from nos-configd, refusing login");
+            return Err(WatchdogEvent::Denied("login unavailable".to_string()));
+        }
+    };
+    let order = cfg.aaa.order();
+    if order == [LoginBackend::Local] {
+        return verify_password(ctx, user, password).await.map(|()| None);
+    }
+    let invalid = || WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
+    if user.is_empty() || user.len() > 64 {
+        return Err(invalid());
+    }
+    for backend in &order {
+        match backend {
+            LoginBackend::Local if cfg.users.iter().any(|u| u.name == user) => {
+                return verify_password(ctx, user, password).await.map(|()| None);
+            }
+            LoginBackend::Local => {}
+            LoginBackend::Radius => match radius_login(ctx, &cfg, user, &password).await {
+                Ok(role) => {
+                    info!(user = ?user, role = role.claim(), "login accepted by radius");
+                    return Ok(Some(role.claim().to_string()));
+                }
+                Err(nos_radius::AuthError::Unreachable) => {
+                    warn!(user = ?user, "no radius server answered");
+                }
+                Err(e) => {
+                    info!(user = ?user, reason = %e, "radius login rejected");
+                    return Err(invalid());
+                }
+            },
+        }
+    }
+    if order.contains(&LoginBackend::Local) {
+        // Not a local user: burns the same time as a wrong password.
+        verify_password(ctx, user, password).await.map(|()| None)
+    } else {
+        Err(WatchdogEvent::Denied("login unavailable".to_string()))
+    }
+}
+
+/// The Linux VRF device of routing table `table`, asked of its `nos-ribd`
+/// (`None` while it is not up).
+async fn vrf_name(ctx: &Ctx, table: &str) -> Option<String> {
+    use nos_proto::{RibEvent, RibRequest, ServiceRef};
+    let s = &ctx.sockets;
+    let path = ctx
+        .registry
+        .resolve(
+            &ServiceRef::RibTable(table.to_string()),
+            &s.config,
+            &s.interfaces,
+            &s.log,
+            &s.lacp,
+            &s.lldp,
+            &s.bfd,
+            &s.stp,
+            &s.acl,
+        )
+        .await?;
+    let call = async {
+        let stream = ctx
+            .pki
+            .identity
+            .connect(&path, &PeerId::new(Role::Ribd.as_str(), table))
+            .await
+            .ok()?;
+        let (r, w) = split(stream);
+        let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+        let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+        writer.send(RibRequest::GetVrfName).await.ok()?;
+        match reader.next().await {
+            Some(Ok(RibEvent::VrfName(name))) => name,
+            _ => None,
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), call)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The configured servers, with their secret, port (authentication or
+/// accounting) and VRF device; one whose secret or VRF is missing is skipped.
+async fn radius_servers(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    accounting: bool,
+) -> Vec<nos_radius::Server> {
+    let mut servers = Vec::new();
+    for s in &cfg.aaa.servers {
+        let Some(secret) = cfg.key(&s.secret_ref) else {
+            continue;
+        };
+        let mut vrf = None;
+        if let Some(t) = &s.routing_table {
+            vrf = vrf_name(ctx, t).await;
+            if vrf.is_none() {
+                warn!(server = %s.name, table = %t, "radius server skipped: the VRF of its routing table is not available");
+                continue;
+            }
+        }
+        let port = if accounting {
+            s.accounting_port.unwrap_or(RADIUS_ACCT_PORT_DEFAULT)
+        } else {
+            s.port.unwrap_or(RADIUS_PORT_DEFAULT)
+        };
+        servers.push(nos_radius::Server {
+            addr: std::net::SocketAddr::new(s.address, port),
+            secret: secret.as_bytes().to_vec(),
+            timeout: Duration::from_secs(u64::from(
+                s.timeout_secs.unwrap_or(RADIUS_TIMEOUT_DEFAULT_SECS),
+            )),
+            retries: s.retries.unwrap_or(RADIUS_RETRIES_DEFAULT),
+            vrf,
+        });
+    }
+    servers
+}
+
+/// One Access-Request across the configured servers; the role comes from the
+/// reply attribute `aaa role-attribute` names (read-only when absent).
+async fn radius_login(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    user: &str,
+    password: &str,
+) -> Result<UserRole, nos_radius::AuthError> {
+    let servers = radius_servers(ctx, cfg, false).await;
+    let accepted = nos_radius::authenticate(&servers, user, password, "nos").await?;
+    let ty = match cfg.aaa.role_attribute {
+        RoleAttribute::FilterId => nos_radius::attr::FILTER_ID,
+        RoleAttribute::Class => nos_radius::attr::CLASS,
+        RoleAttribute::ReplyMessage => nos_radius::attr::REPLY_MESSAGE,
+    };
+    Ok(accepted
+        .attr(ty)
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .and_then(UserRole::from_claim)
+        .unwrap_or(UserRole::ReadOnly))
 }
 
 /// The password half of a login: `Err` carries the reply to send.
@@ -484,10 +731,14 @@ async fn renew(
     csr_der: &[u8],
     realm: Realm,
     started: Instant,
+    claim: Option<&str>,
 ) -> WatchdogEvent {
     match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
-        Ok(users) if users.iter().any(|u| u.name == user) => {
-            let event = issue(ctx, user, csr_der, realm, started);
+        // A RADIUS user has no local entry: the role in the presented
+        // certificate is carried over (the session cap still bounds it).
+        Ok(users) if users.iter().any(|u| u.name == user) || claim.is_some() => {
+            let claim = claim.filter(|_| !users.iter().any(|u| u.name == user));
+            let event = issue(ctx, user, csr_der, realm, started, claim);
             if matches!(event, WatchdogEvent::Issued { .. }) {
                 info!(user = ?user, rest = matches!(realm, Realm::Rest), "user certificate renewed");
             }
@@ -504,9 +755,16 @@ async fn renew(
     }
 }
 
-fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm, started: Instant) -> WatchdogEvent {
+fn issue(
+    ctx: &Ctx,
+    user: &str,
+    csr_der: &[u8],
+    realm: Realm,
+    started: Instant,
+    claim: Option<&str>,
+) -> WatchdogEvent {
     let signed = match realm {
-        Realm::Ipc => ctx.pki.sign_user(csr_der, user, started),
+        Realm::Ipc => ctx.pki.sign_user(csr_der, user, started, claim),
         Realm::Rest => ctx.pki.sign_rest_user(csr_der, user, started),
     };
     match signed {

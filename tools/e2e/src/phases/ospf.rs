@@ -9,7 +9,7 @@ use reqwest::Method;
 
 use super::bgp::no_leak;
 use crate::consts::*;
-use crate::router::{log, strings, Id, Router, A, B, C, D, E};
+use crate::router::{keep_ospfv3_profiles, log, strings, Id, Router, A, B, C, D, E};
 use crate::world::World;
 
 const BD: &str = OSPF_BROADCAST_DOMAIN;
@@ -207,6 +207,8 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait("dropping ospf hello with mismatched hello-interval")
         .await?;
+    // #1211: nos-ospfd keeps CAP_NET_RAW through the sandbox trampoline.
+    super::drivers::assert_sandbox(w, "nos-ospfd", 1, Some(CAP_EFF_NET_RAW)).await?;
     log("confirming the mismatched-hello-interval neighbor never reaches init");
     a.assert_quiet(&init_b, init0, 8).await?;
 
@@ -1094,6 +1096,7 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
 /// RFC 5709 HMAC-SHA-256: matching keys reach/stay Full with real per-packet
 /// digest checks; a mismatched key on router-a logs a real verification failure
 /// on router-b and blocks a new Full; restoring it lets Full form again.
+/// Restores no authentication and ext-seq off at the end.
 pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let key = |k: &str| {
@@ -1210,7 +1213,28 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.assert_quiet("crypto sequence number not increasing", replays, 5)
-        .await
+        .await?;
+
+    // Restore: leaked auth/ext-seq broke the phases after this one (#1292).
+    log("restoring no authentication and extended sequence numbers off on both routers");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    for r in [a, b] {
+        r.edit(|c| {
+            for p in c
+                .ospf_instances
+                .iter_mut()
+                .flat_map(|i| i.areas.iter_mut())
+                .flat_map(|ar| ar.profiles.iter_mut())
+            {
+                p.auth = None;
+                p.extended_sequence_numbers = false;
+            }
+            Ok(())
+        })
+        .await?;
+    }
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    both_full_p2p(a, b).await
 }
 
 /// RFC 5613 Link-Local Signaling (requires `ospf`, runs before `ospf-auth` so
@@ -1361,6 +1385,7 @@ pub async fn ospf_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
 #[allow(clippy::too_many_lines)]
 pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    both_full_p2p(a, b).await?;
     let instance = |extra: &[&str]| {
         let mut f = strings(&[
             "--ospf-instance",
@@ -1406,6 +1431,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(extra));
         with_base(B, f)
     };
+    let peer_route0 = a.count(&format!(
+        "added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ));
     let full_again0 = b.count(&full_p2p(OSPF_ROUTER_ID));
     let full_again_a0 = a.count(&full_p2p(OSPF_ROUTER_ID_B));
     let cap60 = "ospf instance config resolved.*graceful_restart_helper_max_grace_period=Some(60)";
@@ -1413,9 +1441,20 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&helper_cap(&[
         "--ospf-graceful-restart-helper-max-grace-period",
         "60",
+        "--loopback-address",
+        OSPF_GR_PEER_LOOPBACK_ADDRESS,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
     ]))
     .await?;
     b.wait_new(cap60, cap60_0, 60).await?;
+    // router-a holds an OSPF route to router-b's loopback before it restarts.
+    a.wait_new(
+        &format!("added route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}.*source=Some(Ospf)"),
+        peer_route0,
+        60,
+    )
+    .await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_again0, 60)
         .await?;
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_again_a0, 60)
@@ -1447,6 +1486,21 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let marker = "ospf graceful restart marker written";
     let skipped = "ospf stub router on-startup skipped after graceful restart";
     let (mm0, marker0, skipped0) = (a.count(max_metric_on), a.count(marker), a.count(skipped));
+    // RFC 3623 §2 restarting router (#1145): the respawn enters restart mode,
+    // pushes no routes until its neighbor is Full again, so router-a's own
+    // kernel route to router-b's loopback is never removed (#1027-safe: the
+    // removal is logged by `nos-ribd` on router-a itself).
+    let restart_in = "ospf restart mode: entered neighbors=[12]";
+    let restart_out = "ospf restart mode: exited reason=complete";
+    let grace_flush =
+        format!("ospf graceful restart: grace-lsa flushed link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
+    let removed = format!("removed route prefix={OSPF_GR_PEER_LOOPBACK_ADDRESS}");
+    let (in0, out0, flush0, removed0) = (
+        a.count(restart_in),
+        a.count(restart_out),
+        a.count(&grace_flush),
+        a.count(&removed),
+    );
     let marks = (a.log_mark(), b.log_mark());
     log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
     w.dock
@@ -1469,6 +1523,9 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         // with the neighbor that held it Full the whole time.
         b.wait_new(&full_on_b, full_b0, 90).await?;
         a.wait_new(&full_on_a, full_a0, 90).await?;
+        a.wait_new(restart_in, in0, 90).await?;
+        a.wait_new(restart_out, out0, 90).await?;
+        a.wait_new(&grace_flush, flush0, 30).await?;
         // Reaching Full ended the grace period. A topology change now (router-b's
         // own Router-LSA gains a stub link) must find no grace to exit; the exit
         // itself (RFC 3623 §3.2 (c)) is a unit test in `link/tests/grace.rs`, as
@@ -1501,6 +1558,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // RFC 3623 §2: the restarter keeps its LSAs; the helper never tears the
     // adjacency down and never flushes them.
     quiet_settled(a, flush_on_a, flush_a0).await?;
+    quiet_settled(a, &removed, removed0).await?;
     quiet_settled(b, torn, torn0).await?;
     quiet_settled(b, &flushed, flushed0).await?;
     // Neither on-shutdown nor on-startup ever turned max-metric on.
@@ -1527,6 +1585,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "0",
         "--loopback-remove-address",
         OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS,
+    ]))
+    .await?;
+    b.provision_flags(&helper_cap(&[
+        "--loopback-remove-address",
+        OSPF_GR_PEER_LOOPBACK_ADDRESS,
         "--clear-ospf-loopback-profile",
     ]))
     .await?;
@@ -1899,19 +1962,21 @@ pub async fn ospf_push_chunked(w: &mut World) -> anyhow::Result<()> {
 }
 
 /// RFC 2328 §3.5/§3.6 stub areas and area ranges, self-contained. eth0.0 is
-/// in area 1, router-a's only area; router-b's loopback is in area 0, making
-/// router-b the ABR, and router-b redistributes a static route (a Type-5 that
+/// in area 1, router-a's only area; router-b's loopback and the bd-ospf bridge
+/// shared with router-c are in area 0, making router-b the ABR (a loopback
+/// alone does not attach it, RFC 3509), and router-b redistributes a static route (a Type-5 that
 /// must never reach the stub area).
 #[allow(clippy::too_many_lines)]
 pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
-    let (a, b) = (w.a()?, w.b()?);
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     let loopback = OSPF_STUB_LOOPBACK_ADDRESS;
     let loopback_id = loopback.trim_end_matches("/32");
     let range = OSPF_STUB_RANGE;
     let range_id = range.split('/').next().unwrap_or(range);
     let area = |router_id: &str, extra: &[&str]| {
-        let mut f = strings(&[
+        let mut flags = strings(&[
             "--ospf-instance",
             OSPF_INSTANCE,
             "--ospf-router-id",
@@ -1919,8 +1984,8 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
             "--ospf-area",
             OSPF_AREA_1,
         ]);
-        f.extend(strings(extra));
-        f
+        flags.extend(strings(extra));
+        flags
     };
     let on_eth0 = |router_id: &str, area_type: &str| {
         area(
@@ -1946,21 +2011,23 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
         .await?;
     b.provision_flags(&with_base(B, asbr(on_eth0(OSPF_ROUTER_ID_B, "normal"))))
         .await?;
-    b.provision(&[
-        "--ospf-instance",
-        OSPF_INSTANCE,
-        "--ospf-router-id",
-        OSPF_ROUTER_ID_B,
-        "--ospf-area",
-        OSPF_AREA,
-        "--ospf-profile",
-        OSPF_PROFILE,
+    // Router-b is an ABR only with a Full area-0 adjacency (RFC 3509, #1170): a
+    // loopback alone does not attach, so router-c joins it in area 0 on bd-ospf.
+    let abr_up = "ospf abr backbone attachment changed abr=true";
+    let abr0 = b.count_fresh(abr_up).await;
+    let mut b_area0 = ospf_instance_only(OSPF_ROUTER_ID_B);
+    b_area0.extend(strings(&[
         "--loopback-address",
         loopback,
         "--ospf-loopback-profile",
         OSPF_PROFILE,
-    ])
-    .await?;
+    ]));
+    b_area0.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_B));
+    b.provision(&b_area0).await?;
+    let mut c_flags = ospf_instance_only(OSPF_ROUTER_ID_C);
+    c_flags.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_C));
+    c.provision_flags(&with_base(C, c_flags)).await?;
+    b.wait_new(abr_up, abr0, 60).await?;
     a.wait(mismatch).await?;
     b.wait(mismatch).await?;
     b.wait("ospf lsa originated.*lsa_type=5").await?;
@@ -3415,7 +3482,20 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
         IP_B.s(),
         "--delete-subinterface",
     ]))
-    .await
+    .await?;
+    // The profile would otherwise stay in the area and trip #1161's
+    // "every profile's instance-id must be 64-95" in `ospfv3-instance-id`.
+    a.edit(|c| {
+        nos_proto::Ospfv3ProfileOp::Delete {
+            instance: OSPFV3_INSTANCE.into(),
+            area_id: OSPFV3_AREA.parse()?,
+            name: passive_p.into(),
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    Ok(())
 }
 
 /// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its
@@ -3423,7 +3503,103 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
 /// both reaches Full with a non-zero id on the wire both ways. Requires
 /// `ospfv3` to have run; leaves both back at 0 for `ospfv3-dr`'s router-c.
 pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
+    let result = ospfv3_instance_id_steps(w).await;
+    keep_ospfv3_profiles(false);
+    if result.is_err() {
+        // A failed step must not leave instance-id != 0 on a/b: `ospfv3-dr`'s
+        // router-c would never two-way with them. Best effort; the original
+        // error wins.
+        let (a, b) = (w.a()?, w.b()?);
+        // Extra instances left by a failed step would break `ospfv3-dr` too.
+        for r in [a, b] {
+            if let Err(e) = drop_extra_instances(r).await {
+                log(format!("extra instance cleanup failed: {e:#}"));
+            }
+        }
+        for (r, id, addr, rid) in [
+            (a, A, OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            (b, B, OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+        ] {
+            let mut f = ospfv3(addr, rid);
+            f.extend(strings(&[
+                "--ospfv3-instance-id",
+                "0",
+                "--ospfv3-address-family",
+                "ipv6-unicast",
+            ]));
+            if let Err(e) = r.provision_flags(&with_base(id, f)).await {
+                log(format!("instance-id restore failed: {e:#}"));
+            }
+        }
+        // Apart: each errors when its static route is absent.
+        let mut f = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        f.extend(strings(&[
+            "--remove-static-route",
+            OSPFV3_INSTANCE_2_PREFIX,
+        ]));
+        let _ = a.provision_flags(&with_base(A, f)).await;
+        let mut f = ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B);
+        f.extend(strings(&CLEAR_B_STATIC));
+        let _ = b.provision_flags(&with_base(B, f)).await;
+    }
+    result
+}
+
+/// Router-b's static route into instance 1 and the rule feeding it, undone.
+const CLEAR_B_STATIC: [&str; 5] = [
+    "--remove-static-route",
+    OSPFV3_INSTANCE_1_PREFIX,
+    "--clear-redistribute-to-ospfv3",
+    "--redistribute-to-ospfv3-instance",
+    OSPFV3_INSTANCE,
+];
+
+/// Removes `ospfv3-instance-id`'s extra instances 3 and 2 (attach, claim,
+/// section; the redistribute rule goes with the claim) from `r`. Every op that
+/// finds nothing to remove is skipped, so it is safe on a clean lab.
+async fn drop_extra_instances(r: &Router) -> anyhow::Result<()> {
+    r.edit(|c| {
+        for (inst, prof) in [
+            (OSPFV3_INSTANCE_3, OSPFV3_PROFILE_3),
+            (OSPFV3_INSTANCE_2, OSPFV3_PROFILE_2),
+        ] {
+            let _ = nos_proto::SubinterfaceOp::RemoveOspfv3Profile {
+                interface: "eth0".into(),
+                tag: 0,
+                ospfv3_profile: prof.into(),
+            }
+            .apply(c);
+            let _ = nos_proto::RoutingTableOp::RemoveOspfv3Instance {
+                name: "rt1".into(),
+                ospfv3_instance: inst.into(),
+            }
+            .apply(c);
+            let _ = nos_proto::Ospfv3InstanceOp::Delete { name: inst.into() }.apply(c);
+        }
+        Ok(())
+    })
+    .await
+    .map(drop)
+}
+
+async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    // A lab left dirty by an aborted run: start from instance 1 alone.
+    drop_extra_instances(a).await?;
+    drop_extra_instances(b).await?;
+    // `ospfv3-abr`/`-area-range` leave router-b's area-1 profile (instance-id
+    // 0) behind; #1161's validator then refuses the ipv4-unicast step below
+    // ("every profile's instance-id must be 64-95"). Drop the area if present.
+    b.edit(|c| {
+        // Absent area is fine (standalone run): the error is ignored.
+        let _ = nos_proto::Ospfv3AreaOp::Delete {
+            instance: OSPFV3_INSTANCE.into(),
+            area_id: OSPFV3_AREA_1.parse()?,
+        }
+        .apply(c);
+        Ok(())
+    })
+    .await?;
     let full =
         |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
     let with_id = |id: &str, addr: &str, rid: &str| {
@@ -3454,11 +3630,45 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
 
-    log("resetting instance-id to 0 on both routers");
+    // RFC 5838: an IPv4-unicast instance (ids 64-95, AF-bit set) on router-a
+    // alone is dropped by router-b (id 1); on both it reaches Full.
+    let with_af = |af: &str, id: &str, addr: &str, rid: &str| {
+        let mut f = with_id(id, addr, rid);
+        f.extend(strings(&["--ospfv3-address-family", af]));
+        f
+    };
+    log("setting the ipv4-unicast address family (instance-id 64) on router-a only");
+    let drops = b.count("ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=64");
+    a.provision_flags(&with_base(
+        A,
+        with_af("ipv4-unicast", "64", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.wait_new(
+        "ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=64",
+        drops,
+        30,
+    )
+    .await?;
+    log("setting the ipv4-unicast address family on router-b too");
     let (a_full, b_full) = (
         a.count(&full(OSPFV3_ROUTER_ID_B)),
         b.count(&full(OSPFV3_ROUTER_ID)),
     );
+    b.provision_flags(&with_base(
+        B,
+        with_af("ipv4-unicast", "64", OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+
+    log("resetting to ipv6-unicast, instance-id 0 on both routers");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    let with_id = |id: &str, addr: &str, rid: &str| with_af("ipv6-unicast", id, addr, rid);
     a.provision_flags(&with_base(
         A,
         with_id("0", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
@@ -3470,7 +3680,194 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
-    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+    keep_ospfv3_profiles(true);
+    ospfv3_several_instances(w).await
+}
+
+/// `ospfv3-instance-id` second half (#1280): instances 2 (IPv6, id 1) and 3
+/// (`ipv4-unicast`, id 64) on the same link as instance 1 (id 0), without
+/// cross-talk, with each instance's routes surviving the others' SPF pushes
+/// (#1277), then removed again so `ospfv3-dr` finds the lab as `ospfv3` left it.
+#[allow(
+    clippy::needless_range_loop,
+    reason = "`s` also indexes the peer (1 - s)"
+)]
+async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let full = |n: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={n}");
+    let removed = |p: &str| format!("removed route prefix={p}");
+    // (router, id, address, instance-1 rid, instance-2 rid, instance-3 rid)
+    let sides = [
+        (
+            a,
+            A,
+            OSPFV3_ADDRESS_A,
+            OSPFV3_ROUTER_ID,
+            OSPFV3_RID_2_A,
+            OSPFV3_RID_3_A,
+        ),
+        (
+            b,
+            B,
+            OSPFV3_ADDRESS_B,
+            OSPFV3_ROUTER_ID_B,
+            OSPFV3_RID_2_B,
+            OSPFV3_RID_3_B,
+        ),
+    ];
+    let flags = |s: usize, extra: &[&str]| {
+        let (_, id, addr, rid, ..) = sides[s];
+        let mut f = ospfv3(addr, rid);
+        f.extend(strings(extra));
+        with_base(id, f)
+    };
+    let spec2 = |s: usize| format!("{OSPFV3_INSTANCE_2}:{}:{OSPFV3_PROFILE_2}:1", sides[s].4);
+    let spec3 = |s: usize| {
+        format!(
+            "{OSPFV3_INSTANCE_3}:{}:{OSPFV3_PROFILE_3}:{OSPFV3_INSTANCE_3_ID}:ipv4",
+            sides[s].5
+        )
+    };
+    // Full lines per router: (instance 1, 2, 3) toward the peer's router-ids.
+    let fulls = |s: usize| {
+        let peer = sides[1 - s];
+        [full(peer.3), full(peer.4), full(peer.5)]
+    };
+    let counts = |s: usize| fulls(s).map(|p| sides[s].0.count(&p));
+
+    log("instance 2 (IPv6, id 1) next to instance 1 (id 0) on both routers");
+    let base = [counts(0), counts(1)];
+    // The Instance ID filter runs before authentication, so a shared link must
+    // raise no authentication failure.
+    let auth = "ospfv3 packet authentication failed\\|crypto sequence number not increasing";
+    let auth0 = [a.count(auth), b.count(auth)];
+    for s in 0..2 {
+        sides[s]
+            .0
+            .provision_flags(&flags(s, &["--ospfv3-extra-instance", &spec2(s)]))
+            .await?;
+    }
+    for s in 0..2 {
+        sides[s].0.wait_new(&fulls(s)[1], base[s][1], 60).await?;
+    }
+    for s in 0..2 {
+        sides[s].0.assert_quiet(&fulls(s)[0], base[s][0], 8).await?;
+        sides[s].0.assert_quiet(auth, auth0[s], 1).await?;
+    }
+
+    log("routes of one instance survive the other's SPF pushes (#1277)");
+    // Each router originates one static into one instance only and learns the
+    // other's: router-b holds instance 2's route, router-a instance 1's.
+    let (p1, p2) = (OSPFV3_INSTANCE_1_PREFIX, OSPFV3_INSTANCE_2_PREFIX);
+    a.provision_flags(&flags(
+        0,
+        &[
+            "--static-route",
+            p2,
+            "--static-gateway",
+            OSPFV3_ASBR_GATEWAY,
+            "--redistribute-to-ospfv3",
+            "--redistribute-to-ospfv3-instance",
+            OSPFV3_INSTANCE_2,
+        ],
+    ))
+    .await?;
+    b.provision_flags(&flags(
+        1,
+        &[
+            "--static-route",
+            p1,
+            "--static-gateway",
+            OSPFV3_GATEWAY_A,
+            "--redistribute-to-ospfv3",
+            "--redistribute-to-ospfv3-instance",
+            OSPFV3_INSTANCE,
+        ],
+    ))
+    .await?;
+    // Polled, not a new log line: a leftover from an earlier failed run may
+    // already have installed either route.
+    for (r, p) in [(b, p2), (a, p1)] {
+        for _ in 0..60 {
+            if r.rt1_has(p, "Ospf").await? {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if !r.rt1_has(p, "Ospf").await? {
+            bail!("{} never installed {p}", r.name());
+        }
+    }
+    // A cost change on instance 1 makes router-b recompute and push instance
+    // 1's routes; instance 2's prefix must not be withdrawn by it.
+    let (rm2, rm1) = (b.count(&removed(p2)), a.count(&removed(p1)));
+    a.provision_flags(&flags(0, &["--ospfv3-profile-cost", "7"]))
+        .await?;
+    b.assert_quiet(&removed(p2), rm2, 15).await?;
+    // And the other way round: instance 2's push on router-a leaves instance
+    // 1's route there.
+    a.edit(|c| {
+        nos_proto::Ospfv3ProfileOp::SetCost {
+            instance: OSPFV3_INSTANCE_2.into(),
+            area_id: OSPFV3_AREA.parse()?,
+            name: OSPFV3_PROFILE_2.into(),
+            cost: 9,
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    a.assert_quiet(&removed(p1), rm1, 15).await?;
+    a.provision_flags(&flags(0, &["--ospfv3-profile-cost", "1"]))
+        .await?;
+    if !b.rt1_has(p2, "Ospf").await? || !a.rt1_has(p1, "Ospf").await? {
+        bail!("a route was lost to the other instance's SPF push");
+    }
+
+    log("instance 3 (ipv4-unicast, id 64) next to instances 1 and 2");
+    let base = [counts(0), counts(1)];
+    for s in 0..2 {
+        sides[s]
+            .0
+            .provision_flags(&flags(s, &["--ospfv3-extra-instance", &spec3(s)]))
+            .await?;
+    }
+    for s in 0..2 {
+        sides[s].0.wait_new(&fulls(s)[2], base[s][2], 60).await?;
+    }
+    for s in 0..2 {
+        sides[s].0.assert_quiet(&fulls(s)[0], base[s][0], 8).await?;
+        sides[s].0.assert_quiet(&fulls(s)[1], base[s][1], 1).await?;
+    }
+
+    log("removing instances 3 then 2: instance 1 stays Full");
+    let base = [counts(0), counts(1)];
+    let rm2 = b.count(&removed(p2));
+    for (inst, prof) in [
+        (OSPFV3_INSTANCE_3, OSPFV3_PROFILE_3),
+        (OSPFV3_INSTANCE_2, OSPFV3_PROFILE_2),
+    ] {
+        for s in 0..2 {
+            let spec = format!("{inst}:{prof}");
+            sides[s]
+                .0
+                .provision_flags(&flags(s, &["--ospfv3-remove-extra-instance", &spec]))
+                .await?;
+        }
+    }
+    b.wait_new(&removed(p2), rm2, 60).await?;
+    for s in 0..2 {
+        sides[s].0.assert_quiet(&fulls(s)[0], base[s][0], 8).await?;
+    }
+    if !a.rt1_has(p1, "Ospf").await? {
+        bail!("router-a lost instance 1's route {p1} when instances 2 and 3 were removed");
+    }
+
+    log("reset: no extra static route or redistribute rule left");
+    a.provision_flags(&flags(0, &["--remove-static-route", p2]))
+        .await?;
+    b.provision_flags(&flags(1, &CLEAR_B_STATIC)).await
 }
 
 /// #957: router-b comes back under a new router-id from the same link-local
@@ -3889,6 +4286,26 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     });
     let route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
     let v2_route = format!("added route prefix={ASBR_PREFIX} .*source=Some(Ospf)");
+    // #1297/#1306: own the v2 base on both routers (no dependence on earlier
+    // v2 phases or a leftover bridge profile); replacing each config clears
+    // any such leftover, and router-b keeps its v3 instance.
+    let (full_a0, full_b0) = (
+        a.count(&full_p2p(OSPF_ROUTER_ID_B)),
+        b.count(&full_p2p(OSPF_ROUTER_ID)),
+    );
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(
+        B,
+        [
+            ospf(OSPF_ROUTER_ID_B),
+            ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+        ]
+        .concat(),
+    ))
+    .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_a0, 90).await?;
+    b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_b0, 90).await?;
     let (v2_o0, v2_i0, v2_r0) = (
         a.count("ospf lsa originated.*lsa_type=5"),
         b.count("ospf lsa installed.*lsa_type=5"),
@@ -3925,16 +4342,40 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
     wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
 
+    // #1277: one `nos-ribd` table holds the v2 and v3 route sets of two
+    // owners. Restarting one daemon (it pushes a fresh `Full`) must leave the
+    // other family's route installed on router-b.
+    let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
+    let v2_removed = format!("removed route prefix={ASBR_PREFIX} ");
+    let v3_removed0 = b.count(&removed);
+    let full_v2 = full_p2p(OSPF_ROUTER_ID);
+    let full_v2_0 = b.count(&full_v2);
+    let v2_added0 = b.count(&v2_route);
+    let v3_added0 = b.count(&route);
+    log("killing router-b's nos-ospfd; router-b's ospfv3 route must stay installed");
+    w.dock.kill_process("router-b", "nos-ospfd").await?;
+    b.wait_new(&full_v2, full_v2_0, 90).await?;
+    b.assert_quiet(&removed, v3_removed0, 1).await?;
+    // The restarted daemon's own route returns once its SPF has run.
+    b.wait_new(&v2_route, v2_added0, 150).await?;
+    let v2_removed0 = b.count(&v2_removed);
+    let full_v3 = format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
+    let full_v3_0 = b.count(&full_v3);
+    log("killing router-b's nos-ospfv3d; router-b's ospf route must stay installed");
+    w.dock.kill_process("router-b", "nos-ospfv3d").await?;
+    b.wait_new(&full_v3, full_v3_0, 90).await?;
+    b.assert_quiet(&v2_removed, v2_removed0, 1).await?;
+    b.wait_new(&route, v3_added0, 150).await?;
+    wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
+
     let aged = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa prematurely aged lsa_type={t} ")
     });
     let flushed = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa maxage flushed .*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID}")
     });
-    let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
     let (aged0, flushed0, removed0) = (a.count(&aged), b.count(&flushed), b.count(&removed));
     let v2_aged = "ospf lsa prematurely aged.*lsa_type=5";
-    let v2_removed = format!("removed route prefix={ASBR_PREFIX} ");
     let (v2_aged0, v2_removed0) = (a.count(v2_aged), b.count(&v2_removed));
     log("removing router-a's ospfv3 redistribute rule; only its as-external-lsa must be flushed");
     a.provision(&["--clear-redistribute-to-ospfv3"]).await?;
@@ -4013,6 +4454,7 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         OSPFV3_ABR_LOOPBACK_ADDRESS,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
     ])
     .await?;
     b.wait_new(&aged, aged0, 30).await?;
@@ -4091,6 +4533,7 @@ pub async fn ospfv3_area_range(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         l1,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
     ])
     .await
 }
@@ -4577,6 +5020,445 @@ pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
     flushed
 }
 
+/// Polls `r`'s `GET /v1/ospfv3/database` until one LSA satisfies `pred` (60s).
+async fn wait_lsa3(
+    r: &Router,
+    what: &str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        if report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(&pred)
+        {
+            return Ok(());
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("{}: no {what} in its database: {last}", r.name())
+}
+
+/// RFC 5340 §4.7 virtual link (#1158), self-contained, three routers (the
+/// `ospfv3-abr-transit` topology): router-a in the backbone only (eth0.0),
+/// router-b the ABR (eth0.0 in area 0, eth1 in area 1), router-c on eth1 in
+/// area 1 only, detached from the backbone until a virtual link b<->c through
+/// area 1 joins it. Each end advertises an area-1 loopback: its `/128` LA
+/// prefix is the virtual link's address. The virtual adjacency must reach Full
+/// over the real VRF raw sockets (unicast to the far loopback, hop limit 64),
+/// both Router-LSAs carry the type-4 link in area 0 (seen at router-a) and the
+/// V bit in area 1, and router-c dropping its end takes the adjacency down on
+/// router-b within the dead interval, with the type-4 link and the V bit.
+pub async fn ospfv3_virtual_link(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
+            .await?;
+    }
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
+        .await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
+        .await?;
+    let result = ospfv3_virtual_link_run(w).await;
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn ospfv3_virtual_link_run(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let area1 = |id: Id, v4: &str, v6: &str, router_id: &str| {
+        strings(&[
+            "--interface",
+            "eth1",
+            "--address",
+            v4,
+            "--address6",
+            v6,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ])
+    };
+    // The area-1 loopback (the endpoint address) and the virtual link.
+    let vlink = |router_id: &str, loopback: &str, endpoint: &str| {
+        strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-loopback-address",
+            loopback,
+            "--ospfv3-loopback-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-virtual-link",
+            &format!("{OSPFV3_AREA_1}:{endpoint}"),
+        ])
+    };
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&area1(
+        B,
+        &format!("{OSPFV3_A1_IP_B}/24"),
+        OSPFV3_A1_ADDRESS_B.s(),
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+    b.provision(&vlink(
+        OSPFV3_ROUTER_ID_B,
+        OSPFV3_VLINK_LOOPBACK_B,
+        OSPFV3_ROUTER_ID_C,
+    ))
+    .await?;
+    c.provision_flags(&with_base(C, vec![])).await?;
+    c.provision_flags(&area1(
+        C,
+        &format!("{OSPFV3_A1_IP_C}/24"),
+        OSPFV3_A1_ADDRESS_C.s(),
+        OSPFV3_ROUTER_ID_C,
+    ))
+    .await?;
+    c.provision(&vlink(
+        OSPFV3_ROUTER_ID_C,
+        OSPFV3_VLINK_LOOPBACK_C,
+        OSPFV3_ROUTER_ID_B,
+    ))
+    .await?;
+    // #1159: router-b does not summarize the backbone's a-b segment into
+    // area 1 (a not-advertise range), so router-c can only learn it over the
+    // virtual link.
+    b.provision(&strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA,
+        "--ospfv3-area-range",
+        &format!("{OSPFV3_VLINK_BACKBONE}:not-advertise"),
+    ]))
+    .await?;
+
+    a.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        90,
+    )
+    .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+        0,
+        90,
+    )
+    .await?;
+
+    log("the virtual link b<->c comes up from area 1's spf and reaches full");
+    let b_link = format!("vlink-{OSPFV3_AREA_1}-{OSPFV3_ROUTER_ID_C}");
+    let c_link = format!("vlink-{OSPFV3_AREA_1}-{OSPFV3_ROUTER_ID_B}");
+    b.wait(&format!("ospfv3 virtual link up link={b_link} "))
+        .await?;
+    c.wait(&format!("ospfv3 virtual link up link={c_link} "))
+        .await?;
+    b.wait(&format!(
+        "ospfv3 neighbor reached full link={b_link} neighbor={OSPFV3_ROUTER_ID_C}"
+    ))
+    .await?;
+    c.wait(&format!(
+        "ospfv3 neighbor reached full link={c_link} neighbor={OSPFV3_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    // Router-LSA (legacy 0x2001, or RFC 8362 E-Router 0xA021) of `router`.
+    let router_lsa = |l: &serde_json::Value, router: &str, area: &str| {
+        l["area_id"] == area
+            && l["advertising_router"] == router
+            && matches!(l["lsa_type"].as_u64(), Some(0x2001 | 0xA021))
+            && l["age"].as_u64().is_some_and(|a| a < 3600)
+    };
+    log("type-4 links in area 0 (at router-a) and V bits in area 1");
+    for (router, far) in [
+        (OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C),
+        (OSPFV3_ROUTER_ID_C, OSPFV3_ROUTER_ID_B),
+    ] {
+        wait_lsa3(a, &format!("{router}'s type-4 link to {far}"), |l| {
+            router_lsa(l, router, OSPFV3_AREA)
+                && l["virtual_links"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|x| x == far))
+        })
+        .await?;
+    }
+    for (holder, router) in [(c, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID_C)] {
+        wait_lsa3(holder, &format!("{router}'s area-1 V bit"), |l| {
+            router_lsa(l, router, OSPFV3_AREA_1)
+                && l["router_flags"].as_u64().is_some_and(|f| f & 0x04 != 0)
+        })
+        .await?;
+    }
+
+    log("router-c, in area 1 only, routes the backbone segment over the virtual link");
+    let backbone_route = format!("added route prefix={OSPFV3_VLINK_BACKBONE} .*source=Some(Ospf)");
+    c.wait(&backbone_route).await?;
+    if !c.rt1_has(OSPFV3_VLINK_BACKBONE, "Ospf").await? {
+        bail!("router-c's rt1 does not list the backbone route {OSPFV3_VLINK_BACKBONE}");
+    }
+
+    log("router-c drops its end: router-b's virtual neighbor dies within the dead interval");
+    c.provision(&strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_C,
+        "--ospfv3-clear-virtual-link",
+        &format!("{OSPFV3_AREA_1}:{OSPFV3_ROUTER_ID_B}"),
+    ]))
+    .await?;
+    c.wait(&format!("ospfv3 virtual link down link={c_link}"))
+        .await?;
+    log("router-c loses the backbone route with the link");
+    c.wait(&format!("removed route prefix={OSPFV3_VLINK_BACKBONE}"))
+        .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor state changed to down link={b_link}"),
+        0,
+        60,
+    )
+    .await?;
+    log("router-b withdraws its type-4 link and V bit");
+    wait_lsa3(
+        a,
+        "router-b's backbone Router-LSA without its type-4 link",
+        |l| {
+            router_lsa(l, OSPFV3_ROUTER_ID_B, OSPFV3_AREA)
+                && l["virtual_links"].as_array().is_some_and(Vec::is_empty)
+        },
+    )
+    .await?;
+    wait_lsa3(c, "router-b's area-1 Router-LSA without the V bit", |l| {
+        router_lsa(l, OSPFV3_ROUTER_ID_B, OSPFV3_AREA_1)
+            && l["router_flags"].as_u64().is_some_and(|f| f & 0x04 == 0)
+    })
+    .await
+}
+
+/// RFC 3101 NSSA over OSPFv3 (#1156), self-contained, the `ospfv3-abr-transit`
+/// topology with area 1 an NSSA: router-c (ASBR, eth1) redistributes an IPv6
+/// static as an NSSA-LSA (0x2007) that router-b, the only ABR and so the
+/// elected translator, turns into its own AS-External-LSA. Router-a installs
+/// that over the backbone and routes it; router-a never translates and no
+/// AS-External-LSA enters the NSSA. Clearing the rule flushes both LSAs and
+/// removes router-a's route.
+pub async fn ospfv3_nssa(w: &mut World) -> anyhow::Result<()> {
+    w.require_ipv6().await?;
+    if !w.dock.network_exists(NET_OSPFV3_A1).await {
+        w.dock
+            .network_create(
+                NET_OSPFV3_A1,
+                &[OSPFV3_A1_SUBNET.s(), OSPFV3_A1_SUBNET6.s()],
+                true,
+            )
+            .await?;
+    }
+    w.start(A, None, &[]).await?;
+    w.start(B, None, &[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-b", OSPFV3_A1_IP_B.s())
+        .await?;
+    w.dock
+        .network_connect_ip(NET_OSPFV3_A1, "router-c", OSPFV3_A1_IP_C.s())
+        .await?;
+    let result = ospfv3_nssa_run(w).await;
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+async fn ospfv3_nssa_run(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let nssa = |id: Id, v4: &str, v6: &str, router_id: &str| {
+        strings(&[
+            "--interface",
+            "eth1",
+            "--address",
+            v4,
+            "--address6",
+            v6,
+            "--asn",
+            &id.asn.to_string(),
+            "--router-id",
+            id.rid,
+            "--remote-as",
+            &id.remote_as.to_string(),
+            "--peer",
+            id.peer_ip.s(),
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            router_id,
+            "--ospfv3-area",
+            OSPFV3_AREA_1,
+            "--ospfv3-area-type",
+            "nssa",
+            "--ospfv3-profile",
+            OSPFV3_PROFILE_AREA1,
+            "--ospfv3-interface-profile",
+            OSPFV3_PROFILE_AREA1,
+        ])
+    };
+    let external =
+        |pat: fn(u16) -> String| either_form(LSA_TYPE_AS_EXTERNAL_V3, LSA_TYPE_E_AS_EXTERNAL, pat);
+    let type5_originated = external(|t| format!("ospfv3 lsa originated lsa_type={t} "));
+    let type5_installed = external(|t| format!("ospfv3 lsa installed.*lsa_type={t} "));
+    let route = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}.*source=Some(Ospf)");
+    // Baselines at phase start (#886), before anything can originate or
+    // install an AS-External-LSA.
+    let (a_orig0, c_inst0) = (
+        a.count_fresh(&type5_originated).await,
+        c.count_fresh(&type5_installed).await,
+    );
+
+    let a_base = with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID));
+    let b_base = with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B));
+    let b_nssa = nssa(
+        B,
+        &format!("{OSPFV3_A1_IP_B}/24"),
+        OSPFV3_A1_ADDRESS_B.s(),
+        OSPFV3_ROUTER_ID_B,
+    );
+    a.provision_flags(&a_base).await?;
+    b.provision_flags(&b_base).await?;
+    b.provision_flags(&b_nssa).await?;
+    let c_base = with_base(C, vec![]);
+    c.provision_flags(&c_base).await?;
+    let mut c_flags = nssa(
+        C,
+        &format!("{OSPFV3_A1_IP_C}/24"),
+        OSPFV3_A1_ADDRESS_C.s(),
+        OSPFV3_ROUTER_ID_C,
+    );
+    c_flags.extend(strings(&[
+        "--static-route",
+        OSPFV3_A1_ASBR_PREFIX,
+        "--static-gateway",
+        OSPFV3_A1_ADDRESS_B.s().trim_end_matches("/64"),
+        "--redistribute-to-ospfv3",
+    ]));
+    c.provision_flags(&c_flags).await?;
+    let c_nssa = c_flags.clone();
+
+    a.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"),
+        0,
+        90,
+    )
+    .await?;
+    b.wait_new(
+        &format!("ospfv3 neighbor reached full link=eth1.0 neighbor={OSPFV3_ROUTER_ID_C}"),
+        0,
+        90,
+    )
+    .await?;
+
+    // Router-c's NSSA-LSA, translated by router-b alone.
+    let type7 = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_NSSA_V3} ");
+    c.wait_new(&type7, 0, 60).await?;
+    b.wait_new("ospfv3 nssa translator role changed areas=.*0.0.0.1", 0, 60)
+        .await?;
+    b.wait_new(&type5_originated, 0, 60).await?;
+    let from_b = external(|t| {
+        format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}")
+    });
+    a.wait_new(&from_b, 0, 60).await?;
+    a.wait_new(&route, 0, 60).await?;
+    log("confirming router-a doesn't translate and no AS-External-LSA enters the NSSA");
+    a.assert_quiet(&type5_originated, a_orig0, 10).await?;
+    c.assert_quiet(&type5_installed, c_inst0, 1).await?;
+
+    // Redistribution removed: the NSSA-LSA and its translation are flushed
+    // (RFC 2328 §14.1) and router-a's route goes.
+    let removed = format!("removed route prefix={OSPFV3_A1_ASBR_PREFIX}");
+    let removed0 = a.count(&removed);
+    let aged5 = external(|t| format!("ospfv3 lsa prematurely aged lsa_type={t} "));
+    let aged5_0 = b.count(&aged5);
+    c.provision(&["--clear-redistribute-to-ospfv3"]).await?;
+    c.wait_new(
+        &format!("ospfv3 lsa prematurely aged lsa_type={LSA_TYPE_NSSA_V3} "),
+        0,
+        60,
+    )
+    .await?;
+    b.wait_new(&aged5, aged5_0, 60).await?;
+    a.wait_new(&removed, removed0, 60).await?;
+
+    // RFC 8362 (#1157): extended-lsa on all three routers re-originates the
+    // NSSA-LSA as an E-NSSA-LSA (0xA027, the legacy one ages), router-b
+    // translates it into an E-AS-External-LSA (0xC025) and router-a routes
+    // it again.
+    log("switching all routers to extended-lsa: E-NSSA-LSA 0xA027 translated to 0xC025");
+    let e_type5 = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_AS_EXTERNAL} ");
+    let e_type5_0 = b.count_fresh(&e_type5).await;
+    let added = format!("added route prefix={OSPFV3_A1_ASBR_PREFIX}");
+    let added0 = a.count_fresh(&added).await;
+    let ext = strings(&["--ospfv3-extended-lsa"]);
+    for (r, base) in [(a, &a_base), (b, &b_base), (c, &c_base)] {
+        r.provision_flags(&[base.clone(), ext.clone()].concat())
+            .await?;
+    }
+    b.provision_flags(&[b_nssa, ext.clone()].concat()).await?;
+    c.provision_flags(&[c_nssa, ext].concat()).await?;
+    c.wait_new(
+        &format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_NSSA} "),
+        0,
+        60,
+    )
+    .await?;
+    b.wait_new(&e_type5, e_type5_0, 60).await?;
+    a.wait_new(&added, added0, 60).await
+}
+
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
 /// period configured, is restarted with SIGTERM. It must send a Grace-LSA
 /// before exiting, and router-b must help: hold the adjacency and keep
@@ -4694,8 +5576,11 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // The loopback address stays on router-b (flags cannot remove one) and
     // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
     // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
-    b.provision_flags(&helper_cap(&["--clear-ospfv3-loopback-profile"]))
-        .await
+    b.provision_flags(&helper_cap(&[
+        "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]))
+    .await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
@@ -4836,7 +5721,8 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&lsa_c, a0, 60).await?;
     b.wait_new(&lsa_c, b0, 60).await?;
-    c.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
 
     log("router-c holds only the bridge's own link-lsas (rfc 5340 §4.5.1)");
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;
@@ -4844,6 +5730,87 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(7)).await;
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;
     assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID_B).await
+}
+
+/// RFC 8362 Sparse mode (#1179; requires `ospfv3-dr`, which puts router-c on
+/// the shared bridge): router-a sparse, router-b full, router-c legacy-only in
+/// one area. Every adjacency stays `Full`, a's legacy Router-LSA reaches the
+/// full-mode b, b's E-Router-LSA reaches the sparse a, and a loopback of each
+/// router is installed as a kernel route on the other two.
+pub async fn ospfv3_extended_lsa_sparse(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let [lo_a, lo_b, lo_c] = OSPFV3_SPARSE_LOOPBACKS;
+    // The loopbacks are unique to this phase, so a first-occurrence wait is safe.
+    let route = |p: &str| format!("added route prefix={p}.*source=Some(Ospf) backup=false");
+    let legacy_a = format!(
+        "ospfv3 lsa installed.*lsa_type={LSA_TYPE_ROUTER_V3}.*advertising_router={OSPFV3_ROUTER_ID}"
+    );
+    let ext_b = format!(
+        "ospfv3 lsa installed.*lsa_type={LSA_TYPE_E_ROUTER}.*advertising_router={OSPFV3_ROUTER_ID_B}"
+    );
+    let lo = |prefix: &'static str, mode: &'static str| {
+        let mut flags = vec![
+            "--ospfv3-loopback-address",
+            prefix,
+            "--ospfv3-loopback-profile",
+            OSPFV3_PROFILE,
+        ];
+        flags.extend(Some(mode).filter(|m| !m.is_empty()));
+        flags
+    };
+    // Only the loopback's first IPv6 address is originated: drop the earlier
+    // phases' (`ospfv3-lfa`'s on router-b, `ospfv3-dr`'s on router-c) first.
+    for (r, old) in [
+        (a, OSPFV3_LOOPBACK_ADDRESS),
+        (b, OSPFV3_LFA_LOOPBACK_ADDRESS),
+        (c, OSPFV3_DR_LOOPBACK_ADDRESS_C),
+    ] {
+        // Absent when a phase before already removed it.
+        let _ = r.provision(&["--loopback-remove-address", old]).await;
+    }
+    a.provision(&lo(lo_a, "--ospfv3-extended-lsa-sparse"))
+        .await?;
+    b.provision(&lo(lo_b, "--ospfv3-extended-lsa")).await?;
+    c.provision(&lo(lo_c, "")).await?;
+
+    b.wait(&legacy_a).await?;
+    a.wait(&ext_b).await?;
+    let link = format!("link=broadcast-domain:{BD}");
+    for (r, peers) in [
+        (a, [OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C]),
+        (b, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_C]),
+        (c, [OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B]),
+    ] {
+        for n in peers {
+            r.wait(&format!("ospfv3 neighbor reached full {link} neighbor={n}"))
+                .await?;
+        }
+    }
+    let wants = [(a, [lo_b, lo_c]), (b, [lo_a, lo_c]), (c, [lo_a, lo_b])];
+    for (r, ps) in wants {
+        for p in ps {
+            r.wait(&route(p)).await?;
+        }
+    }
+
+    // Leave full mode on both (what `ospfv3` left) and no loopback behind.
+    a.provision(&[
+        "--ospfv3-extended-lsa",
+        "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ])
+    .await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
+    for (r, mine) in [(a, lo_a), (b, lo_b), (c, lo_c)] {
+        r.provision(&["--loopback-remove-address", mine]).await?;
+    }
+    // Give router-b `ospfv3-lfa`'s address back (`ospfv3-spf-ecmp` removes it).
+    b.provision(&lo(OSPFV3_LFA_LOOPBACK_ADDRESS, "")).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await
 }
 
 /// RFC 5286 loop-free alternate over OSPFv3 (requires `ospfv3-dr`, which puts
@@ -4870,7 +5837,8 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
 
     let removed = format!("removed route prefix={prefix}.*backup=true");
     let r0 = a.count(&removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     a.wait_new(&removed, r0, 60).await
 }
 
@@ -4940,6 +5908,160 @@ pub async fn ospfv3_p2mp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// RFC 6845 hybrid broadcast and point-to-multipoint (#1180; requires
+/// `ospfv3-dr`, which stands up router-c on the shared bridge): a second
+/// profile forced to `hybrid` on the bridge of all three routers. The
+/// election, Hello and database sync are the broadcast ones (an election
+/// logged, every pair Full as the DR/BDR are adjacent to the DROther), but the
+/// Router-LSAs list point-to-point links and the DR originates no Network-LSA
+/// (§4.5): each router installs the others' /128 host routes and router-c's
+/// loopback. Switching the bridge back to the broadcast profile re-elects.
+pub async fn ospfv3_hybrid(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let hybrid = |rid: &str| {
+        strings(&[
+            "--ospfv3-instance",
+            OSPFV3_INSTANCE,
+            "--ospfv3-router-id",
+            rid,
+            "--ospfv3-area",
+            OSPFV3_AREA,
+            "--ospfv3-profile",
+            OSPFV3_HYBRID_PROFILE,
+            "--ospfv3-profile-network-type",
+            "hybrid",
+            "--routing-table",
+            "rt1",
+            "--broadcast-domain",
+            BD,
+            "--ospfv3-broadcast-domain-profile",
+            OSPFV3_HYBRID_PROFILE,
+        ])
+    };
+    let link = format!("link=broadcast-domain:{BD}");
+    let became = format!("ospfv3 interface became .* {link}");
+    let full = |n: &str| format!("ospfv3 neighbor reached full {link} neighbor={n}");
+    let host = |addr: &str| addr.split('/').next().unwrap_or_default().to_string();
+    let added = |addr: &str| format!("added route prefix={}/128.*source=Some(Ospf)", host(addr));
+    let loopback = format!("added route prefix={OSPFV3_DR_LOOPBACK_ADDRESS_C}.*source=Some(Ospf)");
+
+    let routers = [
+        (a, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID_C),
+        (b, OSPFV3_ROUTER_ID_B, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_C),
+        (c, OSPFV3_ROUTER_ID_C, OSPFV3_ROUTER_ID, OSPFV3_ROUTER_ID_B),
+    ];
+    let base: Vec<_> = routers
+        .iter()
+        .map(|(r, _, p, q)| (r.count(&became), r.count(&full(p)), r.count(&full(q))))
+        .collect();
+    let (a_b, a_c, b_a, b_c, c_a, c_b) = (
+        a.count(&added(OSPFV3_BROADCAST_ADDRESS_B)),
+        a.count(&added(OSPFV3_BROADCAST_ADDRESS_C)),
+        b.count(&added(OSPFV3_BROADCAST_ADDRESS_A)),
+        b.count(&added(OSPFV3_BROADCAST_ADDRESS_C)),
+        c.count(&added(OSPFV3_BROADCAST_ADDRESS_A)),
+        c.count(&added(OSPFV3_BROADCAST_ADDRESS_B)),
+    );
+    let (loop_a, loop_b) = (a.count(&loopback), b.count(&loopback));
+
+    log("forcing a hybrid profile (rfc 6845) on the bridge of all three routers");
+    a.provision_flags(&with_base(A, hybrid(OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, hybrid(OSPFV3_ROUTER_ID_B)))
+        .await?;
+    c.provision_flags(&with_base(crate::router::C, hybrid(OSPFV3_ROUTER_ID_C)))
+        .await?;
+    for ((r, _, p, q), (e0, p0, q0)) in routers.iter().zip(&base) {
+        r.wait_new(&became, *e0, 120).await?;
+        r.wait_new(&full(p), *p0, 120).await?;
+        r.wait_new(&full(q), *q0, 120).await?;
+    }
+    // Point-to-point links in the Router-LSAs: the peers' own addresses are
+    // /128 host routes, not the bridge's /64.
+    a.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_B), a_b, 60)
+        .await?;
+    a.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_C), a_c, 60)
+        .await?;
+    b.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_A), b_a, 60)
+        .await?;
+    b.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_C), b_c, 60)
+        .await?;
+    c.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_A), c_a, 60)
+        .await?;
+    c.wait_new(&added(OSPFV3_BROADCAST_ADDRESS_B), c_b, 60)
+        .await?;
+
+    let mut flags = strings(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_C,
+        "--ospfv3-area",
+        OSPFV3_AREA,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE,
+    ]);
+    flags.extend(strings(&[
+        "--ospfv3-loopback-address",
+        OSPFV3_DR_LOOPBACK_ADDRESS_C,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ]));
+    c.provision_flags(&with_base(crate::router::C, flags))
+        .await?;
+    a.wait_new(&loopback, loop_a, 60).await?;
+    b.wait_new(&loopback, loop_b, 60).await?;
+    c.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
+
+    log("no Network-LSA is held (rfc 6845 4.5)");
+    let mut left = String::new();
+    for _ in 0..30 {
+        let body = a
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let rows = report[0]["result"].as_array().cloned().unwrap_or_default();
+        left = rows
+            .iter()
+            .filter(|r| {
+                r["lsa_type"].as_u64().is_some_and(|t| t & 0x1fff == 2)
+                    && r["age"].as_u64().is_some_and(|age| age < 3600)
+            })
+            .map(ToString::to_string)
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    if !left.is_empty() {
+        bail!("a network-lsa is still held on a hybrid bridge: {left}");
+    }
+
+    log("switching the bridge back to the broadcast profile re-elects");
+    let base: Vec<_> = routers.iter().map(|(r, ..)| r.count(&became)).collect();
+    a.provision_flags(&with_base(
+        A,
+        ospfv3_broadcast_with_l2(OSPF_BROADCAST_ADDRESS_A, OSPFV3_BROADCAST_ADDRESS_A),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        ospfv3_broadcast_with_l2(OSPF_BROADCAST_ADDRESS_B, OSPFV3_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    c.provision_flags(&with_base(
+        crate::router::C,
+        ospfv3_broadcast(OSPFV3_BROADCAST_ADDRESS_C),
+    ))
+    .await?;
+    for ((r, ..), e0) in routers.iter().zip(&base) {
+        r.wait_new(&became, *e0, 120).await?;
+    }
+    Ok(())
+}
+
 /// RFC 2328 §16.1 ECMP over OSPFv3 (#1135, requires `ospfv3-dr`): router-b is
 /// reachable from router-a over both the p2p `eth0.0` and the shared bridge at
 /// the same cost, so its loopback is one `RTA_MULTIPATH` route (`next_hops=2`).
@@ -4990,6 +6112,7 @@ pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
         "--loopback-remove-address",
         prefix,
         "--clear-ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
     ])
     .await?;
     a.wait_new(&removed, r0, 60).await
@@ -5156,7 +6279,8 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     b.wait_new("ospfv3 link driver started link=eth0.0", fb0, 60)
         .await?;
     let removed0 = a.count(&primary_removed);
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     a.wait_new(&primary_removed, removed0, 60).await
 }
 
@@ -5266,7 +6390,8 @@ pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(&replaced, r1, 20).await?;
 
     // Cleanup so the following phases see the lab they expect.
-    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
+        .await?;
     for tag in OSPFV3_VLAN_TAGS {
         a.provision_flags(&vlan(A, OSPFV3_ROUTER_ID, tag, 1, true))
             .await?;
@@ -5296,6 +6421,7 @@ pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
         "--broadcast-domain",
         BD,
         "--clear-ospfv3-broadcast-domain-profile",
+        OSPFV3_PROFILE,
     ]);
     a.provision(&leave).await?;
     c.provision_flags(&with_base(crate::router::C, leave))
@@ -5965,8 +7091,20 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     }
     // Leave no loopback behind: `ospfv3-lfa` re-provisions this very prefix
     // and waits for a *new* route add, which an identical config never gives.
-    b.provision(&[&format!("--clear-{}-loopback-profile", s.daemon)])
-        .await
+    let clear = format!("--clear-{}-loopback-profile", s.daemon);
+    // The OSPFv3 flag names the profile to remove (#1278); the OSPFv2 one is a switch.
+    let mut flags = vec![clear.as_str()];
+    if s.v6 {
+        flags.push(OSPFV3_PROFILE);
+    }
+    b.provision(&flags).await?;
+    if !s.v6 {
+        // The address left on the loopback made `ospf-graceful-restart`'s
+        // second loopback address vanish from router-b's LSA (#1293).
+        b.provision(&["--loopback-remove-address", s.prefix])
+            .await?;
+    }
+    Ok(())
 }
 
 /// `ospf-bfd` (#288), on the `ospf` lab.
@@ -6204,6 +7342,169 @@ pub async fn ospf_forged_lsa(w: &mut World) -> anyhow::Result<()> {
     a.established().await
 }
 
+// --- #1146: LSDB overload limit ---
+
+/// `max-lsa` on router-a in `ospf-max-lsa`: small enough to hit with one injection.
+const MAX_LSA_CAP: usize = 10;
+/// Distinct fake LSAs injected past it.
+const MAX_LSA_INJECTED: usize = 40;
+/// Sequence number of the injected LSAs (above the initial one).
+const MAX_LSA_SEQ: &str = "2147484000";
+
+/// How many `9.9.1.*` (injected) LSAs `r`'s database holds, and the highest
+/// sequence number of one of `r`'s own LSAs (`own`).
+async fn max_lsa_counts(r: &Router, database: &str, own: &str) -> anyhow::Result<(usize, i64)> {
+    let body = r.rest_expect(Method::GET, database, None, 200).await?;
+    let report: serde_json::Value = serde_json::from_str(&body)?;
+    let lsas = report[0]["result"].as_array().cloned().unwrap_or_default();
+    let fake = lsas
+        .iter()
+        .filter(|l| {
+            l["advertising_router"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("9.9.1."))
+        })
+        .count();
+    let seq = lsas
+        .iter()
+        .filter(|l| l["advertising_router"] == own)
+        .filter_map(|l| l["sequence_number"].as_i64())
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("no lsa of {own} in {body}"))?;
+    Ok((fake, seq))
+}
+
+/// One protocol's run of `ospf_max_lsa`: router-a caps non-self LSAs at
+/// `MAX_LSA_CAP`; router-b's netns floods `MAX_LSA_INJECTED` distinct fake
+/// Router-LSAs. The limit is logged, the store stops at the cap, and router-a's
+/// own LSA still re-originates (a metric change); the fakes are then flushed.
+#[allow(clippy::too_many_arguments)]
+async fn max_lsa_run(
+    w: &World,
+    mode: &str,
+    log_prefix: &str,
+    database: &str,
+    a_rid: &str,
+    b_rid: &str,
+    flags: &[String],
+) -> anyhow::Result<()> {
+    let a = w.a()?;
+    // The shared `nos-ospf-common` line, so one text serves both daemons.
+    let limit = "ospf lsdb limit reached";
+    let l0 = a.count(limit);
+    let seq0 = max_lsa_counts(a, database, a_rid).await?.1;
+    let injected = MAX_LSA_INJECTED.to_string();
+    let inject = |step: &'static str| {
+        let args = [
+            "python3",
+            "-c",
+            include_str!("max_lsa.py"),
+            mode,
+            step,
+            OSPF_AREA,
+            b_rid,
+            if mode == "v2" { IP_B.s() } else { "-" },
+            &injected,
+            MAX_LSA_SEQ,
+        ];
+        async move {
+            let out = w
+                .dock
+                .in_netns(PYTHON_HELPER_IMAGE, "router-b", &args)
+                .await?;
+            log(out.trim());
+            anyhow::Ok(())
+        }
+    };
+    inject("flood").await?;
+    a.wait_new(limit, l0, 20).await?;
+    // Delayed acks, MinLSArrival and the periodic resend settle in a few seconds.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let (held, _) = max_lsa_counts(a, database, a_rid).await?;
+    anyhow::ensure!(
+        (1..=MAX_LSA_CAP).contains(&held),
+        "{mode}: {held} injected LSAs held with max-lsa {MAX_LSA_CAP}"
+    );
+    log(format!(
+        "{mode}: {held} of {MAX_LSA_INJECTED} injected LSAs held"
+    ));
+    // Own origination is never blocked: a metric change re-originates.
+    let mut stub = flags.to_vec();
+    stub.extend(strings(&[
+        &format!("--{log_prefix}-max-metric-administrative"),
+        "true",
+    ]));
+    a.provision_flags(&with_base(A, stub)).await?;
+    let mut reoriginated = false;
+    for _ in 0..30 {
+        if max_lsa_counts(a, database, a_rid).await?.1 > seq0 {
+            reoriginated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        reoriginated,
+        "{mode}: own LSA did not re-originate at the cap"
+    );
+    a.provision_flags(&with_base(A, flags.to_vec())).await?;
+    // Leave no fake LSA behind for the next phase.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    inject("flush").await
+}
+
+/// #1146 (self-contained): `max-lsa` bounds the LSDB a neighbor can grow, in
+/// OSPFv2 and OSPFv3 (see `max_lsa_run`).
+pub async fn ospf_max_lsa(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let cap = MAX_LSA_CAP.to_string();
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID));
+    fa.extend(strings(&["--ospf-max-lsa", &cap, "--ospfv3-max-lsa", &cap]));
+    let mut fb = ospf(OSPF_ROUTER_ID_B);
+    fb.extend(ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B));
+    a.provision_flags(&with_base(A, fa.clone())).await?;
+    b.provision_flags(&with_base(B, fb)).await?;
+    both_full_p2p(a, b).await?;
+    for (x, peer) in [(a, OSPFV3_ROUTER_ID_B), (b, OSPFV3_ROUTER_ID)] {
+        x.wait(&format!(
+            "ospfv3 neighbor reached full link=eth0.0 neighbor={peer}"
+        ))
+        .await?;
+    }
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:trixie-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    max_lsa_run(
+        w,
+        "v2",
+        "ospf",
+        "/v1/ospf/database",
+        OSPF_ROUTER_ID,
+        OSPF_ROUTER_ID_B,
+        &fa,
+    )
+    .await?;
+    max_lsa_run(
+        w,
+        "v3",
+        "ospfv3",
+        "/v1/ospfv3/database",
+        OSPFV3_ROUTER_ID,
+        OSPFV3_ROUTER_ID_B,
+        &fa,
+    )
+    .await?;
+    a.established().await
+}
+
 /// #954: a broadcast-domain attach point reads its bridge's observed kernel
 /// MTU. `--mtu 1400` on router-a's eth0 lowers the `eth0.<tag>` bridge port
 /// and so `br<N>` (no profile override): router-a rejects router-b's
@@ -6243,8 +7544,9 @@ async fn ospf_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
     let full_b = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID}");
     let before_b = b.count(&full_b);
     let dr = format!("ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}");
-    let backup =
-        format!("ospf interface became backup {link} dr={OSPF_ROUTER_ID_B} bdr={OSPF_ROUTER_ID}");
+    // router-c (ospf-lfa onward) may already be the BDR, and BDR is not
+    // preempted (RFC 2328 §9.4): router-a then settles as dr-other (#1293).
+    let backup = format!("ospf interface became [bd][a-z-]* {link} dr={OSPF_ROUTER_ID_B}");
     let (dr0, backup0) = (b.count(&dr), a.count(&backup));
     a.provision_flags(&fa(&["--clear-mtu"])).await?;
     b.provision_flags(&fb(&["--clear-mtu"])).await?;
@@ -6327,6 +7629,7 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
         "--broadcast-domain",
         BD,
         "--clear-ospfv3-broadcast-domain-profile",
+        OSPFV3_PROFILE,
     ]);
     a.provision_flags(&with_base(A, leave.clone())).await?;
     b.provision_flags(&with_base(B, leave)).await?;
@@ -6340,9 +7643,15 @@ async fn ospfv3_bridge_mtu(w: &mut World) -> anyhow::Result<()> {
 /// to the initial delay after a quiet period.
 pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     const FLAPS: usize = 8;
+    // Fresh lab (#1303): `ospf-aging` leaves `--lsa-age-multiplier` on, whose
+    // refresh-driven SPFs would keep the throttle from ever going quiet.
+    w.up(&[]).await?;
     let (a, b) = (w.a()?, w.b()?);
     let base = with_base(A, asbr(ospf(OSPF_ROUTER_ID)));
     a.provision_flags(&base).await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    both_full_p2p(a, b).await?;
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
     let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
     a.wait(&reorig_pat).await?;

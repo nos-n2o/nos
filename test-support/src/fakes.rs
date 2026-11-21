@@ -295,7 +295,7 @@ impl FakeRibd {
                     Reply::One(RibEvent::NextHops(vec![None; addrs.len()]))
                 }
                 RibRequest::PushBgpRoutes(_)
-                | RibRequest::PushOspfRoutes(_)
+                | RibRequest::PushOspfRoutes { .. }
                 | RibRequest::PushEvpnRoutes(_)
                 | RibRequest::PushVpnRoutes(_) => Reply::None,
             }
@@ -329,7 +329,7 @@ impl FakeRibd {
                 matches!(
                     r,
                     RibRequest::PushBgpRoutes(_)
-                        | RibRequest::PushOspfRoutes(_)
+                        | RibRequest::PushOspfRoutes { .. }
                         | RibRequest::PushEvpnRoutes(_)
                 )
             })

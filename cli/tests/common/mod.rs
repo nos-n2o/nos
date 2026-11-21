@@ -148,6 +148,7 @@ pub fn base_running() -> Config {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,
@@ -161,11 +162,14 @@ pub fn base_running() -> Config {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: nos_proto::Ospfv3AddressFamily::default(),
         }],
         ..Default::default()
     }

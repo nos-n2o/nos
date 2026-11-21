@@ -199,7 +199,7 @@ topics! {
     InterfaceRoutingTable,
     /// `Interface.ospf_profile` (also a subinterface's and a broadcast domain's)
     InterfaceOspfProfile,
-    /// `Interface.ospfv3_profile` (also a subinterface's and a broadcast domain's)
+    /// `Interface.ospfv3_profiles` (also a subinterface's and a broadcast domain's)
     InterfaceOspfv3Profile,
     /// `Subinterface.bfd_unsolicited`
     InterfaceBfdUnsolicited,
@@ -267,6 +267,8 @@ topics! {
     OspfInstanceRouterId,
     /// `OspfInstance.graceful_restart_grace_period`
     OspfInstanceGracefulRestart,
+    /// `OspfInstance.max_lsa`
+    OspfInstanceMaxLsa,
     /// `OspfInstance.graceful_restart_helper_max_grace_period`
     OspfInstanceGracefulRestartHelperMaxGracePeriod,
     /// `OspfInstance.prefix_suppression`
@@ -329,8 +331,14 @@ topics! {
     Ospfv3InstanceRouterId,
     /// `Ospfv3Instance.extended_lsa`
     Ospfv3InstanceExtendedLsa,
+    /// `Ospfv3Instance.extended_lsa_sparse`
+    Ospfv3InstanceExtendedLsaSparse,
     /// `Ospfv3Instance.graceful_restart_grace_period`
     Ospfv3InstanceGracefulRestart,
+    /// `Ospfv3Instance.max_lsa`
+    Ospfv3InstanceMaxLsa,
+    /// `Ospfv3Instance.address_family`
+    Ospfv3InstanceAddressFamily,
     /// `Ospfv3Instance.graceful_restart_helper_max_grace_period`
     Ospfv3InstanceGracefulRestartHelperMaxGracePeriod,
     /// `Ospfv3Instance.max_metric_on_startup`
@@ -503,6 +511,30 @@ topics! {
     BfdProfileMode,
     /// `BfdProfile.sbfd_remote_discriminator`
     BfdProfileSbfdRemoteDiscriminator,
+    /// `Config.aaa`
+    Aaa,
+    /// `Aaa.servers`
+    AaaRadiusServer,
+    /// `Aaa.login_order`
+    AaaLoginOrder,
+    /// `Aaa.accounting`
+    AaaAccounting,
+    /// `RadiusServer.accounting_port`
+    RadiusAccountingPort,
+    /// `Aaa.role_attribute`
+    AaaRoleAttribute,
+    /// `RadiusServer.address`
+    RadiusAddress,
+    /// `RadiusServer.port`
+    RadiusPort,
+    /// `RadiusServer.routing_table`
+    RadiusRoutingTable,
+    /// `RadiusServer.secret_ref`
+    RadiusSecretRef,
+    /// `RadiusServer.timeout_secs`
+    RadiusTimeout,
+    /// `RadiusServer.retries`
+    RadiusRetries,
     /// `Config.login_policy`
     LoginPolicy,
     /// `LoginPolicy.max_failures`

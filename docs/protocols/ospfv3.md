@@ -10,7 +10,9 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
   - [Advertise a loopback](#advertise-a-loopback)
   - [Authenticate a link (RFC 7166)](#authenticate-a-link-rfc-7166)
   - [Set the instance ID](#set-the-instance-id)
+  - [Run several instances on one link](#run-several-instances-on-one-link)
   - [Use extended LSAs (RFC 8362)](#use-extended-lsas-rfc-8362)
+  - [Use sparse mode (RFC 8362 §3)](#use-sparse-mode-rfc-8362-3)
   - [Restart without dropping routes (RFC 5187)](#restart-without-dropping-routes-rfc-5187)
   - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
   - [Add a second area (ABR)](#add-a-second-area-abr)
@@ -29,7 +31,7 @@ The model is the same as OSPFv2's, with `ospfv3` in place of `ospf` in every com
 - **profiles**, `profile <name>`, inside an area, holding the per-link settings;
 - a profile **attached** to a subinterface (`set interface eth0 ospfv3 <profile>`), a loopback (`set interface loopback-<table> ospfv3 <profile>`) or a broadcast domain (`set ospfv3 <profile>` inside `edit broadcast domain <name>`). The attach point must have `routing-table` set.
 
-OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and an `ospfv3-instance`, and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
+OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and several `ospfv3-instance`s (each `nos-ospfv3d` pushes its own routes and gets its own redistribution feed; `nos-ribd` keeps them apart, #1277), and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
 
 Prefix options (RFC 5340 A.4.1.1):
 
@@ -73,7 +75,7 @@ $C -X PUT -H 'Content-Type: application/json' \
   -d '{"name":"v3","router_id":"2.2.2.2","areas":[{"area_id":"0.0.0.0","profiles":[{"name":"p6"}]}]}' \
   $B/v1/transactions/v3/ospfv3-instance/v3
 $C -X PUT -H 'Content-Type: application/json' -d '"v3"' $B/v1/transactions/v3/routing-table/rt1/ospfv3-instance
-$C -X PUT -H 'Content-Type: application/json' -d '"p6"' $B/v1/transactions/v3/interface/eth0/subinterface/0/ospfv3-profile
+$C -X PUT -H 'Content-Type: application/json' -d '["p6"]' $B/v1/transactions/v3/interface/eth0/subinterface/0/ospfv3-profile
 $C -X POST $B/v1/transactions/v3/commit
 ```
 
@@ -121,7 +123,7 @@ The REST equivalent on router-b adds an address to its loopback and attaches the
 $C -X POST $B/v1/transactions/v3lo
 $C -X PUT -H 'Content-Type: application/json' -d '{"address":"2001:db8:4::1/128","label":null}' \
   $B/v1/transactions/v3lo/interface/loopback-rt1/address/2001:db8:4::1%2F128
-$C -X PUT -H 'Content-Type: application/json' -d '"p6"' $B/v1/transactions/v3lo/interface/loopback-rt1/ospfv3-profile
+$C -X PUT -H 'Content-Type: application/json' -d '["p6"]' $B/v1/transactions/v3lo/interface/loopback-rt1/ospfv3-profile
 $C -X POST $B/v1/transactions/v3lo/commit
 ```
 
@@ -166,10 +168,44 @@ $C -X PUT -H 'Content-Type: application/json' -d '1' $B/v1/transactions/v3iid/os
 $C -X POST $B/v1/transactions/v3iid/commit
 ```
 
-- The range is 0 to 31, the IPv6 unicast range of RFC 5838.
+- The range is 0 to 31 (IPv6 unicast) or 64 to 95 (IPv4 unicast), RFC 5838 §2.1; the instance's address family decides which (next section).
 - Changing it restarts the link's adjacencies.
 - A dropped packet is logged at debug level only (`ospfv3 packet instance id mismatch, dropping`, with `received` and `expected`). If a neighbour never shows up in `show ospfv3 neigh`, compare both ends' instance IDs.
 - `delete ospfv3 instance v3 area 0.0.0.0 profile p6 instance-id` goes back to 0.
+
+### Run several instances on one link
+
+One link can run several OSPFv3 instances (RFC 5838), for example an IPv6 and an IPv4 address family, or two independent IPv6 topologies. Each instance is its own `nos-ospfv3d` process.
+
+```
+set ospfv3 instance v3b router-id 9.9.9.20
+set ospfv3 instance v3b area 0.0.0.0 profile p2 instance-id 1
+set routing-table rt1 ospfv3-instance v3b
+set interface eth0 ospfv3 p2
+commit
+```
+
+- The attach point (`interface`, `broadcast-domain`) lists one profile per instance: `set interface eth0 ospfv3 p1` and `set interface eth0 ospfv3 p2` side by side. `delete interface eth0 ospfv3 p2` detaches one.
+- The routing table claims every instance (`set routing-table rt1 ospfv3-instance <name>` once per instance); each needs its own router ID, and every router on the link must run the same instance IDs.
+- The effective Instance IDs on one attach point must differ (commit refuses a duplicate). An `ipv4-unicast` instance uses 64 to 95, an IPv6 one 0 to 31.
+- Each daemon drops the other instances' packets by Instance ID before authentication, so a shared link raises no authentication failures.
+- A static-route redistribution feeds every claimed instance. The rule's `instance` field (one instance only) is set through the config ops only; the CLI and REST address a rule by target alone.
+- Each instance pushes its own routes to `nos-ribd`, which keeps them apart: one instance's recomputation never withdraws another's routes. Releasing an instance from the table drops the rules naming it.
+- Verified by `nos-e2e ospfv3-instance-id`.
+
+### Choose the address family (RFC 5838)
+
+```
+configure v3af
+set ospfv3 instance v3 address-family ipv4-unicast
+set ospfv3 instance v3 area 0.0.0.0 profile p6 instance-id 64
+commit
+```
+
+- `ipv6-unicast` is the default; `delete ospfv3 instance v3 address-family` goes back to it.
+- Every profile's instance ID must lie in the family's range (0-31 or 64-95), so an `ipv4-unicast` instance needs an explicit `instance-id` on each profile; the commit fails otherwise.
+- An `ipv4-unicast` instance sets the AF-bit in its Hellos, DBDs and LSAs and discards a Hello without it (`dropping ospfv3 hello without af-bit`). The base IPv6 family sets no AF-bit and accepts either, for compatibility.
+- Only the foundation is built: the adjacency forms, but no IPv4 route is computed yet. Several instances on one link are not possible yet: an attach point names one profile and a routing table claims one OSPFv3 instance.
 
 ### Use extended LSAs (RFC 8362)
 
@@ -193,7 +229,24 @@ What happens when you switch:
 - The router then flushes the LSAs of the mode it left (they reach age 3600), so neighbours drop them within about 10 seconds instead of keeping them for an hour.
 - `show ospfv3 database` can show the old LSAs at age 3600 for those few seconds.
 
-RFC 8362 intends full mode to be enabled on every router of an area at once, and that is how it has been tested in NOS; running an area with some routers in each mode is not tested.
+RFC 8362 intends full mode to be enabled on every router of an area at once; use sparse mode (next section) when the area mixes routers with and without extended-LSA support.
+
+### Use sparse mode (RFC 8362 §3)
+
+`set ospfv3 instance <name> extended-lsa-sparse` keeps the RFC 5340 LSAs as the topology and prefix carriers, so full-mode and legacy-only routers in the same area still interoperate with this one. It still reads extended LSAs from full-mode neighbours and merges them into SPF; a link or prefix present in both a legacy LSA and its extended form counts once. It is mutually exclusive with `extended-lsa`: the commit is refused when both are on. `delete ospfv3 instance <name> extended-lsa-sparse` turns it off.
+
+- NOS originates no extended LSA in sparse mode: it has no TE, SR or other TLV content a legacy LSA cannot hold, so the origination is the same as with both modes off. Extended LSAs of this router's earlier full mode are flushed on the switch, like any mode change.
+- Verified with router-a sparse, router-b full and router-c legacy-only on one bridge (`nos-e2e ospfv3-extended-lsa-sparse`).
+
+### Use a hybrid broadcast and point-to-multipoint link (RFC 6845)
+
+- Use it on a broadcast domain where each router pair needs its own path cost; hello, DR/BDR election and database sync stay as on a normal broadcast link.
+- Set `network-type hybrid` on the profile the broadcast domain's `ospfv3` field names: `set ospfv3 instance <name> area <area-id> profile <p> network-type hybrid`.
+- Every router on the segment must use it; a mixed segment still forms adjacencies but some router pairs carry no traffic.
+- The DR originates no Network-LSA. Routers describe the link as point-to-point links to their neighbors, and advertise their address as a `/128` plus the link's prefix.
+- A router that is not the DR lists a neighbor only once it is `Full` with the DR and the DR's Router-LSA links to that neighbor.
+- A hybrid profile on a subinterface or interface, a `passive` hybrid profile, and OSPFv2 hybrid are rejected at commit.
+- Check it with `show ospfv3 neighbors` (DR/BDR roles as for broadcast) and `show ospfv3 database` (no network LSA).
 
 ### Restart without dropping routes (RFC 5187)
 
@@ -315,7 +368,40 @@ commit
 - The routers clear the E option bit in the area's Hellos and LSAs. A Hello whose E bit disagrees is dropped (`dropping ospfv3 hello with mismatched e-bit`), so a router with the wrong type never gets past `Down`.
 - The ABR originates a `::/0` inter-area prefix LSA into the area at `stub-default-cost` (1 unless set); the routers inside install `::/0` through it. No AS-external LSA (`0x4005`, `0xc025`) is sent, requested, accepted or routed in the area, and one already held ages out when the area turns stub.
 - `area-type totally-stubby` on the ABR's area also stops the other inter-area prefix and router LSAs, leaving the default as the only summary. The routers inside may use `stub` or `totally-stubby`: they are the same for them.
-- The backbone cannot be a stub area, and `nssa` is refused for OSPFv3 at commit.
+- The backbone cannot be a stub area or an NSSA.
+
+### Make an area an NSSA
+
+An NSSA (RFC 3101, RFC 5340 §4.4.3) carries no AS-external LSA, but its own ASBRs originate NSSA-LSAs (`0x2007`, or `0xa027` in extended mode; the AS-external body, area scope) that one ABR translates into AS-external LSAs for the other areas. Set the type on every router of the area, or their Hellos are dropped (`mismatched n-bit`, `mismatched e-bit`):
+
+```
+set ospfv3 instance v3 area 0.0.0.1 area-type nssa
+set ospfv3 instance v3 area 0.0.0.1 nssa-translate-always enable
+set ospfv3 instance v3 area 0.0.0.1 nssa-default-originate enable
+```
+
+- **Origination.** A router in the NSSA that redistributes routes originates one NSSA-LSA per prefix, with the P prefix option and its own link address as forwarding address; an ABR clears P (it originates the AS-external LSA itself). The router sets the E bit in its Router-LSA there.
+- **Translation.** One ABR per NSSA translates the NSSA-LSAs that have the P option and a forwarding address into its own AS-external LSAs, and sets E in its other areas. It is the ABR with the highest router ID, unless another has the Nt bit (`nssa-translate-always enable` sets it and forces the role). The log line is `ospfv3 nssa translator role changed`. An NSSA-LSA that goes away flushes its translation.
+- **`nssa-default-originate enable`** makes an ABR originate a `::/0` NSSA-LSA (no P, so never translated) into the area at `stub-default-cost`.
+- `area-type nssa-no-summary` also sends only a `::/0` inter-area prefix LSA into the area. The ABR sends no Inter-Area-Router-LSA into any NSSA.
+- The two `nssa-*` settings are refused on a non-NSSA area. In extended-LSA mode NSSA-LSAs are originated as E-NSSA-LSAs (`0xa027`, RFC 8362) instead of `0x2007`, and both forms are accepted.
+
+### Join an area to the backbone through another area (virtual link)
+
+An area must touch the backbone (0.0.0.0). When it can't, a virtual link (RFC 5340 §4.7, RFC 2328 §15) runs a backbone adjacency across a normal transit area between two of its ABRs. Here router-c has only area 0.0.0.1 (shared with router-b, which also has area 0.0.0.0). Configure the link on the transit area of both ends, with the other end's router ID:
+
+```
+set ospfv3 instance v3 area 0.0.0.1 virtual-link 9.9.9.10
+```
+
+on router-c (`9.9.9.10` is router-b's router ID), and the mirror image on router-b. Over REST, `PUT {"router_id":"9.9.9.10"}` on `…/ospfv3-instance/v3/area/0.0.0.1/virtual-link/9.9.9.10`. Not allowed on the backbone, a stub area or an NSSA.
+
+- **Each end needs a global address in the transit area.** Add a loopback with a `/128` in the transit area (`set interface loopback-rt1 ospfv3 <profile>` with a profile of that area): its LA prefix in the Intra-Area-Prefix-LSA is the link's address (RFC 5340 §4.4.3.9). Our own `/128` there is the source; without one the link stays down.
+- **When it comes up.** Every 2 seconds each end checks that the other is reachable inside the transit area and advertises such an address. If so, the link comes up with that path's cost (`ospfv3 virtual link up link=vlink-0.0.0.1-9.9.9.10 neighbor=… local=… cost=…`), and down again when it isn't (`ospfv3 virtual link down`).
+- **What it runs.** A backbone adjacency, unicast between the two addresses (hop limit 64, the only sends that leave the link): Hellos, no DR, the link's own timers and authentication (`hello-interval`, `dead-interval`, `crypto-key`, as on a profile), the transit link's MTU and instance ID. A router with a configured virtual link counts as attached to the backbone (B bit, summaries).
+- **Check it.** `show ospfv3 neigh` lists `vlink-<transit-area>-<router-id>` in area 0.0.0.0, `Full`. In `GET /v1/ospfv3/database`, each end's area-0 Router-LSA lists the other in `virtual_links`, and its Router-LSA in the transit area has the V bit (`router_flags` & 4).
+- **Remove it.** `delete … virtual-link <router-id>`. The other end drops the neighbour after its dead interval (`ospfv3 neighbor state changed to down link=vlink-…`) unless it is removed there too.
+- **Routes.** The backbone-less router routes the backbone through the link (RFC 5340 §4.8, RFC 2328 §16.1): the type-4 link is an SPF edge at its cost, with the first hops toward the far end taken from the transit area; the far end summarizes the backbone into its other areas. A backbone-attached ABR ignores summaries in its non-backbone areas, except that a transit area (V bit) may shorten an inter-area backbone route (§16.3). When the link drops, the routes go with it.
 
 ## Features and behaviour
 
@@ -327,7 +413,7 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
 - **Unknown LSA types** (RFC 5340 §2.9) are accepted, not refused. With the U bit set they are stored and flooded by their S2/S1 scope (area, AS or link-local); with it clear they are kept link-local and never sent past the link they arrived on. They are never used for routing. An LSA with the reserved scope `11` is silently dropped (not acknowledged).
-- **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Hellos and LSAs set the E option bit, except in a stub area.
+- **Areas and AS boundary.** A route is chosen by class first (intra-area, inter-area, type-1 external or NSSA N1, type-2 external or N2), then by cost; two type-2 externals compare the LSA's own metric before the distance to the ASBR. The metric installed is always the LSA's metric plus the distance to the ASBR. Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Hellos and LSAs set the E option bit, except in a stub area.
 - **Link failure.** A lost local link (interface deleted, set down, or carrier lost) drops its neighbours within about a second: `nos-ospfv3d` follows the link state `nos-interfaced` streams and logs `ospfv3 link kernel interface down link=eth0.0 reason=absent|admin-down|no-carrier`, then `ospfv3 link kernel interface up` when it returns (a recreated device gets a fresh socket). The LSAs of the dropped link are withdrawn on the next origination tick. A failure beyond the local link (a dead remote end, a switch in between) still takes the dead interval (BFD is #190). A restarting `nos-interfaced` or `nos-ribd` tears no link down: the link keeps its running address, VRF and bridge (`ospfv3 link resolution failed, keeping running link`) while the configuration still demands it. With `--driver noop` nothing is gated.
 - **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
@@ -337,7 +423,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and RFC 6845 hybrid broadcast/point-to-multipoint.
+Also not supported: IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
 
 ## Configuration reference
 
@@ -348,24 +434,28 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | instance | `edit ospfv3 instance <name>`; `delete ospfv3 instance <name>` | `ospfv3-instance/<name>` | string, 1 to 64 characters | unique among OSPFv3 instances | names the instance | `show config` |
 | router ID | `set ospfv3 instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospfv3-instance/<name>/router-id` | dotted quad | | router ID in Hellos and LSAs | `show ospfv3 neigh` on the neighbour |
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
+| extended LSAs, sparse | `set ospfv3 instance <name> extended-lsa-sparse`; `delete ospfv3 instance <name> extended-lsa-sparse` (absolute only) | `ospfv3-instance/<name>/extended-lsa-sparse` | boolean; default `false`; exclusive with `extended-lsa` | | RFC 8362 sparse mode: legacy LSAs, extended ones merged from neighbours | `show ospfv3 database` |
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | graceful restart helper cap | `set ospfv3 instance <name> graceful-restart helper max-grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart helper max-grace-period` | `ospfv3-instance/<name>/graceful-restart-helper-max-grace-period` | seconds, 1 to 3600; 1800 when unset | | the longest grace period this router honours for a restarting neighbour | `effective_grace=` in `ospfv3 helper: grace period entered` |
-| area type | `set ospfv3 instance <name> area <area-id> area-type normal\|stub\|totally-stubby`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0`; no `nssa` | stub: no AS-external LSA, E bit clear, a `::/0` from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospfv3 database`, `show route <table>` |
+| LSDB overload limit | `set ospfv3 instance <name> max-lsa <n>`; `delete ospfv3 instance <name> max-lsa` | `ospfv3-instance/<name>/max-lsa` | 1 to 1000000; 100000 when unset | | LSAs not originated by this router that one store (each area, the AS scope, each link's Link-LSAs) holds; a new LSA past it is discarded unacknowledged, held ones stay updatable, own and MaxAge LSAs never count, no neighbour is reset, links do not restart | `ospfv3 lsdb limit reached` (rate-limited, with `refused` total) |
+| area type | `set ospfv3 instance <name> area <area-id> area-type normal\|stub\|totally-stubby\|nssa\|nssa-no-summary`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0`; no `nssa` | stub: no AS-external LSA, E bit clear, a `::/0` from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospfv3 database`, `show route <table>` |
 | stub default cost | `set ospfv3 instance <name> area <area-id> stub-default-cost <metric>`; `delete … stub-default-cost` | `…/area/<area-id>/stub-default-cost` | 1 or more; 1 when unset | only on a stub area | metric of the ABR's `::/0` | `show ospfv3 database` |
 | max-metric administrative | `set ospfv3 instance <name> max-metric router-lsa administrative`; `delete ospfv3 instance <name> max-metric router-lsa administrative` | `ospfv3-instance/<name>/max-metric-administrative` | bool; off by default | | RFC 6987 stub router until removed | `ospfv3 stub router max-metric changed` |
 | max-metric on-startup | `set ospfv3 instance <name> max-metric router-lsa on-startup <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router for this long after the next start | `reason="on-startup"` |
 | max-metric on-shutdown | `set ospfv3 instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router for this long before the process exits | `reason="on-shutdown"` |
-| routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
+| routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance <name>` | `routing-table/<table>/ospfv3-instance` | list of instance names | each instance must exist and is listed once; one table per instance, but a table may claim several (they share its VRF) | runs the instances in that table | `show ospfv3 neigh` |
 | area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas, one the backbone, make an ABR (`range <cidr> [not-advertise]` summarizes the area, see [ranges](#summarize-an-area-with-ranges)) | `show ospfv3 database` |
-| redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
+| virtual link | `set ospfv3 instance <name> area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | the area is the transit area; router ID unique per area, not the instance's own | not on `0.0.0.0`, a stub area or an NSSA; dead interval above hello interval; keys as on a profile | backbone adjacency to that ABR across the area, needs an area-1 `/128` loopback at both ends | `show ospfv3 neigh` |
+| redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>] [instance <name>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per `(target, instance)`; unset `instance` feeds every claimed instance with no rule of its own, a named rule overrides it for that instance | needs `static-routing-instance` and `ospfv3-instance`; `instance` must be one the table claims | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
 | Passive | `set ospfv3 instance <name> area <area-id> profile <p> passive enable`; relative `set passive enable` / `delete passive` | `…/profile/<p>/passive` | `true`/`false`; default `false` | excludes crypto-key and bfd | advertise the attach point's prefix, no Hello, no adjacency | `GET …/profile/<p>/passive` |
 | crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <label>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"<label>","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; label of an admin key whose secret is 1 to 80 bytes; unset by default | labels must exist, at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | | the key must exist | signs sent packets; all keys verify | `show this` in the profile |
-| instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31; unset means 0 | 0 to 31 | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
+| address family | `set ospfv3 instance <name> address-family <ipv6-unicast\|ipv4-unicast>`; `delete … address-family` | `ospfv3-instance/<name>/address-family` | `Ipv6Unicast` (default), `Ipv4Unicast` | every profile's instance ID within the family's range | `ipv4-unicast` sets the AF-bit and requires it from neighbours | `show this` in the instance |
+| instance ID | `set ospfv3 instance <name> area <area-id> profile <p> instance-id <n>`; relative `set instance-id <n>` / `delete instance-id` | `…/profile/<p>/instance-id` | 0 to 31 or 64 to 95; unset means 0 | in the instance's address family range | sent in every packet; packets with another instance ID are dropped | `show this` in the profile |
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/profile/<p>/auth` | default | | | |
-| subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3` | `interface/<if>/subinterface/<tag>/ospfv3-profile`, `interface/loopback-<table>/ospfv3-profile` | | the attach point needs `routing-table` | runs OSPFv3 on the link | `show ospfv3 neigh` |
-| broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profile` | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |
+| subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3 <p>` | `interface/<if>/subinterface/<tag>/ospfv3-profile`, `interface/loopback-<table>/ospfv3-profile` (a list) | | the attach point needs `routing-table`; at most one profile per instance, distinct effective Instance IDs | runs OSPFv3 on the link | `show ospfv3 neigh` |
+| broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3 <p>` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profile` (a list) | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |
 
 OSPFv3 profiles have no `simple-password` and no `extended-sequence-numbers`. The instance's `routing_table` and `redistribute_policy` JSON fields are filled in by the router and are read-only.

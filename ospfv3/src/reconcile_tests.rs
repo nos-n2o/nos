@@ -56,7 +56,7 @@ fn sub(tag: u16, addrs: &[&str], rt: Option<&str>, profile: Option<&str>) -> Sub
         tag,
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         routing_table: rt.map(Into::into),
-        ospfv3_profile: profile.map(Into::into),
+        ospfv3_profiles: profile.map(Into::into).into_iter().collect(),
         ..Default::default()
     }
 }
@@ -72,7 +72,7 @@ fn iface(name: &str, subs: Vec<Subinterface>) -> Interface {
 fn loopback(name: &str, profile: &str) -> Interface {
     Interface {
         name: name.into(),
-        ospfv3_profile: Some(profile.into()),
+        ospfv3_profiles: vec![profile.into()],
         ..Default::default()
     }
 }
@@ -81,7 +81,7 @@ fn domain(name: &str, rt: Option<&str>, addrs: &[&str]) -> BroadcastDomain {
     BroadcastDomain {
         name: name.into(),
         routing_table: rt.map(Into::into),
-        ospfv3_profile: Some("p1".into()),
+        ospfv3_profiles: vec!["p1".into()],
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         ..Default::default()
     }
@@ -101,6 +101,9 @@ fn area(id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
         ranges: Vec::new(),
         area_type: nos_proto::OspfAreaType::Normal,
         stub_default_cost: None,
+        nssa_translate_always: false,
+        nssa_default_originate: false,
+        virtual_links: Vec::new(),
     }
 }
 
@@ -406,6 +409,35 @@ async fn resync_stub_area_marks_the_link_and_feeds_the_manager() {
 }
 
 #[tokio::test]
+async fn resync_nssa_area_marks_the_link_and_feeds_the_manager() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].areas = vec![Ospfv3Area {
+        area_type: nos_proto::OspfAreaType::Nssa,
+        nssa_translate_always: true,
+        ..area("0.0.0.1", vec![profile("p1")])
+    }];
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    let l = e.running("nostst0.0").await.expect("link built");
+    assert!(l.stub && l.nssa, "an NSSA link is stub-like and N-bit");
+    let id = Ipv4Addr::new(0, 0, 0, 1);
+    assert_eq!(
+        e.links.nssa_areas_for_test(),
+        std::collections::HashMap::from([(
+            id,
+            crate::link::NssaSettings {
+                translate_always: true,
+                default_originate: false
+            }
+        )])
+    );
+    assert_eq!(
+        e.links.stub_areas_for_test(),
+        std::collections::HashMap::from([(id, (true, 1))])
+    );
+}
+
+#[tokio::test]
 async fn resync_dangling_auth_label_does_not_start_the_link() {
     let mut cfg = p2p_cfg();
     let mut p = profile("p1");
@@ -470,7 +502,7 @@ async fn resync_loopback_feeds_the_prefix_map() {
         loopback("loopback-gone", "p1"),
         // Not a loopback: carries the profile but is never a stub network.
         Interface {
-            ospfv3_profile: Some("p1".into()),
+            ospfv3_profiles: vec!["p1".into()],
             ..iface("eth9", vec![])
         },
     ];
@@ -505,6 +537,15 @@ async fn resync_applies_the_instance_knobs() {
     assert_eq!(e.links.grace_period(), 120);
     let p = e.links.redistribute_policy().await;
     assert!(!verdict(&p, "2001:db8::/32", &[]), "deny-all installed");
+}
+
+#[tokio::test]
+async fn resync_sparse_mode_originates_the_legacy_flavor() {
+    let mut cfg = p2p_cfg();
+    cfg.ospfv3_instances[0].extended_lsa_sparse = true;
+    let mut e = Env::ready(cfg);
+    e.resync().await;
+    assert!(!e.links.extended_lsa());
 }
 
 #[tokio::test]
@@ -837,7 +878,7 @@ fn attach_points_mixed_config_in_order() {
     let mut cfg = Config {
         interfaces: vec![
             Interface {
-                ospfv3_profile: Some("p1".into()),
+                ospfv3_profiles: vec!["p1".into()],
                 ..iface(
                     "loopback-a",
                     vec![
@@ -847,12 +888,12 @@ fn attach_points_mixed_config_in_order() {
                 )
             },
             Interface {
-                ospfv3_profile: Some("other".into()),
+                ospfv3_profiles: vec!["other".into()],
                 ..iface("eth1", vec![])
             },
             // Carries the profile but is no loopback.
             Interface {
-                ospfv3_profile: Some("p1".into()),
+                ospfv3_profiles: vec!["p1".into()],
                 ..iface("eth2", vec![])
             },
         ],
@@ -860,7 +901,7 @@ fn attach_points_mixed_config_in_order() {
         ..Default::default()
     };
     cfg.broadcast_domains.push(BroadcastDomain {
-        ospfv3_profile: Some("other".into()),
+        ospfv3_profiles: vec!["other".into()],
         ..domain("bd2", None, &[])
     });
 
@@ -872,6 +913,22 @@ fn attach_points_mixed_config_in_order() {
     assert_eq!(l.len(), 1);
     assert_eq!(l[0].interface, "loopback-a");
     assert_eq!(subinterface_attach_points(&cfg, "p1").len(), 1);
+}
+
+/// One interface lists a profile of each of two instances; each daemon
+/// selects it only by its own instance's profile.
+#[test]
+fn one_interface_lists_profiles_of_two_instances() {
+    let cfg = Config {
+        interfaces: vec![Interface {
+            ospfv3_profiles: vec!["p1".into(), "q1".into()],
+            ..iface("loopback-a", vec![])
+        }],
+        ..Default::default()
+    };
+    assert_eq!(attach_points_for(&cfg, "p1"), ["loopback-a"]);
+    assert_eq!(attach_points_for(&cfg, "q1"), ["loopback-a"]);
+    assert_eq!(attach_points_for(&cfg, "r1"), Vec::<String>::new());
 }
 
 #[test]

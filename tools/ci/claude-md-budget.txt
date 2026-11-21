@@ -15,6 +15,7 @@ ospf/CLAUDE.md 12288
 ospfv3/CLAUDE.md 8192
 nss/CLAUDE.md 8192
 pam/CLAUDE.md 8192
+radius/CLAUDE.md 8192
 pki/CLAUDE.md 8192
 proto/CLAUDE.md 8192
 rest/CLAUDE.md 8192
@@ -23,3 +24,4 @@ stp/CLAUDE.md 8192
 acl/CLAUDE.md 8192
 tc/CLAUDE.md 8192
 ssh/CLAUDE.md 8192
+sandbox/CLAUDE.md 8192

@@ -145,15 +145,36 @@ impl Pki {
     /// Certifies the public key in a client's CSR as `user`. Returns the leaf
     /// certificate DER; the client keeps its private key.
     /// `started` is the password login behind it; renewals pass it on.
-    pub fn sign_user(&self, csr_der: &[u8], user: &str, started: Instant) -> io::Result<Vec<u8>> {
-        let cert = self
-            .ca
-            .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)?;
+    /// `claim` is the role an external backend (RADIUS) granted a user the
+    /// config has no entry for; it rides in the certificate (#1153).
+    pub fn sign_user(
+        &self,
+        csr_der: &[u8],
+        user: &str,
+        started: Instant,
+        claim: Option<&str>,
+    ) -> io::Result<Vec<u8>> {
+        let id = peer(Role::User, user);
+        let cert = match claim {
+            Some(c) => self
+                .ca
+                .sign_csr_claiming(csr_der, &id, c, self.user_lifetime)?,
+            None => self.ca.sign_csr(csr_der, &id, self.user_lifetime)?,
+        };
         let mut users = lock(&self.users);
         let issued = users.entry(user.to_string()).or_default();
         issued.retain(|(s, _)| !s.expired());
         issued.push((Serial::of(&cert)?, started));
         Ok(cert)
+    }
+
+    /// Whether an unexpired IPC certificate of the password login that began
+    /// at `started` still exists (renewals inherit `started`; a revocation
+    /// removes the entries). Ends an accounting session (#1153).
+    pub fn session_live(&self, user: &str, started: Instant) -> bool {
+        lock(&self.users)
+            .get(user)
+            .is_some_and(|v| v.iter().any(|(s, st)| *st == started && !s.expired()))
     }
 
     /// Caps how long renewals may extend one IPC password login.
@@ -418,7 +439,7 @@ mod tests {
     }
 
     fn issue(pki: &Pki, user: &str) {
-        pki.sign_user(&generate_csr().unwrap().0, user, Instant::now())
+        pki.sign_user(&generate_csr().unwrap().0, user, Instant::now(), None)
             .unwrap();
     }
 
@@ -510,7 +531,7 @@ mod tests {
         let (_tmp, pki) = pki();
         let sign = |user: &str, started| {
             let cert = pki
-                .sign_user(&generate_csr().unwrap().0, user, started)
+                .sign_user(&generate_csr().unwrap().0, user, started, None)
                 .unwrap();
             Serial::of(&cert).unwrap().to_string()
         };

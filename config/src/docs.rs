@@ -620,8 +620,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             ),
         ),
         Topic::RoutingTableOspfv3Instance => (
-            "Associate an OSPFv3 instance with a routing table.",
-            "The OSPFv3 instance's routes are installed into this routing table (its VRF). An instance can be claimed by at most one routing table. `delete` removes the association.",
+            "Associate OSPFv3 instances with a routing table.",
+            "The OSPFv3 instances' routes are installed into this routing table (its VRF). A table may claim several instances; an instance can be claimed by at most one table. `set` adds one, `delete <instance>` removes it (and the redistribute rules naming it).",
         ),
         Topic::RoutingTableRedistribute => (
             "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.",
@@ -636,7 +636,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              redistributed routes through; omitted, redistribution stays unfiltered \
              (accept-all), unlike a peer-group's import-policy/export-policy, which default to \
              deny-all. For 'ospf' only, 'metric <1-16777215>' (default 20) and 'metric-type \
-             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs.",
+             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs. For 'ospfv3' only, 'instance <name>' names one claimed instance the rule feeds; unset, the rule feeds every claimed instance without a rule of its own.",
                 " ",
                 "`delete redistribute <target>` removes that rule.",
             ),
@@ -801,7 +801,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::InterfaceOspfv3Profile => (
             "Run OSPFv3 on this attach point under a profile.",
-            "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. Needs a routing-table on the same attach point. `delete` leaves OSPFv3 there.",
+            "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. `set` adds a profile (at most one per OSPFv3 instance, with distinct instance IDs); `delete <profile>` removes that one. Needs a routing-table on the same attach point.",
         ),
         Topic::InterfaceBfdUnsolicited => (
             "Answer unsolicited BFD on this subinterface.",
@@ -1180,6 +1180,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Announce an RFC 3623 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
         ),
+        Topic::OspfInstanceMaxLsa | Topic::Ospfv3InstanceMaxLsa => (
+            "Cap the LSAs another router can make this router hold (LSDB overload limit).",
+            "Most LSAs not originated by this router that one store holds: each area, the AS scope, and each link's Link-LSAs (1-1000000, default 100000). A new LSA past it is discarded, not acknowledged, and logged `ospf lsdb limit reached`; LSAs already held can still be updated, this router's own and MaxAge LSAs never count, and no adjacency is reset. Takes effect without restarting links. `delete` restores the default.",
+        ),
+        Topic::Ospfv3InstanceAddressFamily => (
+            "Choose the RFC 5838 address family this OSPFv3 instance routes.",
+            "ipv6-unicast (default) uses instance IDs 0-31; ipv4-unicast uses 64-95, so every profile of the instance must set an `instance-id` in that range (checked at commit). An ipv4-unicast instance sets the AF-bit in its Hellos, DBDs and LSAs and discards Hellos without it. `delete` restores ipv6-unicast. IPv4 route computation is not built yet.",
+        ),
         Topic::OspfInstanceGracefulRestartHelperMaxGracePeriod => (
             "Cap the grace period this router grants a restarting neighbor (RFC 3623 helper).",
             "A neighbor's Grace-LSA is honoured for its remaining grace period (grace period minus the LSA's age) but never longer than this many seconds (1-3600, default 1800). Helping also ends at once when another router's type 1-5 LSA changes (strict LSA checking). `delete` restores the default.",
@@ -1332,7 +1340,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             concat!(
-                "Sets the network-type field on a profile to point-to-point, broadcast or point-to-multipoint (RFC 2328 §9.5, RFC 5340 §4.2), \
+                "Sets the network-type field on a profile to point-to-point, broadcast, point-to-multipoint (RFC 2328 §9.5, RFC 5340 §4.2) or hybrid (RFC 6845, \
+             OSPFv3 on a broadcast domain only), \
              overriding the default that would otherwise be derived from each attach point's \
              own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
              to broadcast). Never validated against the attach point's actual kind — this NOS \
@@ -1394,6 +1403,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::Ospfv3InstanceExtendedLsa => (
             "Originate RFC 8362 extended LSAs (Full mode).",
             "Makes the instance originate and use the RFC 8362 E-Router/E-Link/E-Intra-Area-Prefix LSAs instead of the legacy formats. Every router in the area must agree. `delete` returns to legacy LSAs.",
+        ),
+        Topic::Ospfv3InstanceExtendedLsaSparse => (
+            "Use RFC 8362 Sparse mode (legacy LSAs plus extended LSAs from neighbors).",
+            "Makes the instance originate the legacy RFC 5340 LSAs, which carry topology and prefixes, so full-mode and legacy-only routers in the same area interoperate, and merge any extended LSAs of neighbors into SPF. Exclusive with extended-lsa. `delete` turns it off.",
         ),
         Topic::Ospfv3InstanceGracefulRestart => (
             "Announce an RFC 5187 graceful restart before a planned shutdown.",
@@ -1855,6 +1868,54 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::BfdProfileSbfdRemoteDiscriminator => (
             "Set the S-BFD discriminator to probe.",
             "For `mode sbfd`: the reflector's S-BFD discriminator, written as an IPv4 address (its 32 bits). Unset uses the session peer's own IPv4 address, so a reflector configured with its own address needs nothing here. An IPv6 peer needs it.",
+        ),
+        Topic::Aaa => (
+            "Configure login backends.",
+            "Where `nos-watchdogd` checks a password: the local users, RADIUS servers (RFC 2865, over UDP), or both in `login-order`. A RADIUS user with no local entry is logged in as a transient user whose role comes from the reply (`role-attribute`); a local user keeps its configured role. RADIUS secrets are shared secrets: MD5 is the protocol's own primitive, so use RADIUS only over networks you trust.",
+        ),
+        Topic::AaaRadiusServer => (
+            "Add a RADIUS server.",
+            "Servers are tried in the order they are listed; a server that does not answer within `timeout-secs` (after `retries` more attempts) is skipped. An Access-Reject from any server ends the login.",
+        ),
+        Topic::AaaLoginOrder => (
+            "Set the order login backends are tried in.",
+            "`local` and `radius`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",
+        ),
+        Topic::AaaAccounting => (
+            "Send RADIUS accounting.",
+            "RFC 2866 records to every server: a Start at each login, a Stop when its session ends (within a few seconds of the certificate being revoked or expiring) and an Interim-Update per config commit (`Acct-Session-Id commit:<transaction>`, `User-Name` the committer). Sent through a bounded queue: a slow or dead server drops records, it never delays a login or a commit. Default off.",
+        ),
+        Topic::RadiusAccountingPort => (
+            "Set a RADIUS server's accounting UDP port.",
+            "1-65535. `delete` restores 1813.",
+        ),
+        Topic::AaaRoleAttribute => (
+            "Set the RADIUS attribute that carries the role.",
+            "`filter-id` (default), `class` or `reply-message`; its text is `admin`, `operator` or `read-only`. Missing or unrecognised means read-only.",
+        ),
+        Topic::RadiusAddress => (
+            "Set a RADIUS server's address.",
+            "An IP address (there is no resolver). See `routing-table` for the VRF it is reached through.",
+        ),
+        Topic::RadiusPort => (
+            "Set a RADIUS server's UDP port.",
+            "1-65535. `delete` restores 1812.",
+        ),
+        Topic::RadiusRoutingTable => (
+            "Send RADIUS requests from inside a routing table's VRF.",
+            "Names an existing routing table: the socket is scoped into its VRF, so a server reachable only through that table can be used. `delete` uses the default network namespace.",
+        ),
+        Topic::RadiusSecretRef => (
+            "Name the admin key holding the shared secret.",
+            "The label of an `admin key` entry; the secret itself is never shown. The server needs the same value.",
+        ),
+        Topic::RadiusTimeout => (
+            "Set the seconds to wait for one reply.",
+            "1 to 30. `delete` restores 3.",
+        ),
+        Topic::RadiusRetries => (
+            "Set the extra attempts before the next server.",
+            "0 to 10. `delete` restores 2.",
         ),
         Topic::LoginPolicy => (
             "Set the login lockout.",

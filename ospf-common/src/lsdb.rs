@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,7 +51,22 @@ pub struct Lsdb<L: Lsa> {
     /// Advertising routers whose topology LSA changed since the last
     /// `take_topology_changes` — see `Lsa::is_topology`.
     topology_changes: HashSet<Ipv4Addr>,
+    /// The subset of `topology_changes` that replaced or flushed an LSA
+    /// already held (not a first install): RFC 3623 §2.2's restarting-router
+    /// check, see `take_superseded_changes`.
+    superseded_changes: HashSet<Ipv4Addr>,
+    /// Overload limit (#1146): own router ID plus the shared cap — see
+    /// `set_limit`.
+    limit: Option<(Ipv4Addr, Arc<AtomicU32>)>,
+    /// Entries `counted` against `limit`.
+    foreign: usize,
+    /// Received LSAs refused by `limit`, total.
+    refused: u64,
+    warn: crate::ratelimit::WarnLimiter,
 }
+
+/// Default `max-lsa`: non-self LSAs one store holds.
+pub const DEFAULT_MAX_LSA: u32 = 100_000;
 
 impl<L: Lsa> Default for Lsdb<L> {
     fn default() -> Self {
@@ -62,6 +78,11 @@ impl<L: Lsa> Default for Lsdb<L> {
             reflected: HashSet::new(),
             reflect_notify: None,
             topology_changes: HashSet::new(),
+            superseded_changes: HashSet::new(),
+            limit: None,
+            foreign: 0,
+            refused: 0,
+            warn: crate::ratelimit::WarnLimiter::default(),
         }
     }
 }
@@ -86,6 +107,9 @@ pub enum InstallOutcome {
     /// Newer, but received less than `MIN_LS_ARRIVAL` after the held
     /// instance was — RFC 2328 §13 step 5a: discard without acknowledging.
     TooSoon,
+    /// A new key from another router, refused by the `max-lsa` limit (#1146):
+    /// discarded unacknowledged and not held.
+    LimitReached,
 }
 
 impl<L: Lsa> Lsdb<L> {
@@ -106,6 +130,26 @@ impl<L: Lsa> Lsdb<L> {
     pub fn with_reflect_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
         self.reflect_notify = Some(notify);
         self
+    }
+
+    /// Caps the LSAs this store holds that `own` did not originate (and that
+    /// are not at `MaxAge`) at `max`, read on every receive so a config change
+    /// needs no restart. A key already held is always updatable.
+    pub fn set_limit(&mut self, own: Ipv4Addr, max: Arc<AtomicU32>) {
+        self.limit = Some((own, max));
+        self.foreign = self.entries.values().filter(|l| self.counted(l)).count();
+    }
+
+    /// Received LSAs the limit has refused so far.
+    pub fn refused(&self) -> u64 {
+        self.refused
+    }
+
+    fn counted(&self, lsa: &L) -> bool {
+        self.limit
+            .as_ref()
+            .is_some_and(|(own, _)| lsa.header().advertising_router() != *own)
+            && lsa.header().age() < MAX_AGE
     }
 
     /// RFC 2328 §13.4: records that the held instance of `key`, one of this
@@ -138,6 +182,12 @@ impl<L: Lsa> Lsdb<L> {
         self.topology_changes.drain().collect()
     }
 
+    /// Like `take_topology_changes`, only for LSAs that replaced or flushed
+    /// one already held.
+    pub fn take_superseded_changes(&mut self) -> Vec<Ipv4Addr> {
+        self.superseded_changes.drain().collect()
+    }
+
     /// Records `lsa`'s origin when installing it over `old` is a topology change.
     fn note_topology(&mut self, lsa: &L, old: Option<&L>) {
         let flush = lsa.header().age() >= MAX_AGE;
@@ -147,8 +197,11 @@ impl<L: Lsa> Lsdb<L> {
                 Some(o) => !o.same_content(lsa) || (flush && o.header().age() < MAX_AGE),
             };
         if changed {
-            self.topology_changes
-                .insert(lsa.header().advertising_router());
+            let origin = lsa.header().advertising_router();
+            self.topology_changes.insert(origin);
+            if old.is_some() {
+                self.superseded_changes.insert(origin);
+            }
         }
     }
 
@@ -172,12 +225,15 @@ impl<L: Lsa> Lsdb<L> {
                 // A fresh instance restarts the MaxAge hold; a flushed one
                 // (same sequence, age now MaxAge) starts it.
                 self.max_age_ticks.remove(&key);
+                self.foreign -= usize::from(self.counted(&existing));
+                self.foreign += usize::from(self.counted(&lsa));
                 self.entries.insert(key, Arc::new(lsa));
                 self.kick();
                 InstallOutcome::Superseded
             }
             None => {
                 self.note_topology(&lsa, None);
+                self.foreign += usize::from(self.counted(&lsa));
                 self.entries.insert(key, Arc::new(lsa));
                 self.kick();
                 InstallOutcome::Installed
@@ -202,6 +258,22 @@ impl<L: Lsa> Lsdb<L> {
         if too_soon && newer {
             return InstallOutcome::TooSoon;
         }
+        if let Some((_, max)) = &self.limit {
+            let max = max.load(AtomicOrdering::Relaxed) as usize;
+            if !self.entries.contains_key(&key) && self.counted(&lsa) && self.foreign >= max {
+                self.refused += 1;
+                if self.warn.allow(now) {
+                    let suppressed = self.warn.take_suppressed();
+                    tracing::warn!(
+                        max_lsa = max,
+                        refused = self.refused,
+                        suppressed,
+                        "ospf lsdb limit reached"
+                    );
+                }
+                return InstallOutcome::LimitReached;
+            }
+        }
         let outcome = self.install(lsa);
         if outcome != InstallOutcome::Rejected {
             self.last_received.insert(key, now);
@@ -211,7 +283,9 @@ impl<L: Lsa> Lsdb<L> {
 
     /// Drops `key` outright — a received Grace-LSA, acted on and never held.
     pub fn remove(&mut self, key: &Key<L>) {
-        self.entries.remove(key);
+        if let Some(old) = self.entries.remove(key) {
+            self.foreign -= usize::from(self.counted(&old));
+        }
         self.kick();
         self.max_age_ticks.remove(key);
         self.last_received.remove(key);
@@ -249,6 +323,8 @@ impl<L: Lsa> Lsdb<L> {
         let mut evicted = Vec::new();
         let max_age_ticks = &mut self.max_age_ticks;
         let last_received = &mut self.last_received;
+        let own = self.limit.as_ref().map(|(o, _)| *o);
+        let mut uncounted = 0;
         self.entries.retain(|key, lsa| {
             if lsa.header().age() >= MAX_AGE {
                 let ticks = max_age_ticks.entry(*key).or_insert(0);
@@ -265,6 +341,9 @@ impl<L: Lsa> Lsdb<L> {
             if aged >= MAX_AGE && hold.contains(&lsa.header().advertising_router()) {
                 aged = MAX_AGE - 1;
             }
+            if aged >= MAX_AGE && own.is_some_and(|o| lsa.header().advertising_router() != o) {
+                uncounted += 1;
+            }
             if aged != lsa.header().age() {
                 let mut updated = (**lsa).clone();
                 updated.header_mut().set_age(aged);
@@ -272,6 +351,7 @@ impl<L: Lsa> Lsdb<L> {
             }
             true
         });
+        self.foreign -= uncounted;
         if !evicted.is_empty() {
             self.kick();
         }
@@ -306,8 +386,10 @@ mod tests {
         assert!(db.take_topology_changes().is_empty(), "drained once");
         db.install(with(9, 2, 5, 0));
         assert!(db.take_topology_changes().is_empty(), "identical refresh");
+        assert!(db.take_superseded_changes().is_empty(), "first install");
         db.install(with(9, 3, 6, 0));
         db.install(with(9, 4, 7, 0));
+        assert_eq!(db.take_superseded_changes(), vec![origin], "changed copy");
         assert_eq!(
             db.take_topology_changes(),
             vec![origin],
@@ -330,6 +412,93 @@ mod tests {
         assert_eq!(db.install(with(9, 1, 5, 100)), InstallOutcome::Superseded);
         assert_eq!(db.get(&9).unwrap().header().age(), 100);
         assert_eq!(db.install(with(9, 1, 5, 1001)), InstallOutcome::Rejected);
+    }
+
+    /// Test LSAs' advertising router is their id.
+    fn limited(own: u32, max: u32) -> Db {
+        let mut db = Db::new();
+        db.set_limit(Ipv4Addr::from(own), Arc::new(AtomicU32::new(max)));
+        db
+    }
+
+    #[test]
+    fn limit_refuses_new_foreign_keys_only() {
+        let t0 = Instant::now();
+        let mut db = limited(1, 2);
+        assert_eq!(
+            db.install_received(with(10, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
+        assert_eq!(
+            db.install_received(with(11, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
+        assert_eq!(
+            db.install_received(with(12, 1, 0, 0), t0),
+            InstallOutcome::LimitReached
+        );
+        assert_eq!(db.refused(), 1);
+        assert!(db.get(&12).is_none());
+        // An update of a held key is always accepted.
+        let later = t0 + Duration::from_secs(2);
+        assert_eq!(
+            db.install_received(with(10, 2, 0, 0), later),
+            InstallOutcome::Superseded
+        );
+        // Own LSAs are exempt, however installed.
+        assert_eq!(db.install(with(1, 1, 0, 0)), InstallOutcome::Installed);
+        assert_eq!(
+            db.install_received(with(1, 2, 0, 0), later),
+            InstallOutcome::Superseded
+        );
+        assert_eq!(
+            db.install_received(with(1, 3, 0, 0), later + Duration::from_secs(2)),
+            InstallOutcome::Superseded
+        );
+    }
+
+    #[test]
+    fn limit_ignores_max_age_and_frees_on_removal() {
+        let t0 = Instant::now();
+        let mut db = limited(1, 1);
+        assert_eq!(
+            db.install_received(with(10, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
+        // A flushed instance of a new key is not counted.
+        assert_eq!(
+            db.install_received(with(11, 1, 0, MAX_AGE), t0),
+            InstallOutcome::Installed
+        );
+        assert_eq!(
+            db.install_received(with(12, 1, 0, 0), t0),
+            InstallOutcome::LimitReached
+        );
+        // A held LSA aging to MaxAge stops counting.
+        db.age_and_evict(MAX_AGE, &HashSet::new());
+        assert_eq!(
+            db.install_received(with(12, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
+        db.remove(&12);
+        assert_eq!(
+            db.install_received(with(13, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
+        // The cap is read live.
+        let mut db = limited(1, 1);
+        let max = Arc::new(AtomicU32::new(1));
+        db.set_limit(Ipv4Addr::from(1), Arc::clone(&max));
+        db.install_received(with(10, 1, 0, 0), t0);
+        assert_eq!(
+            db.install_received(with(11, 1, 0, 0), t0),
+            InstallOutcome::LimitReached
+        );
+        max.store(5, AtomicOrdering::Relaxed);
+        assert_eq!(
+            db.install_received(with(11, 1, 0, 0), t0),
+            InstallOutcome::Installed
+        );
     }
 
     #[test]

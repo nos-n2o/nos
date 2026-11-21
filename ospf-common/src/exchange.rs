@@ -149,6 +149,12 @@ pub struct AdjacencyData<L: Lsa> {
     pub stub: bool,
     /// v2 only: the link is in an NSSA (RFC 3101).
     pub nssa: bool,
+    /// Master only, set by `start_negotiation`: no real poll (only the bare
+    /// negotiation packet) has gone out yet. A master whose summary is empty
+    /// from the start (a restarting router, RFC 3623) must still send one on
+    /// the first reply, or the slave — which answered the bare packet —
+    /// never sees the M=0 poll that ends its exchange.
+    pub unpolled: bool,
 }
 
 // By hand: a derive would demand `L: Default`.
@@ -166,6 +172,7 @@ impl<L: Lsa> Default for AdjacencyData<L> {
             opaque_capable: false,
             stub: false,
             nssa: false,
+            unpolled: false,
         }
     }
 }
@@ -461,9 +468,10 @@ fn master_process_reply<L: Lsa>(
     // answered by a final M=0 poll, which the slave needs to finish.
     let had_nothing_left = adj.summary_remaining.is_empty();
     trim_summary(adj, dbd);
-    if !dbd.more && had_nothing_left {
+    if !dbd.more && had_nothing_left && !adj.unpolled {
         return (None, true);
     }
+    adj.unpolled = false;
     adj.dd_sequence_number = adj.dd_sequence_number.wrapping_add(1);
     let (chunk, more) = pop_chunk(&mut adj.summary_remaining, p.max_headers);
     let poll = Dbd {
@@ -716,7 +724,8 @@ where
         match store.install_received(l.clone(), now) {
             // §13 step 5a (`MinLSArrival`): neither acked nor answering a
             // request; the sender's retransmission brings it back.
-            InstallOutcome::TooSoon => continue,
+            // `max-lsa` (#1146): discarded unacked, like a bad checksum.
+            InstallOutcome::TooSoon | InstallOutcome::LimitReached => continue,
             InstallOutcome::Rejected => {}
             InstallOutcome::Installed | InstallOutcome::Superseded => newly_installed.push(h),
         }

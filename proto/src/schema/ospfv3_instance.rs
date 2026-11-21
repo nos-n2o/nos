@@ -36,7 +36,7 @@ pub struct Ospfv3Instance {
     pub router_id: Ipv4Addr,
 
     /// This instance's `OSPFv3` areas, keyed by `area_id` — see `Ospfv3Area`.
-    #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas)))]
+    #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas, self.router_id)))]
     #[cli(topic = Ospfv3Area)]
     pub areas: Vec<Ospfv3Area>,
 
@@ -63,6 +63,15 @@ pub struct Ospfv3Instance {
     #[garde(skip)]
     #[cli(topic = Ospfv3InstanceExtendedLsa)]
     pub extended_lsa: bool,
+
+    /// RFC 8362 Sparse mode: the RFC 5340 legacy LSAs carry topology and
+    /// prefixes (so full-mode and legacy-only routers in the area still
+    /// interoperate); E-LSAs from neighbors are merged into SPF. Mutually
+    /// exclusive with `extended_lsa`. Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceExtendedLsaSparse, words = "extended-lsa-sparse")]
+    pub extended_lsa_sparse: bool,
 
     /// RFC 5187 graceful restart: on a planned shutdown, send a Grace-LSA
     /// asking every `Full` neighbor to keep the adjacency (and this router's
@@ -110,6 +119,72 @@ pub struct Ospfv3Instance {
     #[garde(skip)]
     #[cli(topic = Ospfv3InstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
     pub max_metric_administrative: bool,
+
+    /// LSDB overload limit (#1146): most LSAs not originated by this router
+    /// that one store (area, AS scope, or one link's Link-LSAs) holds, 1 to
+    /// 1000000. A new LSA past it is discarded and logged, never
+    /// acknowledged; own and `MaxAge` LSAs do not count and no neighbor is
+    /// reset. `None` means 100000.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 1_000_000))]
+    #[cli(topic = Ospfv3InstanceMaxLsa, words = "max-lsa")]
+    pub max_lsa: Option<u32>,
+
+    /// RFC 5838 address family this instance routes: `ipv6-unicast`
+    /// (default, instance IDs 0-31) or `ipv4-unicast` (instance IDs 64-95;
+    /// every profile of the instance must then set one, and the AF-bit is
+    /// set in its Hellos, DBDs and LSAs). IPv6/IPv4 multicast are not built.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceAddressFamily, words = "address-family")]
+    pub address_family: Ospfv3AddressFamily,
+}
+
+/// An RFC 5838 §2.1 address family of an `Ospfv3Instance`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum Ospfv3AddressFamily {
+    #[default]
+    /// IPv6 unicast: the base `OSPFv3` AF, instance IDs 0 to 31.
+    Ipv6Unicast,
+    /// IPv4 unicast (RFC 5838): instance IDs 64 to 95.
+    Ipv4Unicast,
+}
+
+impl Ospfv3AddressFamily {
+    /// RFC 5838 §2.1's Instance ID range of this AF.
+    pub const fn instance_ids(self) -> std::ops::RangeInclusive<u8> {
+        match self {
+            Ospfv3AddressFamily::Ipv6Unicast => 0..=31,
+            Ospfv3AddressFamily::Ipv4Unicast => 64..=95,
+        }
+    }
+}
+
+/// Every profile's Instance ID (unset means 0) must lie in its instance's AF
+/// range (RFC 5838 §2.1), so an IPv4-unicast instance needs an explicit one.
+pub(crate) fn valid_address_families(instances: &[Ospfv3Instance]) -> garde::Result {
+    for i in instances {
+        if i.extended_lsa && i.extended_lsa_sparse {
+            return Err(garde::Error::new(
+                "extended-lsa and extended-lsa-sparse are mutually exclusive (RFC 8362 Full vs Sparse mode)",
+            ));
+        }
+        let range = i.address_family.instance_ids();
+        let bad = i
+            .areas
+            .iter()
+            .flat_map(|a| &a.profiles)
+            .any(|p| !range.contains(&p.instance_id.unwrap_or(0)));
+        if bad {
+            return Err(garde::Error::new(format!(
+                "every profile's instance-id must be {}-{} for this instance's address-family (RFC 5838)",
+                range.start(),
+                range.end()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -122,18 +197,21 @@ impl Default for Ospfv3Instance {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: Ospfv3AddressFamily::Ipv6Unicast,
         }
     }
 }
 
 /// No two areas within the same instance may share an `area_id` — mirrors
 /// `ospf_instance::unique_area_ids` exactly.
-fn unique_area_ids(areas: &[Ospfv3Area]) -> garde::Result {
+fn unique_area_ids(areas: &[Ospfv3Area], router_id: Ipv4Addr) -> garde::Result {
     let mut seen: Vec<Ipv4Addr> = Vec::new();
     for a in areas {
         if seen.contains(&a.area_id) {
@@ -143,6 +221,11 @@ fn unique_area_ids(areas: &[Ospfv3Area]) -> garde::Result {
         }
         seen.push(a.area_id);
         super::ospfv3_area::valid_area_settings(a)?;
+        if a.virtual_links.iter().any(|v| v.router_id == router_id) {
+            return Err(garde::Error::new(
+                "a virtual link can't end at this instance's own router id",
+            ));
+        }
     }
     Ok(())
 }
@@ -165,11 +248,14 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
@@ -196,6 +282,20 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a"), instance("vrf-b")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn sparse_and_full_extended_lsa_are_exclusive() {
+        let with = |full, sparse| {
+            let mut i = instance("o1");
+            i.extended_lsa = full;
+            i.extended_lsa_sparse = sparse;
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(false, true));
+        assert!(with(true, false));
+        assert!(!with(true, true));
     }
 
     #[test]

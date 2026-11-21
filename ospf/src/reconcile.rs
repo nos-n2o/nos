@@ -498,6 +498,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
     links.set_remote_lfa(own.remote_lfa);
+    links.set_max_lsa(own.max_lsa);
     links.set_spf_timers(spf_timers(&own.spf_throttle));
     links.set_max_metric(
         own.max_metric_on_startup,
@@ -1233,7 +1234,7 @@ mod tests {
 
     fn interface(name: &str, ospf_profile: Option<&str>) -> Interface {
         Interface {
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -1269,7 +1270,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 100,
             addresses: Vec::new(),
@@ -1287,7 +1288,7 @@ mod tests {
     fn finds_broadcast_domain_attachment() {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1326,7 +1327,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
@@ -1348,7 +1349,7 @@ mod tests {
         let cfg = Config {
             interfaces: vec![interface("loopback-rt1", Some("p1"))],
             broadcast_domains: vec![BroadcastDomain {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1374,7 +1375,7 @@ mod tests {
     fn broadcast_domain_attach_points_finds_routing_table() {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1418,7 +1419,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
@@ -1428,7 +1429,7 @@ mod tests {
         let cfg = Config {
             interfaces: vec![iface],
             broadcast_domains: vec![BroadcastDomain {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1458,7 +1459,7 @@ mod tests {
             acl_in: None,
             acl_out: None,
             flowspec: false,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
             tag: 0,
             addresses: Vec::new(),
@@ -1562,7 +1563,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 0,
                 addresses: vec![addr],
@@ -1574,7 +1575,7 @@ mod tests {
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
                 tag: 1,
                 addresses: Vec::new(),

@@ -1,0 +1,2243 @@
+module nos-config {
+  yang-version 1.1;
+  namespace "urn:nos:params:xml:ns:yang:nos-config";
+  prefix nos;
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  description
+    "NOS configuration tree, generated from the nos-proto schema.";
+
+  revision 2026-11-27 {
+    description "Generated.";
+  }
+
+  list bgp_instances {
+    key "name";
+    description "Create a BGP instance in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    leaf router_id {
+      type inet:ipv4-address;
+      description "Set a BGP instance's router ID.";
+    }
+    leaf asn {
+      type uint32;
+      description "Set a BGP instance's autonomous system number.";
+    }
+    list peer_groups {
+      key "name";
+      description "Create a peer-group in a BGP instance if it doesn't already exist.";
+      leaf name {
+        type string;
+      }
+      leaf remote_as {
+        type uint32;
+        description "Set a peer-group's remote autonomous system number.";
+      }
+      container source_address {
+        description "Set a peer-group's transport source address.";
+        choice variant {
+          case Interface {
+            container Interface {
+              leaf interface {
+                type string;
+              }
+              leaf label {
+                type string;
+              }
+            }
+          }
+          case Loopback {
+            container Loopback {
+              leaf label {
+                type string;
+              }
+            }
+          }
+        }
+      }
+      leaf-list address_families {
+        type string;
+        description "Add an address family to a peer-group.";
+      }
+      leaf hold_time {
+        type uint16;
+        description "Set a peer-group's BGP hold-time.";
+      }
+      leaf keepalive_interval {
+        type uint16;
+        description "Set a peer-group's BGP keepalive interval.";
+      }
+      leaf connect_retry_time {
+        type uint16;
+        description "Set a peer-group's BGP connect-retry time.";
+      }
+      leaf mrai {
+        type uint16;
+        description "Set a peer-group's BGP MinRouteAdvertisementInterval.";
+      }
+      leaf route_refresh_stale_time {
+        type uint16;
+        description "Set how long a peer-group's routes stay stale during an enhanced route refresh.";
+      }
+      container damping {
+        description "Enable route flap damping on a peer-group.";
+        leaf half_life {
+          type uint32;
+          description "Enable route flap damping on a peer-group.";
+        }
+        leaf reuse {
+          type uint32;
+          description "Enable route flap damping on a peer-group.";
+        }
+        leaf suppress {
+          type uint32;
+          description "Enable route flap damping on a peer-group.";
+        }
+        leaf max_suppress {
+          type uint32;
+          description "Enable route flap damping on a peer-group.";
+        }
+      }
+      leaf max_hops {
+        type uint8;
+        description "Set how many router hops away a peer-group's peers may be.";
+      }
+      container auth {
+        description "A peer-group's BGP session authentication: an MD5 password or TCP-AO keys.";
+        choice variant {
+          case Md5 {
+            container Md5 {
+              leaf key_ref {
+                type string;
+              }
+            }
+          }
+          case Ao {
+            container Ao {
+              list keys {
+                key "send_id";
+                leaf send_id {
+                  type uint8;
+                }
+                leaf recv_id {
+                  type uint8;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf algorithm {
+                  type enumeration {
+                    enum "HmacSha1_96";
+                    enum "AesCmac96";
+                  }
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf key_ref {
+                  type string;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf is_current {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf is_rnext {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf exclude_options {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+              }
+            }
+          }
+        }
+      }
+      leaf bfd {
+        type string;
+        description "Run BFD with a BFD profile.";
+      }
+      leaf next_hop {
+        type enumeration {
+          enum "SelfAddress";
+          enum "Unchanged";
+        }
+        description "Set a peer-group's advertised BGP next-hop mode.";
+      }
+      leaf route_reflector_client {
+        type boolean;
+        description "Mark a peer-group as an RFC 4456 route-reflector client.";
+      }
+      leaf route_server_client {
+        type boolean;
+        description "Mark a peer-group as an RFC 7947 route-server client.";
+      }
+      leaf import_policy {
+        type string;
+        description "Filter the routes this peer-group's peers send us through a routing policy.";
+      }
+      leaf export_policy {
+        type string;
+        description "Filter the routes we advertise to this peer-group's peers through a routing policy.";
+      }
+      container shutdown {
+        description "Administratively shut every peer in a peer-group.";
+        leaf message {
+          type string;
+          description "Administratively shut every peer in a peer-group.";
+        }
+      }
+      container maximum_prefix {
+        description "Limit how many prefixes a peer-group's peers may send, per address family.";
+        container ipv4 {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container ipv6 {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container l2vpn_evpn {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container ipv4_flowspec {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container ipv6_flowspec {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container vpnv4 {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container vpnv6 {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container rt_constraint {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container vpnv4_flowspec {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+        container vpnv6_flowspec {
+          description "Limit how many prefixes a peer-group's peers may send, per address family.";
+          leaf limit {
+            type uint32;
+            description "Set the most prefixes a peer may send in this address family.";
+          }
+          leaf warning_only {
+            type boolean;
+            description "Only log when the maximum-prefix limit is exceeded.";
+          }
+          leaf restart_interval {
+            type uint16;
+            description "Retry a peer held down by its maximum-prefix limit after this many seconds.";
+          }
+        }
+      }
+      leaf announce_rpki_state {
+        type boolean;
+        description "Exchange RPKI origin validation state with a peer-group's iBGP peers (RFC 8097).";
+      }
+      container local_as {
+        description "Set the AS a peer-group's peers see instead of this instance's own.";
+        leaf asn {
+          type uint32;
+          description "Set the AS a peer-group's peers see instead of this instance's own.";
+        }
+        leaf no_prepend {
+          type boolean;
+          description "Set the AS a peer-group's peers see instead of this instance's own.";
+        }
+        leaf replace_as {
+          type boolean;
+          description "Set the AS a peer-group's peers see instead of this instance's own.";
+        }
+      }
+      leaf add_path {
+        type enumeration {
+          enum "Receive";
+          enum "Send";
+          enum "Both";
+        }
+        description "Set RFC 7911 ADD-PATH (several paths per prefix) for a peer-group.";
+      }
+      leaf add_path_send_count {
+        type uint8;
+        description "Set how many paths per prefix a peer-group is sent over ADD-PATH.";
+      }
+      leaf role {
+        type enumeration {
+          enum "Provider";
+          enum "RouteServer";
+          enum "RouteServerClient";
+          enum "Customer";
+          enum "Peer";
+        }
+        description "Set the RFC 9234 BGP role a peer-group's peers have toward this instance.";
+      }
+      leaf strict_mode {
+        type boolean;
+        description "Refuse peers that do not announce a BGP role.";
+      }
+      leaf evpn_import_policy {
+        type string;
+        description "Filter the EVPN routes this peer-group's peers send us through a routing policy.";
+      }
+      leaf enforce_first_as {
+        type boolean;
+        description "Require the first AS of a received AS_PATH to be the peer's AS.";
+      }
+      container flowspec_validation {
+        description "Tune the validation of received Flowspec rules (RFC 8955 section 6 as updated by RFC 9117).";
+        leaf disable_dest_prefix_rule {
+          type boolean;
+          description "Tune the validation of received Flowspec rules (RFC 8955 section 6 as updated by RFC 9117).";
+        }
+        leaf rfc8955_strict {
+          type boolean;
+          description "Tune the validation of received Flowspec rules (RFC 8955 section 6 as updated by RFC 9117).";
+        }
+      }
+      leaf flowspec_import_policy {
+        type string;
+        description "Filter the Flowspec rules this peer-group's peers send us through a routing policy.";
+      }
+      leaf flowspec_export_policy {
+        type string;
+        description "Filter the Flowspec rules we advertise to this peer-group's peers through a routing policy.";
+      }
+      leaf soft_reconfiguration_inbound {
+        type boolean;
+        description "Keep the peer-group's received routes so import-policy changes apply without a reset.";
+      }
+      leaf graceful_shutdown {
+        type boolean;
+        description "Drain traffic from this router before maintenance (RFC 8326).";
+      }
+      leaf graceful_shutdown_receive_disabled {
+        type boolean;
+        description "Ignore the GRACEFUL_SHUTDOWN community (65535:0) received from the peer-group's peers.";
+      }
+      container blackhole {
+        description "Honour the RFC 7999 BLACKHOLE community (65535:666) from this peer-group, within a prefix-list.";
+        leaf prefix_list {
+          type string;
+          description "Honour the RFC 7999 BLACKHOLE community (65535:666) from this peer-group, within a prefix-list.";
+        }
+      }
+    }
+    list peers {
+      key "remote_address";
+      description "Associate a remote address with a peer-group.";
+      leaf remote_address {
+        type inet:ip-address;
+      }
+      leaf peer_group {
+        type string;
+        description "Associate a remote address with a peer-group.";
+      }
+      container shutdown {
+        description "Administratively shut one BGP peer.";
+        leaf message {
+          type string;
+          description "Administratively shut every peer in a peer-group.";
+        }
+      }
+    }
+    leaf cluster_id {
+      type inet:ipv4-address;
+      description "Set a BGP instance's RFC 4456 route-reflector cluster ID.";
+    }
+    leaf maximum_paths {
+      type uint8;
+      description "Set how many equal BGP paths a prefix installs (multipath).";
+    }
+    container confederation {
+      description "Make a BGP instance a member of an RFC 5065 confederation.";
+      leaf identifier {
+        type uint32;
+        description "Set the AS a confederation shows to peers outside it.";
+      }
+      leaf-list peers {
+        type uint32;
+        description "Add another member AS of the confederation.";
+      }
+    }
+    container graceful_restart {
+      description "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).";
+      leaf disabled {
+        type boolean;
+        description "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).";
+      }
+      leaf restart_time {
+        type uint16;
+        description "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).";
+      }
+      leaf stale_time {
+        type uint16;
+        description "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).";
+      }
+      leaf selection_deferral_time {
+        type uint16;
+        description "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).";
+      }
+    }
+    list rpki_caches {
+      key "address";
+      description "Take RPKI origin validation data from an RPKI-to-Router cache.";
+      leaf address {
+        type inet:ip-address;
+      }
+      leaf port {
+        type uint16;
+        description "Set the RPKI cache's TCP port.";
+      }
+      leaf preference {
+        type uint8;
+        description "Set the RPKI cache's preference.";
+      }
+      container auth {
+        description "The RPKI cache's RTR session authentication: an MD5 password or TCP-AO keys.";
+        choice variant {
+          case Md5 {
+            container Md5 {
+              leaf key_ref {
+                type string;
+              }
+            }
+          }
+          case Ao {
+            container Ao {
+              list keys {
+                key "send_id";
+                leaf send_id {
+                  type uint8;
+                }
+                leaf recv_id {
+                  type uint8;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf algorithm {
+                  type enumeration {
+                    enum "HmacSha1_96";
+                    enum "AesCmac96";
+                  }
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf key_ref {
+                  type string;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf is_current {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf is_rnext {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+                leaf exclude_options {
+                  type boolean;
+                  description "Set (or replace) one of a peer-group's TCP-AO keys.";
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    list bmp_stations {
+      key "name";
+      description "Export this instance's BGP monitoring data to a BMP station (RFC 7854).";
+      leaf name {
+        type string;
+      }
+      leaf address {
+        type inet:ip-address;
+        description "Set the BMP station's address.";
+      }
+      leaf port {
+        type uint16;
+        description "Set the BMP station's TCP port.";
+      }
+      leaf monitor {
+        type enumeration {
+          enum "PostPolicy";
+          enum "PrePolicy";
+          enum "Both";
+        }
+        description "Choose which policy view the BMP station gets as Route Monitoring.";
+      }
+      leaf statistics_interval {
+        type uint32;
+        description "Send the BMP station a Statistics Report per peer every N seconds.";
+      }
+      leaf monitor_out {
+        type enumeration {
+          enum "None";
+          enum "PrePolicy";
+          enum "PostPolicy";
+          enum "Both";
+        }
+        description "Choose which Adj-RIB-Out views (RFC 8671) the BMP station gets.";
+      }
+    }
+    list aggregates {
+      key "prefix";
+      description "Originate an aggregate route covering more specific BGP routes.";
+      leaf prefix {
+        type inet:ip-prefix;
+      }
+      leaf as_set {
+        type boolean;
+        description "Keep the contributors' AS numbers in the aggregate's AS_PATH.";
+      }
+      leaf summary_only {
+        type boolean;
+        description "Advertise only the aggregate, not its more specific routes.";
+      }
+    }
+  }
+  list routing_tables {
+    key "name";
+    description "Create a routing table in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    leaf bgp_instance {
+      type string;
+      description "Associate a BGP instance with a routing table.";
+    }
+    leaf static_routing_instance {
+      type string;
+      description "Associate a static routing instance with a routing table.";
+    }
+    leaf ospf_instance {
+      type string;
+      description "Associate an OSPF instance with a routing table.";
+    }
+    leaf-list ospfv3_instances {
+      type string;
+      description "Associate OSPFv3 instances with a routing table.";
+    }
+    list redistribute {
+      key "to";
+      description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      leaf from {
+        type enumeration {
+          enum "Static";
+        }
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+      leaf to {
+        type enumeration {
+          enum "Bgp";
+          enum "Ospf";
+          enum "Ospfv3";
+        }
+      }
+      leaf policy {
+        type string;
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+      leaf metric {
+        type uint32;
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+      leaf metric_type {
+        type uint8;
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+      leaf instance {
+        type string;
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+    }
+    container rest_api {
+      description "Serve the REST API on an address inside this routing table.";
+      leaf address {
+        type inet:ip-address;
+        description "Serve the REST API on an address inside this routing table.";
+      }
+      leaf port {
+        type uint16;
+        description "Serve the REST API on an address inside this routing table.";
+      }
+    }
+    container ssh_server {
+      description "Serve SSH on an address inside this routing table.";
+      leaf address {
+        type inet:ip-address;
+        description "Serve SSH on an address inside this routing table.";
+      }
+      leaf port {
+        type uint16;
+        description "Serve SSH on an address inside this routing table.";
+      }
+    }
+    container evpn {
+      description "Make this routing table an EVPN IP-VRF with an L3 VNI.";
+      leaf l3_vni {
+        type uint32;
+        description "Set the table's L3 VNI.";
+      }
+      leaf rd {
+        type string;
+        description "Set the Route Distinguisher of the table's Type-5 routes.";
+      }
+      leaf-list route_targets_import {
+        type string;
+        description "Add an EVPN Route Target to the table's import or export list.";
+      }
+      leaf-list route_targets_export {
+        type string;
+        description "Add an EVPN Route Target to the table's import or export list.";
+      }
+      container vtep_source {
+        description "Set the address the table's VXLAN tunnels are sourced from.";
+        choice variant {
+          case Interface {
+            container Interface {
+              leaf interface {
+                type string;
+              }
+              leaf label {
+                type string;
+              }
+            }
+          }
+          case Loopback {
+            container Loopback {
+              leaf label {
+                type string;
+              }
+            }
+          }
+        }
+      }
+      leaf bgp_instance {
+        type string;
+        description "Name the underlay BGP instance the table's Type-5 routes are exchanged over.";
+      }
+    }
+    container vpn {
+      description "Give this routing table an L3VPN identity (RFC 4364 VPNv4/VPNv6).";
+      leaf rd {
+        type string;
+        description "Set the Route Distinguisher of the table's VPN routes.";
+      }
+      leaf-list route_targets_import {
+        type string;
+        description "Add a VPN Route Target to the table's import or export list.";
+      }
+      leaf-list route_targets_export {
+        type string;
+        description "Add a VPN Route Target to the table's import or export list.";
+      }
+      leaf bgp_instance {
+        type string;
+        description "Name the underlay BGP instance the table's VPN routes are exchanged over.";
+      }
+      leaf label {
+        type uint32;
+        description "Set a static MPLS label for the table's exported VPN routes.";
+      }
+      leaf site_of_origin {
+        type string;
+        description "Set the Site of Origin of the table's CE site.";
+      }
+    }
+  }
+  list ospf_instances {
+    key "name";
+    description "Create an OSPF instance in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    leaf router_id {
+      type inet:ipv4-address;
+      description "Set an OSPF instance's router id.";
+    }
+    list areas {
+      key "area_id";
+      description "Create an OSPF area in the transaction if it doesn't already exist.";
+      leaf area_id {
+        type inet:ipv4-address;
+      }
+      list profiles {
+        key "name";
+        description "Create an OSPF profile in the transaction if it doesn't already exist.";
+        leaf name {
+          type string;
+        }
+        leaf hello_interval {
+          type uint16;
+          description "Set an OSPF profile's Hello interval.";
+        }
+        leaf dead_interval {
+          type uint16;
+          description "Set an OSPF profile's router dead interval.";
+        }
+        leaf cost {
+          type uint16;
+          description "Set an OSPF profile's interface cost.";
+        }
+        leaf priority {
+          type uint8;
+          description "Set an OSPF profile's Router Priority.";
+        }
+        leaf mtu {
+          type uint16;
+          description "Override the MTU OSPF believes this link has.";
+        }
+        leaf mtu_ignore {
+          type boolean;
+          description "Enable or disable the DBD Interface MTU check.";
+        }
+        leaf lls {
+          type boolean;
+          description "Enable or disable RFC 5613 Link-Local Signaling.";
+        }
+        leaf network_type {
+          type enumeration {
+            enum "PointToPoint";
+            enum "Broadcast";
+            enum "PointToMultipoint";
+            enum "Hybrid";
+          }
+          description "Set an OSPF profile's network type.";
+        }
+        container auth {
+          description "An OSPF profile's authentication: a simple password or crypto keys.";
+          choice variant {
+            case Simple {
+              container Simple {
+                leaf key {
+                  type string;
+                }
+              }
+            }
+            case Crypto {
+              container Crypto {
+                list keys {
+                  key "key_id";
+                  leaf key_id {
+                    type uint16;
+                  }
+                  leaf algorithm {
+                    type enumeration {
+                      enum "Md5";
+                      enum "HmacSha1";
+                      enum "HmacSha256";
+                      enum "HmacSha384";
+                      enum "HmacSha512";
+                    }
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                  leaf key {
+                    type string;
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                  leaf is_current {
+                    type boolean;
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                }
+              }
+            }
+          }
+        }
+        leaf bfd {
+          type string;
+          description "Run BFD with a BFD profile.";
+        }
+        leaf extended_sequence_numbers {
+          type boolean;
+          description "Enable or disable RFC 7474 extended cryptographic sequence numbers.";
+        }
+        leaf passive {
+          type boolean;
+          description "Enable or disable passive mode on an OSPF profile.";
+        }
+      }
+      leaf area_type {
+        type enumeration {
+          enum "Normal";
+          enum "Stub";
+          enum "TotallyStubby";
+          enum "Nssa";
+          enum "NssaNoSummary";
+        }
+        description "Make an OSPF area a stub, totally-stubby or not-so-stubby area.";
+      }
+      leaf stub_default_cost {
+        type uint16;
+        description "Set the cost of the default route an ABR sends into this stub area.";
+      }
+      list ranges {
+        key "cidr";
+        description "Summarize this area's prefixes into one range (RFC 2328 §3.5).";
+        leaf cidr {
+          type inet:ip-prefix;
+        }
+        leaf not_advertise {
+          type boolean;
+          description "Hide every prefix an OSPF area range covers from the other areas.";
+        }
+      }
+      leaf nssa_translate_always {
+        type boolean;
+        description "Always translate this NSSA's Type-7 routes, as its area border router.";
+      }
+      leaf nssa_default_originate {
+        type boolean;
+        description "Send a default route into this NSSA, as its area border router.";
+      }
+      list virtual_links {
+        key "router_id";
+        description "Join the backbone across this area with an OSPF virtual link (RFC 2328 §15).";
+        leaf router_id {
+          type inet:ipv4-address;
+        }
+        leaf hello_interval {
+          type uint16;
+          description "Set a virtual link's Hello interval, in seconds.";
+        }
+        leaf dead_interval {
+          type uint16;
+          description "Set a virtual link's dead interval, in seconds.";
+        }
+        container auth {
+          description "A virtual link's authentication: a simple password or crypto keys.";
+          choice variant {
+            case Simple {
+              container Simple {
+                leaf key {
+                  type string;
+                }
+              }
+            }
+            case Crypto {
+              container Crypto {
+                list keys {
+                  key "key_id";
+                  leaf key_id {
+                    type uint16;
+                  }
+                  leaf algorithm {
+                    type enumeration {
+                      enum "Md5";
+                      enum "HmacSha1";
+                      enum "HmacSha256";
+                      enum "HmacSha384";
+                      enum "HmacSha512";
+                    }
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                  leaf key {
+                    type string;
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                  leaf is_current {
+                    type boolean;
+                    description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    leaf graceful_restart_grace_period {
+      type uint16;
+      description "Announce an RFC 3623 graceful restart before a planned shutdown.";
+    }
+    leaf graceful_restart_helper_max_grace_period {
+      type uint32;
+      description "Cap the grace period this router grants a restarting neighbor (RFC 3623 helper).";
+    }
+    leaf prefix_suppression {
+      type boolean;
+      description "Hide transit-only networks (RFC 6860 prefix suppression).";
+    }
+    leaf max_metric_on_startup {
+      type uint32;
+      description "Advertise this router as a stub router for a while after it starts (RFC 6987).";
+    }
+    leaf max_metric_on_shutdown {
+      type uint8;
+      description "Advertise this router as a stub router before it stops (RFC 6987).";
+    }
+    leaf max_metric_administrative {
+      type boolean;
+      description "Advertise this router as a stub router until removed (RFC 6987).";
+    }
+    leaf max_lsa {
+      type uint32;
+      description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
+    }
+    leaf host_router {
+      type boolean;
+      description "Make this router a host router that never carries transit traffic (RFC 8770).";
+    }
+    leaf remote_lfa {
+      type boolean;
+      description "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).";
+    }
+    container spf_throttle {
+      description "Tune the SPF back-off timers of this instance (RFC 8405).";
+      leaf initial_ms {
+        type uint32;
+        description "Delay of the first SPF run after a quiet period, in milliseconds (default 50).";
+      }
+      leaf short_ms {
+        type uint32;
+        description "Delay of SPF runs while changes keep arriving, in milliseconds (default 200).";
+      }
+      leaf long_ms {
+        type uint32;
+        description "Delay of SPF runs once the churn outlasts `time-to-learn`, in milliseconds (default 5000).";
+      }
+      leaf holddown_ms {
+        type uint32;
+        description "Time without a change that returns SPF to the initial delay, in milliseconds (default 10000).";
+      }
+      leaf time_to_learn_ms {
+        type uint32;
+        description "How long the short delay lasts before the long one applies, in milliseconds (default 3000).";
+      }
+    }
+  }
+  list ospfv3_instances {
+    key "name";
+    description "Create or delete an OSPFv3 instance.";
+    leaf name {
+      type string;
+    }
+    leaf router_id {
+      type inet:ipv4-address;
+      description "Set an OSPFv3 instance's router-id.";
+    }
+    list areas {
+      key "area_id";
+      description "Create or delete an OSPFv3 area.";
+      leaf area_id {
+        type inet:ipv4-address;
+      }
+      list profiles {
+        key "name";
+        description "Create or delete an OSPFv3 profile.";
+        leaf name {
+          type string;
+        }
+        leaf hello_interval {
+          type uint16;
+          description "Set an OSPF profile's Hello interval.";
+        }
+        leaf dead_interval {
+          type uint16;
+          description "Set an OSPF profile's router dead interval.";
+        }
+        leaf cost {
+          type uint16;
+          description "Set an OSPF profile's interface cost.";
+        }
+        leaf priority {
+          type uint8;
+          description "Set an OSPF profile's Router Priority.";
+        }
+        leaf mtu {
+          type uint16;
+          description "Override the MTU OSPF believes this link has.";
+        }
+        leaf mtu_ignore {
+          type boolean;
+          description "Enable or disable the DBD Interface MTU check.";
+        }
+        leaf network_type {
+          type enumeration {
+            enum "PointToPoint";
+            enum "Broadcast";
+            enum "PointToMultipoint";
+            enum "Hybrid";
+          }
+          description "Set an OSPF profile's network type.";
+        }
+        list auth {
+          key "key_id";
+          description "An OSPFv3 profile's RFC 7166 authentication-trailer keys.";
+          leaf key_id {
+            type uint16;
+          }
+          leaf algorithm {
+            type enumeration {
+              enum "Md5";
+              enum "HmacSha1";
+              enum "HmacSha256";
+              enum "HmacSha384";
+              enum "HmacSha512";
+            }
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf key {
+            type string;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf is_current {
+            type boolean;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+        }
+        leaf bfd {
+          type string;
+          description "Run BFD with a BFD profile.";
+        }
+        leaf instance_id {
+          type uint8;
+          description "Set an OSPFv3 profile's instance id.";
+        }
+        leaf passive {
+          type boolean;
+          description "Enable or disable passive mode on an OSPF profile.";
+        }
+      }
+      list ranges {
+        key "cidr";
+        description "Summarize this area's prefixes into one range (RFC 2328 §3.5).";
+        leaf cidr {
+          type inet:ip-prefix;
+        }
+        leaf not_advertise {
+          type boolean;
+          description "Hide every prefix an OSPF area range covers from the other areas.";
+        }
+      }
+      leaf area_type {
+        type enumeration {
+          enum "Normal";
+          enum "Stub";
+          enum "TotallyStubby";
+          enum "Nssa";
+          enum "NssaNoSummary";
+        }
+        description "Make an OSPF area a stub, totally-stubby or not-so-stubby area.";
+      }
+      leaf stub_default_cost {
+        type uint16;
+        description "Set the cost of the default route an ABR sends into this stub area.";
+      }
+      leaf nssa_translate_always {
+        type boolean;
+        description "Always translate this NSSA's Type-7 routes, as its area border router.";
+      }
+      leaf nssa_default_originate {
+        type boolean;
+        description "Send a default route into this NSSA, as its area border router.";
+      }
+      list virtual_links {
+        key "router_id";
+        description "Join the backbone across this area with an OSPF virtual link (RFC 2328 §15).";
+        leaf router_id {
+          type inet:ipv4-address;
+        }
+        leaf hello_interval {
+          type uint16;
+          description "Set a virtual link's Hello interval, in seconds.";
+        }
+        leaf dead_interval {
+          type uint16;
+          description "Set a virtual link's dead interval, in seconds.";
+        }
+        list auth {
+          key "key_id";
+          description "An OSPFv3 profile's RFC 7166 authentication-trailer keys.";
+          leaf key_id {
+            type uint16;
+          }
+          leaf algorithm {
+            type enumeration {
+              enum "Md5";
+              enum "HmacSha1";
+              enum "HmacSha256";
+              enum "HmacSha384";
+              enum "HmacSha512";
+            }
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf key {
+            type string;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+          leaf is_current {
+            type boolean;
+            description "Set (or replace) one of an OSPF profile's cryptographic auth keys.";
+          }
+        }
+      }
+    }
+    leaf extended_lsa {
+      type boolean;
+      description "Originate RFC 8362 extended LSAs (Full mode).";
+    }
+    leaf extended_lsa_sparse {
+      type boolean;
+      description "Use RFC 8362 Sparse mode (legacy LSAs plus extended LSAs from neighbors).";
+    }
+    leaf graceful_restart_grace_period {
+      type uint16;
+      description "Announce an RFC 5187 graceful restart before a planned shutdown.";
+    }
+    leaf graceful_restart_helper_max_grace_period {
+      type uint32;
+      description "Cap the grace period this router grants a restarting neighbor (RFC 5187 helper).";
+    }
+    leaf max_metric_on_startup {
+      type uint32;
+      description "Advertise this router as a stub router for a while after it starts (RFC 6987).";
+    }
+    leaf max_metric_on_shutdown {
+      type uint8;
+      description "Advertise this router as a stub router before it stops (RFC 6987).";
+    }
+    leaf max_metric_administrative {
+      type boolean;
+      description "Advertise this router as a stub router until removed (RFC 6987).";
+    }
+    leaf max_lsa {
+      type uint32;
+      description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
+    }
+    leaf address_family {
+      type enumeration {
+        enum "Ipv6Unicast";
+        enum "Ipv4Unicast";
+      }
+      description "Choose the RFC 5838 address family this OSPFv3 instance routes.";
+    }
+  }
+  list static_routing_instances {
+    key "name";
+    description "Create a static routing instance in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    list routes {
+      key "subnet";
+      description "Add or repoint a static route.";
+      leaf subnet {
+        type inet:ip-prefix;
+      }
+      leaf gateway {
+        type inet:ip-address;
+        description "Add or repoint a static route.";
+      }
+      leaf bfd {
+        type string;
+        description "Run BFD with a BFD profile.";
+      }
+    }
+  }
+  list interfaces {
+    key "name";
+    description "Create an interface in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    list addresses {
+      key "address";
+      description "Add an IP address to an interface.";
+      leaf address {
+        type inet:ip-prefix;
+      }
+      leaf label {
+        type string;
+        description "Add an IP address to an interface.";
+      }
+    }
+    leaf routing_table {
+      type string;
+      description "Associate a routing table with an interface.";
+    }
+    leaf ospf_profile {
+      type string;
+      description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
+    }
+    leaf-list ospfv3_profiles {
+      type string;
+      description "Run OSPFv3 on this attach point under a profile.";
+    }
+    leaf switching_profile {
+      type string;
+      description "Associate a switching profile with an interface.";
+    }
+    leaf port_aggregate {
+      type string;
+      description "Associate an interface with a port aggregate as a bonded member.";
+    }
+    leaf stp_port_profile {
+      type string;
+      description "Attach a spanning-tree port profile.";
+    }
+    leaf acl_in {
+      type string;
+      description "Filter the IP packets received on this link.";
+    }
+    leaf acl_out {
+      type string;
+      description "Filter the IP packets sent on this link.";
+    }
+    leaf flowspec {
+      type boolean;
+      description "Enforce BGP flowspec rules on the IP packets received on this link.";
+    }
+    leaf lacp_port_priority {
+      type uint16;
+      description "Set an interface's LACP Actor Port Priority.";
+    }
+    leaf lacp_link_number {
+      type uint16;
+      description "Set an interface's LACP Link_Number.";
+    }
+    leaf lacp_mode {
+      type enumeration {
+        enum "Active";
+        enum "Passive";
+      }
+      description "Set an interface's LACP mode (active or passive).";
+    }
+    leaf mtu {
+      type uint32;
+      description "Set an interface's MTU.";
+    }
+    leaf lldp_transmit {
+      type boolean;
+      description "Enable or disable LLDP transmit on an interface.";
+    }
+    leaf lldp_receive {
+      type boolean;
+      description "Enable or disable LLDP receive on an interface.";
+    }
+    leaf lldp_destination {
+      type enumeration {
+        enum "NearestBridge";
+        enum "NonTpmr";
+        enum "CustomerBridge";
+      }
+      description "Set the LLDP destination group an interface uses.";
+    }
+    list subinterfaces {
+      key "tag";
+      description "Create or delete a subinterface: one 802.1q tag's L3 attach point.";
+      leaf tag {
+        type uint16;
+      }
+      list addresses {
+        key "address";
+        description "Add an IP address to an interface.";
+        leaf address {
+          type inet:ip-prefix;
+        }
+        leaf label {
+          type string;
+          description "Add an IP address to an interface.";
+        }
+      }
+      leaf routing_table {
+        type string;
+        description "Associate a routing table with an interface.";
+      }
+      leaf ospf_profile {
+        type string;
+        description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
+      }
+      leaf-list ospfv3_profiles {
+        type string;
+        description "Run OSPFv3 on this attach point under a profile.";
+      }
+      leaf mtu {
+        type uint32;
+        description "Override a VLAN subinterface's MTU.";
+      }
+      leaf bfd_unsolicited {
+        type string;
+        description "Answer unsolicited BFD on this subinterface.";
+      }
+      leaf acl_in {
+        type string;
+        description "Filter the IP packets received on this link.";
+      }
+      leaf acl_out {
+        type string;
+        description "Filter the IP packets sent on this link.";
+      }
+      leaf flowspec {
+        type boolean;
+        description "Enforce BGP flowspec rules on the IP packets received on this link.";
+      }
+    }
+  }
+  list policy_definitions {
+    key "name";
+    description "Create or delete a routing policy.";
+    leaf name {
+      type string;
+    }
+    leaf source {
+      type string;
+      description "Set a routing policy's RPL source.";
+    }
+  }
+  list community_aliases {
+    key "name";
+    description "Create or delete a community alias.";
+    leaf name {
+      type string;
+    }
+    leaf value {
+      type string;
+      description "Set the community a community alias stands for.";
+    }
+  }
+  list community_groups {
+    key "name";
+    description "Create or delete a community group.";
+    leaf name {
+      type string;
+    }
+    leaf-list members {
+      type string;
+      description "Add or remove a member of a community group.";
+    }
+  }
+  list prefix_lists {
+    key "name";
+    description "Create or delete a prefix list.";
+    leaf name {
+      type string;
+    }
+    list entries {
+      key "cidr";
+      description "Add or remove a prefix-list entry.";
+      leaf cidr {
+        type inet:ip-prefix;
+        description "Add or remove a prefix-list entry.";
+      }
+      leaf range {
+        type string;
+        description "Add or remove a prefix-list entry.";
+      }
+    }
+  }
+  list as_path_lists {
+    key "name";
+    description "Create or delete an AS-path list.";
+    leaf name {
+      type string;
+    }
+    leaf-list patterns {
+      type string;
+      description "Add or remove an AS-path list pattern.";
+    }
+  }
+  list broadcast_domains {
+    key "name";
+    description "Create a broadcast domain in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    list addresses {
+      key "address";
+      description "Add an IP address to a broadcast domain's SVI.";
+      leaf address {
+        type inet:ip-prefix;
+      }
+      leaf label {
+        type string;
+        description "Add an IP address to an interface.";
+      }
+    }
+    leaf routing_table {
+      type string;
+      description "Associate a routing table with a broadcast domain's SVI.";
+    }
+    leaf ospf_profile {
+      type string;
+      description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
+    }
+    leaf-list ospfv3_profiles {
+      type string;
+      description "Run OSPFv3 on this attach point under a profile.";
+    }
+    leaf vni {
+      type uint32;
+      description "Give a broadcast domain a VXLAN Network Identifier (EVPN).";
+    }
+    leaf rd {
+      type string;
+      description "Set a broadcast domain's EVPN Route Distinguisher.";
+    }
+    leaf-list route_targets_import {
+      type string;
+      description "Add an EVPN Route Target to a broadcast domain's import or export list.";
+    }
+    leaf-list route_targets_export {
+      type string;
+      description "Add an EVPN Route Target to a broadcast domain's import or export list.";
+    }
+    container vtep_source {
+      description "Set the address a broadcast domain's VXLAN tunnels are sourced from.";
+      choice variant {
+        case Interface {
+          container Interface {
+            leaf interface {
+              type string;
+            }
+            leaf label {
+              type string;
+            }
+          }
+        }
+        case Loopback {
+          container Loopback {
+            leaf label {
+              type string;
+            }
+          }
+        }
+      }
+    }
+    leaf mac_redistribute {
+      type string;
+      description "Redistribute a broadcast domain's MAC addresses into a BGP instance (EVPN).";
+    }
+    leaf arp_redistribute {
+      type string;
+      description "Also originate a broadcast domain's ARP/ND neighbours as EVPN MAC+IP routes.";
+    }
+    leaf connected_redistribute {
+      type string;
+      description "Originate a broadcast domain's own (SVI) addresses as EVPN MAC+IP routes.";
+    }
+    leaf neigh_suppress {
+      type boolean;
+      description "Answer ARP/ND locally for EVPN-learned hosts (ARP/ND suppression).";
+    }
+    leaf max_remote_macs {
+      type uint32;
+      description "Cap the remote MAC addresses installed for this domain from EVPN.";
+    }
+    leaf stp_instance {
+      type uint16;
+      description "Map the domain's VLAN to an MST instance.";
+    }
+    leaf stp_priority {
+      type uint16;
+      description "Set the per-VLAN bridge priority.";
+    }
+    leaf stp_hello_time {
+      type uint8;
+      description "Set the per-VLAN hello time.";
+    }
+    leaf stp_max_age {
+      type uint8;
+      description "Set the per-VLAN maximum age.";
+    }
+    leaf stp_forward_delay {
+      type uint8;
+      description "Set the per-VLAN forward delay.";
+    }
+  }
+  list switching_profiles {
+    key "name";
+    description "Create a switching profile in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    list members {
+      key "broadcast_domain";
+      description "Add or retag a broadcast domain within a switching profile.";
+      leaf broadcast_domain {
+        type string;
+      }
+      container tag {
+        description "Add or retag a broadcast domain within a switching profile.";
+        choice variant {
+          case Untagged {
+            leaf Untagged {
+              type empty;
+            }
+          }
+          case Dot1q {
+            leaf Dot1q {
+              type uint16;
+            }
+          }
+        }
+      }
+      leaf stp_cost {
+        type uint32;
+        description "Set the spanning-tree port cost.";
+      }
+      leaf stp_priority {
+        type uint8;
+        description "Set the spanning-tree port priority.";
+      }
+    }
+  }
+  list port_aggregates {
+    key "name";
+    description "Create a port aggregate in the transaction if it doesn't already exist.";
+    leaf name {
+      type string;
+    }
+    leaf mode {
+      type enumeration {
+        enum "Xor";
+        enum "Lacp";
+      }
+      description "Set a port aggregate's bonding mode.";
+    }
+    leaf lacp_rate {
+      type enumeration {
+        enum "Slow";
+        enum "Fast";
+      }
+      description "Set how fast a port aggregate's LACP partner is asked to send LACPDUs.";
+    }
+    leaf esi {
+      type string;
+      description "Set the EVPN Ethernet Segment Identifier of a port aggregate.";
+    }
+    leaf redundancy_mode {
+      type enumeration {
+        enum "AllActive";
+        enum "SingleActive";
+      }
+      description "Set how the PEs sharing a port aggregate's Ethernet Segment divide the traffic.";
+    }
+    leaf df_algorithm {
+      type enumeration {
+        enum "Modulo";
+        enum "Hrw";
+      }
+      description "Set the Designated Forwarder election algorithm of a port aggregate's Ethernet Segment.";
+    }
+    leaf lacp_system_id {
+      type string;
+      description "Override a port aggregate's LACP Actor System ID.";
+    }
+    leaf lacp_system_priority {
+      type uint16;
+      description "Set a port aggregate's LACP Actor System Priority.";
+    }
+    leaf lacp_version {
+      type enumeration {
+        enum "V1";
+        enum "V2";
+      }
+      description "Set the LACP version (1 or 2) an aggregate advertises.";
+    }
+    leaf lacp_port_algorithm {
+      type enumeration {
+        enum "Unspecified";
+        enum "CVlan";
+        enum "SVlan";
+      }
+      description "Set how an aggregate maps frames to LACP conversations.";
+    }
+    list lacp_conversation_map {
+      key "first";
+      description "Map LACP conversation ids to a member link.";
+      leaf first {
+        type uint16;
+        description "Set the first conversation id of a range.";
+      }
+      leaf last {
+        type uint16;
+        description "Set the last conversation id of a range.";
+      }
+      leaf member {
+        type string;
+        description "Set the member interface carrying a conversation range.";
+      }
+    }
+    leaf min_links {
+      type uint16;
+      description "Set how many LACP members a port aggregate needs to carry traffic.";
+    }
+    leaf bfd {
+      type string;
+      description "Run micro-BFD on every member of a port aggregate.";
+    }
+    leaf bfd_peer {
+      type inet:ip-address;
+      description "Set the peer address of an aggregate's micro-BFD sessions.";
+    }
+    leaf stp_port_profile {
+      type string;
+      description "Attach a spanning-tree port profile.";
+    }
+    leaf acl_in {
+      type string;
+      description "Filter the IP packets received on this link.";
+    }
+    leaf acl_out {
+      type string;
+      description "Filter the IP packets sent on this link.";
+    }
+    leaf flowspec {
+      type boolean;
+      description "Enforce BGP flowspec rules on the IP packets received on this link.";
+    }
+    leaf switching_profile {
+      type string;
+      description "Associate a switching profile with an interface.";
+    }
+    leaf mtu {
+      type uint32;
+      description "Set an interface's MTU.";
+    }
+    list subinterfaces {
+      key "tag";
+      description "Create or delete a subinterface: one 802.1q tag's L3 attach point.";
+      leaf tag {
+        type uint16;
+      }
+      list addresses {
+        key "address";
+        description "Add an IP address to an interface.";
+        leaf address {
+          type inet:ip-prefix;
+        }
+        leaf label {
+          type string;
+          description "Add an IP address to an interface.";
+        }
+      }
+      leaf routing_table {
+        type string;
+        description "Associate a routing table with an interface.";
+      }
+      leaf ospf_profile {
+        type string;
+        description "Associate an OSPF profile with an interface, subinterface, or broadcast domain.";
+      }
+      leaf-list ospfv3_profiles {
+        type string;
+        description "Run OSPFv3 on this attach point under a profile.";
+      }
+      leaf mtu {
+        type uint32;
+        description "Override a VLAN subinterface's MTU.";
+      }
+      leaf bfd_unsolicited {
+        type string;
+        description "Answer unsolicited BFD on this subinterface.";
+      }
+      leaf acl_in {
+        type string;
+        description "Filter the IP packets received on this link.";
+      }
+      leaf acl_out {
+        type string;
+        description "Filter the IP packets sent on this link.";
+      }
+      leaf flowspec {
+        type boolean;
+        description "Enforce BGP flowspec rules on the IP packets received on this link.";
+      }
+    }
+  }
+  leaf hostname {
+    type string;
+    description "Set the configuration's hostname.";
+  }
+  container lldp {
+    description "System-wide LLDP settings.";
+    leaf tx_interval_secs {
+      type uint16;
+      description "Set the system-wide LLDP transmit interval.";
+    }
+    leaf tx_hold {
+      type uint8;
+      description "Set the system-wide LLDP transmit hold multiplier.";
+    }
+    leaf-list management_addresses {
+      type inet:ip-address;
+      description "Add an LLDP management address.";
+    }
+    leaf system_description {
+      type string;
+      description "Set the LLDP System Description.";
+    }
+  }
+  container logging {
+    description "Log export settings.";
+    list syslog {
+      key "name";
+      description "Create or delete a remote syslog collector.";
+      leaf name {
+        type string;
+      }
+      leaf address {
+        type inet:ip-address;
+        description "Set a syslog collector's address.";
+      }
+      leaf port {
+        type uint16;
+        description "Set a syslog collector's port.";
+      }
+      leaf transport {
+        type enumeration {
+          enum "Udp";
+          enum "Tcp";
+          enum "Tls";
+        }
+        description "Set a syslog collector's transport.";
+      }
+      leaf routing_table {
+        type string;
+        description "Send syslog from inside a routing table's VRF.";
+      }
+      leaf level {
+        type enumeration {
+          enum "Trace";
+          enum "Debug";
+          enum "Info";
+          enum "Warn";
+          enum "Error";
+        }
+        description "Set a syslog collector's minimum severity.";
+      }
+      leaf facility {
+        type enumeration {
+          enum "Local0";
+          enum "Local1";
+          enum "Local2";
+          enum "Local3";
+          enum "Local4";
+          enum "Local5";
+          enum "Local6";
+          enum "Local7";
+        }
+        description "Set a syslog collector's facility.";
+      }
+      container tls {
+        description "Configure how a TLS syslog collector is authenticated.";
+        leaf trust_anchor {
+          type string;
+          description "Trust the collector's certificate through a CA (RFC 5425 §4.2.1).";
+        }
+        leaf fingerprint {
+          type string;
+          description "Trust one collector certificate by its SHA-256 fingerprint (RFC 5425 §4.2.2).";
+        }
+        leaf server_name {
+          type string;
+          description "Set the DNS name the collector's certificate must carry.";
+        }
+        leaf allow_tls12 {
+          type boolean;
+          description "Also allow TLS 1.2 with classical key exchange, for collectors that need RFC 9662.";
+        }
+      }
+    }
+  }
+  container login_policy {
+    description "Set the login lockout.";
+    leaf max_failures {
+      type uint8;
+      description "Set the failed logins that lock an account.";
+    }
+    leaf lockout_window_secs {
+      type uint32;
+      description "Set the lockout window in seconds.";
+    }
+  }
+  container aaa {
+    description "Configure login backends.";
+    list servers {
+      key "name";
+      description "Add a RADIUS server.";
+      leaf name {
+        type string;
+      }
+      leaf address {
+        type inet:ip-address;
+        description "Set a RADIUS server's address.";
+      }
+      leaf port {
+        type uint16;
+        description "Set a RADIUS server's UDP port.";
+      }
+      leaf accounting_port {
+        type uint16;
+        description "Set a RADIUS server's accounting UDP port.";
+      }
+      leaf routing_table {
+        type string;
+        description "Send RADIUS requests from inside a routing table's VRF.";
+      }
+      leaf secret_ref {
+        type string;
+        description "Name the admin key holding the shared secret.";
+      }
+      leaf timeout_secs {
+        type uint8;
+        description "Set the seconds to wait for one reply.";
+      }
+      leaf retries {
+        type uint8;
+        description "Set the extra attempts before the next server.";
+      }
+    }
+    leaf-list login_order {
+      type string;
+      description "Set the order login backends are tried in.";
+    }
+    leaf accounting {
+      type boolean;
+      description "Send RADIUS accounting.";
+    }
+    leaf role_attribute {
+      type enumeration {
+        enum "FilterId";
+        enum "Class";
+        enum "ReplyMessage";
+      }
+      description "Set the RADIUS attribute that carries the role.";
+    }
+  }
+  list users {
+    key "name";
+    description "Create or delete a local user.";
+    leaf name {
+      type string;
+    }
+    leaf password {
+      type string;
+      description "Set a local user's password.";
+    }
+    leaf role {
+      type enumeration {
+        enum "Admin";
+        enum "Operator";
+        enum "ReadOnly";
+      }
+      description "Set what a local user may do: admin, operator or read-only.";
+    }
+  }
+  list bfd_profiles {
+    key "name";
+    description "Create or delete a BFD profile.";
+    leaf name {
+      type string;
+    }
+    leaf min_tx_interval {
+      type uint32;
+      description "Set the desired minimum transmit interval.";
+    }
+    leaf min_rx_interval {
+      type uint32;
+      description "Set the required minimum receive interval.";
+    }
+    leaf detect_multiplier {
+      type uint8;
+      description "Set the detection multiplier.";
+    }
+    leaf passive {
+      type boolean;
+      description "Make the BFD role passive.";
+    }
+    leaf minimum_ttl {
+      type uint8;
+      description "Set the minimum accepted TTL.";
+    }
+    leaf shutdown {
+      type boolean;
+      description "Administratively shut down the profile's sessions.";
+    }
+    container auth {
+      description "Set BFD authentication.";
+      leaf key_id {
+        type uint8;
+        description "Set BFD authentication.";
+      }
+      leaf method {
+        type enumeration {
+          enum "SimplePassword";
+          enum "KeyedMd5";
+          enum "MeticulousMd5";
+          enum "KeyedSha1";
+          enum "MeticulousSha1";
+        }
+        description "Set BFD authentication.";
+      }
+      leaf key {
+        type string;
+        description "Set BFD authentication.";
+      }
+    }
+    leaf echo_mode {
+      type enumeration {
+        enum "Disabled";
+        enum "Affiliated";
+        enum "Unaffiliated";
+      }
+      description "Set the BFD Echo function mode.";
+    }
+    leaf echo_interval {
+      type uint32;
+      description "Set the BFD Echo interval.";
+    }
+    leaf padded_pdu_size {
+      type uint16;
+      description "Pad BFD Control packets to a size.";
+    }
+    leaf mode {
+      type enumeration {
+        enum "Async";
+        enum "Sbfd";
+      }
+      description "Choose classical or Seamless BFD.";
+    }
+    leaf sbfd_remote_discriminator {
+      type inet:ipv4-address;
+      description "Set the S-BFD discriminator to probe.";
+    }
+  }
+  container sbfd_reflector {
+    description "Answer Seamless BFD probes.";
+    leaf-list discriminators {
+      type inet:ipv4-address;
+      description "Add an S-BFD discriminator to answer for.";
+    }
+    leaf-list allow_from {
+      type inet:ip-prefix;
+      description "Only answer probes from these sources.";
+    }
+  }
+  container spanning_tree {
+    description "Configure spanning tree.";
+    leaf mode {
+      type enumeration {
+        enum "Rstp";
+        enum "Mstp";
+        enum "RapidPvst";
+        enum "Disabled";
+      }
+      description "Choose the spanning-tree protocol.";
+    }
+    leaf priority {
+      type uint16;
+      description "Set the bridge priority.";
+    }
+    leaf hello_time {
+      type uint8;
+      description "Set the hello time.";
+    }
+    leaf max_age {
+      type uint8;
+      description "Set the maximum age.";
+    }
+    leaf forward_delay {
+      type uint8;
+      description "Set the forward delay.";
+    }
+    leaf tx_hold_count {
+      type uint8;
+      description "Set the transmit hold count.";
+    }
+    leaf max_hops {
+      type uint8;
+      description "Set the MSTP hop budget.";
+    }
+    leaf force_version {
+      type enumeration {
+        enum "Stp";
+        enum "Rstp";
+      }
+      description "Force a protocol version.";
+    }
+    container region {
+      description "Set the MST region identity.";
+      leaf name {
+        type string;
+        description "Set the MST region identity.";
+      }
+      leaf revision {
+        type uint16;
+        description "Set the MST region identity.";
+      }
+    }
+    list mst_instances {
+      key "id";
+      description "Define an MST instance.";
+      leaf id {
+        type uint16;
+      }
+      leaf priority {
+        type uint16;
+        description "Set this bridge's priority in the instance.";
+      }
+    }
+  }
+  list stp_port_profiles {
+    key "name";
+    description "Create or delete a spanning-tree port profile.";
+    leaf name {
+      type string;
+    }
+    leaf edge_port {
+      type enumeration {
+        enum "Admin";
+        enum "Auto";
+        enum "Disabled";
+      }
+      description "Set the edge-port behaviour.";
+    }
+    leaf link_type {
+      type enumeration {
+        enum "Auto";
+        enum "PointToPoint";
+        enum "Shared";
+      }
+      description "Set the link type.";
+    }
+    leaf cost {
+      type uint32;
+      description "Set the port path cost.";
+    }
+    leaf priority {
+      type uint8;
+      description "Set the port priority.";
+    }
+    leaf bpdu_guard {
+      type boolean;
+      description "Shut the port when a BPDU arrives.";
+    }
+    leaf bpdu_guard_recovery {
+      type uint32;
+      description "Bring an err-disabled port back.";
+    }
+    leaf bpdu_filter {
+      type boolean;
+      description "Neither send nor process BPDUs.";
+    }
+    leaf root_guard {
+      type boolean;
+      description "Never become the root port.";
+    }
+    leaf loop_guard {
+      type boolean;
+      description "Block the port when BPDUs stop.";
+    }
+    leaf restricted_tcn {
+      type boolean;
+      description "Do not propagate topology changes from this port.";
+    }
+    list mst_instances {
+      key "id";
+      description "Tune the port in an MST instance.";
+      leaf id {
+        type uint16;
+      }
+      leaf cost {
+        type uint32;
+        description "Set the port cost in the instance.";
+      }
+      leaf priority {
+        type uint8;
+        description "Set the port priority in the instance.";
+      }
+    }
+  }
+  list acls {
+    key "name";
+    description "Create or delete an access list.";
+    leaf name {
+      type string;
+    }
+    leaf default_action {
+      type enumeration {
+        enum "Permit";
+        enum "Deny";
+      }
+      description "Set what happens when no rule matches.";
+    }
+    list rules {
+      key "name";
+      description "Add or edit a rule.";
+      leaf name {
+        type string;
+      }
+      leaf action {
+        type enumeration {
+          enum "Permit";
+          enum "Deny";
+        }
+        description "Set what the rule does.";
+      }
+      leaf protocol {
+        type string;
+        description "Match an IP protocol.";
+      }
+      leaf source {
+        type inet:ip-prefix;
+        description "Match the source prefix.";
+      }
+      leaf destination {
+        type inet:ip-prefix;
+        description "Match the destination prefix.";
+      }
+      leaf source_port {
+        type string;
+        description "Match the TCP/UDP source port.";
+      }
+      leaf destination_port {
+        type string;
+        description "Match the TCP/UDP destination port.";
+      }
+      leaf established {
+        type boolean;
+        description "Match TCP segments of an existing connection.";
+      }
+      leaf icmp_type {
+        type uint8;
+        description "Match the ICMP message type.";
+      }
+      leaf icmp_code {
+        type uint8;
+        description "Match the ICMP message code.";
+      }
+      leaf log {
+        type boolean;
+        description "Log the packets the rule matches.";
+      }
+    }
+  }
+  container admin {
+    description "The admin keystore: secrets other sections reference by label.";
+    list keys {
+      key "label";
+      description "Create or delete a labelled key.";
+      leaf label {
+        type string;
+      }
+      leaf secret {
+        type string;
+        description "Set a key's secret.";
+      }
+    }
+  }
+}

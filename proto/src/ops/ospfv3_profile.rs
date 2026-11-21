@@ -540,11 +540,14 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
@@ -555,6 +558,9 @@ mod tests {
             ranges: Vec::new(),
             area_type: crate::schema::OspfAreaType::Normal,
             stub_default_cost: None,
+            nssa_translate_always: false,
+            nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 

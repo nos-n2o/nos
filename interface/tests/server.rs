@@ -24,7 +24,7 @@ async fn sample_interfaces() -> Interfaces {
     let cfg = nos_proto::Config {
         interfaces: vec![
             nos_proto::Interface {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 name: "eth0".to_string(),
                 addresses: vec![],
                 routing_table: None,
@@ -43,7 +43,7 @@ async fn sample_interfaces() -> Interfaces {
                     acl_in: None,
                     acl_out: None,
                     flowspec: false,
-                    ospfv3_profile: None,
+                    ospfv3_profiles: Vec::new(),
                     bfd_unsolicited: None,
                     tag: 0,
                     addresses: vec![sample_address()],
@@ -53,7 +53,7 @@ async fn sample_interfaces() -> Interfaces {
                 ..Default::default()
             },
             nos_proto::Interface {
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 name: "eth1".to_string(),
                 addresses: vec![],
                 routing_table: None,

@@ -10,11 +10,10 @@ use std::sync::Arc;
 use ipnet::IpNet;
 use nos_proto::AddressFamily;
 
-use super::{BgpRib, FlowspecKey, VpnFlowCopy};
+use super::{BgpRib, FlowspecKey, VpnCopy, VpnFlowCopy};
 use crate::bmp::{monitor, Hub};
 use crate::evpn::EvpnNlri;
 use crate::message::UpdateMessage;
-use crate::vpn::VpnKey;
 
 /// The hub, when some station wants the post-policy stream: the one check a
 /// tap site makes (an atomic load), so an unmonitored RIB does no work.
@@ -29,7 +28,7 @@ pub(crate) enum BmpKey {
     Prefix(IpNet),
     Evpn(EvpnNlri),
     Flow(FlowspecKey),
-    Vpn(VpnKey<IpNet>),
+    Vpn(VpnCopy),
     VpnFlow(VpnFlowCopy),
 }
 
@@ -85,7 +84,8 @@ impl BgpRib {
         };
         out.extend(
             vpn.into_iter()
-                .flat_map(|t| t.keys().map(|k| BmpKey::Vpn(*k))),
+                .flat_map(super::vpn_out::copies)
+                .map(|(c, _)| BmpKey::Vpn(c)),
         );
         let vpn_flow = if post {
             self.vpn_flow_adj_rib_in.get(&peer)
@@ -149,10 +149,12 @@ impl BgpRib {
                     } else {
                         self.retained.vpn.get(&peer)
                     };
+                    let ap =
+                        add_path.contains(&(monitor::afi_of(k.0 .1), crate::message::SAFI_VPN));
                     out.extend(
                         table
-                            .and_then(|t| t.get(k))
-                            .map(|r| monitor::vpn_to_update(k, r)),
+                            .and_then(|t| t.get(&k.0)?.get(&k.1))
+                            .map(|r| monitor::vpn_to_update(k, r, ap)),
                     );
                 }
                 BmpKey::VpnFlow(k) => {

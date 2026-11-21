@@ -1,5 +1,5 @@
-# `vpn-add-path` (#1132): a scripted BGP speaker that sends two RFC 7911 paths
-# of one VPNv4 key (SAFI 128) and one id-less unicast route, so the wire bytes
+# `vpn-add-path` (#1132, #1133): a scripted BGP speaker that sends two RFC 7911
+# paths of one VPNv4 key (SAFI 128; path 1 carries RT 65000:1, path 2 RT 65000:2) and one id-less unicast route, so the wire bytes
 # (id before the length octet) are exact. Placeholders (@IP_A@ ...) are filled in by the phase.
 import socket, struct, threading, time
 
@@ -46,6 +46,7 @@ def update(attrs, nlri=b""):
 
 
 def vpn_path(path_id, label, withdraw=False):
+    rt_n = path_id  # path 1 -> RT 65000:1, path 2 -> RT 65000:2
     # vpnv4 10.10.0.0/24, RD 65001:1, RT 65000:1; the id precedes the length.
     nh = bytes(8) + socket.inet_aton(NEXT_HOP)
     field = bytes([0x80, 0, 0]) if withdraw else struct.pack("!I", (label << 4) | 1)[1:]
@@ -54,7 +55,7 @@ def vpn_path(path_id, label, withdraw=False):
     if withdraw:
         return update(attr(0x80, 15, struct.pack("!HB", 1, 128) + nlri))
     mp = struct.pack("!HBB", 1, 128, len(nh)) + nh + bytes([0]) + nlri
-    return update(base_attrs() + attr(0x80, 14, mp) + attr(0xC0, 16, rt(1)))
+    return update(base_attrs() + attr(0x80, 14, mp) + attr(0xC0, 16, rt(rt_n)))
 
 
 def unicast():

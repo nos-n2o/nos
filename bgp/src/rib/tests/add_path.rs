@@ -116,7 +116,7 @@ fn route_server_client_without_add_path_gets_only_ordinary_single_best() {
         | OutboundUpdate::AnnounceFlowspec(_)
         | OutboundUpdate::WithdrawFlowspec(..)
         | OutboundUpdate::AnnounceVpn(_)
-        | OutboundUpdate::WithdrawVpn(_)
+        | OutboundUpdate::WithdrawVpn(..)
         | OutboundUpdate::AnnounceRtc(_)
         | OutboundUpdate::WithdrawRtc(_)
         | OutboundUpdate::AnnounceVpnFlowspec(..)

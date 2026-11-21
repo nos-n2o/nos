@@ -41,6 +41,43 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 - Adding a secret-bearing field: extend `for_role` and the sentinel fixture in `redact.rs` (the test cannot notice a field missing from the fixture). Adding a role: classify it in `visible()` (exhaustive `match`).
 - The negative side (a foreign role sees no keys) is covered by `config/tests/ipc.rs`; the e2e harness only has user-role REST access, so the existing auth phases (`auth`, `ao`, `ospf-auth`, `ospfv3-auth`, `bfd-auth`) prove the allowed side.
 
+## W^X for daemons (#1210)
+
+- `nos-watchdogd` sets `PR_SET_MDWE` (`PR_MDWE_REFUSE_EXEC_GAIN`) on itself at start and fails to start without it; every supervised process inherits it, `nos-sshd` included. The watchdog is under it too (no JIT in it).
+- The kernel then refuses a writable+executable mapping and `mprotect` of a writable mapping to executable; inherited across fork and exec, never liftable by the daemon.
+- `nos-sshd`'s children (`sshd -i`, login shells) inherit it too: JIT-based tools (node, JVM, PyPy) fail in an ssh session. Accepted (owner decision, #1210).
+
+## Sandbox (#1211, part of #1186)
+
+- Every daemon but `nos-sshd` runs `NO_NEW_PRIVS`: the watchdog execs `nos-sandbox-exec` (crate `sandbox/`), which sets it and execs the daemon. Container-level `no-new-privileges` stays off: it would also strip the watchdog's own file capabilities.
+- The clip rule: under `NO_NEW_PRIVS` the exec'd file's permitted set is intersected with the caller's permitted set. So the trampoline holds, as file capabilities, the union of what daemons need (`cap_net_admin,cap_net_raw,cap_net_bind_service`; keep equal to the other `setcap` lines in the `Dockerfile`), reads the target's `security.capability` xattr and trims itself to exactly that before `NO_NEW_PRIVS` and `execv`. The daemon then gets its own file capabilities, identical to a direct exec (the `sandbox-nnp` phase asserts `CapEff` per daemon).
+- Exposure: any process can exec the trampoline, but under `NO_NEW_PRIVS` it gets only the target's xattr capabilities, never more than a direct exec of that target. Targets are confined to regular files directly in `/usr/local/bin` (canonicalised, so a symlink out is refused). It never execs unsandboxed: any error exits 126.
+- `nos-sshd` is exempt: it runs as root and `NO_NEW_PRIVS` would break its login `setuid`. A root-run daemon would also lose root's implicit capabilities under the clip rule: exempt it or give it xattr caps.
+
+### Seccomp deny-list (#1217)
+
+- Installed by the trampoline right after `NO_NEW_PRIVS`, before `execv` (inherited across the exec). Same list for every sandboxed daemon (`--profile` is not used yet); `nos-sshd` is exempt, with its children. Allow by default, `SECCOMP_RET_KILL_PROCESS` on a listed syscall. A per-daemon allowlist is a later step.
+- Built by `seccompiler` (`sandbox/src/seccomp.rs`), the only seccomp generator in the tree; no env or config switch.
+- Denied, since no daemon needs them:
+
+| Syscalls | Why |
+|---|---|
+| `ptrace`, `process_vm_readv/writev` | read or inject into another daemon's memory (mTLS keys live there) |
+| `personality` | `ADDR_NO_RANDOMIZE`, `READ_IMPLIES_EXEC` weaken ASLR/W^X |
+| `kexec_load`, `kexec_file_load`, `reboot` | replace or stop the kernel/host |
+| `init_module`, `finit_module`, `delete_module` | kernel code loading |
+| `mount`, `umount2`, `pivot_root`, `fsopen`, `fsmount`, `move_mount`, `open_tree`, `fsconfig`, `fspick`, `mount_setattr` | filesystem and mount namespace tampering |
+| `swapon`, `swapoff` | host-level |
+| `bpf`, `perf_event_open` | kernel attack surface, side channels (`nos-tc` uses netlink only) |
+| `keyctl`, `add_key`, `request_key` | kernel keyring, unused |
+| `userfaultfd` | kernel race exploitation primitive |
+| `open_by_handle_at` | container-escape primitive |
+
+- Kept allowed: `unshare`/`setns` (VRF/netns), `clone3` (tokio/glibc), `execve`.
+- Architectures: x86_64 and aarch64 only (anything else fails to compile). The program kills a foreign `AUDIT_ARCH` (i386 compat). On x86_64 the x32 ABI shares the x86_64 arch value and ORs `0x40000000` into the syscall number, which a name-based list would miss, so three BPF instructions kill any number with that bit first.
+- Diagnosing: a daemon using a denied syscall dies of `SIGSYS`; the watchdog logs `exited ... signal: 31` with `hint="seccomp deny-list violation (nos-sandbox)..."` and restarts it with backoff. If a daemon really needs one, exempt that daemon only and record why here; never widen the shared list silently.
+- Proof: the `sandbox-nnp` phase asserts `Seccomp_filters` = `nos-watchdogd`'s count + 1 per sandboxed daemon (+ 0 for `nos-sshd`; the baseline is Docker's own filter) and no SIGSYS in the log; `sandbox/tests/seccomp.rs` forks a child and checks `ptrace` is killed.
+
 ## uid model (#512, #513)
 
 - **Who runs as whom.** `nos-watchdogd` runs as `nos-wd` (uid 990); it starts each daemon as its role's own user `nos-<role>` (uids 10001+ in `Role` declaration order, table in `watchdog/src/uids.rs`: `role_uid`, an exhaustive `match`, so a new `Role` won't compile until it has a uid). The image's `ENTRYPOINT` passes `--child-gid` (group `nos`), which also turns per-role uids on; unset (tests, non-container runs) every child keeps the watchdog's uid. `nos` (uid 991) is the shared client user: the `nos` shell, `nos-provision`, `nos-e2e` execs. Everyone has primary group `nos`.

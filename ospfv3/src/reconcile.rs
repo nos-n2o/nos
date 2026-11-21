@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::interface_client;
-use crate::link::{LinkConfig, LinkManager, DEFAULT_HELPER_MAX_GRACE_PERIOD};
+use crate::link::{LinkConfig, LinkManager, VirtualLinkConfig, DEFAULT_HELPER_MAX_GRACE_PERIOD};
 use crate::link_client::{self, Gate, LinkTable};
 use crate::packet;
 use nos_daemon::config;
@@ -151,6 +151,13 @@ pub async fn run(
 
 /// RFC 3623 helper cap on a neighbor's grace period, seconds
 /// (`graceful-restart helper max-grace-period`, default 1800).
+/// Whether `instance` runs RFC 5838's IPv4-unicast address family.
+fn is_ipv4_af(cfg: &nos_proto::Config, instance: &str) -> bool {
+    cfg.ospfv3_instances.iter().any(|i| {
+        i.name == instance && i.address_family == nos_proto::Ospfv3AddressFamily::Ipv4Unicast
+    })
+}
+
 fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
     cfg.ospfv3_instances
         .iter()
@@ -297,6 +304,9 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            ipv4_af: is_ipv4_af(cfg, instance),
+            nssa: area.area_type.is_nssa(),
+            virtual_link: None,
         });
     }
 }
@@ -444,6 +454,9 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             instance_id: profile.instance_id.unwrap_or(0),
             helper_max_grace_period: helper_cap(cfg, instance),
             stub: area.area_type.is_stub(),
+            ipv4_af: is_ipv4_af(cfg, instance),
+            nssa: area.area_type.is_nssa(),
+            virtual_link: None,
         });
     }
 }
@@ -485,6 +498,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
+        extended_lsa_sparse = own.extended_lsa_sparse,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         graceful_restart_helper_max_grace_period = ?own.graceful_restart_helper_max_grace_period,
         max_metric_on_startup = ?own.max_metric_on_startup,
@@ -493,8 +507,14 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
-    links.set_extended_lsa(own.extended_lsa);
+    // RFC 8362 Sparse mode originates exactly the legacy set (the validator
+    // keeps it exclusive with Full mode), so only Full mode flips the flavor.
+    // ponytail: no E-LSA TLV generation: NOS has no TE/SR/multi-TLV content a
+    // legacy LSA cannot hold; add it when such a consumer exists. Received
+    // E-LSAs are already merged into SPF (`spf::merge_router_fragments`).
+    links.set_extended_lsa(own.extended_lsa && !own.extended_lsa_sparse);
     links.set_graceful_restart(own.graceful_restart_grace_period);
+    links.set_max_lsa(own.max_lsa);
     links.set_max_metric(
         own.max_metric_on_startup,
         own.max_metric_on_shutdown,
@@ -585,6 +605,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         desired_loopback_prefixes,
     } = wanted;
     links.set_bfd(bfd_wants);
+    links
+        .set_virtual_links(virtual_links(&own.areas, &cfg, instance))
+        .await;
     links.set_stub_areas(
         own.areas
             .iter()
@@ -596,6 +619,21 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                         a.area_type.import_summaries(),
                         u32::from(a.stub_default_cost.unwrap_or(1)),
                     ),
+                )
+            })
+            .collect(),
+    );
+    links.set_nssa_areas(
+        own.areas
+            .iter()
+            .filter(|a| a.area_type.is_nssa())
+            .map(|a| {
+                (
+                    a.area_id,
+                    crate::link::NssaSettings {
+                        translate_always: a.nssa_translate_always,
+                        default_originate: a.nssa_default_originate,
+                    },
                 )
             })
             .collect(),
@@ -895,17 +933,17 @@ fn resolve_redistribute_policy(
 fn attach_points_for(cfg: &nos_proto::Config, profile: &str) -> Vec<String> {
     let mut points = Vec::new();
     for iface in &cfg.interfaces {
-        if iface.ospfv3_profile.as_deref() == Some(profile) {
+        if iface.ospfv3_profiles.iter().any(|p| p == profile) {
             points.push(iface.name.clone());
         }
         for sub in &iface.subinterfaces {
-            if sub.ospfv3_profile.as_deref() == Some(profile) {
+            if sub.ospfv3_profiles.iter().any(|p| p == profile) {
                 points.push(format!("{}.{}", iface.name, sub.tag));
             }
         }
     }
     for domain in &cfg.broadcast_domains {
-        if domain.ospfv3_profile.as_deref() == Some(profile) {
+        if domain.ospfv3_profiles.iter().any(|p| p == profile) {
             points.push(format!("broadcast-domain:{}", domain.name));
         }
     }
@@ -934,7 +972,7 @@ fn subinterface_attach_points(
     let mut points = Vec::new();
     for iface in &cfg.interfaces {
         for sub in &iface.subinterfaces {
-            if sub.ospfv3_profile.as_deref() == Some(profile) {
+            if sub.ospfv3_profiles.iter().any(|p| p == profile) {
                 points.push(SubinterfaceAttachPoint {
                     interface: iface.name.clone(),
                     tag: sub.tag,
@@ -966,7 +1004,7 @@ fn broadcast_domain_attach_points(
 ) -> Vec<BroadcastDomainAttachPoint> {
     cfg.broadcast_domains
         .iter()
-        .filter(|d| d.ospfv3_profile.as_deref() == Some(profile))
+        .filter(|d| d.ospfv3_profiles.iter().any(|p| p == profile))
         .map(|d| BroadcastDomainAttachPoint {
             name: d.name.clone(),
             routing_table: d.routing_table.clone(),
@@ -984,7 +1022,7 @@ fn loopback_attach_points(cfg: &nos_proto::Config, profile: &str) -> Vec<Loopbac
         .iter()
         .filter(|i| {
             nos_proto::loopback_table_name(&i.name).is_some()
-                && i.ospfv3_profile.as_deref() == Some(profile)
+                && i.ospfv3_profiles.iter().any(|p| p == profile)
         })
         .map(|i| LoopbackAttachPoint {
             interface: i.name.clone(),
@@ -1037,6 +1075,38 @@ async fn resolve_local_address(
 
 const DEFAULT_OSPF_MTU: u16 = 1500;
 
+/// Every area's virtual links (the area is the transit area), with the
+/// Appendix C.3 defaults for unset timers. Fail closed like a profile: a
+/// link whose key label dangles (commit validation prevents it) is left out.
+fn virtual_links(
+    areas: &[nos_proto::Ospfv3Area],
+    cfg: &nos_proto::Config,
+    instance: &str,
+) -> Vec<VirtualLinkConfig> {
+    let mut out = Vec::new();
+    for a in areas {
+        for v in &a.virtual_links {
+            let auth = match resolve_keys(v.auth.as_deref(), cfg) {
+                Ok(a) => a,
+                Err(label) => {
+                    error!(instance = %instance, endpoint = %v.router_id, label = %label, "ospfv3 virtual link references an unknown admin key, not starting it");
+                    continue;
+                }
+            };
+            out.push(VirtualLinkConfig {
+                transit_area: a.area_id,
+                endpoint: v.router_id,
+                hello_interval: v
+                    .hello_interval
+                    .unwrap_or(nos_proto::HELLO_INTERVAL_DEFAULT),
+                dead_interval: v.dead_interval.unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT),
+                auth,
+            });
+        }
+    }
+    out
+}
+
 /// Translates `Ospfv3Profile.auth` into `packet::TrailerAuth` — mirrors
 /// `ospf::reconcile::resolve_auth`. `current_key_id` needs no fallback:
 /// commit-time validation guarantees exactly one `is_current` key, and no
@@ -1045,7 +1115,15 @@ fn resolve_auth(
     profile: &nos_proto::Ospfv3Profile,
     cfg: &nos_proto::Config,
 ) -> Result<Option<packet::TrailerAuth>, String> {
-    let Some(keys) = profile.auth.as_ref() else {
+    resolve_keys(profile.auth.as_deref(), cfg)
+}
+
+/// `resolve_auth` for any RFC 7166 key list (a virtual link's too).
+fn resolve_keys(
+    keys: Option<&[nos_proto::OspfCryptoKey]>,
+    cfg: &nos_proto::Config,
+) -> Result<Option<packet::TrailerAuth>, String> {
+    let Some(keys) = keys else {
         return Ok(None);
     };
     let mut resolved = Vec::new();
@@ -1169,7 +1247,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: ospfv3_profile.map(str::to_string),
+            ospfv3_profiles: ospfv3_profile.map(str::to_string).into_iter().collect(),
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,
@@ -1205,7 +1283,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: Some("p1".to_string()),
+            ospfv3_profiles: vec!["p1".to_string()],
             bfd_unsolicited: None,
         }];
         let cfg = Config {
@@ -1223,7 +1301,7 @@ mod tests {
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
-                ospfv3_profile: Some("p1".to_string()),
+                ospfv3_profiles: vec!["p1".to_string()],
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1262,7 +1340,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
-            ospfv3_profile: Some("p1".to_string()),
+            ospfv3_profiles: vec!["p1".to_string()],
             bfd_unsolicited: None,
         }];
         let cfg = Config {
@@ -1283,7 +1361,7 @@ mod tests {
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),
                 ospf_profile: None,
-                ospfv3_profile: Some("p1".to_string()),
+                ospfv3_profiles: vec!["p1".to_string()],
                 vni: None,
                 rd: None,
                 route_targets_import: Vec::new(),
@@ -1315,6 +1393,47 @@ mod tests {
         assert_eq!(points[0].interface, "loopback-rt1");
     }
 
+    /// The transit area is the area holding the link; unset timers take the
+    /// defaults, and a link whose key label dangles is left out.
+    #[test]
+    fn virtual_links_default_timers_and_fail_closed() {
+        let area = |keys| nos_proto::Ospfv3Area {
+            area_id: "0.0.0.1".parse().unwrap(),
+            virtual_links: vec![nos_proto::Ospfv3VirtualLink {
+                router_id: "3.3.3.3".parse().unwrap(),
+                hello_interval: None,
+                dead_interval: Some(60),
+                auth: keys,
+            }],
+            ..Default::default()
+        };
+        let cfg = Config::default();
+        let ok = virtual_links(&[area(None)], &cfg, "i");
+        assert_eq!(ok.len(), 1);
+        assert_eq!(
+            ok[0].transit_area,
+            "0.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(
+            (
+                ok[0].hello_interval,
+                ok[0].dead_interval,
+                ok[0].auth.is_none()
+            ),
+            (nos_proto::HELLO_INTERVAL_DEFAULT, 60, true)
+        );
+        let dangling = nos_proto::OspfCryptoKey {
+            key_id: 1,
+            algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+            key: "nope".into(),
+            is_current: true,
+        };
+        assert_eq!(
+            virtual_links(&[area(Some(vec![dangling]))], &cfg, "i"),
+            Vec::<VirtualLinkConfig>::new()
+        );
+    }
+
     fn running() -> LinkConfig {
         LinkConfig {
             attach_point: "eth0.0".into(),
@@ -1335,6 +1454,9 @@ mod tests {
             instance_id: 0,
             helper_max_grace_period: 1800,
             stub: false,
+            ipv4_af: false,
+            nssa: false,
+            virtual_link: None,
         }
     }
 
@@ -1436,7 +1558,7 @@ mod tests {
             addresses,
             routing_table: Some("rt1".into()),
             ospf_profile: None,
-            ospfv3_profile: Some("p1".into()),
+            ospfv3_profiles: vec!["p1".into()],
             bfd_unsolicited: None,
         };
         let mut iface = interface("eth0", None);

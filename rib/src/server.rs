@@ -16,8 +16,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::driver::RibDriver;
 use crate::evpn::EvpnState;
-use crate::reconcile::KernelGate;
-use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
+use crate::reconcile::{KernelGate, Pending};
+use crate::rib::{BestPathChange, OspfOwner, Rib, RibEntry, RouteSource};
 
 /// Shared, read-only context every connection dispatches against: the
 /// table's in-memory `Rib` (for `GetRoutes`/`Lookup`) and the driver
@@ -86,7 +86,8 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // the underlay table.
         // `logd` scopes a syslog collector's socket into its table's VRF.
         // `sshd` binds its listener inside the VRF; it never needs the table id.
-        RibRequest::GetVrfName => role == Role::Sshd || vrf_resolver(role),
+        // `watchdog` scopes a RADIUS server's socket into it (#1153).
+        RibRequest::GetVrfName => matches!(role, Role::Sshd | Role::Watchdog) || vrf_resolver(role),
         RibRequest::GetTableId => vrf_resolver(role),
         // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
         RibRequest::PushBgpRoutes(_)
@@ -95,7 +96,7 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         | RibRequest::BgpRouteCount => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
-        RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
+        RibRequest::PushOspfRoutes { .. } => matches!(role, Role::Ospfd | Role::Ospfv3d),
         // `ResolveNextHop`: `nos-bgpd` resolving its VPN PE next hops.
         RibRequest::IgpCosts | RibRequest::ResolveNextHop { .. } => {
             matches!(role, Role::User | Role::Restd | Role::Bgpd)
@@ -127,6 +128,15 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
+            Ok(RibRequest::PushOspfRoutes { instance, .. }) if instance != name => {
+                // A daemon pushes only as itself (identity `nos://ospfd/<name>`,
+                // name = instance), never as a sibling instance.
+                warn!(
+                    table = %ctx.table, role = role.as_str(), name = %name, instance = %instance,
+                    "RIB request refused: OSPF push for another instance"
+                );
+                break;
+            }
             Ok(req) if !allowed(role, &req) => {
                 warn!(
                     table = %ctx.table, role = role.as_str(), name = %name,
@@ -135,7 +145,7 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
                 break;
             }
             Ok(req) => match staging.absorb(&ctx.table, req) {
-                Some(req) => dispatch(&ctx, req).await,
+                Some(req) => dispatch(&ctx, role == Role::Ospfv3d, req).await,
                 None => None,
             },
             Err(e) => {
@@ -160,7 +170,8 @@ struct FullStaging {
     bgp: nos_proto::chunk::FullStaging<BgpRoute>,
     evpn: nos_proto::chunk::FullStaging<nos_proto::EvpnRoute>,
     vpn: nos_proto::chunk::FullStaging<VpnRoute>,
-    ospf: nos_proto::chunk::FullStaging<OspfRoute>,
+    /// Per pushing instance: one connection may carry several (#1277).
+    ospf: HashMap<String, nos_proto::chunk::FullStaging<OspfRoute>>,
 }
 
 impl FullStaging {
@@ -205,17 +216,19 @@ impl FullStaging {
                 }
                 return Some(RibRequest::PushVpnRoutes(out));
             }
-            RibRequest::PushOspfRoutes(updates) => {
+            RibRequest::PushOspfRoutes { instance, updates } => {
                 let mut out = Vec::with_capacity(updates.len());
+                let staging = self.ospf.entry(instance.clone()).or_default();
                 for update in updates {
                     match update {
-                        OspfRouteUpdate::FullPart(routes) => self.ospf.part(routes),
-                        OspfRouteUpdate::Full(routes) if self.ospf.is_staging() => {
-                            let (all, parts) = self.ospf.close(routes);
+                        OspfRouteUpdate::FullPart(routes) => staging.part(routes),
+                        OspfRouteUpdate::Full(routes) if staging.is_staging() => {
+                            let (all, parts) = staging.close(routes);
                             info!(
                                 table = %table,
                                 routes = all.len(),
                                 parts,
+                                instance = %instance,
                                 "assembled chunked ospf route snapshot"
                             );
                             out.push(OspfRouteUpdate::Full(all));
@@ -223,7 +236,10 @@ impl FullStaging {
                         update => out.push(update),
                     }
                 }
-                return Some(RibRequest::PushOspfRoutes(out));
+                return Some(RibRequest::PushOspfRoutes {
+                    instance,
+                    updates: out,
+                });
             }
             req => return Some(req),
         };
@@ -275,7 +291,7 @@ fn routes_page(rib: &Rib, after: Option<IpNet>, limit: u32, budget: usize) -> Ri
     RibEvent::RoutesPage { routes, next }
 }
 
-async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
+async fn dispatch(ctx: &Context, v3: bool, req: RibRequest) -> Option<RibEvent> {
     trace!(table = %ctx.table, request = ?req, "serving RIB query");
     match req {
         RibRequest::GetRoutes => Some(RibEvent::Error(
@@ -300,8 +316,9 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_bgp_route_update(ctx, updates).await;
             None
         }
-        RibRequest::PushOspfRoutes(updates) => {
-            apply_ospf_route_update(ctx, updates).await;
+        RibRequest::PushOspfRoutes { instance, updates } => {
+            let owner = OspfOwner::new(v3, instance);
+            apply_ospf_route_update(ctx, &owner, updates).await;
             None
         }
         RibRequest::IgpCosts => Some(RibEvent::IgpCosts(ctx.rib.read().await.igp_costs())),
@@ -409,7 +426,10 @@ async fn apply_vpn_route_update(ctx: &Context, updates: Vec<VpnRouteUpdate>) {
         let routes = guard.best_routes_for_kernel();
         drop(guard);
         let r = ctx.driver.apply(&ctx.table, &routes).await;
-        if ctx.kernel.source_done(&gate, RouteSource::Vpn) {
+        if ctx
+            .kernel
+            .source_done(&gate, &Pending::Source(RouteSource::Vpn))
+        {
             ctx.kernel
                 .release_hold(
                     &ctx.table,
@@ -456,7 +476,7 @@ pub(crate) async fn apply_evpn_route_update(
                 guard.refresh_evpn();
             }
             crate::reconcile::apply_to_kernel(table, rib, kernel, &gate, driver).await;
-            if kernel.source_done(&gate, RouteSource::Evpn) {
+            if kernel.source_done(&gate, &Pending::Source(RouteSource::Evpn)) {
                 kernel
                     .release_hold(table, rib, &gate, driver, "all sources re-pushed")
                     .await;
@@ -556,7 +576,10 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
             ctx.kernel.mark_dirty();
         }
-        if ctx.kernel.source_done(&gate, RouteSource::Bgp) {
+        if ctx
+            .kernel
+            .source_done(&gate, &Pending::Source(RouteSource::Bgp))
+        {
             ctx.kernel
                 .release_hold(
                     &ctx.table,
@@ -584,7 +607,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
 /// goes through the driver's full `apply`, `Add`/`Remove` recompute only the
 /// touched prefix's winner and `apply_delta` just that), since the two
 /// writers only ever touch disjoint `RouteSource` candidates.
-async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
+async fn apply_ospf_route_update(ctx: &Context, owner: &OspfOwner, updates: Vec<OspfRouteUpdate>) {
     let gate = ctx.kernel.lock().await;
     let mut guard = ctx.rib.write().await;
     let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
@@ -593,16 +616,20 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
     for update in updates {
         match update {
             OspfRouteUpdate::Full(routes) => {
-                guard.set_ospf_metrics(routes.iter().map(|r| (r.prefix, r.metric)));
-                guard.replace_source(RouteSource::Ospf, routes.into_iter().map(ospf_entry));
+                guard.replace_ospf(
+                    owner,
+                    routes.into_iter().map(|r| {
+                        let metric = r.metric;
+                        (ospf_entry(r), metric)
+                    }),
+                );
                 full_replace = true;
             }
             // Staged by `FullStaging::absorb` before dispatch.
             OspfRouteUpdate::FullPart(_) => {}
             OspfRouteUpdate::Add(r) => {
-                guard.set_ospf_metric(r.prefix, Some(r.metric));
-                let prefix = r.prefix;
-                match guard.upsert_and_diff(ospf_entry(r)) {
+                let (prefix, metric) = (r.prefix, r.metric);
+                match guard.upsert_ospf_and_diff(owner, ospf_entry(r), metric) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
                         deltas.insert(prefix, Some(e));
@@ -612,18 +639,15 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                     }
                 }
             }
-            OspfRouteUpdate::Remove(prefix) => {
-                guard.set_ospf_metric(prefix, None);
-                match guard.remove_and_diff(&prefix, RouteSource::Ospf) {
-                    BestPathChange::Unchanged => {}
-                    BestPathChange::Installed(e) => {
-                        deltas.insert(prefix, Some(e));
-                    }
-                    BestPathChange::Removed => {
-                        deltas.insert(prefix, None);
-                    }
+            OspfRouteUpdate::Remove(prefix) => match guard.remove_ospf_and_diff(owner, &prefix) {
+                BestPathChange::Unchanged => {}
+                BestPathChange::Installed(e) => {
+                    deltas.insert(prefix, Some(e));
                 }
-            }
+                BestPathChange::Removed => {
+                    deltas.insert(prefix, None);
+                }
+            },
         }
     }
 
@@ -635,7 +659,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
             error!(table = %ctx.table, error = %e, "failed to apply ospf-pushed routes to kernel");
             ctx.kernel.mark_dirty();
         }
-        if ctx.kernel.source_done(&gate, RouteSource::Ospf) {
+        if ctx.kernel.source_done(&gate, &Pending::Ospf(owner.clone())) {
             ctx.kernel
                 .release_hold(
                     &ctx.table,
@@ -880,7 +904,10 @@ mod authz_tests {
             assert_eq!(
                 allowed(
                     role,
-                    &RibRequest::PushOspfRoutes(vec![OspfRouteUpdate::FullPart(vec![])])
+                    &RibRequest::PushOspfRoutes {
+                        instance: String::new(),
+                        updates: vec![OspfRouteUpdate::FullPart(vec![])]
+                    }
                 ),
                 matches!(role, Role::Ospfd | Role::Ospfv3d)
             );
@@ -966,9 +993,19 @@ mod authz_tests {
             backup_tunnel: None,
             backup_interface_id: None,
         };
-        apply_ospf_route_update(&ctx, vec![OspfRouteUpdate::Add(o)]).await;
+        apply_ospf_route_update(
+            &ctx,
+            &OspfOwner::new(false, "o1"),
+            vec![OspfRouteUpdate::Add(o)],
+        )
+        .await;
         assert!(dirty(&ctx));
-        apply_ospf_route_update(&ctx, vec![OspfRouteUpdate::Full(vec![])]).await;
+        apply_ospf_route_update(
+            &ctx,
+            &OspfOwner::new(false, "o1"),
+            vec![OspfRouteUpdate::Full(vec![])],
+        )
+        .await;
         assert!(dirty(&ctx));
         apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Add(vpn_route("10.3.0.0/24", 1))]).await;
         assert!(dirty(&ctx));
@@ -1033,6 +1070,7 @@ mod authz_tests {
         apply_vpn_route_update(&ctx, vec![VpnRouteUpdate::Remove(a.prefix)]).await;
         let Some(RibEvent::RoutesPage { routes, next: None }) = dispatch(
             &ctx,
+            false,
             RibRequest::GetRoutesPage {
                 after: None,
                 limit: 0,
@@ -1051,6 +1089,7 @@ mod authz_tests {
         assert_eq!(c.vpn[0].rd, "65001:1");
         let Some(RibEvent::NextHops(hops)) = dispatch(
             &ctx,
+            false,
             RibRequest::ResolveNextHop {
                 addrs: vec!["10.2.0.1".parse().unwrap()],
             },
@@ -1063,7 +1102,7 @@ mod authz_tests {
         assert_eq!(hops, vec![None]);
         ctx.rib.write().await.vpn_label = Some(1000);
         assert!(matches!(
-            dispatch(&ctx, RibRequest::GetVpnLabel).await,
+            dispatch(&ctx, false, RibRequest::GetVpnLabel).await,
             Some(RibEvent::VpnLabel(Some(1000)))
         ));
     }
@@ -1132,7 +1171,7 @@ mod authz_tests {
             driver: Arc::new(crate::driver::NoopRibDriver::default()),
         };
         assert!(matches!(
-            dispatch(&ctx, RibRequest::GetRoutes).await,
+            dispatch(&ctx, false, RibRequest::GetRoutes).await,
             Some(RibEvent::Error(m)) if m.contains("GetRoutesPage")
         ));
     }
@@ -1164,10 +1203,12 @@ mod authz_tests {
             Role::Logd,
             Role::Bfdd,
             Role::Sshd,
+            Role::Watchdog,
         ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }
         assert!(!allowed(Role::Sshd, &RibRequest::GetTableId));
+        assert!(!allowed(Role::Watchdog, &RibRequest::GetTableId));
         assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));
     }
 

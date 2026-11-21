@@ -162,6 +162,15 @@ impl Stream {
             .map(|s| s.to_string())
     }
 
+    /// The role claim in the verified peer certificate (`Ca::sign_csr_claiming`).
+    pub fn peer_claim(&self) -> Option<String> {
+        let certs = match &self.0 {
+            TlsStream::Client(c) => c.get_ref().1.peer_certificates(),
+            TlsStream::Server(c) => c.get_ref().1.peer_certificates(),
+        };
+        PeerId::claim_from_cert_der(certs?.first()?)
+    }
+
     /// What the finished handshake settled on (version, key exchange, suite, peer key algorithm).
     pub fn negotiated(&self) -> Negotiated {
         let (kx, certs) = match &self.0 {

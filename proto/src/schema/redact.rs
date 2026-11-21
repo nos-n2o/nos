@@ -23,6 +23,8 @@ struct Visible {
     bfd: bool,
     /// The reserved `ssh-host-key` label (#1104).
     ssh_host_key: bool,
+    /// RADIUS shared secrets (`Aaa.servers[].secret_ref`), for the login broker.
+    aaa: bool,
 }
 
 fn visible(role: Role) -> Visible {
@@ -34,6 +36,7 @@ fn visible(role: Role) -> Visible {
         ospfv3: false,
         bfd: false,
         ssh_host_key: false,
+        aaa: false,
     };
     match role {
         Role::User | Role::Restd => Visible {
@@ -44,6 +47,7 @@ fn visible(role: Role) -> Visible {
         // Verifies logins, holds no protocol keys.
         Role::Watchdog => Visible {
             users: true,
+            aaa: true,
             ..none
         },
         Role::Bgpd => Visible {
@@ -179,6 +183,9 @@ impl Config {
                     .filter_map(|p| p.auth.as_ref().map(|a| a.key.clone())),
             );
         }
+        if v.aaa {
+            keep.extend(self.aaa.servers.iter().map(|s| s.secret_ref.clone()));
+        }
         if v.ssh_host_key {
             keep.insert(super::SSH_HOST_KEY_LABEL.to_string());
         }
@@ -196,7 +203,8 @@ mod tests {
         RpkiCache, User,
     };
 
-    const SENTINELS: [&str; 7] = [
+    const SENTINELS: [&str; 8] = [
+        "SECRET-radius",
         "SECRET-ssh-host-key",
         "SECRET-bgp",
         "SECRET-rpki",
@@ -222,9 +230,17 @@ mod tests {
         };
         let mut c = Config::default();
         c.hostname = "visible-host".into();
-        c.admin.keys = ["bgp", "rpki", "ospf2", "ospfv3", "bfd", "ssh-host-key"]
-            .map(key)
-            .to_vec();
+        c.admin.keys = [
+            "bgp",
+            "rpki",
+            "ospf2",
+            "ospfv3",
+            "bfd",
+            "ssh-host-key",
+            "radius",
+        ]
+        .map(key)
+        .to_vec();
         c.users = vec![User {
             name: "u".into(),
             password: "SECRET-user".into(),
@@ -276,6 +292,16 @@ mod tests {
             }],
             ..Default::default()
         }];
+        c.aaa.servers = vec![crate::schema::RadiusServer {
+            name: "r".into(),
+            address: "192.0.2.1".parse().unwrap(),
+            port: None,
+            accounting_port: None,
+            routing_table: None,
+            secret_ref: "radius".into(),
+            timeout_secs: None,
+            retries: None,
+        }];
         c.bfd_profiles = vec![BfdProfile {
             auth: Some(BfdAuth {
                 key: "bfd".into(),
@@ -297,7 +323,7 @@ mod tests {
         for role in Role::ALL {
             let want: Vec<&str> = match role {
                 Role::User | Role::Restd => SENTINELS.to_vec(),
-                Role::Watchdog => vec!["SECRET-user"],
+                Role::Watchdog => vec!["SECRET-radius", "SECRET-user"],
                 Role::Bgpd => vec!["SECRET-bgp", "SECRET-rpki", "SECRET-bfd"],
                 Role::Ospfd => vec!["SECRET-ospf2", "SECRET-bfd"],
                 Role::Ospfv3d => vec!["SECRET-ospfv3", "SECRET-bfd"],

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{Config, InterfaceAddress, Subinterface};
 
-use super::OpError;
+use super::{add_ospfv3_profile, remove_ospfv3_profile, OpError};
 
 /// An edit to a single `Subinterface` (keyed by `tag`) nested under a named
 /// `PortAggregate`, within a transaction's in-progress config — the
@@ -74,8 +74,8 @@ pub enum PortAggregateSubinterfaceOp {
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
-    /// Sets the `OSPFv3` profile of the port-aggregate subinterface to `ospfv3_profile`.
-    SetOspfv3Profile {
+    /// Idempotently attaches one more `OSPFv3` profile to the port-aggregate subinterface.
+    AddOspfv3Profile {
         /// Name of the port aggregate.
         port_aggregate: String,
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
@@ -83,12 +83,14 @@ pub enum PortAggregateSubinterfaceOp {
         /// Name of the `OSPFv3` profile to attach.
         ospfv3_profile: String,
     },
-    /// Clears the `OSPFv3` profile of the port-aggregate subinterface so it reverts to the default.
-    ClearOspfv3Profile {
+    /// Detaches one `OSPFv3` profile from the port-aggregate subinterface (error when not attached).
+    RemoveOspfv3Profile {
         /// Name of the port aggregate.
         port_aggregate: String,
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
+        /// Name of the `OSPFv3` profile to detach.
+        ospfv3_profile: String,
     },
     /// Overrides the MTU of the port-aggregate subinterface's VLAN sub-link.
     SetMtu {
@@ -191,20 +193,26 @@ impl PortAggregateSubinterfaceOp {
                 find_subinterface_mut(config, port_aggregate, *tag)?.ospf_profile = None;
                 Ok(())
             }
-            PortAggregateSubinterfaceOp::SetOspfv3Profile {
+            PortAggregateSubinterfaceOp::AddOspfv3Profile {
                 port_aggregate,
                 tag,
                 ospfv3_profile,
             } => {
-                ensure_subinterface_mut(config, port_aggregate, *tag)?.ospfv3_profile =
-                    Some(ospfv3_profile.clone());
+                add_ospfv3_profile(
+                    &mut ensure_subinterface_mut(config, port_aggregate, *tag)?.ospfv3_profiles,
+                    ospfv3_profile,
+                );
                 Ok(())
             }
-            PortAggregateSubinterfaceOp::ClearOspfv3Profile {
+            PortAggregateSubinterfaceOp::RemoveOspfv3Profile {
                 port_aggregate,
                 tag,
+                ospfv3_profile,
             } => {
-                find_subinterface_mut(config, port_aggregate, *tag)?.ospfv3_profile = None;
+                remove_ospfv3_profile(
+                    &mut find_subinterface_mut(config, port_aggregate, *tag)?.ospfv3_profiles,
+                    ospfv3_profile,
+                )?;
                 Ok(())
             }
             PortAggregateSubinterfaceOp::SetMtu {
@@ -286,7 +294,7 @@ fn ensure_subinterface_mut<'a>(
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
         });
     }
@@ -474,7 +482,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
         };
         let mut cfg = Config {
@@ -549,7 +557,7 @@ mod tests {
                     addresses: Vec::new(),
                     routing_table: None,
                     ospf_profile: None,
-                    ospfv3_profile: None,
+                    ospfv3_profiles: Vec::new(),
                     bfd_unsolicited: None,
                 }],
             )],

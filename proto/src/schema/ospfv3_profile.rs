@@ -91,7 +91,8 @@ pub struct Ospfv3Profile {
 
     /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send
     /// and accept: a received packet carrying any other value is dropped.
-    /// `None` means 0. Limited to 0-31, RFC 5838 §2.1's IPv6-unicast range.
+    /// `None` means 0. 0-31 (IPv6 unicast) or 64-95 (IPv4 unicast), RFC 5838 §2.1;
+    /// the owning instance's `address_family` decides which.
     #[garde(custom(|i: &Option<u8>, _ctx: &Config| valid_instance_id(*i)))]
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileInstanceId)]
@@ -109,14 +110,14 @@ pub struct Ospfv3Profile {
 
 fn valid_instance_id(id: Option<u8>) -> garde::Result {
     match id {
-        Some(i) if i > 31 => Err(garde::Error::new(
-            "instance-id must be between 0 and 31 (RFC 5838 IPv6 unicast)",
+        Some(i) if !(0..=31).contains(&i) && !(64..=95).contains(&i) => Err(garde::Error::new(
+            "instance-id must be 0-31 (IPv6 unicast) or 64-95 (IPv4 unicast), RFC 5838",
         )),
         _ => Ok(()),
     }
 }
 
-fn valid_auth(keys: Option<&[OspfCryptoKey]>, cfg: &Config) -> garde::Result {
+pub(crate) fn valid_auth(keys: Option<&[OspfCryptoKey]>, cfg: &Config) -> garde::Result {
     let Some(keys) = keys else { return Ok(()) };
     valid_crypto_keys(keys, cfg)?;
     if keys.iter().any(|k| k.algorithm == OspfCryptoAlgorithm::Md5) {
@@ -152,6 +153,9 @@ pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result 
     for p in profiles {
         if p.passive && (p.auth.is_some() || p.bfd.is_some()) {
             return Err(garde::Error::new("passive excludes auth and bfd"));
+        }
+        if p.passive && p.network_type == Some(NetworkType::Hybrid) {
+            return Err(garde::Error::new("passive excludes hybrid"));
         }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval)
             && dead <= hello
@@ -243,6 +247,9 @@ mod tests {
             ranges: Vec::new(),
             area_type: crate::schema::OspfAreaType::Normal,
             stub_default_cost: None,
+            nssa_translate_always: false,
+            nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 
@@ -254,11 +261,14 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
@@ -295,6 +305,72 @@ mod tests {
             auth: Some(vec![crypto_key(1, OspfCryptoAlgorithm::HmacSha256, true)]),
             ..passive()
         }));
+    }
+
+    #[test]
+    fn hybrid_excludes_passive() {
+        let mk = |passive| {
+            let p = Ospfv3Profile {
+                passive,
+                network_type: Some(NetworkType::Hybrid),
+                ..profile("p")
+            };
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(mk(false));
+        assert!(!mk(true));
+    }
+
+    /// RFC 6845 hybrid needs a broadcast attach point.
+    #[test]
+    fn hybrid_profile_may_not_attach_to_a_point_to_point_link() {
+        use crate::validators::ospfv3_profiles_point_to_point_valid as valid;
+        let mk = |nt| {
+            let p = Ospfv3Profile {
+                network_type: nt,
+                ..profile("p")
+            };
+            config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])])
+        };
+        let name = vec!["p".to_string()];
+        assert!(valid(&name, &mk(Some(NetworkType::Broadcast))).is_ok());
+        assert!(valid(&name, &mk(None)).is_ok());
+        assert!(valid(&[], &mk(Some(NetworkType::Hybrid))).is_ok());
+        let err = valid(&name, &mk(Some(NetworkType::Hybrid))).unwrap_err();
+        assert!(err.to_string().contains("broadcast domain"), "{err}");
+        assert!(valid(&["nope".to_string()], &mk(None)).is_err());
+    }
+
+    /// #1278: a list of profiles, one per instance, distinct instance IDs.
+    #[test]
+    fn profile_list_rules() {
+        use crate::validators::ospfv3_profiles_valid as valid;
+        let with_id = |n: &str, id: Option<u8>| Ospfv3Profile {
+            instance_id: id,
+            ..profile(n)
+        };
+        let cfg = config_with(vec![
+            instance(
+                "r1",
+                vec![area(
+                    "0.0.0.0",
+                    vec![with_id("a1", None), with_id("a2", Some(1))],
+                )],
+            ),
+            instance("r2", vec![area("0.0.0.0", vec![with_id("b1", Some(1))])]),
+            instance("r3", vec![area("0.0.0.0", vec![with_id("c1", Some(2))])]),
+        ]);
+        let v = |l: &[&str]| valid(&l.iter().map(ToString::to_string).collect::<Vec<_>>(), &cfg);
+        assert!(v(&[]).is_ok());
+        assert!(v(&["a1", "b1"]).is_ok(), "distinct instances and ids");
+        assert!(v(&["a1", "b1", "c1"]).is_ok());
+        assert!(v(&["nope"]).is_err(), "missing");
+        assert!(v(&["a1", "a1"]).is_err(), "duplicate");
+        let same_inst = v(&["a1", "a2"]).unwrap_err().to_string();
+        assert!(same_inst.contains("same instance"), "{same_inst}");
+        let same_id = v(&["a2", "b1"]).unwrap_err().to_string();
+        assert!(same_id.contains("instance-id"), "{same_id}");
     }
 
     #[test]
@@ -388,11 +464,32 @@ mod tests {
 
     #[test]
     fn instance_id_range() {
-        for (id, ok) in [(0, true), (31, true), (32, false)] {
+        use crate::schema::Ospfv3AddressFamily::{Ipv4Unicast, Ipv6Unicast};
+        // RFC 5838 §2.1: the id must lie in the instance's AF range; unset is 0.
+        let cases = [
+            (Ipv6Unicast, None, true),
+            (Ipv6Unicast, Some(0), true),
+            (Ipv6Unicast, Some(31), true),
+            (Ipv6Unicast, Some(32), false),
+            (Ipv6Unicast, Some(64), false),
+            (Ipv4Unicast, None, false),
+            (Ipv4Unicast, Some(0), false),
+            (Ipv4Unicast, Some(63), false),
+            (Ipv4Unicast, Some(64), true),
+            (Ipv4Unicast, Some(95), true),
+            (Ipv4Unicast, Some(96), false),
+        ];
+        for (af, id, ok) in cases {
             let mut p = profile("p1");
-            p.instance_id = Some(id);
-            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
-            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "instance-id {id}");
+            p.instance_id = id;
+            let mut i = instance("r1", vec![area("0.0.0.0", vec![p])]);
+            i.address_family = af;
+            let cfg = config_with(vec![i]);
+            assert_eq!(
+                cfg.validate_with(&cfg).is_ok(),
+                ok,
+                "{af:?} instance-id {id:?}"
+            );
         }
     }
 
@@ -402,6 +499,7 @@ mod tests {
             NetworkType::PointToPoint,
             NetworkType::Broadcast,
             NetworkType::PointToMultipoint,
+            NetworkType::Hybrid,
         ] {
             let mut p = profile("p1");
             p.network_type = Some(network_type);

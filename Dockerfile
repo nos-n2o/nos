@@ -3,7 +3,7 @@
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
 # versions in the slim images breaks on every security update.
-FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS builder
 WORKDIR /app
 
 # hadolint ignore=DL3008
@@ -22,7 +22,7 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos --bin nos-provision --bin nos-rtr-stub \
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos-sandbox-exec --bin nos --bin nos-provision --bin nos-rtr-stub --bin nos-radius-stub \
     && cargo build --release -p nos-pam -p nos-nss
 
 # trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
@@ -76,6 +76,7 @@ COPY --from=builder /app/target/release/nos-fdbd       /usr/local/bin/nos-fdbd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
 COPY --from=builder /app/target/release/nos-sshd       /usr/local/bin/nos-sshd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
+COPY --from=builder /app/target/release/nos-sandbox-exec /usr/local/bin/nos-sandbox-exec
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
 # and for operators who want to provision without the interactive shell.
@@ -109,6 +110,10 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # inside its routing table's VRF (see rest/CLAUDE.md).
 # nos-sshd has no file capabilities: it runs as root (uid 0) and drops its own
 # bounding set at startup (see ssh/CLAUDE.md).
+# nos-sandbox-exec (#1211) is the trampoline every daemon but nos-sshd is exec'd
+# through (NO_NEW_PRIVS): it must hold, in permitted, every capability any daemon
+# gets, so it carries the union of the lines above (keep them equal). It trims itself
+# to the target's own file capabilities before exec, so it grants nothing extra.
 # nos-watchdogd runs as `nos-wd` and needs CAP_SETUID/CAP_SETGID to start every
 # child as its role's user, and CAP_CHOWN to create their state directories; the
 # children's own file capabilities above are computed at their exec, so they
@@ -128,6 +133,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bfdd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-fdbd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-restd \
+    && setcap 'cap_net_admin,cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-sandbox-exec \
     && setcap 'cap_setuid,cap_setgid,cap_chown,cap_kill=ep' /usr/local/bin/nos-watchdogd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
@@ -188,6 +194,7 @@ ENTRYPOINT ["nos-watchdogd", "--child-gid", "991"]
 FROM runtime AS lab
 USER root
 COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-stub
+COPY --from=builder /app/target/release/nos-radius-stub /usr/local/bin/nos-radius-stub
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pamtester libcap2-bin \

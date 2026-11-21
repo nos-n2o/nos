@@ -1,3 +1,5 @@
+/// Login backends (`Aaa`): RADIUS servers and their order.
+pub mod aaa;
 /// Access lists (`Acl`): ordered permit/deny rules attached to interfaces.
 pub mod acl;
 /// The admin keystore (`Admin`): labelled secrets other sections reference.
@@ -61,6 +63,10 @@ pub mod switching_profile;
 /// Local login users (`User`) with argon2id password hashes.
 pub mod user;
 
+pub use aaa::{
+    Aaa, LoginBackend, RadiusServer, RoleAttribute, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT,
+    RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS,
+};
 pub use acl::{flowspec_points, Acl, AclAction, AclProtocol, AclRule, FlowspecPoint, PortRange};
 pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN, SSH_HOST_KEY_LABEL};
 pub use as_path_list::AsPathList;
@@ -94,8 +100,8 @@ pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,
     HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,
 };
-pub use ospfv3_area::{Ospfv3Area, Ospfv3AreaRange};
-pub use ospfv3_instance::Ospfv3Instance;
+pub use ospfv3_area::{Ospfv3Area, Ospfv3AreaRange, Ospfv3VirtualLink};
+pub use ospfv3_instance::{Ospfv3AddressFamily, Ospfv3Instance};
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
 pub use policy_symbols::PolicySymbols;
@@ -148,7 +154,10 @@ pub struct Config {
     /// `OSPFv2` speakers; each gets its own `nos-ospfd` process.
     pub ospf_instances: Vec<OspfInstance>,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|instances, _ctx: &Config| ospfv3_instance::valid_address_families(instances))
+    )]
     #[cli(topic = Ospfv3Instance, words = "ospfv3 instance")]
     /// `OSPFv3` speakers; each gets its own `nos-ospfv3d` process.
     pub ospfv3_instances: Vec<Ospfv3Instance>,
@@ -238,6 +247,13 @@ pub struct Config {
     #[garde(dive)]
     #[cli(topic = LoginPolicy, words = "login-policy")]
     pub login_policy: LoginPolicy,
+
+    /// Login backends (RADIUS) and their order. `serde(default)` so on-disk
+    /// config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = Aaa)]
+    pub aaa: Aaa,
 
     /// Local users allowed to log in. `serde(default)` so on-disk config saved
     /// before this field existed still loads (`nos-configd` then seeds `admin`).
@@ -340,6 +356,7 @@ impl Default for Config {
             lldp: LldpSettings::default(),
             logging: LoggingSettings::default(),
             login_policy: LoginPolicy::default(),
+            aaa: Aaa::default(),
             users: Vec::new(),
             bfd_profiles: Vec::new(),
             sbfd_reflector: SbfdReflector::default(),

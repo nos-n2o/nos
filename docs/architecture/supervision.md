@@ -41,6 +41,12 @@ In every family's pass-through flags (`--bgpd-arg`, `--restd-arg`, `--sshd-arg`,
 
 **User ids** (#512, #513): `nos-watchdogd` runs as `nos-wd`; `supervise_one` starts each child with `ProcessSpec.uid`, the role's own uid (`ProcessSpec::with_role_uid`, from `--child-gid` in the image) after creating `/var/lib/nos/<role>` and logs `uid=`/`gid=` in its `starting` line. The ids switch before exec, so the children's file capabilities are unaffected. See "uid model" in [IPC security](ipc-security.md).
 
+**Sandbox trampoline** (#1211): every child but `nos-sshd` is exec'd through `nos-sandbox-exec` (`--sandbox-exec`, default `/usr/local/bin/nos-sandbox-exec`; a path override, not an off switch).
+- Spawn path: watchdog, uid switch, `nos-sandbox-exec --profile <role> -- <daemon> <args...>`, daemon. No fork: the pid is the daemon's, so wait, SIGINT and the heartbeat address it directly.
+- `ProcessSpec::with_sandbox` (after `with_identity`) sets it; the `Role::Sshd` exemption lives there. `command_line()` builds the exec'd program and arguments.
+- Fail closed: a missing or refusing trampoline is a failed spawn (the usual backoff), never an unsandboxed daemon. MDWE (#1210) is inherited through both execs. The trampoline also installs the seccomp deny-list after `NO_NEW_PRIVS`; a daemon killed by it exits `SIGSYS` and the `exited` line carries a `hint`.
+- The `starting` line logs `sandbox=<path|none>` next to `program=`. A `dev-args` build has `--no-sandbox` (the unprivileged system test runs daemons from a target dir, outside `/usr/local/bin`). See "Sandbox" in [IPC security](ipc-security.md).
+
 - Per-process env (#756): `ProcessSpec.env`/`with_env` is applied after the scrubbed `CHILD_ENV` allowlist, so a child gets extra variables only when its spec asks; only `nos-logd` (#756) and `nos-configd` (#776) use it, both for `MALLOC_ARENA_MAX=1`; `nos-configd` also gets `MALLOC_TRIM_THRESHOLD_=131072` and `MALLOC_TOP_PAD_=0` (#796). `nos-restd` does not: the #766 measurements showed its RSS unchanged by it.
 
 **Liveness** (#1150): a hung daemon (deadlock, blocked runtime) is restarted, not only a dead one.
@@ -49,3 +55,5 @@ In every family's pass-through flags (`--bgpd-arg`, `--restd-arg`, `--sshd-arg`,
 - A child that never beats (`nos-sshd`, a daemon still starting) is exempt; each spawn forgets the previous beat.
 - Debugging a daemon under a debugger: start a `dev-args` build of `nos-watchdogd` with `--no-heartbeat-kill` (the flag is absent from a release build, #1214).
 - Only the runtime is observed; one wedged sub-task in a live runtime is not (see the `ponytail:` note in `daemon/src/liveness.rs`).
+
+Spawn hardening (#1210): `nos-watchdogd` sets `PR_SET_MDWE` (`REFUSE_EXEC_GAIN`: no W+X mapping, no W-to-X `mprotect`) on itself once at start, before anything else, and checks it with `PR_GET_MDWE`. The setting is irrevocable and inherited across fork and exec, so every supervised child has it with no `pre_exec` hook (the spawn path stays `posix_spawn`). It fails closed: on a kernel older than 6.3 (`EINVAL`) the watchdog exits at start with "PR_SET_MDWE failed: nos-watchdogd needs Linux >= 6.3" and nothing runs. The host kernel must be >= 6.3 (container hosts too: the kernel is shared; `e2e-preflight.sh` checks). Each spawn logs `spawned process=<name> pid=<n> mdwe=<bool>`; the value is the watchdog's own `PR_GET_MDWE` (the one the child inherits; a child's state is not readable from outside), and is `true` whenever the watchdog is running. See "W^X for daemons" in IPC security.

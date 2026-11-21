@@ -47,7 +47,9 @@ services:
     # Do NOT set `security_opt: [no-new-privileges:true]`: the kernel then
     # ignores file capabilities on exec, so every setcap binary (ribd,
     # interfaced, bgpd, ...) loses its capabilities, nos-watchdogd's
-    # cap_setuid/cap_setgid/cap_chown included. `kernel.yama.ptrace_scope=2` is a host
+    # cap_setuid/cap_setgid/cap_chown included. The daemons set NO_NEW_PRIVS on
+    # themselves through `nos-sandbox-exec` (#1211), which keeps their file caps.
+    # `kernel.yama.ptrace_scope=2` is a host
     # sysctl (not settable here); see docs/architecture/ipc-security.md.
     volumes:
       - nos-run:/run/nos

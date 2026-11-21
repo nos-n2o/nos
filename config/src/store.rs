@@ -340,7 +340,13 @@ impl ConfigStore {
     /// Fails closed: a user the config no longer has is read-only. A config
     /// with no users at all (never the case on a running system: one is
     /// seeded and the last cannot be removed) has no roles to apply.
-    pub async fn user_role(&self, name: &str) -> nos_proto::UserRole {
+    /// `claim` is the role an external backend (RADIUS) put in the caller's
+    /// certificate; it applies only to a name the config has no entry for.
+    pub async fn user_role(
+        &self,
+        name: &str,
+        claim: Option<nos_proto::UserRole>,
+    ) -> nos_proto::UserRole {
         let r = self.0.running.read().await;
         if r.users.is_empty() {
             return nos_proto::UserRole::Admin;
@@ -348,7 +354,7 @@ impl ConfigStore {
         r.users
             .iter()
             .find(|u| u.name == name)
-            .map_or(nos_proto::UserRole::ReadOnly, |u| u.role)
+            .map_or(claim.unwrap_or(nos_proto::UserRole::ReadOnly), |u| u.role)
     }
 
     /// BGP instance names of the running config (no config clone, #759).
@@ -1827,7 +1833,7 @@ mod tests {
                     ssh_server: None,
                     evpn: nos_proto::RoutingTableEvpn::default(),
                     vpn: nos_proto::RoutingTableVpn::default(),
-                    ospfv3_instance: None,
+                    ospfv3_instances: Vec::new(),
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
                     ospf_instance: None,
@@ -2776,8 +2782,26 @@ mod tests {
         let store = ConfigStore::new(Config::default(), None);
         commit_password(&store, "t1", "alice", "pw").await;
         commit_password(&store, "t2", "bob", "pw").await;
-        assert_eq!(store.user_role("alice").await, Admin);
-        assert_eq!(store.user_role("nobody").await, ReadOnly, "fails closed");
+        assert_eq!(store.user_role("alice", None).await, Admin);
+        assert_eq!(
+            store.user_role("nobody", None).await,
+            ReadOnly,
+            "fails closed"
+        );
+        assert_eq!(
+            store
+                .user_role("radius-bob", Some(nos_proto::UserRole::Operator))
+                .await,
+            nos_proto::UserRole::Operator,
+            "an external claim covers a name the config lacks"
+        );
+        assert_eq!(
+            store
+                .user_role("alice", Some(nos_proto::UserRole::ReadOnly))
+                .await,
+            Admin,
+            "a local entry wins over a claim"
+        );
         let demote = |who: &'static str| {
             let store = store.clone();
             async move {
@@ -2796,8 +2820,8 @@ mod tests {
         };
         demote("alice").await.unwrap();
         assert!(matches!(demote("bob").await, Err(ConfigError::NoAdminLeft)));
-        assert_eq!(store.user_role("alice").await, ReadOnly);
-        assert_eq!(store.user_role("bob").await, Admin);
+        assert_eq!(store.user_role("alice", None).await, ReadOnly);
+        assert_eq!(store.user_role("bob", None).await, Admin);
     }
 
     #[tokio::test]

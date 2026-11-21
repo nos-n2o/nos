@@ -768,7 +768,7 @@ mod tests {
             }],
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
-            ospfv3_profile: None,
+            ospfv3_profiles: Vec::new(),
             bfd_unsolicited: None,
         }];
         let mut cfg = config_with(vec![agg]);
@@ -777,7 +777,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -804,7 +804,7 @@ mod tests {
                 }],
                 routing_table: None,
                 ospf_profile: None,
-                ospfv3_profile: None,
+                ospfv3_profiles: Vec::new(),
                 bfd_unsolicited: None,
             }];
         }

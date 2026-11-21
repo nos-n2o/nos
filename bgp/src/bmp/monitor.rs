@@ -17,8 +17,8 @@ use crate::message::{
     BgpCodec, BgpMessage, MpReachNlri, MpUnreachNlri, PathAttributes, Pmsi, UpdateMessage,
     AFI_IPV4, AFI_IPV6, AFI_L2VPN, SAFI_EVPN, SAFI_VPN,
 };
-use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, VpnFlowCopy, VpnRoute};
-use crate::vpn::{VpnKey, VpnNlri};
+use crate::rib::{EvpnRoute, FlowspecKey, FlowspecRoute, RibRoute, VpnCopy, VpnFlowCopy, VpnRoute};
+use crate::vpn::VpnNlri;
 
 const TYPE_ROUTE_MONITORING: u8 = 0;
 /// A BGP PDU's length field sits after the 16-byte marker.
@@ -193,7 +193,8 @@ pub fn vpn_flowspec_withdraw_to_update((k, id): &VpnFlowCopy) -> UpdateMessage {
 }
 
 /// The UPDATE announcing a stored VPN path (labels, RD and PE next hop kept).
-pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
+/// `add_path` writes the path id (the session negotiated it for this AFI).
+pub fn vpn_to_update((k, id): &VpnCopy, r: &VpnRoute, add_path: bool) -> UpdateMessage {
     let unspecified = match k.1 {
         IpNet::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         IpNet::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
@@ -204,7 +205,7 @@ pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
         r.route.next_hop.unwrap_or(unspecified),
     );
     mp.vpn = vec![VpnNlri {
-        path_id: None,
+        path_id: add_path.then_some(*id),
         labels: r.labels.clone(),
         rd: k.0,
         prefix: k.1,
@@ -217,10 +218,10 @@ pub fn vpn_to_update(k: &VpnKey<IpNet>, r: &VpnRoute) -> UpdateMessage {
 }
 
 /// The UPDATE withdrawing a VPN path.
-pub fn vpn_withdraw_to_update(k: &VpnKey<IpNet>) -> UpdateMessage {
+pub fn vpn_withdraw_to_update((k, id): &VpnCopy, add_path: bool) -> UpdateMessage {
     let mut mp = unreach(afi_of(k.1), SAFI_VPN);
     mp.vpn = vec![VpnNlri {
-        path_id: None,
+        path_id: add_path.then_some(*id),
         labels: Vec::new(),
         rd: k.0,
         prefix: k.1,
@@ -728,7 +729,7 @@ mod tests {
                 labels: vec![100],
                 route: route(Some(hop)),
             };
-            let got = back(&vpn_to_update(&(rd, prefix), &r));
+            let got = back(&vpn_to_update(&((rd, prefix), 0), &r, false));
             assert_eq!(
                 got.mp_reach[0].vpn,
                 vec![VpnNlri {
@@ -741,8 +742,17 @@ mod tests {
             assert_eq!(got.mp_reach[0].next_hop, hop.parse::<IpAddr>().unwrap());
             let a = got.attributes.unwrap();
             assert_eq!((a.local_pref, a.med), (Some(150), Some(7)));
-            let w = back(&vpn_withdraw_to_update(&(rd, prefix)));
+            let w = back(&vpn_withdraw_to_update(&((rd, prefix), 0), false));
             assert_eq!(w.mp_unreach[0].vpn[0].prefix, prefix);
+            // A session with Add-Path for the family carries the id (#1133).
+            assert_eq!(
+                vpn_to_update(&((rd, prefix), 7), &r, true).mp_reach[0].vpn[0].path_id,
+                Some(7)
+            );
+            assert_eq!(
+                vpn_withdraw_to_update(&((rd, prefix), 7), true).mp_unreach[0].vpn[0].path_id,
+                Some(7)
+            );
         }
     }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -36,6 +36,9 @@ pub struct ProcessSpec {
     /// Extra variables for this child only, applied after the scrubbed
     /// `CHILD_ENV` allowlist (which stays untouched for everyone else).
     pub env: Vec<(String, String)>,
+    /// `Some(path)`: the child is exec'd through `nos-sandbox-exec` at `path`
+    /// (`NO_NEW_PRIVS`, #1211). `None` only for tests and the sshd exemption.
+    pub sandbox: Option<PathBuf>,
 }
 
 /// Which certificate a child is issued: `nos://<role>/<name>`.
@@ -61,7 +64,39 @@ impl ProcessSpec {
             identity: None,
             uid: None,
             env: Vec::new(),
+            sandbox: None,
         }
+    }
+
+    /// Routes the child through the `nos-sandbox-exec` trampoline at `exec`
+    /// (`None`: no trampoline, for tests). A no-op for `Role::Sshd`: it runs as
+    /// root and `NO_NEW_PRIVS` would break its login `setuid`. Call after
+    /// `with_identity`, like `with_role_uid`.
+    #[must_use]
+    pub fn with_sandbox(mut self, exec: Option<&Path>) -> Self {
+        let sshd = self.identity.as_ref().is_some_and(|i| i.role == Role::Sshd);
+        self.sandbox = exec.filter(|_| !sshd).map(Path::to_path_buf);
+        self
+    }
+
+    /// The program and argument vector actually exec'd: the daemon itself, or
+    /// the trampoline followed by `--profile <role> -- <daemon> <args...>`.
+    #[must_use]
+    pub fn command_line(&self) -> (PathBuf, Vec<String>) {
+        let Some(exec) = &self.sandbox else {
+            return (self.program.clone(), self.args.clone());
+        };
+        let profile = self
+            .identity
+            .as_ref()
+            .map_or("none", |i| i.role.as_str())
+            .to_string();
+        let args = ["--profile".to_string(), profile, "--".to_string()]
+            .into_iter()
+            .chain([self.program.display().to_string()])
+            .chain(self.args.iter().cloned())
+            .collect();
+        (exec.clone(), args)
     }
 
     /// Adds one environment variable to this child (on top of the allowlist).
@@ -154,6 +189,49 @@ fn allowed_env(
         .collect()
 }
 
+// Linux `include/uapi/linux/prctl.h` (6.3); newer than the `libc` release pinned.
+const PR_SET_MDWE: libc::c_int = 65;
+const PR_GET_MDWE: libc::c_int = 66;
+const PR_MDWE_REFUSE_EXEC_GAIN: libc::c_ulong = 1;
+
+/// `PR_GET_MDWE` of this process: is `REFUSE_EXEC_GAIN` set? Children inherit
+/// it across fork and exec, so this is also their state.
+pub fn mdwe_active() -> bool {
+    // SAFETY: a prctl read with integer arguments.
+    #[allow(unsafe_code, reason = "one prctl read, integer args only (#1210)")]
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- integer-arg prctl
+    let got = unsafe { libc::prctl(PR_GET_MDWE, 0, 0, 0, 0) };
+    got >= 0 && got & 1 != 0 // 1 = PR_MDWE_REFUSE_EXEC_GAIN
+}
+
+/// Memory-Deny-Write-Execute for this process (#1210): no W+X mapping, no
+/// `mprotect` to X of a writable one. Irrevocable and inherited by every child
+/// across fork and exec (so the spawn path stays `posix_spawn`, no `pre_exec`).
+/// Called once at watchdog start; fails on kernels < 6.3 (`EINVAL`), and the
+/// watchdog then refuses to start: nothing may run without it.
+pub fn enable_mdwe() -> std::io::Result<()> {
+    // SAFETY: a prctl syscall with integer arguments.
+    #[allow(unsafe_code, reason = "one prctl syscall, integer args only (#1210)")]
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- integer-arg prctl
+    let set = unsafe { libc::prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) };
+    if set != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if !mdwe_active() {
+        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(())
+}
+
+/// Extra `exited` field when the child died of `SIGSYS`: that is `nos-sandbox`'s seccomp
+/// deny-list killing a daemon that called a denied syscall (#1217).
+fn sigsys_hint(status: std::process::ExitStatus) -> Option<&'static str> {
+    use std::os::unix::process::ExitStatusExt;
+    (status.signal() == Some(libc::SIGSYS)).then_some(
+        "seccomp deny-list violation (nos-sandbox); see docs/architecture/ipc-security.md",
+    )
+}
+
 /// Consecutive rapid crashes at which (and every 10th after) an alarm is logged.
 const CRASH_LOOP_ALARM: u32 = 5;
 
@@ -175,6 +253,7 @@ pub async fn supervise_one(
         info!(
             process = %spec.name,
             program = %spec.program.display(),
+            sandbox = %spec.sandbox.as_ref().map_or("none".into(), |p| p.display().to_string()),
             uid = spec.uid.map(|i| i.0),
             gid = spec.uid.map(|i| i.1),
             env = %spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","),
@@ -182,8 +261,9 @@ pub async fn supervise_one(
         );
         let start = Instant::now();
 
-        let mut command = Command::new(&spec.program);
-        command.args(&spec.args);
+        let (program, args) = spec.command_line();
+        let mut command = Command::new(program);
+        command.args(args);
         command.env_clear().envs(allowed_env(std::env::vars_os()));
         command.envs(spec.env.iter().cloned());
         if let Some((uid, gid)) = spec.uid {
@@ -193,7 +273,11 @@ pub async fn supervise_one(
             command.stdin(Stdio::piped());
         }
         let mut child = match command.spawn() {
-            Ok(child) => child,
+            Ok(child) => {
+                // The child inherits our MDWE (set once at start, irrevocable).
+                info!(process = %spec.name, pid = child.id(), mdwe = mdwe_active(), "spawned");
+                child
+            }
             Err(e) => {
                 error!(process = %spec.name, error = %e, "failed to spawn");
                 if wait_or_shutdown(delay, &mut shutdown).await {
@@ -224,7 +308,7 @@ pub async fn supervise_one(
             tokio::select! {
                 status = child.wait() => {
                     match status {
-                        Ok(status) => warn!(process = %spec.name, %status, "exited"),
+                        Ok(status) => warn!(process = %spec.name, %status, hint = sigsys_hint(status), "exited"),
                         Err(e) => error!(process = %spec.name, error = %e, "wait() failed"),
                     }
                     break true;
@@ -494,6 +578,149 @@ mod backoff_tests {
         assert_eq!(bare.with_role_uid(Some(992)).uid, None);
     }
 
+    #[test]
+    fn sandbox_wraps_the_command_line_except_for_sshd() {
+        let pki = Pki::start(
+            tempfile::tempdir().unwrap().path(),
+            Duration::from_secs(60),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let exec = PathBuf::from("/usr/local/bin/nos-sandbox-exec");
+        let spec = |role| {
+            ProcessSpec::new(
+                "x",
+                "/usr/local/bin/nos-ribd",
+                vec!["--a".into(), "b".into()],
+            )
+            .with_identity(pki.clone(), role, "t")
+        };
+        // Off: the daemon itself.
+        let plain = spec(Role::Ribd).with_sandbox(None);
+        assert_eq!(plain.sandbox, None);
+        assert_eq!(
+            plain.command_line(),
+            (
+                "/usr/local/bin/nos-ribd".into(),
+                vec!["--a".into(), "b".into()]
+            )
+        );
+        // On: trampoline, profile, separator, daemon, its args in order.
+        let s = spec(Role::Ribd).with_sandbox(Some(&exec));
+        let (prog, args) = s.command_line();
+        assert_eq!(prog, exec);
+        assert_eq!(
+            args,
+            [
+                "--profile",
+                "ribd",
+                "--",
+                "/usr/local/bin/nos-ribd",
+                "--a",
+                "b"
+            ]
+        );
+        // sshd is exempt.
+        assert_eq!(spec(Role::Sshd).with_sandbox(Some(&exec)).sandbox, None);
+    }
+
+    #[allow(unsafe_code, reason = "raw mmap/mprotect probe (#1210)")]
+    fn assert_wx_refused() {
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only mmap probe
+        let map = |prot| unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        let rwx = map(libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+        assert_eq!(rwx, libc::MAP_FAILED, "RWX mapping must be refused");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let w = map(libc::PROT_READ | libc::PROT_WRITE);
+        assert_ne!(w, libc::MAP_FAILED);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- test-only mprotect probe
+        let r = unsafe { libc::mprotect(w, 4096, libc::PROT_READ | libc::PROT_EXEC) };
+        assert_eq!(r, -1, "W then X must be refused");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
+    /// Re-runs this test binary on one `--exact` test with `env` set.
+    #[allow(
+        clippy::disallowed_types,
+        reason = "runs the test binary itself (#228)"
+    )]
+    fn rerun(test: &str, env: &str) -> std::process::Output {
+        // nosemgrep: rust.lang.security.current-exe.current-exe -- test re-execs itself, nothing security-relevant
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(env, "1")
+            .output()
+            .unwrap()
+    }
+
+    fn mdwe_supported() -> bool {
+        let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
+        let mut it = rel.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
+        let ok = (it.next().unwrap_or(0), it.next().unwrap_or(0)) >= (6, 3);
+        if !ok {
+            eprintln!("kernel {rel} < 6.3: skipping");
+        }
+        ok
+    }
+
+    /// Process side of `enable_mdwe_refuses_wx_and_children_inherit_it`: a
+    /// no-op unless re-run by it (`enable_mdwe` is irrevocable, so it must not
+    /// run in the shared test process).
+    #[test]
+    fn mdwe_probe() {
+        if std::env::var_os("NOS_MDWE_PROBE").is_none() {
+            return;
+        }
+        assert!(!mdwe_active());
+        enable_mdwe().unwrap();
+        assert!(mdwe_active());
+        assert_wx_refused();
+        let out = rerun("backoff_tests::mdwe_grandchild", "NOS_MDWE_GRANDCHILD");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Grandchild: spawned by the probe after `enable_mdwe`, never calls it.
+    #[test]
+    fn mdwe_grandchild() {
+        if std::env::var_os("NOS_MDWE_GRANDCHILD").is_some() {
+            assert!(mdwe_active());
+            assert_wx_refused();
+        }
+    }
+
+    #[test]
+    fn enable_mdwe_refuses_wx_and_children_inherit_it() {
+        if !mdwe_supported() {
+            return;
+        }
+        let out = rerun("backoff_tests::mdwe_probe", "NOS_MDWE_PROBE");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// A child spawned with our own uid/gid still runs (an unprivileged
     /// `setuid` to oneself is allowed), and the `starting` path takes it.
     #[tokio::test]
@@ -610,5 +837,16 @@ mod backoff_tests {
         );
         let (without, out) = spec("without");
         assert_eq!(seen(without, &out).await, "x");
+    }
+
+    #[test]
+    fn sigsys_gets_the_seccomp_hint_only() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::ExitStatus;
+        assert!(
+            sigsys_hint(ExitStatus::from_raw(libc::SIGSYS)).is_some_and(|h| h.contains("seccomp"))
+        );
+        assert_eq!(sigsys_hint(ExitStatus::from_raw(libc::SIGKILL)), None);
+        assert_eq!(sigsys_hint(ExitStatus::from_raw(0)), None);
     }
 }

@@ -373,6 +373,12 @@ pub enum OpError {
         /// Prefix-list entry that was looked up.
         entry: PrefixListEntry,
     },
+    /// `RemoveOspfv3Profile` named a profile the attach point does not list.
+    #[error("ospfv3 profile '{0}' is not attached")]
+    Ospfv3ProfileNotAttached(String),
+    /// `RemoveOspfv3Instance` named an instance the table does not claim.
+    #[error("ospfv3 instance '{0}' is not claimed by the table")]
+    Ospfv3InstanceNotClaimed(String),
     /// No broadcast domain matches the given name.
     #[error("broadcast domain '{0}' not found")]
     BroadcastDomainNotFound(String),
@@ -532,6 +538,18 @@ pub enum OpError {
         /// Range prefix that was looked up.
         cidr: ipnet::Ipv6Net,
     },
+    /// No `OSPFv3` virtual link matches the key (`instance`, `area_id`, `router_id`).
+    #[error(
+        "virtual link to '{router_id}' not found in area '{area_id}' of ospfv3 instance '{instance}'"
+    )]
+    Ospfv3VirtualLinkNotFound {
+        /// Name of the owning instance that was looked up.
+        instance: String,
+        /// Transit area ID that was looked up.
+        area_id: Ipv4Addr,
+        /// Endpoint router id that was looked up.
+        router_id: Ipv4Addr,
+    },
     #[error(
         "virtual link to '{router_id}' not found in area '{area_id}' of ospf instance '{instance}'"
     )]
@@ -544,6 +562,23 @@ pub enum OpError {
         /// Remote router ID of the virtual link that was looked up.
         router_id: Ipv4Addr,
     },
+}
+
+/// Idempotent push of one `OSPFv3` profile onto an attach point's list.
+fn add_ospfv3_profile(list: &mut Vec<String>, profile: &str) {
+    if !list.iter().any(|p| p == profile) {
+        list.push(profile.to_string());
+    }
+}
+
+/// Removes one `OSPFv3` profile from an attach point's list; absent is an error.
+fn remove_ospfv3_profile(list: &mut Vec<String>, profile: &str) -> Result<(), OpError> {
+    let before = list.len();
+    list.retain(|p| p != profile);
+    if list.len() == before {
+        return Err(OpError::Ospfv3ProfileNotAttached(profile.to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

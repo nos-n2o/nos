@@ -432,6 +432,12 @@ pub struct Args {
     #[arg(long)]
     pub redistribute_to_ospfv3_policy: Option<String>,
 
+    /// With `--redistribute-to-ospfv3` or `--clear-redistribute-to-ospfv3`:
+    /// the one claimed instance the rule feeds (`Redistribute.instance`);
+    /// unset means every claimed instance without a rule of its own.
+    #[arg(long)]
+    pub redistribute_to_ospfv3_instance: Option<String>,
+
     /// `--clear-redistribute-to-ospf`'s twin: removes the table's redistribute
     /// rule, so the AS-External-LSAs are flushed.
     #[arg(long)]
@@ -1432,6 +1438,9 @@ pub struct Args {
     /// instance; `0` clears it.
     #[arg(long)]
     pub ospf_graceful_restart_helper_max_grace_period: Option<u32>,
+    /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
+    #[arg(long)]
+    pub ospf_max_lsa: Option<u32>,
     /// RFC 6860 prefix suppression for that instance (requires
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
@@ -1596,6 +1605,9 @@ pub struct Args {
     /// RFC 8362 Full mode for that instance (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_extended_lsa: bool,
+    /// RFC 8362 Sparse mode for that instance (requires `--ospfv3-instance`).
+    #[arg(long)]
+    pub ospfv3_extended_lsa_sparse: bool,
     /// RFC 5187 graceful-restart grace period (seconds) for that instance
     /// (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -1604,6 +1616,14 @@ pub struct Args {
     /// instance; `0` clears it.
     #[arg(long)]
     pub ospfv3_graceful_restart_helper_max_grace_period: Option<u32>,
+    /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
+    #[arg(long)]
+    pub ospfv3_max_lsa: Option<u32>,
+    /// RFC 5838 address family of that instance, `ipv6-unicast` or
+    /// `ipv4-unicast` (requires `--ospfv3-instance`; the profiles'
+    /// `--ospfv3-instance-id` must then be 64-95).
+    #[arg(long)]
+    pub ospfv3_address_family: Option<String>,
     /// RFC 6987 `max-metric router-lsa on-startup <secs>` for that instance
     /// (requires `--ospfv3-instance`); `0` clears it.
     #[arg(long)]
@@ -1635,6 +1655,15 @@ pub struct Args {
     /// Removes that range from `--ospfv3-area` (`Ospfv3AreaOp::RemoveRange`).
     #[arg(long, requires = "ospfv3_area")]
     pub ospfv3_clear_area_range: Option<Ipv6Net>,
+    /// `<transit-area>:<router-id>`, with `--ospfv3-instance`: an RFC 5340
+    /// §4.7 virtual link through that area (`Ospfv3AreaOp::SetVirtualLink`,
+    /// upserted).
+    #[arg(long, requires = "ospfv3_instance")]
+    pub ospfv3_virtual_link: Option<String>,
+    /// `<transit-area>:<router-id>`, with `--ospfv3-instance`: removes that
+    /// virtual link (`Ospfv3AreaOp::RemoveVirtualLink`).
+    #[arg(long, requires = "ospfv3_instance")]
+    pub ospfv3_clear_virtual_link: Option<String>,
     /// Same shape as `--ospf-profile` (requires `--ospfv3-area`).
     #[arg(long)]
     pub ospfv3_profile: Option<String>,
@@ -1676,17 +1705,29 @@ pub struct Args {
     #[arg(long)]
     pub ospfv3_crypto_key: Option<String>,
     /// Same shape as `--ospf-interface-profile`, joining `OSPFv3` instead
-    /// (`SubinterfaceOp::SetOspfv3Profile`).
+    /// (`SubinterfaceOp::AddOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_interface_profile: Option<String>,
+    /// `<name>:<router-id>:<profile>:<instance-id>[:ipv4]`: a further `OSPFv3`
+    /// instance on the same link (RFC 5838 §2.1; `:ipv4` = `ipv4-unicast`,
+    /// instance-id 64-95, checked at commit). Creates the instance with
+    /// `--ospfv3-area`, a profile with that Instance ID, the table's claim and
+    /// the `--ospfv3-interface-profile` attach point's list entry. Default timers.
+    #[arg(long, requires_all = ["ospfv3_area", "ospfv3_interface_profile"])]
+    pub ospfv3_extra_instance: Option<String>,
+    /// `<name>:<profile>`: undoes `--ospfv3-extra-instance`. Detaches the
+    /// profile from the attach point, releases the table's claim, deletes the
+    /// instance.
+    #[arg(long)]
+    pub ospfv3_remove_extra_instance: Option<String>,
     /// Same shape as `--ospf-broadcast-domain-profile`, joining `OSPFv3`
-    /// instead (`BroadcastDomainOp::SetOspfv3Profile`).
+    /// instead (`BroadcastDomainOp::AddOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_broadcast_domain_profile: Option<String>,
-    /// Detaches `OSPFv3` from `--broadcast-domain`
-    /// (`BroadcastDomainOp::ClearOspfv3Profile`).
+    /// Detaches the named `OSPFv3` profile from `--broadcast-domain`
+    /// (`BroadcastDomainOp::RemoveOspfv3Profile`).
     #[arg(long, conflicts_with = "ospfv3_broadcast_domain_profile")]
-    pub clear_ospfv3_broadcast_domain_profile: bool,
+    pub clear_ospfv3_broadcast_domain_profile: Option<String>,
 
     /// If set, adds this IPv6 address to `--routing-table`'s loopback
     /// interface (`loopback-<routing-table>`) alongside `--loopback-address`
@@ -1699,10 +1740,10 @@ pub struct Args {
     #[arg(long)]
     pub ospfv3_loopback_profile: Option<String>,
 
-    /// Same shape as `--clear-ospf-loopback-profile`, joining `OSPFv3`
-    /// instead. Mutually exclusive with `--ospfv3-loopback-profile`.
+    /// Detaches the named `OSPFv3` profile from the loopback
+    /// (`InterfaceOp::RemoveOspfv3Profile`). Mutually exclusive with `--ospfv3-loopback-profile`.
     #[arg(long)]
-    pub clear_ospfv3_loopback_profile: bool,
+    pub clear_ospfv3_loopback_profile: Option<String>,
 
     /// If set, adds this IPv6 address to `--broadcast-domain`'s SVI
     /// alongside `--broadcast-domain-svi-address`.
@@ -2877,6 +2918,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: args.redistribute_policy.clone(),
@@ -2897,6 +2939,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
@@ -2905,6 +2948,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         }));
     }
+    if args.redistribute_to_ospfv3_instance.is_some()
+        && !args.redistribute_to_ospfv3
+        && !args.clear_redistribute_to_ospfv3
+    {
+        bail!(
+            "--redistribute-to-ospfv3-instance requires --redistribute-to-ospfv3 or --clear-redistribute-to-ospfv3"
+        );
+    }
     if args.redistribute_to_ospfv3 {
         if args.ospfv3_instance.is_none() {
             bail!("--redistribute-to-ospfv3 requires --ospfv3-instance to also be set");
@@ -2912,6 +2963,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: args.redistribute_to_ospfv3_instance.clone(),
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: args.redistribute_to_ospfv3_policy.clone(),
@@ -2925,6 +2977,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospfv3 is mutually exclusive with --redistribute-to-ospfv3");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: args.redistribute_to_ospfv3_instance.clone(),
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospfv3,
         }));
@@ -2934,6 +2987,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute-to-ospf");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: None,
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospf,
         }));
@@ -3440,7 +3494,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     // `--ospfv3-loopback-address` adds a second (IPv6) address to the same
     // loopback interface `--loopback-address` (typically IPv4) already
     // ensures, since `OSPFv3` only ever advertises IPv6 prefixes.
-    if args.ospfv3_loopback_profile.is_some() && args.clear_ospfv3_loopback_profile {
+    if args.ospfv3_loopback_profile.is_some() && args.clear_ospfv3_loopback_profile.is_some() {
         bail!(
             "--ospfv3-loopback-profile and --clear-ospfv3-loopback-profile are mutually exclusive"
         );
@@ -3460,14 +3514,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: loopback_name.clone(),
             routing_table: args.routing_table.clone(),
         }));
-        ops.push(ConfigOp::Interface(InterfaceOp::SetOspfv3Profile {
+        ops.push(ConfigOp::Interface(InterfaceOp::AddOspfv3Profile {
             name: loopback_name.clone(),
             ospfv3_profile: profile,
         }));
     }
-    if args.clear_ospfv3_loopback_profile {
-        ops.push(ConfigOp::Interface(InterfaceOp::ClearOspfv3Profile {
+    if let Some(profile) = args.clear_ospfv3_loopback_profile.clone() {
+        ops.push(ConfigOp::Interface(InterfaceOp::RemoveOspfv3Profile {
             name: loopback_name,
+            ospfv3_profile: profile,
         }));
     }
 
@@ -4066,6 +4121,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
+        if let Some(max_lsa) = args.ospf_max_lsa {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetMaxLsa {
+                name: name.clone(),
+                max_lsa: (max_lsa != 0).then_some(max_lsa),
+            }));
+        }
         if let Some(seconds) = args.ospf_graceful_restart_helper_max_grace_period {
             ops.push(ConfigOp::OspfInstance(
                 OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod {
@@ -4390,10 +4451,39 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
-        if args.ospfv3_extended_lsa {
+        if args.ospfv3_extended_lsa && args.ospfv3_extended_lsa_sparse {
+            bail!("--ospfv3-extended-lsa and --ospfv3-extended-lsa-sparse are mutually exclusive");
+        }
+        // Each mode flag switches the other off: provisioning is cumulative.
+        if args.ospfv3_extended_lsa || args.ospfv3_extended_lsa_sparse {
             ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
                 name: name.clone(),
-                enabled: true,
+                enabled: args.ospfv3_extended_lsa,
+            }));
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetExtendedLsaSparse {
+                    name: name.clone(),
+                    enabled: args.ospfv3_extended_lsa_sparse,
+                },
+            ));
+        }
+        if let Some(af) = &args.ospfv3_address_family {
+            let address_family = match af.as_str() {
+                "ipv6-unicast" => nos_proto::Ospfv3AddressFamily::Ipv6Unicast,
+                "ipv4-unicast" => nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+                other => anyhow::bail!("--ospfv3-address-family: unknown `{other}`"),
+            };
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetAddressFamily {
+                    name: name.clone(),
+                    address_family,
+                },
+            ));
+        }
+        if let Some(max_lsa) = args.ospfv3_max_lsa {
+            ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetMaxLsa {
+                name: name.clone(),
+                max_lsa: (max_lsa != 0).then_some(max_lsa),
             }));
         }
         if let Some(seconds) = args.ospfv3_graceful_restart_helper_max_grace_period {
@@ -4436,12 +4526,34 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
-        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
             name: args.routing_table.clone(),
             ospfv3_instance: name,
         }));
     } else if args.ospfv3_router_id.is_some() {
         bail!("--ospfv3-router-id requires --ospfv3-instance to also be set");
+    }
+
+    if let Some(spec) = &args.ospfv3_virtual_link {
+        let instance = args.ospfv3_instance.clone().unwrap_or_default();
+        let (area_id, router_id) = virtual_link_spec("--ospfv3-virtual-link", spec)?;
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+            instance: instance.clone(),
+            area_id,
+        }));
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetVirtualLink {
+            instance,
+            area_id,
+            router_id,
+        }));
+    }
+    if let Some(spec) = &args.ospfv3_clear_virtual_link {
+        let (area_id, router_id) = virtual_link_spec("--ospfv3-clear-virtual-link", spec)?;
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::RemoveVirtualLink {
+            instance: args.ospfv3_instance.clone().unwrap_or_default(),
+            area_id,
+            router_id,
+        }));
     }
 
     if let Some(area_id) = args.ospfv3_area {
@@ -4550,6 +4662,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                             "point-to-point" => NetworkType::PointToPoint,
                             "broadcast" => NetworkType::Broadcast,
                             "point-to-multipoint" => NetworkType::PointToMultipoint,
+                            "hybrid" => NetworkType::Hybrid,
                             other => bail!("--ospfv3-profile-network-type: unknown {other:?}"),
                         },
                     },
@@ -4609,29 +4722,131 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
 
     if let Some(profile) = args.ospfv3_interface_profile.clone() {
-        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
             interface: args.interface.clone(),
             tag: args.subinterface_tag,
             ospfv3_profile: profile,
         }));
     }
 
+    if let Some(spec) = &args.ospfv3_extra_instance {
+        push_extra_ospfv3_instance(args, spec, &mut ops)?;
+    }
+    if let Some(spec) = &args.ospfv3_remove_extra_instance {
+        remove_extra_ospfv3_instance(args, spec, &mut ops)?;
+    }
+
     if let Some(profile) = args.ospfv3_broadcast_domain_profile.clone() {
         ops.push(ConfigOp::BroadcastDomain(
-            BroadcastDomainOp::SetOspfv3Profile {
+            BroadcastDomainOp::AddOspfv3Profile {
                 name: args.broadcast_domain.clone(),
                 ospfv3_profile: profile,
             },
         ));
     }
-    if args.clear_ospfv3_broadcast_domain_profile {
+    if let Some(profile) = args.clear_ospfv3_broadcast_domain_profile.clone() {
         ops.push(ConfigOp::BroadcastDomain(
-            BroadcastDomainOp::ClearOspfv3Profile {
+            BroadcastDomainOp::RemoveOspfv3Profile {
                 name: args.broadcast_domain.clone(),
+                ospfv3_profile: profile,
             },
         ));
     }
     Ok(ops)
+}
+
+/// `--ospfv3-extra-instance`'s `<name>:<router-id>:<profile>:<instance-id>[:ipv4]`.
+fn push_extra_ospfv3_instance(
+    args: &Args,
+    spec: &str,
+    ops: &mut Vec<ConfigOp>,
+) -> anyhow::Result<()> {
+    let bad = || {
+        format!(
+            "--ospfv3-extra-instance: expected name:router-id:profile:instance-id[:ipv4], got {spec:?}"
+        )
+    };
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (name, rid, profile, id, ipv4) = match parts[..] {
+        [n, r, p, i] => (n, r, p, i, false),
+        [n, r, p, i, "ipv4"] => (n, r, p, i, true),
+        _ => bail!(bad()),
+    };
+    let router_id: Ipv4Addr = rid.parse().with_context(bad)?;
+    let instance_id: u8 = id.parse().with_context(bad)?;
+    let area_id = args
+        .ospfv3_area
+        .context("--ospfv3-extra-instance requires --ospfv3-area")?;
+    let (name, profile) = (name.to_string(), profile.to_string());
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Ensure {
+        name: name.clone(),
+    }));
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId {
+        name: name.clone(),
+        router_id,
+    }));
+    if ipv4 {
+        ops.push(ConfigOp::Ospfv3Instance(
+            Ospfv3InstanceOp::SetAddressFamily {
+                name: name.clone(),
+                address_family: nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+            },
+        ));
+    }
+    ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+        instance: name.clone(),
+        area_id,
+    }));
+    ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+        instance: name.clone(),
+        area_id,
+        name: profile.clone(),
+    }));
+    ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+        instance: name.clone(),
+        area_id,
+        name: profile.clone(),
+        instance_id: (instance_id != 0).then_some(instance_id),
+    }));
+    ops.push(ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
+        name: args.routing_table.clone(),
+        ospfv3_instance: name,
+    }));
+    ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
+        interface: args.interface.clone(),
+        tag: args.subinterface_tag,
+        ospfv3_profile: profile,
+    }));
+    Ok(())
+}
+
+/// `--ospfv3-remove-extra-instance <name>:<profile>`: references first (the
+/// commit validator rejects a dangling one), the instance section last.
+fn remove_extra_ospfv3_instance(
+    args: &Args,
+    spec: &str,
+    ops: &mut Vec<ConfigOp>,
+) -> anyhow::Result<()> {
+    let (name, profile) = spec.split_once(':').with_context(|| {
+        format!("--ospfv3-remove-extra-instance: expected name:profile, got {spec:?}")
+    })?;
+    ops.push(ConfigOp::Subinterface(
+        SubinterfaceOp::RemoveOspfv3Profile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            ospfv3_profile: profile.to_string(),
+        },
+    ));
+    ops.push(ConfigOp::RoutingTable(
+        RoutingTableOp::RemoveOspfv3Instance {
+            name: args.routing_table.clone(),
+            ospfv3_instance: name.to_string(),
+        },
+    ));
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete {
+        name: name.to_string(),
+    }));
+    Ok(())
 }
 
 /// Parses `--ospf-crypto-key`/`--ospfv3-crypto-key`'s `<key-id>:<algorithm>:
@@ -5085,6 +5300,34 @@ mod tests {
             }),
         );
         assert!(err(&["--ospfv3-area-type", "stub"]).contains("--ospfv3-area"));
+    }
+
+    #[test]
+    fn ospfv3_virtual_link_flags() {
+        let base = ["--ospfv3-instance", "o", "--ospfv3-router-id", "1.1.1.1"];
+        let with = |flag: &str| {
+            let mut v = base.to_vec();
+            v.extend([flag, "0.0.0.1:2.2.2.2"]);
+            ops(&v).unwrap()
+        };
+        let (area_id, router_id) = ("0.0.0.1".parse().unwrap(), "2.2.2.2".parse().unwrap());
+        has(
+            &with("--ospfv3-virtual-link"),
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::SetVirtualLink {
+                instance: "o".into(),
+                area_id,
+                router_id,
+            }),
+        );
+        has(
+            &with("--ospfv3-clear-virtual-link"),
+            &ConfigOp::Ospfv3Area(Ospfv3AreaOp::RemoveVirtualLink {
+                instance: "o".into(),
+                area_id,
+                router_id,
+            }),
+        );
+        assert!(err(&["--ospfv3-virtual-link", "0.0.0.1:2.2.2.2"]).contains("ospfv3-instance"));
     }
 
     #[test]
@@ -5601,6 +5844,32 @@ mod tests {
     }
 
     #[test]
+    fn ospfv3_sparse_switches_full_mode_off() {
+        let base = ["--ospfv3-instance", "o3", "--ospfv3-router-id", "1.1.1.1"];
+        let ops = ops(&[&base[..], &["--ospfv3-extended-lsa-sparse"]].concat()).unwrap();
+        let set = |full, enabled| {
+            if full {
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
+                    name: "o3".into(),
+                    enabled,
+                })
+            } else {
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsaSparse {
+                    name: "o3".into(),
+                    enabled,
+                })
+            }
+        };
+        assert!(ops.contains(&set(true, false)) && ops.contains(&set(false, true)));
+        assert!(err(&[
+            &base[..],
+            &["--ospfv3-extended-lsa", "--ospfv3-extended-lsa-sparse"]
+        ]
+        .concat())
+        .contains("mutually exclusive"));
+    }
+
+    #[test]
     fn every_ospf_flag() {
         let ops = ops(&[
             "--static-route",
@@ -5710,6 +5979,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospf,
                     policy: None,
@@ -5765,6 +6035,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospfv3,
                     policy: Some("p".into()),
@@ -5776,6 +6047,7 @@ mod tests {
         has(
             &ops(&["--clear-redistribute-to-ospfv3"]).unwrap(),
             &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+                instance: None,
                 name: "rt1".into(),
                 to: RedistributeTarget::Ospfv3,
             }),
@@ -5792,6 +6064,98 @@ mod tests {
     }
 
     #[test]
+    fn ospfv3_extra_instance_flags() {
+        let base = [
+            "--ospfv3-instance",
+            "o1",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p1",
+            "--ospfv3-interface-profile",
+            "p1",
+        ];
+        let add = ops(&[
+            &base[..],
+            &["--ospfv3-extra-instance", "o2:2.2.2.2:p2:64:ipv4"],
+        ]
+        .concat())
+        .unwrap();
+        let at = |op: &ConfigOp| add.iter().position(|o| o == op).unwrap();
+        let attach = at(&ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
+            interface: "eth0".into(),
+            tag: 0,
+            ospfv3_profile: "p2".into(),
+        }));
+        let claim = at(&ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
+            name: "rt1".into(),
+            ospfv3_instance: "o2".into(),
+        }));
+        let id = at(&ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+            instance: "o2".into(),
+            area_id: "0.0.0.0".parse().unwrap(),
+            name: "p2".into(),
+            instance_id: Some(64),
+        }));
+        assert!(id < claim && id < attach);
+        has(
+            &add,
+            &ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetAddressFamily {
+                name: "o2".into(),
+                address_family: nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+            }),
+        );
+
+        let rm = ops(&[&base[..], &["--ospfv3-remove-extra-instance", "o2:p2"]].concat()).unwrap();
+        assert!(matches!(
+            &rm[rm.len() - 3..],
+            [
+                ConfigOp::Subinterface(SubinterfaceOp::RemoveOspfv3Profile { .. }),
+                ConfigOp::RoutingTable(RoutingTableOp::RemoveOspfv3Instance { .. }),
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete { .. }),
+            ]
+        ));
+
+        let rule = ops(&[
+            &base[..],
+            &[
+                "--static-route",
+                "2001:db8:77::/48",
+                "--static-gateway",
+                "2001:db8::1",
+                "--redistribute-to-ospfv3",
+                "--redistribute-to-ospfv3-instance",
+                "o2",
+            ],
+        ]
+        .concat())
+        .unwrap();
+        assert!(rule.iter().any(|o| matches!(o,
+            ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute { redistribute, .. })
+                if redistribute.instance.as_deref() == Some("o2"))));
+
+        // Base, base + extra, base again (every phase re-sends the base): the
+        // second profile stays attached.
+        let mut cfg = nos_proto::Config::default();
+        let with_extra = [&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2:1"]].concat();
+        for flags in [&base[..], &with_extra[..], &base[..]] {
+            for op in ops(flags).unwrap() {
+                op.apply(&mut cfg).unwrap();
+            }
+        }
+        let sub = &cfg.interfaces[0].subinterfaces[0];
+        assert_eq!(sub.ospfv3_profiles, ["p1", "p2"]);
+
+        assert!(err(&["--redistribute-to-ospfv3-instance", "o2"]).contains("requires"));
+        assert!(
+            err(&[&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2"]].concat())
+                .contains("expected")
+        );
+    }
+
+    #[test]
     fn clearing_and_deleting_flags() {
         let all = ops(&[
             "--delete-subinterface",
@@ -5799,7 +6163,9 @@ mod tests {
             "--delete-loopback",
             "--clear-ospf-loopback-profile",
             "--clear-ospfv3-loopback-profile",
+            "p3",
             "--clear-ospfv3-broadcast-domain-profile",
+            "p3",
             "--delete-broadcast-domain-svi",
             "--clear-ssh-server",
             "--evpn-clear",
@@ -5843,8 +6209,9 @@ mod tests {
         );
         has(
             &all,
-            &ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfv3Profile {
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveOspfv3Profile {
                 name: "bd-svi".into(),
+                ospfv3_profile: "p3".into(),
             }),
         );
         assert!(!all
@@ -5962,6 +6329,7 @@ mod tests {
                     "--ospfv3-loopback-profile",
                     "p",
                     "--clear-ospfv3-loopback-profile",
+                    "p",
                 ],
                 "mutually exclusive",
             ),
@@ -6915,6 +7283,44 @@ mod tests {
         shows(&build_ops(&args).unwrap(), "SetLls");
         let orphan = parse(&["--ospf-lls", "true"]);
         assert!(build_ops(&orphan).is_err());
+    }
+
+    #[test]
+    fn max_lsa_flags_set_or_clear() {
+        for (flag, name, kind) in [
+            ("--ospf-max-lsa", "--ospf-instance", "Ospf"),
+            ("--ospfv3-max-lsa", "--ospfv3-instance", "Ospfv3"),
+        ] {
+            let router_id = flag.replace("max-lsa", "router-id");
+            let dbg = |n: &str| {
+                format!(
+                    "{:?}",
+                    ops(&[name, "o", &router_id, "1.1.1.1", flag, n]).unwrap()
+                )
+            };
+            assert!(
+                dbg("50").contains("SetMaxLsa { name: \"o\", max_lsa: Some(50) }"),
+                "{kind}"
+            );
+            assert!(dbg("0").contains("max_lsa: None"), "{kind}");
+        }
+    }
+
+    #[test]
+    fn ospfv3_address_family_sets_the_address_family() {
+        let dbg = format!(
+            "{:?}",
+            ops(&[
+                "--ospfv3-instance",
+                "o",
+                "--ospfv3-router-id",
+                "1.1.1.1",
+                "--ospfv3-address-family",
+                "ipv4-unicast"
+            ])
+            .unwrap()
+        );
+        assert!(dbg.contains("SetAddressFamily { name: \"o\", address_family: Ipv4Unicast }"));
     }
 
     #[test]

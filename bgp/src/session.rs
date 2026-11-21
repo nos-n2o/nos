@@ -1106,6 +1106,7 @@ impl SessionManager {
                     site_of_origin: crate::vpn::sites_of_origin(&r.route.extended_communities)
                         .first()
                         .map(|s| crate::vpn::format_soo(*s)),
+                    path_id: (c.path_id != 0).then_some(c.path_id),
                 })
             },
             nos_proto::page::wire_len,
@@ -2130,6 +2131,7 @@ mod tests {
                 local_pref: 100,
                 best: true,
                 site_of_origin: None,
+                path_id: None,
             }
         );
         let one = vpn(AddressFamily::Vpnv4Unicast, Some("65001:2")).await;

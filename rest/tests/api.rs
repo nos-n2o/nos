@@ -1528,12 +1528,14 @@ async fn bgp_vpn_routes_pass_the_family_and_rd_through() {
                 local_pref: limit,
                 best: true,
                 site_of_origin: None,
+                path_id: None,
             }],
             // A first page has a next one, the continuation is the last.
             next: after.is_none().then(|| nos_proto::VpnRouteCursor {
                 peer: "192.0.2.1".parse().unwrap(),
                 rd: [0, 0, 0xfd, 0xe9, 0, 0, 0, 1],
                 prefix: "10.0.0.0/24".parse().unwrap(),
+                path_id: 0,
             }),
         },
         _ => BgpEvent::PeerNotFound,
@@ -2893,4 +2895,183 @@ async fn patch_merges_keeps_siblings_deletes_on_null_and_honours_if_match() {
         patch(app, url, MP, r#"{"asn":1}"#, Some(&cur)).await.0,
         StatusCode::OK
     );
+}
+
+/// RESTCONF (#1176): one request, with optional body and one header; returns
+/// status, headers and the JSON body.
+async fn rc(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    hdr: Option<(header::HeaderName, &str)>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut req = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/yang-data+json")
+        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+    if let Some((n, v)) = hdr {
+        req = req.header(n, v);
+    }
+    let resp = app
+        .clone()
+        .oneshot(
+            req.body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        headers,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+#[allow(clippy::many_single_char_names)]
+async fn restconf_crud_etag_and_errors() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let d = "/restconf/data";
+    let r1 = "/restconf/data/nos-config:bgp-instance=r1";
+
+    // POST creates (201 + Location), again is 409 data-exists.
+    let body = json!({"nos-config:bgp_instances": [bgp_instance("r1", 65000)]});
+    let (s, h, _) = rc(app, Method::POST, d, Some(body.clone()), None).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(
+        h[header::LOCATION],
+        "/restconf/data/nos-config:bgp_instances=r1"
+    );
+    let (s, _, v) = rc(app, Method::POST, d, Some(body), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(
+        v["ietf-restconf:errors"]["error"][0]["error-tag"],
+        "data-exists"
+    );
+
+    // GET: wrapped entry, ETag, 304 on If-None-Match, depth and fields.
+    let (s, h, v) = rc(app, Method::GET, r1, None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(h[header::CONTENT_TYPE], "application/yang-data+json");
+    assert_eq!(v["nos-config:bgp-instance"][0]["asn"], 65000);
+    let tag = h[header::ETAG].to_str().unwrap().to_string();
+    let inm = Some((header::IF_NONE_MATCH, tag.as_str()));
+    assert_eq!(
+        rc(app, Method::GET, r1, None, inm).await.0,
+        StatusCode::NOT_MODIFIED
+    );
+    let (_, _, v) = rc(app, Method::GET, &format!("{r1}?fields=asn"), None, None).await;
+    assert_eq!(v["nos-config:bgp-instance"], json!([{"asn": 65000}]));
+    let (_, _, v) = rc(
+        app,
+        Method::GET,
+        &format!("{d}/nos-config:config?depth=1"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(v["nos-config:config"], json!({}));
+    let nonconfig = format!("{r1}?content=nonconfig");
+    assert_eq!(
+        rc(app, Method::GET, &nonconfig, None, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let bogus = format!("{r1}?bogus=1");
+    assert_eq!(
+        rc(app, Method::GET, &bogus, None, None).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // PATCH merges; a stale If-Match is 412 and changes nothing.
+    let patch = json!({"nos-config:bgp-instance": [{"asn": 65001}]});
+    let im = Some((header::IF_MATCH, tag.as_str()));
+    let (s, ..) = rc(app, Method::PATCH, r1, Some(patch.clone()), im.clone()).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _, v) = rc(app, Method::PATCH, r1, Some(patch), im).await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(
+        v["ietf-restconf:errors"]["error"][0]["error-tag"],
+        "operation-failed"
+    );
+    let (_, _, v) = rc(app, Method::GET, &format!("{r1}/asn"), None, None).await;
+    assert_eq!(v["asn"], 65001);
+
+    // PUT on a scalar replaces (204); a wrong node name is 400.
+    let host = "/restconf/data/nos-config:hostname";
+    let put = |b: Value| rc(app, Method::PUT, host, Some(b), None);
+    // `hostname` has a default, so it already exists: replace, not create.
+    assert_eq!(
+        put(json!({"nos-config:hostname": "h1"})).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put(json!({"hostname": "h2"})).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(put(json!({"asn": 1})).await.0, StatusCode::BAD_REQUEST);
+
+    // PUT of a new list entry creates it.
+    let r2 = json!({"nos-config:bgp-instance": [bgp_instance("r2", 65002)]});
+    let (s, ..) = rc(
+        app,
+        Method::PUT,
+        "/restconf/data/nos-config:bgp-instance=r2",
+        Some(r2),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    // DELETE, then 404 missing-element.
+    assert_eq!(
+        rc(app, Method::DELETE, r1, None, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (s, _, v) = rc(app, Method::DELETE, r1, None, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(
+        v["ietf-restconf:errors"]["error"][0]["error-tag"],
+        "missing-element"
+    );
+    assert_eq!(
+        rc(app, Method::GET, r1, None, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // OPTIONS, content negotiation, discovery.
+    let (s, h, _) = rc(app, Method::OPTIONS, r1, None, None).await;
+    assert!(s.is_success() && h[header::ALLOW].to_str().unwrap().contains("PATCH"));
+    let xml = Some((header::ACCEPT, "application/yang-data+xml"));
+    assert_eq!(
+        rc(app, Method::GET, r1, None, xml).await.0,
+        StatusCode::NOT_ACCEPTABLE
+    );
+    for p in [
+        "/restconf",
+        "/restconf/yang-library-version",
+        "/restconf/yang/nos-config.yang",
+        "/.well-known/host-meta",
+    ] {
+        assert_eq!(rc(app, Method::GET, p, None, None).await.0, StatusCode::OK);
+    }
+    let lib = "/restconf/data/ietf-yang-library:yang-library";
+    let (_, _, v) = rc(app, Method::GET, lib, None, None).await;
+    assert_eq!(
+        v["ietf-yang-library:yang-library"]["module-set"][0]["module"][0]["name"],
+        "nos-config"
+    );
+
+    // Implicit transactions never leak: all 32 slots are still free.
+    for i in 0..32 {
+        let uri = format!("/v1/transactions/after{i}?base=blank");
+        let (s, ..) = send_full(app, Method::POST, &uri, None, Some(USER), None).await;
+        assert_eq!(s, StatusCode::CREATED, "{i}");
+    }
 }

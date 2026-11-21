@@ -24,7 +24,7 @@ use self::rx::{
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -494,7 +494,7 @@ impl LinkStatus {
                 NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                     InterfaceState::PointToPoint
                 }
-                NetworkType::Broadcast => InterfaceState::Waiting,
+                NetworkType::Broadcast | NetworkType::Hybrid => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
             dr: None,
@@ -565,6 +565,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         opaque_capable: false, // learnt from the neighbor's DBD
         stub: cfg.stub,
         nssa: cfg.nssa,
+        unpolled: true,
     };
     (adj, dbd)
 }
@@ -755,11 +756,14 @@ pub async fn run(
             }
             Some(command) = commands.recv() => match command {
                 LinkCommand::Grace(grace_period) => {
-                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, 0, &mut next_seq);
                     // RFC 4812: the last Hello says "restarting", for peers that read LLS not the Grace-LSA.
                     if cfg.lls_active() && cfg.virtual_link.is_none() {
                         send_hello_eof(&socket, &cfg, local_router_id, &status, &mut next_seq, lls::EOF_RS);
                     }
+                }
+                LinkCommand::FlushGrace => {
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, 0, lsa::MAX_AGE, &mut next_seq);
                 }
                 LinkCommand::FloodNow => {
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
@@ -790,6 +794,9 @@ pub enum LinkCommand {
     /// These routers' topology LSAs changed in this link's area: a helped
     /// neighbor other than them leaves grace (RFC 3623 §3.2 (c)).
     TopologyChanged(Vec<Ipv4Addr>),
+    /// RFC 3623 §2.3: restart mode ended, flush the Grace-LSA (one at `MaxAge`
+    /// to every `Full` neighbor).
+    FlushGrace,
 }
 
 struct LinkEntry {
@@ -882,6 +889,8 @@ pub struct LinkManager {
     /// H-bit, with max-metric transit links. An atomic like
     /// `prefix_suppression`.
     host_router: AtomicBool,
+    /// `max-lsa`, shared with every store (`set_max_lsa`).
+    max_lsa: Arc<AtomicU32>,
     /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
     /// looks for a tunnel backup where there is no basic LFA.
     remote_lfa: AtomicBool,
@@ -894,6 +903,12 @@ pub struct LinkManager {
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
+    /// RFC 3623 restarting-router mode (`begin_restart`): `Some` while this
+    /// process is the respawn of a planned restart and has not yet seen its
+    /// pre-restart neighbors `Full` again. Mirrored in `restart_on` for the
+    /// lock-free reads of the origination pass and the route push.
+    restart: std::sync::Mutex<Option<grace::RestartState>>,
+    restart_on: AtomicBool,
     /// RFC 6987 stub router (`OspfInstance.max_metric_*`), see
     /// `max_metric_active`.
     max_metric: std::sync::Mutex<MaxMetric>,
@@ -1015,10 +1030,13 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
+            max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             remote_lfa: AtomicBool::new(false),
             spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
             host_bit_state: Mutex::new(HashMap::new()),
             restarting: AtomicBool::new(false),
+            restart: std::sync::Mutex::new(None),
+            restart_on: AtomicBool::new(false),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
@@ -1061,6 +1079,26 @@ impl LinkManager {
 
     pub fn set_prefix_suppression(&self, on: bool) {
         self.prefix_suppression.store(on, Ordering::Relaxed);
+    }
+
+    /// An empty store wired to this manager's notifiers and, once the router
+    /// ID is known, the `max-lsa` limit (#1146).
+    async fn new_store(&self) -> Lsdb {
+        let mut db = Lsdb::with_notify(Arc::clone(&self.route_changed))
+            .with_reflect_notify(Arc::clone(&self.reoriginate));
+        if let Some(id) = *self.router_id.lock().await {
+            db.set_limit(id, Arc::clone(&self.max_lsa));
+        }
+        db
+    }
+
+    /// `max-lsa` (#1146), every resync; read per receive, so a link never
+    /// restarts for it.
+    pub fn set_max_lsa(&self, max_lsa: Option<u32>) {
+        self.max_lsa.store(
+            max_lsa.unwrap_or(nos_ospf_common::lsdb::DEFAULT_MAX_LSA),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn set_host_router(&self, on: bool) {
@@ -1197,12 +1235,16 @@ impl LinkManager {
 
     /// Gets or creates the shared LSDB for `area_id`.
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
-        Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
-            Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&self.route_changed))
-                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
-            ))
-        }))
+        let mut stores = self.lsdbs.lock().await;
+        if let Some(l) = stores.get(&area_id) {
+            return Arc::clone(l);
+        }
+        let db = self.new_store().await;
+        Arc::clone(
+            stores
+                .entry(area_id)
+                .or_insert_with(|| Arc::new(Mutex::new(db))),
+        )
     }
 
     /// RFC 2328 §14: ages every installed LSA, in every area, by one
@@ -1236,8 +1278,13 @@ impl LinkManager {
             .iter()
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
+        let mut superseded = Vec::new();
         for (area_id, lsdb) in area_stores {
-            let origins = lsdb.lock().await.take_topology_changes();
+            let (origins, changed) = {
+                let mut db = lsdb.lock().await;
+                (db.take_topology_changes(), db.take_superseded_changes())
+            };
+            superseded.extend(changed);
             if origins.is_empty() {
                 continue;
             }
@@ -1267,6 +1314,9 @@ impl LinkManager {
                 );
             }
         }
+        let own = *self.router_id.lock().await;
+        self.restart_tick(superseded.iter().any(|o| Some(*o) != own))
+            .await;
     }
 
     /// Diffs `desired` against currently-running links by `attach_point`:
@@ -1381,10 +1431,7 @@ impl LinkManager {
                 0
             };
             let (commands, commands_rx) = mpsc::unbounded_channel();
-            let link_local_lsdb = Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&self.route_changed))
-                    .with_reflect_notify(Arc::clone(&self.reoriginate)),
-            ));
+            let link_local_lsdb = Arc::new(Mutex::new(self.new_store().await));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),

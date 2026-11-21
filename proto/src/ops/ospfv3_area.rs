@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, OspfAreaType, Ospfv3Area, Ospfv3AreaRange};
+use crate::schema::{Config, OspfAreaType, Ospfv3Area, Ospfv3AreaRange, Ospfv3VirtualLink};
 
 use super::ospfv3_instance::find_instance_mut;
 use super::OpError;
@@ -65,6 +65,25 @@ pub enum Ospfv3AreaOp {
         area_id: Ipv4Addr,
         /// Metric; `None` is 1.
         cost: Option<u16>,
+    },
+    /// Adds the virtual link to `router_id` through the area, resetting its
+    /// timers and auth if it exists (upsert).
+    SetVirtualLink {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Transit area ID in dotted-quad form.
+        area_id: Ipv4Addr,
+        /// The far endpoint's router id.
+        router_id: Ipv4Addr,
+    },
+    /// Removes the virtual link to `router_id` from the area.
+    RemoveVirtualLink {
+        /// Name of the `OSPFv3` instance owning the target.
+        instance: String,
+        /// Transit area ID in dotted-quad form.
+        area_id: Ipv4Addr,
+        /// The far endpoint's router id.
+        router_id: Ipv4Addr,
     },
 }
 
@@ -144,6 +163,39 @@ impl Ospfv3AreaOp {
                 find_area_mut(config, instance, *area_id)?.stub_default_cost = *cost;
                 Ok(())
             }
+            Ospfv3AreaOp::SetVirtualLink {
+                instance,
+                area_id,
+                router_id,
+            } => {
+                let links = &mut find_area_mut(config, instance, *area_id)?.virtual_links;
+                let link = Ospfv3VirtualLink {
+                    router_id: *router_id,
+                    ..Default::default()
+                };
+                match links.iter_mut().find(|v| v.router_id == *router_id) {
+                    Some(v) => *v = link,
+                    None => links.push(link),
+                }
+                Ok(())
+            }
+            Ospfv3AreaOp::RemoveVirtualLink {
+                instance,
+                area_id,
+                router_id,
+            } => {
+                let links = &mut find_area_mut(config, instance, *area_id)?.virtual_links;
+                let before = links.len();
+                links.retain(|v| v.router_id != *router_id);
+                if links.len() == before {
+                    return Err(OpError::Ospfv3VirtualLinkNotFound {
+                        instance: instance.clone(),
+                        area_id: *area_id,
+                        router_id: *router_id,
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -176,16 +228,54 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 
     fn area_id(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn virtual_link_upsert_and_remove() {
+        let mut cfg = Config {
+            ospfv3_instances: vec![instance(
+                "o1",
+                vec![Ospfv3Area {
+                    area_id: area_id("0.0.0.1"),
+                    ..Default::default()
+                }],
+            )],
+            ..Default::default()
+        };
+        let (instance, area_id) = ("o1".to_string(), area_id("0.0.0.1"));
+        let router_id = Ipv4Addr::new(2, 2, 2, 2);
+        let set = Ospfv3AreaOp::SetVirtualLink {
+            instance: instance.clone(),
+            area_id,
+            router_id,
+        };
+        set.apply(&mut cfg).unwrap();
+        set.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.ospfv3_instances[0].areas[0].virtual_links.len(), 1);
+        let remove = Ospfv3AreaOp::RemoveVirtualLink {
+            instance,
+            area_id,
+            router_id,
+        };
+        remove.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.ospfv3_instances[0].areas[0].virtual_links, vec![]);
+        assert!(matches!(
+            remove.apply(&mut cfg),
+            Err(OpError::Ospfv3VirtualLinkNotFound { .. })
+        ));
     }
 
     #[test]
@@ -228,6 +318,9 @@ mod tests {
                         ranges: Vec::new(),
                         area_type: crate::schema::OspfAreaType::Normal,
                         stub_default_cost: None,
+                        nssa_translate_always: false,
+                        nssa_default_originate: false,
+                        virtual_links: Vec::new(),
                     },
                     Ospfv3Area {
                         area_id: area_id("0.0.0.1"),
@@ -235,6 +328,9 @@ mod tests {
                         ranges: Vec::new(),
                         area_type: crate::schema::OspfAreaType::Normal,
                         stub_default_cost: None,
+                        nssa_translate_always: false,
+                        nssa_default_originate: false,
+                        virtual_links: Vec::new(),
                     },
                 ],
             )],

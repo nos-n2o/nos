@@ -393,17 +393,14 @@ impl BgpRib {
         for k in vpn {
             self.sync_vpn_to(peer, &k, false);
         }
-        let vpn_flow: HashSet<_> = self
-            .vpn_flow_loc
-            .keys()
-            .chain(
-                self.vpn_flow_adj_rib_out
-                    .get(&peer)
-                    .into_iter()
-                    .flat_map(std::collections::HashMap::keys),
-            )
-            .cloned()
-            .collect();
+        let mut vpn_flow = self.vpn_flow_keys_where(|_| true);
+        vpn_flow.extend(
+            self.vpn_flow_adj_rib_out
+                .get(&peer)
+                .into_iter()
+                .flat_map(std::collections::HashMap::keys)
+                .cloned(),
+        );
         for k in vpn_flow {
             self.sync_vpn_flow_to(peer, &k, false);
         }
@@ -521,7 +518,7 @@ impl BgpRib {
             .is_some_and(|s| s.iter().any(|(f, _)| family.is_none_or(|x| x == *f)));
         let vpn = self.vpn_stale.get(&peer).is_some_and(|s| {
             s.iter()
-                .any(|k| family.is_none_or(|f| super::vpn_out::vpn_family(k.1) == f))
+                .any(|c| family.is_none_or(|f| super::vpn_out::vpn_family(c.0 .1) == f))
         });
         let rtc = family.is_none_or(|f| f == AddressFamily::RtConstraint)
             && self.rtc_stale.get(&peer).is_some_and(|s| !s.is_empty());
@@ -715,11 +712,12 @@ impl BgpRib {
             .vpn_adj_rib_in
             .get(&peer)
             .into_iter()
-            .flat_map(|t| t.keys().copied())
-            .partition(|k| families.contains(&super::vpn_out::vpn_family(k.1)));
+            .flat_map(super::vpn_out::copies)
+            .map(|(c, _)| c)
+            .partition(|c| families.contains(&super::vpn_out::vpn_family(c.0 .1)));
         self.vpn_stale.entry(peer).or_default().extend(keep);
-        for k in drop {
-            self.drop_vpn(peer, &k);
+        for c in drop {
+            self.drop_vpn(peer, &c);
         }
         let (keep, drop): (Vec<_>, Vec<_>) = self
             .vpn_flow_adj_rib_in

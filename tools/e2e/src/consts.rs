@@ -138,6 +138,11 @@ pub const RPKI_WRONG_ASN: u32 = 64999;
 pub const RTR_STUB: &str = "rtr-stub";
 pub const IP_RTR_STUB: Addr = Addr("10.50.0.10");
 pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
+/// `aaa`, #1153: `nos-radius-stub`, the scripted RADIUS server router-a logs
+/// users in against, and the shared secret both sides hold.
+pub const RADIUS_STUB: &str = "radius-stub";
+pub const IP_RADIUS_STUB: Addr = Addr("10.50.0.16");
+pub const RADIUS_SECRET: &str = "radius-sh4red";
 /// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
 /// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
 /// RFC 8097 "invalid", which router-a must ignore from eBGP.
@@ -469,6 +474,10 @@ pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
 /// helps, so its own Router-LSA changes (a topology change). No other phase
 /// uses it.
 pub const OSPF_GR_TOPOLOGY_LOOPBACK_ADDRESS: &str = "203.0.113.113/32";
+/// `ospf-graceful-restart`: router-b's loopback in OSPF from the start, so
+/// router-a (the restarter) holds an OSPF route whose kernel entry must never
+/// be removed while its `nos-ospfd` restarts (#1145). No other phase uses it.
+pub const OSPF_GR_PEER_LOOPBACK_ADDRESS: &str = "203.0.113.114/32";
 /// `ospf-opaque`: an FRR router (`router-f`, pulled, same tag as
 /// `tools/bench-bgp.sh`'s `FRR_IMAGE`) on its own network with router-a's
 /// eth1 only, so router-b can hear FRR's LSAs only through router-a.
@@ -549,6 +558,8 @@ pub const OSPFV3_ROUTER_ID_C: &str = "9.9.9.8";
 pub const OSPFV3_ROUTER_ID_B_NEW: &str = "9.9.9.11";
 pub const OSPFV3_AREA: &str = "0.0.0.0";
 pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
+/// `ospfv3-hybrid`'s second profile, forced to RFC 6845 hybrid.
+pub const OSPFV3_HYBRID_PROFILE: &str = "ospfv3-hybrid";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
 /// The second OSPFv3 link of `ospfv3` (#276): `eth1`, a direct veth pair.
@@ -573,6 +584,14 @@ pub const OSPFV3_VLAN_MOVED_COST: u16 = 5;
 pub const OSPFV3_VLAN_OTHER_COST: u16 = 1000;
 /// router-c's loopback for the `ospfv3-dr` multicast data-plane proof (#879).
 pub const OSPFV3_DR_LOOPBACK_ADDRESS_C: &str = "2001:db8:4::8/128";
+/// `ospfv3-extended-lsa-sparse`: one loopback per router (a, b, c).
+pub const OSPFV3_SPARSE_LOOPBACKS: [&str; 3] = [
+    "2001:db8:a::1/128",
+    "2001:db8:a::2/128",
+    "2001:db8:a::3/128",
+];
+/// 0x2001 (legacy Router-LSA) as `lsa_type` prints in the logs.
+pub const LSA_TYPE_ROUTER_V3: u16 = 0x2001;
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
 pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 /// RFC 5340 AS-External-LSA (0x4005) and RFC 8362 E-AS-External-LSA (0xC025),
@@ -580,6 +599,10 @@ pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 /// `ospfv3` leaves both routers in extended mode.
 pub const LSA_TYPE_AS_EXTERNAL_V3: u16 = 0x4005;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0xC025;
+/// RFC 5340 §A.4.8 NSSA-LSA (0x2007, RFC 3101 Type-7), as `lsa_type` prints.
+pub const LSA_TYPE_NSSA_V3: u16 = 0x2007;
+/// RFC 8362 §4.8 E-NSSA-LSA (0xA027), the TLV form of the above.
+pub const LSA_TYPE_E_NSSA: u16 = 0xA027;
 /// RFC 5340 Inter-Area-Prefix-LSA (0x2003) and E-Inter-Area-Prefix (0xA023).
 pub const LSA_TYPE_INTER_AREA_PREFIX_V3: u16 = 0x2003;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;
@@ -689,3 +712,41 @@ pub const FORGED_V6_CONTROL: &str = "2001:db8:98::/64";
 pub const OSPFV3_AREA_2: &str = "0.0.0.2";
 pub const OSPFV3_PROFILE_AREA2: &str = "ospfv3-profile-area2";
 pub const OSPFV3_TRANSIT_LOOPBACK_ADDRESS: &str = "2001:db8:8::1/128";
+/// `ospfv3-virtual-link`: the two ends' area-1 loopbacks, whose `/128` LA
+/// prefixes are the virtual link's addresses (prefixes no other phase uses).
+pub const OSPFV3_VLINK_LOOPBACK_B: &str = "2001:db8:a::2/128";
+pub const OSPFV3_VLINK_LOOPBACK_C: &str = "2001:db8:a::3/128";
+/// The backbone-only a-b segment (`OSPFV3_ADDRESS_A`/`_B`) router-c routes over the link.
+pub const OSPFV3_VLINK_BACKBONE: &str = "2001:db8:1::/64";
+
+/// `sandbox-nnp` (#1211): the effective capability mask each daemon must keep through
+/// `nos-sandbox-exec`, written out from the capability numbers (NET_BIND_SERVICE=10,
+/// NET_ADMIN=12, NET_RAW=13), never read back from the Dockerfile's `setcap` lines, so a
+/// trampoline bug cannot hide itself.
+pub const CAP_EFF_NET_ADMIN_RAW: &str = "0000000000003000";
+pub const CAP_EFF_NET_RAW_BIND: &str = "0000000000002400";
+pub const CAP_EFF_NET_RAW: &str = "0000000000002000";
+pub const CAP_EFF_NONE: &str = "0000000000000000";
+
+// `ospfv3-instance-id`'s extra instances on router-a/b's one link (#1280). The
+// daemon's log lines do not name the instance, so each gets its own router-id
+// per side: `ospfv3 neighbor reached full ... neighbor=<rid>` is then unique
+// per instance. They are fixed because this phase always creates them as the
+// second and third instance of the lab, after `ospfv3` made the first.
+pub const OSPFV3_INSTANCE_2: &str = "ospfv3-2";
+pub const OSPFV3_PROFILE_2: &str = "ospfv3-profile2";
+pub const OSPFV3_RID_2_A: &str = "9.9.9.20";
+pub const OSPFV3_RID_2_B: &str = "9.9.9.21";
+/// RFC 5838 `ipv4-unicast` instance (Instance ID 64, `OSPFV3_INSTANCE_3_ID`).
+pub const OSPFV3_INSTANCE_3: &str = "ospfv3-3";
+pub const OSPFV3_PROFILE_3: &str = "ospfv3-profile3";
+pub const OSPFV3_RID_3_A: &str = "9.9.9.22";
+pub const OSPFV3_RID_3_B: &str = "9.9.9.23";
+pub const OSPFV3_INSTANCE_3_ID: &str = "64";
+/// The IPv6 static only instance 2 originates (`--redistribute-to-ospfv3-instance`);
+/// no other phase uses it, so `nos-ribd` logs a fresh install.
+pub const OSPFV3_INSTANCE_2_PREFIX: &str = "2001:db8:79::/48";
+/// The IPv6 static router-b feeds into instance 1 only (a fresh prefix, like
+/// `OSPFV3_INSTANCE_2_PREFIX`), via router-a's address on the shared link.
+pub const OSPFV3_INSTANCE_1_PREFIX: &str = "2001:db8:7b::/48";
+pub const OSPFV3_GATEWAY_A: &str = "2001:db8:1::1";

@@ -31,6 +31,12 @@ struct DevArgs {
     /// debugger attached; see `docs/architecture/supervision.md`).
     #[cfg_attr(feature = "dev-args", arg(long))]
     no_heartbeat_kill: bool,
+
+    /// Exec daemons directly, not through `nos-sandbox-exec` (#1211): the
+    /// unprivileged system test runs them from a target dir, outside the
+    /// trampoline's `/usr/local/bin`.
+    #[cfg_attr(feature = "dev-args", arg(long))]
+    no_sandbox: bool,
 }
 
 #[derive(Parser)]
@@ -252,6 +258,12 @@ struct Args {
     #[arg(long, default_value = DEFAULT_PKI_DIR)]
     pki_dir: PathBuf,
 
+    /// The `nos-sandbox-exec` trampoline every daemon is exec'd through (#1211):
+    /// it sets `NO_NEW_PRIVS` and keeps the target's file capabilities. A path
+    /// override, not an off switch; a missing file fails the spawn (fail closed).
+    #[arg(long, default_value = "/usr/local/bin/nos-sandbox-exec")]
+    sandbox_exec: PathBuf,
+
     /// Group every supervised child runs in, and the switch for per-role uids:
     /// each child gets its role's own uid (`uids::role_uid`, set before exec,
     /// so file capabilities still apply) and its `--state-dir/<role>` is
@@ -303,6 +315,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // W^X for the watchdog and, by inheritance, every daemon (#1210): fail
+    // closed, nothing starts without it.
+    nos_watchdog::supervisor::enable_mdwe()
+        .context("PR_SET_MDWE failed: nos-watchdogd needs Linux >= 6.3")?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Before tracing: the log forwarder itself needs an identity to reach
     // nos-logd, so the CA has to exist first.
@@ -376,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
     let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin.clone(), logd_args)
         .with_identity(pki.clone(), Role::Logd, "")
         .with_role_uid(child_gid)
+        .with_sandbox(args.sandbox())
         // #756: glibc per-thread arenas fragment nos-logd's churn into
         // 7-17x its live heap; one arena keeps RSS flat (measured, #757).
         .with_env("MALLOC_ARENA_MAX", "1");
@@ -399,6 +416,7 @@ async fn main() -> anyhow::Result<()> {
         policy,
         shutdown_rx: &shutdown_rx,
         child_gid,
+        sandbox_exec: args.sandbox(),
         watchdog_socket: &args.listen_socket,
         log_socket: &args.log_socket,
     };
@@ -451,6 +469,7 @@ struct FixedSupervision<'a> {
     policy: BackoffPolicy,
     shutdown_rx: &'a watch::Receiver<bool>,
     child_gid: Option<u32>,
+    sandbox_exec: Option<&'a Path>,
     watchdog_socket: &'a Path,
     log_socket: &'a Path,
 }
@@ -521,7 +540,8 @@ impl FixedSupervision<'_> {
         let args = fixed_args(listen, self.watchdog_socket, self.log_socket, flags);
         let spec = ProcessSpec::new(name, bin, args)
             .with_identity(self.pki.clone(), role, "")
-            .with_role_uid(self.child_gid);
+            .with_role_uid(self.child_gid)
+            .with_sandbox(self.sandbox_exec);
         tokio::spawn(supervise_one(spec, self.policy, self.shutdown_rx.clone()))
     }
 }
@@ -586,6 +606,7 @@ fn managed_families(
         policy,
         registry: registry.clone(),
         child_gid: args.child_gid,
+        sandbox_exec: args.sandbox().map(Path::to_path_buf),
     };
     let ep = |kind, socket_prefix| {
         Some(Endpoint {
@@ -688,6 +709,13 @@ fn managed_families(
     ]
 }
 
+impl Args {
+    /// The trampoline to route daemons through (`None` only with `--no-sandbox`, dev builds).
+    fn sandbox(&self) -> Option<&Path> {
+        (!self.dev.no_sandbox).then_some(self.sandbox_exec.as_path())
+    }
+}
+
 /// Waits for either SIGTERM (the signal `docker stop` sends) or SIGINT
 /// (Ctrl-C, for interactive/local runs).
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
@@ -719,6 +747,7 @@ fn configd_spec(args: &Args, pki: &Arc<Pki>) -> ProcessSpec {
     ProcessSpec::new("nos-configd", args.configd_bin.clone(), configd_args)
         .with_identity(pki.clone(), Role::Configd, "")
         .with_role_uid(args.child_gid)
+        .with_sandbox(args.sandbox())
         .with_env("MALLOC_ARENA_MAX", "1")
         // #796: a fixed trim threshold also pins the mmap threshold at 128 KiB
         // (glibc turns off its dynamic raise), so big freed buffers go back to
@@ -765,6 +794,10 @@ mod tests {
         assert_eq!(a.child_gid, Some(992));
         assert!(a.logd_flags.is_empty() && a.restd_flags.is_empty() && a.sshd_flags.is_empty());
         assert_eq!(a.sshd_bin, PathBuf::from("/usr/local/bin/nos-sshd"));
+        assert_eq!(
+            a.sandbox_exec,
+            PathBuf::from("/usr/local/bin/nos-sandbox-exec")
+        );
     }
 
     #[test]
@@ -967,6 +1000,49 @@ mod tests {
             .map(|m| (m.section)(&diff)[0].name.clone())
             .collect();
         assert_eq!(got, ["bgp", "rt", "ospf", "ospfv3", "bd", "rt", "rt"]);
+    }
+
+    /// #1279: nos-ospfv3d is driven by the `ospfv3_instances` sections, so two
+    /// instances claimed by one table are two spawns, and a change to the
+    /// table's claim list alone (a `routing_tables` diff) spawns none.
+    #[test]
+    fn ospfv3_spawns_follow_instance_sections_not_the_claiming_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let args = Args::try_parse_from(["x"]).unwrap();
+        let ms = managed_families(
+            &args,
+            &pki,
+            BackoffPolicy::default(),
+            &EndpointRegistry::default(),
+        );
+        // Index 3: the ospfv3 family (see the sibling selector test).
+        let v3 = &ms[3];
+        let sec = |name: &str| SectionDiff {
+            header: String::new(),
+            name: name.into(),
+            status: nos_proto::DiffStatus::Added,
+            fields: vec![],
+            subsections: vec![],
+        };
+        let two = ConfigDiff {
+            ospfv3_instances: vec![sec("a"), sec("b")],
+            routing_tables: vec![sec("rt")],
+            ..ConfigDiff::default()
+        };
+        let names: Vec<_> = (v3.section)(&two).iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, ["a", "b"]);
+        let table_only = ConfigDiff {
+            routing_tables: vec![sec("rt")],
+            ..ConfigDiff::default()
+        };
+        assert_eq!((v3.section)(&table_only).len(), 0);
     }
 
     #[test]

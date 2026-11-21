@@ -59,18 +59,23 @@ pub fn sync_routing_table_refs(config: &mut Config) {
             instance.redistribute_metric = ospf_rule.and_then(|r| r.metric);
             instance.redistribute_metric_type = ospf_rule.and_then(|r| r.metric_type);
         }
-        if let Some(ospfv3_instance) = &table.ospfv3_instance
-            && let Some(instance) = config
-                .ospfv3_instances
-                .iter_mut()
-                .find(|i| &i.name == ospfv3_instance)
-        {
-            instance.routing_table = Some(table.name.clone());
-            instance.redistribute_policy = table
-                .redistribute
-                .iter()
-                .find(|r| r.to == RedistributeTarget::Ospfv3)
-                .and_then(|r| r.policy.clone());
+        for name in &table.ospfv3_instances {
+            if let Some(instance) = config.ospfv3_instances.iter_mut().find(|i| &i.name == name) {
+                instance.routing_table = Some(table.name.clone());
+                // A rule naming the instance overrides the unset one.
+                let rule = table
+                    .redistribute
+                    .iter()
+                    .filter(|r| r.to == RedistributeTarget::Ospfv3)
+                    .find(|r| r.instance.as_ref() == Some(name))
+                    .or_else(|| {
+                        table
+                            .redistribute
+                            .iter()
+                            .find(|r| r.to == RedistributeTarget::Ospfv3 && r.instance.is_none())
+                    });
+                instance.redistribute_policy = rule.and_then(|r| r.policy.clone());
+            }
         }
     }
 }
@@ -114,6 +119,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,
@@ -128,7 +134,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,
@@ -153,6 +159,7 @@ mod tests {
 
         RoutingTable {
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: policy.map(str::to_string),
@@ -172,6 +179,7 @@ mod tests {
 
         RoutingTable {
             redistribute: vec![Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: policy.map(str::to_string),
@@ -362,5 +370,50 @@ mod tests {
         };
         sync_routing_table_refs(&mut cfg);
         assert_eq!(cfg.ospf_instances[0].redistribute_policy, None);
+    }
+
+    #[test]
+    fn two_ospfv3_instances_in_one_table_with_per_instance_policy() {
+        use crate::schema::{Ospfv3Instance, Redistribute};
+        let rule = |instance: Option<&str>, policy: &str| Redistribute {
+            to: RedistributeTarget::Ospfv3,
+            policy: Some(policy.to_string()),
+            instance: instance.map(str::to_string),
+            ..Default::default()
+        };
+        let mut table = RoutingTable {
+            name: "rt1".to_string(),
+            ospfv3_instances: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        };
+        let mut cfg = Config {
+            ospfv3_instances: ["a", "b", "c"]
+                .map(|n| Ospfv3Instance {
+                    name: n.to_string(),
+                    ..Default::default()
+                })
+                .to_vec(),
+            ..Default::default()
+        };
+        // Unset rule applies to every claimed instance.
+        table.redistribute = vec![rule(None, "all")];
+        cfg.routing_tables = vec![table.clone()];
+        sync_routing_table_refs(&mut cfg);
+        let pol = |c: &Config, i: usize| c.ospfv3_instances[i].redistribute_policy.clone();
+        assert_eq!(pol(&cfg, 0).as_deref(), Some("all"));
+        assert_eq!(pol(&cfg, 1).as_deref(), Some("all"));
+        assert_eq!(
+            cfg.ospfv3_instances[1].routing_table.as_deref(),
+            Some("rt1")
+        );
+        // A named rule overrides the unset one for its instance only.
+        table.redistribute.push(rule(Some("b"), "only-b"));
+        cfg.routing_tables = vec![table];
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(pol(&cfg, 0).as_deref(), Some("all"));
+        assert_eq!(pol(&cfg, 1).as_deref(), Some("only-b"));
+        // Unclaimed instance keeps no table.
+        assert_eq!(cfg.ospfv3_instances[2].routing_table, None);
+        assert_eq!(pol(&cfg, 2), None);
     }
 }

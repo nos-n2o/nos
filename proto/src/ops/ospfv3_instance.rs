@@ -31,12 +31,33 @@ pub enum Ospfv3InstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Turns RFC 8362 Sparse mode origination on or off.
+    SetExtendedLsaSparse {
+        /// Name of the `OSPFv3` instance this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Sets (`Some`) or clears (`None`) the RFC 5187 grace period.
     SetGracefulRestartGracePeriod {
         /// Name of the `OSPFv3` instance this op targets.
         name: String,
         /// Grace period in seconds (RFC 3623 / RFC 5187).
         grace_period: Option<u16>,
+    },
+    /// Sets (`Some`) or clears (`None`) the LSDB overload limit (#1146).
+    SetMaxLsa {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Most non-self LSAs per store; `None` restores the default.
+        max_lsa: Option<u32>,
+    },
+    /// Sets the RFC 5838 address family of the instance.
+    SetAddressFamily {
+        /// Name of the instance this op targets.
+        name: String,
+        /// The address family.
+        address_family: crate::schema::Ospfv3AddressFamily,
     },
     /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
     SetGracefulRestartHelperMaxGracePeriod {
@@ -86,11 +107,14 @@ impl Ospfv3InstanceOp {
                         routing_table: None,
                         redistribute_policy: None,
                         extended_lsa: false,
+                        extended_lsa_sparse: false,
                         graceful_restart_grace_period: None,
                         graceful_restart_helper_max_grace_period: None,
                         max_metric_on_startup: None,
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
+                        max_lsa: None,
+                        address_family: crate::schema::Ospfv3AddressFamily::default(),
                     });
                 }
                 Ok(())
@@ -101,6 +125,21 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
                 find_instance_mut(config, name)?.extended_lsa = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetExtendedLsaSparse { name, enabled } => {
+                find_instance_mut(config, name)?.extended_lsa_sparse = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetAddressFamily {
+                name,
+                address_family,
+            } => {
+                find_instance_mut(config, name)?.address_family = *address_family;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetMaxLsa { name, max_lsa } => {
+                find_instance_mut(config, name)?.max_lsa = *max_lsa;
                 Ok(())
             }
             Ospfv3InstanceOp::SetGracefulRestartHelperMaxGracePeriod { name, seconds } => {
@@ -159,11 +198,14 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             extended_lsa: false,
+            extended_lsa_sparse: false,
             graceful_restart_grace_period: None,
             graceful_restart_helper_max_grace_period: None,
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
+            address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }
 

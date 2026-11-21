@@ -35,6 +35,11 @@ pub enum NetworkType {
     /// RFC 2328 §9.5: multicast Hello, no DR/BDR, one adjacency per
     /// discovered neighbor. `OSPFv2` only (rejected on an `Ospfv3Profile`).
     PointToMultipoint,
+    /// RFC 6845 hybrid broadcast and point-to-multipoint: DR/BDR election,
+    /// Hello and database sync as on broadcast, Router-LSA as on
+    /// point-to-multipoint. `OSPFv3` on a broadcast domain only (rejected on
+    /// an `OspfProfile`).
+    Hybrid,
 }
 
 /// A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive
@@ -335,6 +340,11 @@ pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
                 "passive excludes auth, bfd and point-to-multipoint",
             ));
         }
+        if p.network_type == Some(NetworkType::Hybrid) {
+            return Err(garde::Error::new(
+                "network-type hybrid is not supported for OSPFv2",
+            ));
+        }
         if p.extended_sequence_numbers {
             let ok = matches!(&p.auth, Some(OspfAuth::Crypto { keys })
                 if keys.iter().all(|k| k.algorithm != OspfCryptoAlgorithm::Md5));
@@ -419,6 +429,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            max_lsa: None,
             host_router: false,
             remote_lfa: false,
             redistribute_metric: None,
@@ -449,6 +460,21 @@ mod tests {
                 key("pw9", "123456789"),
             ],
         }
+    }
+
+    #[test]
+    fn hybrid_is_rejected_for_ospfv2() {
+        let p = OspfProfile {
+            network_type: Some(NetworkType::Hybrid),
+            ..profile("p")
+        };
+        let err = config_with(vec![instance("o", vec![area("0.0.0.0", vec![p])])])
+            .validate()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not supported for OSPFv2"),
+            "{err}"
+        );
     }
 
     #[test]

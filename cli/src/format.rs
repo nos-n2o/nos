@@ -1331,9 +1331,11 @@ pub fn render_bgp_vpn_lines(routes: &[nos_proto::VpnRouteSummary]) -> String {
         .map(|r| {
             let labels: Vec<String> = r.labels.iter().map(u32::to_string).collect();
             let mut line = format!(
-                "  {} rd {} {} label {} next-hop {} from {} [{}]",
+                "  {} rd {} {}{} label {} next-hop {} from {} [{}]",
                 if r.best { ">" } else { " " },
                 r.rd,
+                r.path_id
+                    .map_or(String::new(), |id| format!("path-id {id} ")),
                 r.prefix,
                 labels.join("/"),
                 r.next_hop,
@@ -1854,6 +1856,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         users,
         logging,
         login_policy,
+        aaa,
         bfd_profiles,
         sbfd_reflector,
         spanning_tree,
@@ -1870,6 +1873,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         .iter()
         .chain(logging)
         .chain(login_policy)
+        .chain(aaa)
         .chain(sbfd_reflector)
         .chain(spanning_tree)
         .chain(admin)
@@ -2566,6 +2570,7 @@ mod tests {
             local_pref: 100,
             best,
             site_of_origin: None,
+            path_id: None,
         };
         assert_eq!(
             render_bgp_vpn("r1", family, &[r(true, vec![100]), r(false, vec![16, 17])]),
@@ -2586,6 +2591,7 @@ mod tests {
             local_pref: 100,
             best: true,
             site_of_origin: Some("65001:77".into()),
+            path_id: None,
         };
         assert!(
             render_bgp_vpn("r1", nos_proto::AddressFamily::Vpnv4Unicast, &[r])
@@ -3452,6 +3458,8 @@ mod tests {
             age: 3,
             checksum: 0x1234,
             link: link.map(str::to_string),
+            router_flags: None,
+            virtual_links: Vec::new(),
         };
         assert_eq!(
             render_ospfv3_database("v3", &[lsa(Some("eth0.0")), lsa(None)]),
@@ -3584,7 +3592,7 @@ mod tests {
                 }]
             }],
             "routing_tables": [{
-                "name": "rt1", "ospfv3_instance": "o3",
+                "name": "rt1", "ospfv3_instances": ["o3"],
                 "evpn": {"l3_vni": 5000, "rd": "1:1"}
             }],
             "users": [{"name": "admin", "password": "$argon2id$secret"}]

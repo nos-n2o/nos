@@ -138,7 +138,12 @@ async fn main() -> anyhow::Result<()> {
         BootCounter::persistent(args.state_dir.join(format!("{}.boot", args.instance))),
     );
     let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
-    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()));
+    let marker = boot::take_grace_marker(&grace_marker, unix_now());
+    links.set_after_graceful_restart(marker.is_some());
+    if let Some(m) = marker {
+        let remaining = m.deadline.saturating_sub(unix_now());
+        links.begin_restart(m.neighbors, std::time::Duration::from_secs(remaining));
+    }
     let (link_tx, link_rx) = watch::channel(nos_ospf::link_client::LinkTable::default());
     let link_task = tokio::spawn(nos_ospf::link_client::run(
         args.watchdog_socket.clone(),
@@ -165,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         links.clone(),
         routing_table_rx,
         shutdown_rx,
+        args.instance.clone(),
         args.dev
             .push_chunk
             .filter(|&n| n > 0)
@@ -192,7 +198,12 @@ async fn main() -> anyhow::Result<()> {
         let grace_period = links.grace_period();
         if grace_period != 0 {
             // Lets the respawned process skip RFC 6987's on-startup period.
-            match boot::write_grace_marker(&grace_marker, unix_now() + u64::from(grace_period)) {
+            let full = links.full_neighbor_ids().await;
+            match boot::write_grace_marker(
+                &grace_marker,
+                unix_now() + u64::from(grace_period),
+                &full,
+            ) {
                 Ok(()) => info!(instance = %args.instance, "ospf graceful restart marker written"),
                 Err(e) => {
                     tracing::warn!(instance = %args.instance, error = %e, "cannot write ospf graceful restart marker");

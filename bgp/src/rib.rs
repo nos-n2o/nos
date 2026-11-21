@@ -128,6 +128,8 @@ pub use rtc::{membership as rtc_membership, AdvertisedRtc, RtcKey};
 pub use shared::{RibGuard, SharedRib};
 pub use vpn_import::{SooSkip, VpnImport, VpnImportPath, VpnImports};
 pub use vpn_out::AdvertisedVpn;
+pub(crate) use vpn_out::VpnCopy;
+use vpn_out::VpnTable;
 
 use adj_in::{evpn_mac_key, AddPathSent, PathCounts, PathKey, PeerTable};
 pub use decision::Hops;
@@ -460,6 +462,8 @@ pub(crate) type VpnFlowKey = (AddressFamily, VpnKey<FlowSpec>);
 /// One received copy of a SAFI 134 rule: the rule and its RFC 7911 path id
 /// (0 for a peer without Add-Path), #1126.
 pub(crate) type VpnFlowCopy = (VpnFlowKey, u32);
+/// What one peer was sent of one SAFI 134 rule, by source copy (peer, path id).
+type SentVpnFlows = HashMap<(IpAddr, u32), AdvertisedFlowspec>;
 
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,13 +623,15 @@ pub enum OutboundUpdate {
     WithdrawFlowspec(AddressFamily, FlowSpec),
     /// A selected VPN path (see `vpn_out`).
     AnnounceVpn(AdvertisedVpn),
-    WithdrawVpn(VpnKey<IpNet>),
+    /// The trailing id is the RFC 7911 path id, `Some` exactly toward a peer
+    /// we send ADD-PATH to for the family.
+    WithdrawVpn(VpnKey<IpNet>, Option<u32>),
     /// An RFC 4684 membership route (see `rtc`).
     AnnounceRtc(AdvertisedRtc),
     WithdrawRtc(RtcKey),
     /// A selected VPN Flowspec rule under its RD (see `flowspec_vpn`).
     AnnounceVpnFlowspec(crate::vpn::Rd, AdvertisedFlowspec),
-    /// The second field is the RFC 7911 path id (`None` until #1127).
+    /// The second field is the RFC 7911 path id (`Some` toward an Add-Path peer, #1127).
     WithdrawVpnFlowspec(VpnFlowKey, Option<u32>),
 }
 
@@ -838,7 +844,7 @@ pub struct BgpRib {
     flowspec_stale: HashMap<IpAddr, HashSet<FlowspecKey>>,
     /// Received VPN-IPv4/IPv6 paths per peer, keyed by (RD, prefix), every
     /// RT kept (see `vpn_out`).
-    vpn_adj_rib_in: HashMap<IpAddr, HashMap<VpnKey<IpNet>, VpnRoute>>,
+    vpn_adj_rib_in: HashMap<IpAddr, VpnTable>,
     /// Received VPN Flowspec (SAFI 134) rules per peer (#1084).
     vpn_flow_adj_rib_in: HashMap<IpAddr, HashMap<VpnFlowCopy, FlowspecRoute>>,
     /// Per held SAFI 134 rule, its validity in each VRF table that imports it.
@@ -851,18 +857,24 @@ pub struct BgpRib {
     /// advertisement needs Add-Path for SAFI 134 (#1124).
     vpn_flow_loc: HashMap<VpnFlowKey, (IpAddr, u32, FlowspecRoute)>,
     /// What each peer was last sent per SAFI 134 rule (`sync_vpn_flow_to`).
-    vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, AdvertisedFlowspec>>,
+    vpn_flow_adj_rib_out: HashMap<IpAddr, HashMap<VpnFlowKey, SentVpnFlows>>,
+    /// Next fresh Add-Path id per (peer, SAFI 134 rule) (`sync_vpn_flow_to`).
+    vpn_flow_next_id: HashMap<(IpAddr, VpnFlowKey), u32>,
     /// The SAFI 134 twin of `flowspec_stale`.
     vpn_flow_stale: HashMap<IpAddr, HashSet<VpnFlowCopy>>,
-    /// Per key, the selected copy and where it came from (`select_vpn`).
-    vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, VpnRoute)>,
+    /// Per key, the selected copy: where it came from, its path id (`select_vpn`).
+    vpn_loc: HashMap<VpnKey<IpNet>, (RouteOrigin, u32, VpnRoute)>,
     /// VRF routes `nos-ribd` exports (`apply_vpn_prefixes`), per table so
     /// one table's `Full` never clobbers another's; `Local` candidates.
     vpn_local: HashMap<String, HashMap<VpnKey<IpNet>, VpnRoute>>,
-    /// What each peer was last sent per key (`sync_vpn_to`).
-    vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, AdvertisedVpn>>,
+    /// What each peer was last sent per key: one entry per advertised copy,
+    /// by its source (`sync_vpn_to`); the wire id is `route.path_id`.
+    vpn_adj_rib_out: HashMap<IpAddr, HashMap<VpnKey<IpNet>, HashMap<PathKey, AdvertisedVpn>>>,
+    /// Per ADD-PATH send peer and key, the next fresh path id (the VPN twin
+    /// of `add_path_next_id`).
+    vpn_next_id: HashMap<(IpAddr, VpnKey<IpNet>), u32>,
     /// The VPN twin of `stale` (graceful restart and RFC 7313 refresh).
-    vpn_stale: HashMap<IpAddr, HashSet<VpnKey<IpNet>>>,
+    vpn_stale: HashMap<IpAddr, HashSet<VpnCopy>>,
     /// The VRFs this (underlay) instance imports VPN routes into (`vpn_import`).
     vpn_vrfs: crate::vpn::VrfSet,
     /// RFC 4684 membership per peer (`rtc`), stale entries included.
@@ -1030,12 +1042,14 @@ impl BgpRib {
             vpn_loc: HashMap::new(),
             vpn_local: HashMap::new(),
             vpn_adj_rib_out: HashMap::new(),
+            vpn_next_id: HashMap::new(),
             vpn_stale: HashMap::new(),
             vpn_flow_adj_rib_in: HashMap::new(),
             vpn_flow_validity: HashMap::new(),
             vpn_flow_visits: 0,
             vpn_flow_loc: HashMap::new(),
             vpn_flow_adj_rib_out: HashMap::new(),
+            vpn_flow_next_id: HashMap::new(),
             vpn_flow_stale: HashMap::new(),
             vpn_vrfs: crate::vpn::VrfSet::default(),
             rtc_adj_rib_in: HashMap::new(),
@@ -1868,7 +1882,9 @@ impl BgpRib {
         self.evpn_adj_rib_out.remove(&peer);
         self.flowspec_adj_rib_out.remove(&peer);
         self.vpn_adj_rib_out.remove(&peer);
+        self.vpn_next_id.retain(|(p, _), _| *p != peer);
         self.vpn_flow_adj_rib_out.remove(&peer);
+        self.vpn_flow_next_id.retain(|(p, _), _| *p != peer);
         self.rtc_adj_rib_out.remove(&peer);
         self.add_path_sent.retain(|(p, _), _| *p != peer);
         self.add_path_next_id.retain(|(p, _), _| *p != peer);
@@ -1900,12 +1916,12 @@ impl BgpRib {
         self.vpn_flow_stale.remove(&peer);
         self.drop_peer_vpn_flows(peer);
         self.gr_deadline.remove(&peer);
-        let vpns: Vec<VpnKey<IpNet>> = self
+        let vpns: Vec<VpnCopy> = self
             .vpn_adj_rib_in
             .get(&peer)
             .into_iter()
-            .flat_map(HashMap::keys)
-            .copied()
+            .flat_map(vpn_out::copies)
+            .map(|(c, _)| c)
             .collect();
         for k in vpns {
             self.drop_vpn(peer, &k);

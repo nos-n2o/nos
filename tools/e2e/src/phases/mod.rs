@@ -10,6 +10,7 @@ mod drivers;
 mod ospf;
 mod pam;
 mod pki;
+mod restconf;
 mod ssh;
 
 use anyhow::bail;
@@ -90,6 +91,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "evpn-l3" => bgp::evpn_l3(w).await,
         "evpn-l3-chunked" => bgp::evpn_l3_chunked(w).await,
         "loopback" => drivers::loopback(w).await,
+        "sandbox-nnp" => drivers::sandbox_nnp(w).await,
         "routes-paging" => drivers::routes_paging(w).await,
         "vrf-unknown" => drivers::vrf_unknown(w).await,
         "mtu" => drivers::mtu(w).await,
@@ -109,6 +111,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "routed-subinterface" => drivers::routed_subinterface(w).await,
         "source-address" => drivers::source_address(w).await,
         "rest" => drivers::rest(w).await,
+        "restconf-conformance" => restconf::restconf_conformance(w).await,
         "acl" => acl::acl(w).await,
         "flowspec-dataplane" => acl::flowspec_dataplane(w).await,
         "daemon-heartbeat" => drivers::daemon_heartbeat(w).await,
@@ -149,6 +152,8 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-abr" => ospf::ospfv3_abr(w).await,
         "ospfv3-area-range" => ospf::ospfv3_area_range(w).await,
         "ospfv3-stub" => ospf::ospfv3_stub(w).await,
+        "ospfv3-nssa" => ospf::ospfv3_nssa(w).await,
+        "ospfv3-virtual-link" => ospf::ospfv3_virtual_link(w).await,
         "ospfv3-lsinfinity" => ospf::ospfv3_lsinfinity(w).await,
         "ospfv3-lsinfinity-asbr" => ospf::ospfv3_lsinfinity_asbr(w).await,
         "ospfv3-graceful-restart" => ospf::ospfv3_graceful_restart(w).await,
@@ -160,7 +165,9 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-p2mp" => ospf::ospfv3_p2mp(w).await,
         "ospfv3-bfd" => ospf::ospfv3_bfd(w).await,
         "ospfv3-dr" => ospf::ospfv3_dr(w).await,
+        "ospfv3-hybrid" => ospf::ospfv3_hybrid(w).await,
         "ospfv3-lfa" => ospf::ospfv3_lfa(w).await,
+        "ospfv3-extended-lsa-sparse" => ospf::ospfv3_extended_lsa_sparse(w).await,
         "ospfv3-spf-ecmp" => ospf::ospfv3_spf_ecmp(w).await,
         "ospfv3-stub-router" => ospf::ospfv3_stub_router(w).await,
         "ospfv3-vlan-nexthop-move" => ospf::ospfv3_vlan_nexthop_move(w).await,
@@ -168,6 +175,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-mtu-pagination" => ospf::ospfv3_mtu_pagination(w).await,
         "ospfv3-router-lsa-split" => ospf::ospfv3_router_lsa_split(w).await,
         "ospf-forged-lsa" => ospf::ospf_forged_lsa(w).await,
+        "ospf-max-lsa" => ospf::ospf_max_lsa(w).await,
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pam" => pam::pam(w).await,
         "ssh" => ssh::ssh(w).await,
@@ -176,6 +184,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "pki" => pki::pki(w).await,
         "pki-crl" => pki::pki_crl(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
+        "aaa" => pki::aaa(w).await,
         "logd-memory" => crate::logd_mem::phase(w).await,
         "config-mem" => crate::logd_mem::config_phase(w).await,
         other => bail!("unknown phase '{other}'"),
@@ -189,6 +198,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         "base" => &[
             "up",
             "established",
+            "sandbox-nnp",
             "reconnect",
             "collision",
             "shutdown",
@@ -208,6 +218,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         "drivers" => &[
             "up",
             "established",
+            "sandbox-nnp",
             "loopback",
             "routes-paging",
             "vrf-unknown",
@@ -228,6 +239,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "routed-subinterface",
             "source-address",
             "rest",
+            "restconf-conformance",
             "syslog",
             "acl",
             "flowspec-dataplane",
@@ -277,6 +289,8 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospf-stub",
             "ospfv3-stub",
             "ospf-nssa",
+            "ospfv3-nssa",
+            "ospfv3-virtual-link",
             "ospf-external-flood",
             "ospf-virtual-link",
             "ospf-abr-transit",
@@ -295,7 +309,9 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3-p2mp",
             "ospfv3-bfd",
             "ospfv3-dr",
+            "ospfv3-hybrid",
             "ospfv3-lfa",
+            "ospfv3-extended-lsa-sparse",
             "ospfv3-spf-ecmp",
             "ospfv3-stub-router",
             "ospfv3-vlan-nexthop-move",
@@ -303,6 +319,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3-mtu-pagination",
             "ospfv3-router-lsa-split",
             "ospf-forged-lsa",
+            "ospf-max-lsa",
             "ospf-remote-lfa",
         ],
         "multi" => &[
@@ -353,7 +370,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
-        "pki-suite" => &["up", "established", "pki", "pki-rotation"],
+        "pki-suite" => &["up", "established", "pki", "aaa", "pki-rotation"],
         // Slow (20-40 min, 30,000 logins): its own CI job, off the fast pki-suite (#677).
         "pki-crl" => &["up", "established", "pki-crl"],
         // Not run by CI (minutes of runtime, memory thresholds are the flakiest
@@ -369,6 +386,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
 pub const ALL: &[&str] = &[
     "up",
     "established",
+    "sandbox-nnp",
     "reconnect",
     "collision",
     "shutdown",
@@ -404,6 +422,7 @@ pub const ALL: &[&str] = &[
     "routed-subinterface",
     "source-address",
     "rest",
+    "restconf-conformance",
     "syslog",
     "acl",
     "flowspec-dataplane",
@@ -487,6 +506,8 @@ pub const ALL: &[&str] = &[
     "ospf-stub",
     "ospfv3-stub",
     "ospf-nssa",
+    "ospfv3-nssa",
+    "ospfv3-virtual-link",
     "ospf-external-flood",
     "ospf-virtual-link",
     "ospf-abr-transit",
@@ -505,7 +526,9 @@ pub const ALL: &[&str] = &[
     "ospfv3-p2mp",
     "ospfv3-bfd",
     "ospfv3-dr",
+    "ospfv3-hybrid",
     "ospfv3-lfa",
+    "ospfv3-extended-lsa-sparse",
     "ospfv3-spf-ecmp",
     "ospfv3-stub-router",
     "ospfv3-vlan-nexthop-move",
@@ -513,8 +536,10 @@ pub const ALL: &[&str] = &[
     "ospfv3-mtu-pagination",
     "ospfv3-router-lsa-split",
     "ospf-forged-lsa",
+    "ospf-max-lsa",
     "ospf-remote-lfa",
     "pki",
+    "aaa",
     "pki-rotation",
     "pki-crl",
     "logd-memory",

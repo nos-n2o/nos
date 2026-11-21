@@ -1,7 +1,10 @@
 //! RFC 3623 graceful restart and RFC 6987 max-metric.
 //! Moved verbatim out of `link.rs`.
 
+use std::collections::BTreeSet;
+
 use nos_ospf_common::lsa::helper_deadline_secs;
+use nos_ospf_common::restart;
 
 use super::rx::next_crypto_seq;
 use super::{
@@ -193,11 +196,12 @@ pub(super) fn send_grace_lsas(
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
     grace_period: u32,
+    age: u16,
     next_seq: &mut u64,
 ) {
     let grace = Lsa {
         header: LsaHeader {
-            age: 0,
+            age,
             options: 0,
             lsa_type: lsa::LSA_TYPE_OPAQUE_LINK,
             link_state_id: lsa::GRACE_LINK_STATE_ID,
@@ -234,6 +238,10 @@ pub(super) fn send_grace_lsas(
         .collect();
     for (neighbor_id, address) in full {
         match socket.send_unicast(address, &payload) {
+            Ok(()) if age >= lsa::MAX_AGE => info!(
+                link = %cfg.attach_point, neighbor = %neighbor_id,
+                "ospf graceful restart: grace-lsa flushed"
+            ),
             Ok(()) => info!(
                 link = %cfg.attach_point, neighbor = %neighbor_id, grace_period,
                 "ospf graceful restart: grace-lsa sent"
@@ -245,7 +253,96 @@ pub(super) fn send_grace_lsas(
     }
 }
 
+/// What restart mode waits for.
+#[derive(Debug)]
+pub(super) struct RestartState {
+    expected: BTreeSet<Ipv4Addr>,
+    deadline: Instant,
+}
+
 impl LinkManager {
+    /// RFC 3623 §2: enters restart mode (this process respawned after a
+    /// planned restart, `boot::take_grace_marker`) for at most `remaining`,
+    /// until every `expected` neighbor (`Full` when the previous process
+    /// stopped) is `Full` again. Meanwhile nothing is originated and the
+    /// route push holds back, so helpers keep our LSAs and `nos-ribd` keeps
+    /// the routes it has. No neighbors, no restart mode.
+    pub fn begin_restart(&self, expected: BTreeSet<Ipv4Addr>, remaining: Duration) {
+        if expected.is_empty() {
+            return;
+        }
+        info!(
+            neighbors = expected.len(),
+            remaining_secs = remaining.as_secs(),
+            "ospf restart mode: entered"
+        );
+        *self
+            .restart
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RestartState {
+            expected,
+            deadline: Instant::now() + remaining,
+        });
+        self.restart_on.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether restart mode is still on.
+    pub fn restart_active(&self) -> bool {
+        self.restart_on.load(Ordering::Relaxed)
+    }
+
+    /// Router ids of every neighbor `Full` on any link now.
+    pub async fn full_neighbor_ids(&self) -> BTreeSet<Ipv4Addr> {
+        self.links
+            .lock()
+            .await
+            .values()
+            .flat_map(|e| {
+                e.status
+                    .borrow()
+                    .neighbors
+                    .iter()
+                    .filter(|(_, n)| n.state == NeighborState::Full)
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Ends restart mode when `restart::exit_reason` says so (1 s aging tick):
+    /// flushes the Grace-LSA (§2.3) and wakes the origination pass; the route
+    /// push then sends its first `Full`. `topology_changed`: strict LSA
+    /// checking saw a router other than us change an installed LSA (§2.2).
+    pub async fn restart_tick(&self, topology_changed: bool) {
+        if !self.restart_active() {
+            return;
+        }
+        let full = self.full_neighbor_ids().await;
+        let reason = {
+            let mut guard = self
+                .restart
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(state) = guard.as_ref() else {
+                return;
+            };
+            let Some(reason) = restart::exit_reason(
+                &state.expected,
+                &full,
+                Instant::now() >= state.deadline,
+                topology_changed,
+            ) else {
+                return;
+            };
+            *guard = None;
+            reason
+        };
+        self.restart_on.store(false, Ordering::Relaxed);
+        info!(reason = %reason.as_str(), "ospf restart mode: exited");
+        self.send_to_links(LinkCommand::FlushGrace).await;
+        self.reoriginate.notify_one();
+    }
+
     pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
         self.grace_period
             .store(grace_period.unwrap_or(0), Ordering::Relaxed);

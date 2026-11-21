@@ -37,11 +37,17 @@ use crate::packet::{read_ipv4, PacketError};
 /// areas or NSSA in `OSPFv3` yet).
 pub const OPTION_V6: u32 = 0x01;
 pub const OPTION_E: u32 = 0x02;
+/// RFC 5340 §A.2 N-bit: the area is an NSSA (RFC 3101 §2.1); the same value
+/// as the prefix option P.
+pub const OPTION_N: u32 = 0x08;
 pub const OPTION_R: u32 = 0x10;
 /// RFC 7166 §2.1/§7 (IANA "`OSPFv3` Options (24 bits)"): every packet on this
 /// link carries an authentication trailer. Set only in Hello/DBD; LSR/LSU/
 /// `LSAck` have no Options field and inherit it from the link's config.
 pub const OPTION_AT: u32 = 0x00_0400;
+/// RFC 5838 §2.2: the router supports address families; an IPv4-unicast
+/// instance sets it in Hello/DBD/LSAs and discards Hellos without it.
+pub const OPTION_AF: u32 = 0x00_0100;
 
 /// S2/S1 scope bits (bits 14-13): `01` = area scope. The U-bit (bit 15,
 /// "flood even if unrecognized") is left clear on the RFC 5340 `LSA_TYPE_*`
@@ -86,8 +92,13 @@ pub fn is_as_scope(lsa_type: u16) -> bool {
 /// RFC 5340 §4.4.3 / RFC 2328 §3.6: whether an LSA of `lsa_type` belongs in
 /// an area of this kind: no AS-scope LSA (0x4005, 0xC025, ...) in a stub
 /// area. The one scope rule every path (DBD, LSR, LSU, flood, SPF) uses.
-pub fn in_area_scope(lsa_type: u16, stub: bool) -> bool {
-    nos_ospf_common::areas::in_area_scope(is_as_scope(lsa_type), false, stub, false)
+pub fn in_area_scope(lsa_type: u16, stub: bool, nssa: bool) -> bool {
+    nos_ospf_common::areas::in_area_scope(
+        is_as_scope(lsa_type),
+        lsa_type == LSA_TYPE_NSSA || lsa_type == LSA_TYPE_E_NSSA,
+        stub,
+        nssa,
+    )
 }
 
 /// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s effective scope is
@@ -110,6 +121,7 @@ pub fn is_known_type(lsa_type: u16) -> bool {
                 | LSA_TYPE_INTER_AREA_PREFIX
                 | LSA_TYPE_INTER_AREA_ROUTER
                 | LSA_TYPE_AS_EXTERNAL
+                | LSA_TYPE_NSSA
                 | LSA_TYPE_LINK
                 | LSA_TYPE_INTRA_AREA_PREFIX
                 | LSA_TYPE_GRACE
@@ -126,10 +138,19 @@ pub const LSA_TYPE_INTER_AREA_PREFIX: u16 = SCOPE_AREA | 3;
 pub const LSA_TYPE_INTER_AREA_ROUTER: u16 = SCOPE_AREA | 4;
 /// RFC 5340 §A.4.7 AS-External-LSA — AS-scoped, function code 5.
 pub const LSA_TYPE_AS_EXTERNAL: u16 = SCOPE_AS | 5;
+/// RFC 5340 §A.4.8 / RFC 3101 NSSA-LSA (Type-7): area-scoped, function code 7,
+/// the AS-External-LSA body; only ever held in an NSSA.
+pub const LSA_TYPE_NSSA: u16 = SCOPE_AREA | 7;
 /// RFC 5340 §A.4.3 Router-LSA flags: B (area border router) and E (AS
 /// boundary router).
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 5340 §A.4.3: V, an endpoint of a fully adjacent virtual link, set in
+/// the transit area's Router-LSA.
+pub const ROUTER_FLAG_V: u8 = 0x04;
+/// RFC 5340 §A.4.3 / RFC 3101: Nt, an NSSA border router that always
+/// translates.
+pub const ROUTER_FLAG_NT: u8 = 0x10;
 /// RFC 5340 §A.4.1.1 `PrefixOptions`: NU (no unicast: not used in routing
 /// calculations), LA (local address: a host address of the originator),
 /// P (propagate, NSSA) and DN (down, PE-CE). Only NU is honoured on
@@ -171,6 +192,9 @@ pub const LSA_TYPE_E_INTRA_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x29;
 pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x23;
 pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0x8000 | SCOPE_AREA | 0x24;
 pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0x8000 | SCOPE_AS | 0x25;
+/// RFC 8362 §4.8 E-NSSA-LSA (E-Type-7, `0xA027`): the TLV form of the
+/// NSSA-LSA, with the same body as `0xC025`; only ever held in an NSSA.
+pub const LSA_TYPE_E_NSSA: u16 = 0x8000 | SCOPE_AREA | 0x27;
 
 /// RFC 8362 §3.2's top-level TLV types (the only ones this crate uses).
 const TLV_ROUTER_LINK: u16 = 1;
@@ -190,6 +214,8 @@ const TLV_IPV6_LINK_LOCAL: u16 = 7;
 /// type in v3: a Router-LSA link never carries a prefix at all.
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
 pub const LINK_TYPE_TRANSIT_NETWORK: u8 = 2;
+/// RFC 5340 §A.4.3: a virtual link, in the backbone's Router-LSA.
+pub const LINK_TYPE_VIRTUAL: u8 = 4;
 
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (§A.4.3): Type(1) + Reserved(1) +
@@ -586,6 +612,7 @@ fn is_extended(lsa_type: u16) -> bool {
             | LSA_TYPE_E_INTER_AREA_PREFIX
             | LSA_TYPE_E_INTER_AREA_ROUTER
             | LSA_TYPE_E_AS_EXTERNAL
+            | LSA_TYPE_E_NSSA
     )
 }
 
@@ -828,7 +855,7 @@ fn decode_ext_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
         LSA_TYPE_E_INTER_AREA_ROUTER => {
             return decode_inter_area_router(single_tlv(data, TLV_INTER_AREA_ROUTER)?);
         }
-        LSA_TYPE_E_AS_EXTERNAL => return decode_ext_external(data),
+        LSA_TYPE_E_AS_EXTERNAL | LSA_TYPE_E_NSSA => return decode_ext_external(data),
         _ => {}
     }
     let fixed_len = if lsa_type == LSA_TYPE_E_INTRA_AREA_PREFIX {
@@ -1159,7 +1186,7 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
         LSA_TYPE_GRACE => decode_grace(data),
         LSA_TYPE_INTER_AREA_PREFIX => Ok(inter_area_prefix(&decode_metric_prefix(data)?)),
         LSA_TYPE_INTER_AREA_ROUTER => decode_inter_area_router(data),
-        LSA_TYPE_AS_EXTERNAL => decode_as_external(data),
+        LSA_TYPE_AS_EXTERNAL | LSA_TYPE_NSSA => decode_as_external(data),
         _ => Ok(LsaBody::Opaque(data.to_vec())),
     }
 }
@@ -1542,6 +1569,11 @@ mod tests {
                 LSA_TYPE_E_AS_EXTERNAL,
                 external(false, false, false, false),
             ),
+            (
+                LSA_TYPE_NSSA,
+                LSA_TYPE_E_NSSA,
+                external(true, true, true, false),
+            ),
         ] {
             for t in [legacy, e_type] {
                 let wire = encode_lsa(&with_body(t, body.clone()));
@@ -1563,6 +1595,9 @@ mod tests {
         assert_eq!(LSA_TYPE_E_INTER_AREA_PREFIX, 0xA023);
         assert_eq!(LSA_TYPE_E_INTER_AREA_ROUTER, 0xA024);
         assert_eq!(LSA_TYPE_E_AS_EXTERNAL, 0xC025);
+        assert_eq!(LSA_TYPE_E_NSSA, 0xA027);
+        assert!(is_known_type(LSA_TYPE_E_NSSA));
+        assert!(!is_as_scope(LSA_TYPE_E_NSSA) && !is_link_local_scope(LSA_TYPE_E_NSSA));
         for t in [LSA_TYPE_AS_EXTERNAL, LSA_TYPE_E_AS_EXTERNAL] {
             assert!(is_as_scope(t) && !is_link_local_scope(t));
         }
@@ -1735,6 +1770,40 @@ mod tests {
             assert_eq!(encode_lsa(&decoded), encoded, "{t:#06x}");
             assert_eq!(is_link_local_scope(t), ll, "{t:#06x}");
             assert_eq!(is_as_scope(t), a, "{t:#06x}");
+        }
+    }
+
+    /// RFC 3101 / RFC 5340 §A.4.8: an NSSA-LSA is an area-scoped LSA with the
+    /// AS-External body; the P prefix option rides in the body.
+    #[test]
+    fn nssa_lsa_round_trips_and_is_area_scoped() {
+        assert_eq!(LSA_TYPE_NSSA, 0x2007);
+        assert!(is_known_type(LSA_TYPE_NSSA));
+        assert!(!is_as_scope(LSA_TYPE_NSSA) && !is_link_local_scope(LSA_TYPE_NSSA));
+        let LsaBody::AsExternal(mut b) = external(false, true, false, false) else {
+            unreachable!()
+        };
+        b.prefix_options = PREFIX_OPT_P;
+        let lsa = with_body(LSA_TYPE_NSSA, LsaBody::AsExternal(b));
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.header.lsa_type, LSA_TYPE_NSSA);
+        assert_eq!(decoded.body, lsa.body);
+    }
+
+    /// The one scope rule: no AS-scope LSA in a stub area or NSSA, an
+    /// NSSA-LSA only in an NSSA.
+    #[test]
+    fn scope_rule_by_area_kind() {
+        for (stub, nssa, as_scope, nssa_lsa) in [
+            (false, false, true, false),
+            (true, false, false, false),
+            (true, true, false, true),
+        ] {
+            assert_eq!(in_area_scope(LSA_TYPE_AS_EXTERNAL, stub, nssa), as_scope);
+            assert_eq!(in_area_scope(LSA_TYPE_E_AS_EXTERNAL, stub, nssa), as_scope);
+            assert_eq!(in_area_scope(LSA_TYPE_NSSA, stub, nssa), nssa_lsa);
+            assert_eq!(in_area_scope(LSA_TYPE_E_NSSA, stub, nssa), nssa_lsa);
+            assert!(in_area_scope(LSA_TYPE_ROUTER, stub, nssa));
         }
     }
 
@@ -2017,11 +2086,12 @@ mod tests {
     fn short_bodies_never_panic() {
         let types = (0..=0x2fu16)
             .chain([
-                0x2001, 0x2002, 0x2003, 0x2004, 0x4005, 0x0008, 0x2009, 0x000B,
+                0x2001, 0x2002, 0x2003, 0x2004, 0x4005, 0x2007, 0x0008, 0x2009, 0x000B,
             ])
             .chain([LSA_TYPE_E_ROUTER, LSA_TYPE_E_NETWORK, LSA_TYPE_E_LINK])
             .chain([LSA_TYPE_E_INTRA_AREA_PREFIX, LSA_TYPE_E_INTER_AREA_PREFIX])
-            .chain([LSA_TYPE_E_INTER_AREA_ROUTER, LSA_TYPE_E_AS_EXTERNAL]);
+            .chain([LSA_TYPE_E_INTER_AREA_ROUTER, LSA_TYPE_E_AS_EXTERNAL])
+            .chain([LSA_TYPE_E_NSSA]);
         for ty in types {
             for fill in [0x00u8, 0xff, 0x01] {
                 for n in 0..=80 {

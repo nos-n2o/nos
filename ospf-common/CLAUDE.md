@@ -6,6 +6,7 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 
 - `neighbor`, `election`: RFC 2328 §10.5 neighbor FSM and §9.4 DR/BDR election (identical in RFC 5340).
 - `throttle`: `SpfThrottle`, the RFC 8405 QUIET/SHORT_WAIT/LONG_WAIT SPF delay machine with an injected `Instant` (#1138; `nos-ospf` only so far).
+- `restart`: RFC 3623/5187 restarting router (#1145, reused by #1163): the `.gr` marker (`encode_marker`/`parse_marker`: deadline + `Full` neighbor ids) and `exit_reason` (complete / topology-change / timeout); the daemons own the file, clock and what restart mode suppresses.
 - `ratelimit`: `WarnLimiter` (token bucket for peer-triggerable `warn!`s) and `MAX_NEIGHBORS_PER_LINK`.
 - `bfd`: `bfd_wanted`, the neighbor-state rule for which neighbors get a BFD session.
 - `drouters`: `AllDRouters` (idempotent AllDRouters join/leave on a `socket2::Socket`; `Iface` implies the family), `wants_all_drouters`, `ALL_D_ROUTERS_V4/V6`, `Dest` and `flood_dest` (where a flooded LSU/delayed LSAck goes, #879).

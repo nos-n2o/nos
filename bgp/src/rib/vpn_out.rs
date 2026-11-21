@@ -12,7 +12,7 @@
 //! as `Local` candidates of the same selection, advertised next-hop-self
 //! with the VRF's own label (RFC 4364 section 4.3.2).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
 use ipnet::IpNet;
@@ -22,18 +22,50 @@ use nos_rpl::CompiledPolicy;
 use nos_proto::{VpnPrefix, VpnPrefixUpdate};
 
 use super::{
-    apply_policy, best_path, build_advertisement, debug, decision, info, message, warn,
-    AdvertisedRoute, BgpRib, Candidate, OutboundUpdate, PolicyPeer, RibRoute, RouteOrigin,
+    apply_policy, best_index, build_advertisement, decision, info, message, rank, warn,
+    AdvertisedRoute, BgpRib, Candidate, OutboundUpdate, PathKey, PolicyPeer, RibRoute, RouteOrigin,
     VpnRoute,
 };
 use crate::vpn::{format_rd, VpnKey};
+
+/// One received copy of a VPN path: (RD, prefix) plus the RFC 7911 path id
+/// (0 without Add-Path).
+pub(crate) type VpnCopy = (VpnKey<IpNet>, u32);
+
+/// A peer's VPN paths: per (RD, prefix), its copies by path id (never an
+/// empty map, so one key's copies are found without a scan, #1133).
+pub(super) type VpnTable = HashMap<VpnKey<IpNet>, BTreeMap<u32, VpnRoute>>;
+
+/// Every copy of `t`.
+pub(super) fn copies(t: &VpnTable) -> impl Iterator<Item = (VpnCopy, &VpnRoute)> {
+    t.iter()
+        .flat_map(|(k, ids)| ids.iter().map(move |(id, r)| ((*k, *id), r)))
+}
+
+pub(super) fn get_copy<'a>(t: &'a VpnTable, c: &VpnCopy) -> Option<&'a VpnRoute> {
+    t.get(&c.0)?.get(&c.1)
+}
+
+pub(super) fn insert_copy(t: &mut VpnTable, c: VpnCopy, r: VpnRoute) -> Option<VpnRoute> {
+    t.entry(c.0).or_default().insert(c.1, r)
+}
+
+pub(super) fn remove_copy(t: &mut VpnTable, c: &VpnCopy) -> Option<VpnRoute> {
+    let ids = t.get_mut(&c.0)?;
+    let old = ids.remove(&c.1);
+    if ids.is_empty() {
+        t.remove(&c.0);
+    }
+    old
+}
 
 /// One VPN path rewritten for one peer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdvertisedVpn {
     pub key: VpnKey<IpNet>,
     pub labels: Vec<u32>,
-    /// The attributes and next hop; its `prefix` is `key.1`, `path_id` unused.
+    /// The attributes and next hop; its `prefix` is `key.1`, its `path_id`
+    /// the RFC 7911 id, `Some` only toward a peer we send ADD-PATH to.
     pub route: AdvertisedRoute,
 }
 
@@ -52,8 +84,8 @@ pub(crate) fn vpn_family(prefix: IpNet) -> AddressFamily {
 /// age (decision step 8).
 #[allow(clippy::too_many_arguments)]
 fn learn_batch(
-    table: &mut HashMap<VpnKey<IpNet>, VpnRoute>,
-    mut retain: Option<&mut HashMap<VpnKey<IpNet>, VpnRoute>>,
+    table: &mut VpnTable,
+    mut retain: Option<&mut VpnTable>,
     mp: &message::MpReachNlri,
     base: &RibRoute,
     peer: (IpAddr, u32),
@@ -66,21 +98,18 @@ fn learn_batch(
     for n in &mp.vpn {
         let k = (n.rd, n.prefix);
         keys.push(k);
-        // ponytail: one copy per (peer, key) until #1133; a later path id
-        // replaces the held one (ids are not stored, so only the new one is named).
-        if let Some(id) = n.path_id
-            && table.contains_key(&k)
-        {
-            debug!(peer = %from, rd = %format_rd(&n.rd), prefix = %n.prefix, path_id = id, "vpn path replaces the held copy of the same key");
-        }
+        // A copy is (key, path id); a re-announcement of one replaces it.
+        let id = n.path_id.unwrap_or(0);
+        let c: VpnCopy = (k, id);
         let candidate = RibRoute {
             next_hop: Some(mp.next_hop),
             ..base.clone()
         };
         // The policy rewrites the held copy: keep the raw one.
         if let Some(r) = retain.as_deref_mut() {
-            r.insert(
-                k,
+            insert_copy(
+                r,
+                c,
                 VpnRoute {
                     labels: n.labels.clone(),
                     route: candidate.clone(),
@@ -95,15 +124,15 @@ fn learn_batch(
             Some(n.rd),
         ) else {
             super::stats::bump(&mut stats.rejected, 1);
-            if table.remove(&k).is_some()
+            if remove_copy(table, &c).is_some()
                 && let Some(h) = bmp
             {
-                h.vpn_post(from, &k, None);
+                h.vpn_post(from, &c, None);
             }
             warn!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, "vpn route rejected by import policy");
             continue;
         };
-        if let Some(old) = table.get(&k)
+        if let Some(old) = get_copy(table, &c)
             && old.labels == n.labels
             && (RibRoute {
                 received_at: old.route.received_at,
@@ -116,13 +145,19 @@ fn learn_batch(
             labels: n.labels.clone(),
             route,
         };
-        if table.insert(k, new.clone()) != Some(new.clone()) {
+        if insert_copy(table, c, new.clone()) != Some(new.clone()) {
             if let Some(h) = bmp {
-                h.vpn_post(from, &k, Some(&new));
+                h.vpn_post(from, &c, Some(&new));
             }
-            info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, path_id = ?n.path_id, "vpn route learned");
+            if id == 0 {
+                info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, "vpn route learned");
+            } else {
+                info!(peer = %from, family = %vpn_family(n.prefix), rd = %format_rd(&n.rd), prefix = %n.prefix, labels = ?n.labels, next_hop = %mp.next_hop, path_id = id, "vpn route learned");
+            }
         }
     }
+    keys.sort_unstable();
+    keys.dedup();
     keys
 }
 
@@ -173,20 +208,25 @@ impl BgpRib {
         }
     }
 
-    /// Removes path `k` from `peer`'s VPN Adj-RIB-In (logged) and re-selects
-    /// it.
-    pub(super) fn drop_vpn(&mut self, peer: IpAddr, k: &VpnKey<IpNet>) -> bool {
+    /// Removes copy `c` from `peer`'s VPN Adj-RIB-In (logged) and re-selects
+    /// its key.
+    pub(super) fn drop_vpn(&mut self, peer: IpAddr, c: &VpnCopy) -> bool {
+        let k = &c.0;
         // A path the policy rejected is not held, but its raw copy is.
-        self.retained.take_vpn(peer, k);
+        self.retained.take_vpn(peer, c);
         let removed = self
             .vpn_adj_rib_in
             .get_mut(&peer)
-            .and_then(|t| t.remove(k))
+            .and_then(|t| remove_copy(t, c))
             .is_some();
         if removed {
-            info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route withdrawn");
+            if c.1 == 0 {
+                info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, "vpn route withdrawn");
+            } else {
+                info!(peer = %peer, family = %vpn_family(k.1), rd = %format_rd(&k.0), prefix = %k.1, path_id = c.1, "vpn route withdrawn");
+            }
             if let Some(h) = super::bmp_tap::tap(self.bmp.as_ref()) {
-                h.vpn_post(peer, k, None);
+                h.vpn_post(peer, c, None);
             }
             self.select_vpn(k);
             self.revalidate_vpn_flows_around(k.1);
@@ -199,32 +239,61 @@ impl BgpRib {
     // ponytail: no next-hop feasibility, and an IGP cost change does not
     // re-select.
     pub(super) fn select_vpn(&mut self, k: &VpnKey<IpNet>) {
-        let local = self.local_vpn(k).cloned();
-        let candidates: Vec<Candidate> = self
-            .vpn_adj_rib_in
-            .values()
-            .filter_map(|t| t.get(k))
-            .chain(local.as_ref())
-            .map(|r| (r.route.clone(), 0))
+        let who = self.vpn_candidates(k);
+        let candidates: Vec<Candidate> = who
+            .iter()
+            .map(|(_, id, r)| (r.route.clone(), *id))
             .collect();
-        let new = best_path(&candidates, &self.igp).and_then(|b| match b.origin {
-            RouteOrigin::Peer(p) => Some((b.origin, self.vpn_adj_rib_in.get(&p)?.get(k)?.clone())),
-            RouteOrigin::Local => Some((b.origin, local.clone()?)),
-        });
-        if self.vpn_loc.get(k) == new.as_ref() {
-            return;
+        let new =
+            best_index(&candidates, &self.igp).map(|i| (who[i].0, who[i].1, who[i].2.clone()));
+        if self.vpn_loc.get(k) != new.as_ref() {
+            match new {
+                Some(n) => self.vpn_loc.insert(*k, n),
+                None => self.vpn_loc.remove(k),
+            };
         }
-        match new {
-            Some(n) => self.vpn_loc.insert(*k, n),
-            None => self.vpn_loc.remove(k),
-        };
         if self.deferring() {
             return; // the deferral's end sends the initial update
         }
+        // Any copy may have entered or left a peer's Add-Path set, so every
+        // peer is re-synced; its diff sends nothing for an unchanged set.
         let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
         for peer in peers {
             self.sync_vpn_to(peer, k, false);
         }
+    }
+
+    /// Every held copy of `k`: each peer's and the local VRF export, as
+    /// (origin, path id, copy); the id is the decision's step-10 tie-break.
+    pub(super) fn vpn_candidates(&self, k: &VpnKey<IpNet>) -> Vec<(RouteOrigin, u32, VpnRoute)> {
+        let mut who = Vec::new();
+        for (p, t) in &self.vpn_adj_rib_in {
+            for (id, r) in t.get(k).into_iter().flatten() {
+                who.push((RouteOrigin::Peer(*p), *id, r.clone()));
+            }
+        }
+        if let Some(l) = self.local_vpn(k) {
+            who.push((RouteOrigin::Local, 0, l.clone()));
+        }
+        who
+    }
+
+    /// `vpn_candidates` best first, keyed by source.
+    fn vpn_ranked(&self, k: &VpnKey<IpNet>) -> Vec<(PathKey, VpnRoute)> {
+        let who = self.vpn_candidates(k);
+        let candidates: Vec<Candidate> = who
+            .iter()
+            .map(|(_, id, r)| (r.route.clone(), *id))
+            .collect();
+        rank(&candidates, &self.igp)
+            .into_iter()
+            .filter_map(|(route, id)| {
+                let pk = (route.origin, id);
+                who.iter()
+                    .find(|(o, i, _)| (*o, *i) == pk)
+                    .map(|(_, _, r)| (pk, r.clone()))
+            })
+            .collect()
     }
 
     /// The local export of `k`: the first table (by name) holding it, as two
@@ -327,38 +396,101 @@ impl BgpRib {
     }
 
     /// Brings `peer` in line with `k`, diffed against what it was last sent;
-    /// `force` re-sends even an unchanged state (a lost update).
+    /// `force` re-sends even an unchanged state (a lost update). Toward an
+    /// ADD-PATH peer that is the first `add_path_send_count` copies it may
+    /// have, ranked, each keeping its id while it stays selected; a copy
+    /// leaving frees its id, which an entering copy takes (an RFC 7911 §3
+    /// implicit replace), else a fresh one from `vpn_next_id`; ids still free
+    /// are withdrawn. Any other peer gets the first copy it may have (RFC 4271
+    /// implicit replace, a withdrawal only when none passes).
     pub(super) fn sync_vpn_to(&mut self, peer: IpAddr, k: &VpnKey<IpNet>, force: bool) {
-        let adv = self
-            .vpn_loc
-            .get(k)
-            .and_then(|(_, r)| self.advertise_vpn(peer, k, r));
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
             return;
         };
         let family = vpn_family(k.1);
-        let sent = self.vpn_adj_rib_out.entry(peer).or_default();
-        match adv {
-            Some(adv) if force || sent.get(k) != Some(&adv) => {
-                info!(peer = %peer, family = %family, rd = %format_rd(&k.0), prefix = %k.1, labels = ?adv.labels, next_hop = %adv.route.next_hop, "vpn route advertised");
-                sent.insert(*k, adv.clone());
-                outbox.tx.send(OutboundUpdate::AnnounceVpn(adv));
+        let add_path = outbox.add_path_tx.contains(&family);
+        let limit = if add_path {
+            outbox.add_path_send_count.unwrap_or(usize::MAX)
+        } else {
+            1
+        };
+        let (tx, negotiated) = (outbox.tx.clone(), outbox.negotiated_afs.contains(&family));
+        let mut selected: Vec<(PathKey, AdvertisedVpn)> = Vec::new();
+        for (pk, r) in self.vpn_ranked(k) {
+            if selected.len() >= limit {
+                break;
             }
-            Some(_) => {}
-            None => {
-                let was_sent = sent.remove(k).is_some();
-                if was_sent || (force && outbox.negotiated_afs.contains(&family)) {
-                    info!(peer = %peer, family = %family, rd = %format_rd(&k.0), prefix = %k.1, "vpn route advertisement withdrawn");
-                    outbox.tx.send(OutboundUpdate::WithdrawVpn(*k));
+            if let Some(adv) = self.advertise_vpn(peer, k, &r) {
+                selected.push((pk, adv));
+            }
+        }
+        let mut sent = self
+            .vpn_adj_rib_out
+            .entry(peer)
+            .or_default()
+            .remove(k)
+            .unwrap_or_default();
+        let had_sent = !sent.is_empty();
+        let mut freed: Vec<u32> = Vec::new();
+        sent.retain(|pk, a| {
+            let keep = selected.iter().any(|(s, _)| s == pk);
+            if !keep {
+                freed.extend(a.route.path_id);
+            }
+            keep
+        });
+        freed.sort_unstable_by(|a, b| b.cmp(a)); // `pop` takes the lowest
+        let fmt_rd = format_rd(&k.0);
+        let announced = !selected.is_empty();
+        for (pk, mut adv) in selected {
+            let id = match sent.get(&pk) {
+                Some(old) => old.route.path_id,
+                None if add_path => Some(freed.pop().unwrap_or_else(|| {
+                    // ponytail: never recycled once withdrawn, a u32 per
+                    // (peer, key) is nowhere near exhausted.
+                    let next = self.vpn_next_id.entry((peer, *k)).or_insert(1);
+                    *next += 1;
+                    *next - 1
+                })),
+                None => None,
+            };
+            adv.route.path_id = id;
+            if !force && sent.get(&pk) == Some(&adv) {
+                continue;
+            }
+            match id {
+                Some(id) => {
+                    info!(peer = %peer, family = %family, rd = %fmt_rd, prefix = %k.1, labels = ?adv.labels, next_hop = %adv.route.next_hop, path_id = id, "vpn route advertised");
+                }
+                None => {
+                    info!(peer = %peer, family = %family, rd = %fmt_rd, prefix = %k.1, labels = ?adv.labels, next_hop = %adv.route.next_hop, "vpn route advertised");
                 }
             }
+            sent.insert(pk, adv.clone());
+            tx.send(OutboundUpdate::AnnounceVpn(adv));
+        }
+        if add_path {
+            for id in freed.into_iter().rev() {
+                info!(peer = %peer, family = %family, rd = %fmt_rd, prefix = %k.1, path_id = id, "vpn route advertisement withdrawn");
+                tx.send(OutboundUpdate::WithdrawVpn(*k, Some(id)));
+            }
+        } else if !announced && (had_sent || (force && negotiated)) {
+            info!(peer = %peer, family = %family, rd = %fmt_rd, prefix = %k.1, "vpn route advertisement withdrawn");
+            tx.send(OutboundUpdate::WithdrawVpn(*k, None));
+        }
+        if !sent.is_empty() {
+            self.vpn_adj_rib_out
+                .entry(peer)
+                .or_default()
+                .insert(*k, sent);
         }
     }
 
-    /// Initial advertisement of every selected VPN path to a just-established
+    /// Initial advertisement of every held VPN path to a just-established
     /// peer (`initial_update`).
     pub(super) fn announce_vpn_to(&mut self, peer: IpAddr) {
         self.vpn_adj_rib_out.remove(&peer);
+        // A key with a held copy has a `vpn_loc` entry.
         let keys: Vec<VpnKey<IpNet>> = self.vpn_loc.keys().copied().collect();
         for k in keys {
             self.sync_vpn_to(peer, &k, false);
@@ -376,6 +508,7 @@ impl BgpRib {
             .get(&peer)
             .into_iter()
             .flat_map(HashMap::values)
+            .flat_map(HashMap::values)
             .filter(|a| vpn_family(a.key.1) == family)
         {
             outbox.tx.send(OutboundUpdate::AnnounceVpn(adv.clone()));
@@ -388,10 +521,11 @@ impl BgpRib {
         let Some(table) = self.vpn_adj_rib_in.get(&peer) else {
             return;
         };
-        self.vpn_stale
-            .entry(peer)
-            .or_default()
-            .extend(table.keys().filter(|k| vpn_family(k.1) == family));
+        self.vpn_stale.entry(peer).or_default().extend(
+            copies(table)
+                .map(|(c, _)| c)
+                .filter(|c| vpn_family(c.0 .1) == family),
+        );
     }
 
     /// Purges `peer`'s stale VPN paths of `family`; returns how many.
@@ -401,33 +535,31 @@ impl BgpRib {
         };
         let keys: Vec<_> = set
             .iter()
-            .filter(|k| vpn_family(k.1) == family)
+            .filter(|c| vpn_family(c.0 .1) == family)
             .copied()
             .collect();
-        set.retain(|k| vpn_family(k.1) != family);
-        keys.iter().filter(|k| self.drop_vpn(peer, k)).count()
+        set.retain(|c| vpn_family(c.0 .1) != family);
+        keys.iter().filter(|c| self.drop_vpn(peer, c)).count()
     }
 
-    /// Every received VPN path of `family`, sorted by peer, RD, prefix, each
-    /// with whether it is the selected one.
-    pub fn vpn_routes(
-        &self,
-        family: AddressFamily,
-    ) -> Vec<(IpAddr, &VpnKey<IpNet>, &VpnRoute, bool)> {
+    /// Whether copy `id` of `k` from `peer` is the selected one.
+    fn vpn_is_best(&self, peer: IpAddr, k: &VpnKey<IpNet>, id: u32) -> bool {
+        self.vpn_loc
+            .get(k)
+            .is_some_and(|(o, i, _)| (*o, *i) == (RouteOrigin::Peer(peer), id))
+    }
+
+    /// Every received VPN copy of `family`, sorted by peer, RD, prefix, path
+    /// id, each with whether it is the selected one.
+    pub fn vpn_routes(&self, family: AddressFamily) -> Vec<(IpAddr, VpnCopy, &VpnRoute, bool)> {
         let mut out: Vec<_> = self
             .vpn_adj_rib_in
             .iter()
-            .flat_map(|(peer, t)| t.iter().map(move |(k, r)| (*peer, k, r)))
-            .filter(|(_, k, _)| vpn_family(k.1) == family)
-            .map(|(peer, k, r)| {
-                let best = self
-                    .vpn_loc
-                    .get(k)
-                    .is_some_and(|(o, _)| *o == RouteOrigin::Peer(peer));
-                (peer, k, r, best)
-            })
+            .flat_map(|(peer, t)| copies(t).map(move |(c, r)| (*peer, c, r)))
+            .filter(|(_, c, _)| vpn_family(c.0 .1) == family)
+            .map(|(peer, c, r)| (peer, c, r, self.vpn_is_best(peer, &c.0, c.1)))
             .collect();
-        out.sort_by_key(|(peer, k, ..)| (*peer, k.0, k.1));
+        out.sort_by_key(|(peer, c, ..)| (*peer, c.0 .0, c.0 .1, c.1));
         out
     }
 
@@ -444,10 +576,11 @@ impl BgpRib {
             .vpn_adj_rib_in
             .iter()
             .flat_map(|(peer, t)| {
-                t.keys().map(move |k| nos_proto::VpnRouteCursor {
+                copies(t).map(move |(c, _)| nos_proto::VpnRouteCursor {
                     peer: *peer,
-                    rd: k.0,
-                    prefix: k.1,
+                    rd: c.0 .0,
+                    prefix: c.0 .1,
+                    path_id: c.1,
                 })
             })
             .filter(|c| vpn_family(c.prefix) == family)
@@ -463,27 +596,19 @@ impl BgpRib {
         &self,
         c: &nos_proto::VpnRouteCursor,
     ) -> Option<(&VpnKey<IpNet>, &VpnRoute, bool)> {
-        let (k, r) = self
+        let (k, ids) = self
             .vpn_adj_rib_in
             .get(&c.peer)?
             .get_key_value(&(c.rd, c.prefix))?;
-        let best = self
-            .vpn_loc
-            .get(k)
-            .is_some_and(|(o, _)| *o == RouteOrigin::Peer(c.peer));
-        Some((k, r, best))
+        let r = ids.get(&c.path_id)?;
+        Some((k, r, self.vpn_is_best(c.peer, k, c.path_id)))
     }
 
     /// VPN paths held from `peer`, `[vpnv4, vpnv6]` (RFC 4486 counts).
     pub(super) fn accepted_vpn(&self, peer: IpAddr) -> [u32; 2] {
         let mut n = [0u32; 2];
-        for k in self
-            .vpn_adj_rib_in
-            .get(&peer)
-            .into_iter()
-            .flat_map(HashMap::keys)
-        {
-            n[usize::from(k.1.addr().is_ipv6())] += 1;
+        for (c, _) in self.vpn_adj_rib_in.get(&peer).into_iter().flat_map(copies) {
+            n[usize::from(c.0 .1.addr().is_ipv6())] += 1;
         }
         n
     }
