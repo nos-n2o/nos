@@ -573,7 +573,8 @@ pub const OSPFV3_ECMP_LOOPBACK_ADDRESS: &str = "2001:db8:9::1/128";
 /// `ospfv3-vlan-nexthop-move` (#618): router-b's loopback, and the two VLAN
 /// subinterfaces of `eth1` (a veth) that carry OSPFv3 between the routers
 /// (`/64` per VLAN; the IPv4 address is incidental, `--address` is required).
-pub const OSPFV3_VLAN_LOOPBACK_ADDRESS_B: &str = "2001:db8:6::1/128";
+/// A prefix no other phase uses: `ospfv3-area-range` used `2001:db8:6::1/128` here (#1313).
+pub const OSPFV3_VLAN_LOOPBACK_ADDRESS_B: &str = "2001:db8:b::1/128";
 pub const OSPFV3_VLAN_TAGS: [u16; 2] = [10, 20];
 /// router-a's cost on VLAN 10 / 20 profiles, then VLAN 10's raised cost that
 /// moves the next hop to VLAN 20. `eth0.0`/eth1.0 (profile `OSPFV3_PROFILE`,
