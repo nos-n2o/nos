@@ -14,6 +14,7 @@
 - `garde` rules (length, range, pattern, cross-field and cross-collection checks) are not expressed; the daemon's commit validation stays authoritative.
 - References (peer-group, policy, routing-table) are plain `string`: the schema does not name their targets, so there is no `leafref`.
 - Enums with payloads are a `container` with a `choice` (serde's externally tagged shape); a unit variant inside such an enum is a `leaf` of type `empty`.
+- On RESTCONF that unit variant is `{"X":[null]}` (RFC 7951 `empty`), in reads and writes; on `/v1` and in the store it stays serde's bare string `"X"` (#1300).
 
 ## Changing the schema
 
