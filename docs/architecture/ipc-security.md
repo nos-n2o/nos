@@ -76,7 +76,7 @@ Every daemon-to-daemon and client-to-daemon connection is mutually authenticated
 - Kept allowed: `unshare`/`setns` (VRF/netns), `clone3` (tokio/glibc), `execve`.
 - Architectures: x86_64 and aarch64 only (anything else fails to compile). The program kills a foreign `AUDIT_ARCH` (i386 compat). On x86_64 the x32 ABI shares the x86_64 arch value and ORs `0x40000000` into the syscall number, which a name-based list would miss, so three BPF instructions kill any number with that bit first.
 - Diagnosing: a daemon using a denied syscall dies of `SIGSYS`; the watchdog logs `exited ... signal: 31` with `hint="seccomp deny-list violation (nos-sandbox)..."` and restarts it with backoff. If a daemon really needs one, exempt that daemon only and record why here; never widen the shared list silently.
-- Proof: the `sandbox-nnp` phase asserts `Seccomp: 2` per daemon and no SIGSYS in the log; `sandbox/tests/seccomp.rs` forks a child and checks `ptrace` is killed.
+- Proof: the `sandbox-nnp` phase asserts `Seccomp_filters` = `nos-watchdogd`'s count + 1 per sandboxed daemon (+ 0 for `nos-sshd`; the baseline is Docker's own filter) and no SIGSYS in the log; `sandbox/tests/seccomp.rs` forks a child and checks `ptrace` is killed.
 
 ## uid model (#512, #513)
 

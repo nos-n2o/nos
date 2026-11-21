@@ -10,6 +10,7 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
   - [Advertise a loopback](#advertise-a-loopback)
   - [Authenticate a link (RFC 7166)](#authenticate-a-link-rfc-7166)
   - [Set the instance ID](#set-the-instance-id)
+  - [Run several instances on one link](#run-several-instances-on-one-link)
   - [Use extended LSAs (RFC 8362)](#use-extended-lsas-rfc-8362)
   - [Use sparse mode (RFC 8362 §3)](#use-sparse-mode-rfc-8362-3)
   - [Restart without dropping routes (RFC 5187)](#restart-without-dropping-routes-rfc-5187)
@@ -30,7 +31,7 @@ The model is the same as OSPFv2's, with `ospfv3` in place of `ospf` in every com
 - **profiles**, `profile <name>`, inside an area, holding the per-link settings;
 - a profile **attached** to a subinterface (`set interface eth0 ospfv3 <profile>`), a loopback (`set interface loopback-<table> ospfv3 <profile>`) or a broadcast domain (`set ospfv3 <profile>` inside `edit broadcast domain <name>`). The attach point must have `routing-table` set.
 
-OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and an `ospfv3-instance`, and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
+OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and several `ospfv3-instance`s (each `nos-ospfv3d` pushes its own routes and gets its own redistribution feed; `nos-ribd` keeps them apart, #1277), and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
 
 Prefix options (RFC 5340 A.4.1.1):
 
@@ -171,6 +172,26 @@ $C -X POST $B/v1/transactions/v3iid/commit
 - Changing it restarts the link's adjacencies.
 - A dropped packet is logged at debug level only (`ospfv3 packet instance id mismatch, dropping`, with `received` and `expected`). If a neighbour never shows up in `show ospfv3 neigh`, compare both ends' instance IDs.
 - `delete ospfv3 instance v3 area 0.0.0.0 profile p6 instance-id` goes back to 0.
+
+### Run several instances on one link
+
+One link can run several OSPFv3 instances (RFC 5838), for example an IPv6 and an IPv4 address family, or two independent IPv6 topologies. Each instance is its own `nos-ospfv3d` process.
+
+```
+set ospfv3 instance v3b router-id 9.9.9.20
+set ospfv3 instance v3b area 0.0.0.0 profile p2 instance-id 1
+set routing-table rt1 ospfv3-instance v3b
+set interface eth0 ospfv3 p2
+commit
+```
+
+- The attach point (`interface`, `broadcast-domain`) lists one profile per instance: `set interface eth0 ospfv3 p1` and `set interface eth0 ospfv3 p2` side by side. `delete interface eth0 ospfv3 p2` detaches one.
+- The routing table claims every instance (`set routing-table rt1 ospfv3-instance <name>` once per instance); each needs its own router ID, and every router on the link must run the same instance IDs.
+- The effective Instance IDs on one attach point must differ (commit refuses a duplicate). An `ipv4-unicast` instance uses 64 to 95, an IPv6 one 0 to 31.
+- Each daemon drops the other instances' packets by Instance ID before authentication, so a shared link raises no authentication failures.
+- A static-route redistribution feeds every claimed instance. The rule's `instance` field (one instance only) is set through the config ops only; the CLI and REST address a rule by target alone.
+- Each instance pushes its own routes to `nos-ribd`, which keeps them apart: one instance's recomputation never withdraws another's routes. Releasing an instance from the table drops the rules naming it.
+- Verified by `nos-e2e ospfv3-instance-id`.
 
 ### Choose the address family (RFC 5838)
 
@@ -402,7 +423,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link, IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
+Also not supported: IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), and BFD.
 
 ## Configuration reference
 
@@ -422,10 +443,10 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | max-metric administrative | `set ospfv3 instance <name> max-metric router-lsa administrative`; `delete ospfv3 instance <name> max-metric router-lsa administrative` | `ospfv3-instance/<name>/max-metric-administrative` | bool; off by default | | RFC 6987 stub router until removed | `ospfv3 stub router max-metric changed` |
 | max-metric on-startup | `set ospfv3 instance <name> max-metric router-lsa on-startup <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router for this long after the next start | `reason="on-startup"` |
 | max-metric on-shutdown | `set ospfv3 instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ...` | `ospfv3-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router for this long before the process exits | `reason="on-shutdown"` |
-| routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
+| routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance <name>` | `routing-table/<table>/ospfv3-instance` | list of instance names | each instance must exist and is listed once; one table per instance, but a table may claim several (they share its VRF) | runs the instances in that table | `show ospfv3 neigh` |
 | area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas, one the backbone, make an ABR (`range <cidr> [not-advertise]` summarizes the area, see [ranges](#summarize-an-area-with-ranges)) | `show ospfv3 database` |
 | virtual link | `set ospfv3 instance <name> area <area-id> virtual-link <router-id> [hello-interval <s>] [dead-interval <s>] [crypto-key …]`; `delete … virtual-link <router-id>` | `…/area/<area-id>/virtual-link/<router-id>` | the area is the transit area; router ID unique per area, not the instance's own | not on `0.0.0.0`, a stub area or an NSSA; dead interval above hello interval; keys as on a profile | backbone adjacency to that ABR across the area, needs an area-1 `/128` loopback at both ends | `show ospfv3 neigh` |
-| redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per target | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
+| redistribute | `set routing-table <table> redistribute ospfv3 [policy <p>] [instance <name>]`; `delete routing-table <table> redistribute ospfv3` | `routing-table/<table>/redistribute/ospfv3`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per `(target, instance)`; unset `instance` feeds every claimed instance with no rule of its own, a named rule overrides it for that instance | needs `static-routing-instance` and `ospfv3-instance`; `instance` must be one the table claims | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `mtu-ignore`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
 | Passive | `set ospfv3 instance <name> area <area-id> profile <p> passive enable`; relative `set passive enable` / `delete passive` | `…/profile/<p>/passive` | `true`/`false`; default `false` | excludes crypto-key and bfd | advertise the attach point's prefix, no Hello, no adjacency | `GET …/profile/<p>/passive` |

@@ -4911,8 +4911,17 @@ pub(super) async fn assert_sandbox(
 ) -> anyhow::Result<()> {
     let st = proc_status(w, comm).await?;
     let want_nnp = format!("NoNewPrivs:\t{nnp}");
-    // #1217: the sandboxed (NNP) daemons carry the seccomp deny-list (mode 2), `nos-sshd` none.
-    let want_seccomp = format!("Seccomp:\t{}", if nnp == 1 { 2 } else { 0 });
+    // #1217: the deny-list is one seccomp filter stacked on whatever the container already has
+    // (Docker's default profile). Baseline = the unsandboxed `nos-watchdogd` in the same
+    // container, so the check holds whatever the lab's profile; `nos-sshd` has no deny-list.
+    let filters = |st: &str| {
+        st.lines()
+            .find_map(|l| l.strip_prefix("Seccomp_filters:"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    };
+    let base = filters(&proc_status(w, "nos-watchdogd").await?)
+        .context("nos-watchdogd: no Seccomp_filters (host kernel < 5.9?)")?;
+    let want_seccomp = format!("Seccomp_filters:\t{}", base + u32::from(nnp));
     let want_cap = cap_eff.map_or(String::new(), |c| format!("CapEff:\t{c}"));
     if !st.contains(&want_nnp) || !st.contains(&want_cap) || !st.contains(&want_seccomp) {
         bail!("{comm}: wanted `{want_nnp}`, `{want_seccomp}` and `{want_cap}`, got:\n{st}");

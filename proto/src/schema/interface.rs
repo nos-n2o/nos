@@ -674,7 +674,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,

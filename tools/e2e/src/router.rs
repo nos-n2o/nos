@@ -16,10 +16,23 @@ use crate::lab::Addr;
 use crate::logs::Logs;
 use crate::rest::Rest;
 
+/// While set, `--ospfv3-*-profile` keeps its additive meaning: `ospfv3-instance-id`
+/// (#1280) runs two profiles on one attach point and re-sends the base flags.
+// ponytail: process-wide (one phase runs at a time); a per-call flag if phases ever run in parallel.
+static KEEP_OSPFV3_PROFILES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn keep_ospfv3_profiles(keep: bool) {
+    KEEP_OSPFV3_PROFILES.store(keep, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// An `--ospfv3-*-profile` flag used to replace the attach point's profile;
 /// since #1278 the op only adds. Every phase before the second-instance one
 /// (#1280) wants the old meaning, so empty the list before the add.
 fn replace_ospfv3_profiles(config: &mut Config, op: &ConfigOp) {
+    if KEEP_OSPFV3_PROFILES.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let list = match op {
         ConfigOp::Interface(InterfaceOp::AddOspfv3Profile { name, .. }) => config
             .interfaces

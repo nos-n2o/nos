@@ -432,6 +432,12 @@ pub struct Args {
     #[arg(long)]
     pub redistribute_to_ospfv3_policy: Option<String>,
 
+    /// With `--redistribute-to-ospfv3` or `--clear-redistribute-to-ospfv3`:
+    /// the one claimed instance the rule feeds (`Redistribute.instance`);
+    /// unset means every claimed instance without a rule of its own.
+    #[arg(long)]
+    pub redistribute_to_ospfv3_instance: Option<String>,
+
     /// `--clear-redistribute-to-ospf`'s twin: removes the table's redistribute
     /// rule, so the AS-External-LSAs are flushed.
     #[arg(long)]
@@ -1702,6 +1708,18 @@ pub struct Args {
     /// (`SubinterfaceOp::AddOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_interface_profile: Option<String>,
+    /// `<name>:<router-id>:<profile>:<instance-id>[:ipv4]`: a further `OSPFv3`
+    /// instance on the same link (RFC 5838 §2.1; `:ipv4` = `ipv4-unicast`,
+    /// instance-id 64-95, checked at commit). Creates the instance with
+    /// `--ospfv3-area`, a profile with that Instance ID, the table's claim and
+    /// the `--ospfv3-interface-profile` attach point's list entry. Default timers.
+    #[arg(long, requires_all = ["ospfv3_area", "ospfv3_interface_profile"])]
+    pub ospfv3_extra_instance: Option<String>,
+    /// `<name>:<profile>`: undoes `--ospfv3-extra-instance`. Detaches the
+    /// profile from the attach point, releases the table's claim, deletes the
+    /// instance.
+    #[arg(long)]
+    pub ospfv3_remove_extra_instance: Option<String>,
     /// Same shape as `--ospf-broadcast-domain-profile`, joining `OSPFv3`
     /// instead (`BroadcastDomainOp::AddOspfv3Profile`).
     #[arg(long)]
@@ -2900,6 +2918,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: args.redistribute_policy.clone(),
@@ -2920,6 +2939,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: None,
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
@@ -2928,6 +2948,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         }));
     }
+    if args.redistribute_to_ospfv3_instance.is_some()
+        && !args.redistribute_to_ospfv3
+        && !args.clear_redistribute_to_ospfv3
+    {
+        bail!(
+            "--redistribute-to-ospfv3-instance requires --redistribute-to-ospfv3 or --clear-redistribute-to-ospfv3"
+        );
+    }
     if args.redistribute_to_ospfv3 {
         if args.ospfv3_instance.is_none() {
             bail!("--redistribute-to-ospfv3 requires --ospfv3-instance to also be set");
@@ -2935,6 +2963,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
             name: args.routing_table.clone(),
             redistribute: Redistribute {
+                instance: args.redistribute_to_ospfv3_instance.clone(),
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: args.redistribute_to_ospfv3_policy.clone(),
@@ -2948,6 +2977,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospfv3 is mutually exclusive with --redistribute-to-ospfv3");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: args.redistribute_to_ospfv3_instance.clone(),
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospfv3,
         }));
@@ -2957,6 +2987,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute-to-ospf");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            instance: None,
             name: args.routing_table.clone(),
             to: RedistributeTarget::Ospf,
         }));
@@ -4495,7 +4526,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
-        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
             name: args.routing_table.clone(),
             ospfv3_instance: name,
         }));
@@ -4698,6 +4729,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    if let Some(spec) = &args.ospfv3_extra_instance {
+        push_extra_ospfv3_instance(args, spec, &mut ops)?;
+    }
+    if let Some(spec) = &args.ospfv3_remove_extra_instance {
+        remove_extra_ospfv3_instance(args, spec, &mut ops)?;
+    }
+
     if let Some(profile) = args.ospfv3_broadcast_domain_profile.clone() {
         ops.push(ConfigOp::BroadcastDomain(
             BroadcastDomainOp::AddOspfv3Profile {
@@ -4715,6 +4753,100 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ));
     }
     Ok(ops)
+}
+
+/// `--ospfv3-extra-instance`'s `<name>:<router-id>:<profile>:<instance-id>[:ipv4]`.
+fn push_extra_ospfv3_instance(
+    args: &Args,
+    spec: &str,
+    ops: &mut Vec<ConfigOp>,
+) -> anyhow::Result<()> {
+    let bad = || {
+        format!(
+            "--ospfv3-extra-instance: expected name:router-id:profile:instance-id[:ipv4], got {spec:?}"
+        )
+    };
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (name, rid, profile, id, ipv4) = match parts[..] {
+        [n, r, p, i] => (n, r, p, i, false),
+        [n, r, p, i, "ipv4"] => (n, r, p, i, true),
+        _ => bail!(bad()),
+    };
+    let router_id: Ipv4Addr = rid.parse().with_context(bad)?;
+    let instance_id: u8 = id.parse().with_context(bad)?;
+    let area_id = args
+        .ospfv3_area
+        .context("--ospfv3-extra-instance requires --ospfv3-area")?;
+    let (name, profile) = (name.to_string(), profile.to_string());
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Ensure {
+        name: name.clone(),
+    }));
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId {
+        name: name.clone(),
+        router_id,
+    }));
+    if ipv4 {
+        ops.push(ConfigOp::Ospfv3Instance(
+            Ospfv3InstanceOp::SetAddressFamily {
+                name: name.clone(),
+                address_family: nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+            },
+        ));
+    }
+    ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+        instance: name.clone(),
+        area_id,
+    }));
+    ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+        instance: name.clone(),
+        area_id,
+        name: profile.clone(),
+    }));
+    ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+        instance: name.clone(),
+        area_id,
+        name: profile.clone(),
+        instance_id: (instance_id != 0).then_some(instance_id),
+    }));
+    ops.push(ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
+        name: args.routing_table.clone(),
+        ospfv3_instance: name,
+    }));
+    ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
+        interface: args.interface.clone(),
+        tag: args.subinterface_tag,
+        ospfv3_profile: profile,
+    }));
+    Ok(())
+}
+
+/// `--ospfv3-remove-extra-instance <name>:<profile>`: references first (the
+/// commit validator rejects a dangling one), the instance section last.
+fn remove_extra_ospfv3_instance(
+    args: &Args,
+    spec: &str,
+    ops: &mut Vec<ConfigOp>,
+) -> anyhow::Result<()> {
+    let (name, profile) = spec.split_once(':').with_context(|| {
+        format!("--ospfv3-remove-extra-instance: expected name:profile, got {spec:?}")
+    })?;
+    ops.push(ConfigOp::Subinterface(
+        SubinterfaceOp::RemoveOspfv3Profile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            ospfv3_profile: profile.to_string(),
+        },
+    ));
+    ops.push(ConfigOp::RoutingTable(
+        RoutingTableOp::RemoveOspfv3Instance {
+            name: args.routing_table.clone(),
+            ospfv3_instance: name.to_string(),
+        },
+    ));
+    ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete {
+        name: name.to_string(),
+    }));
+    Ok(())
 }
 
 /// Parses `--ospf-crypto-key`/`--ospfv3-crypto-key`'s `<key-id>:<algorithm>:
@@ -5847,6 +5979,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospf,
                     policy: None,
@@ -5902,6 +6035,7 @@ mod tests {
             &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                 name: "rt1".into(),
                 redistribute: Redistribute {
+                    instance: None,
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospfv3,
                     policy: Some("p".into()),
@@ -5913,6 +6047,7 @@ mod tests {
         has(
             &ops(&["--clear-redistribute-to-ospfv3"]).unwrap(),
             &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+                instance: None,
                 name: "rt1".into(),
                 to: RedistributeTarget::Ospfv3,
             }),
@@ -5926,6 +6061,98 @@ mod tests {
             "--redistribute-to-ospfv3"
         ])
         .contains("--ospfv3-instance"));
+    }
+
+    #[test]
+    fn ospfv3_extra_instance_flags() {
+        let base = [
+            "--ospfv3-instance",
+            "o1",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p1",
+            "--ospfv3-interface-profile",
+            "p1",
+        ];
+        let add = ops(&[
+            &base[..],
+            &["--ospfv3-extra-instance", "o2:2.2.2.2:p2:64:ipv4"],
+        ]
+        .concat())
+        .unwrap();
+        let at = |op: &ConfigOp| add.iter().position(|o| o == op).unwrap();
+        let attach = at(&ConfigOp::Subinterface(SubinterfaceOp::AddOspfv3Profile {
+            interface: "eth0".into(),
+            tag: 0,
+            ospfv3_profile: "p2".into(),
+        }));
+        let claim = at(&ConfigOp::RoutingTable(RoutingTableOp::AddOspfv3Instance {
+            name: "rt1".into(),
+            ospfv3_instance: "o2".into(),
+        }));
+        let id = at(&ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+            instance: "o2".into(),
+            area_id: "0.0.0.0".parse().unwrap(),
+            name: "p2".into(),
+            instance_id: Some(64),
+        }));
+        assert!(id < claim && id < attach);
+        has(
+            &add,
+            &ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetAddressFamily {
+                name: "o2".into(),
+                address_family: nos_proto::Ospfv3AddressFamily::Ipv4Unicast,
+            }),
+        );
+
+        let rm = ops(&[&base[..], &["--ospfv3-remove-extra-instance", "o2:p2"]].concat()).unwrap();
+        assert!(matches!(
+            &rm[rm.len() - 3..],
+            [
+                ConfigOp::Subinterface(SubinterfaceOp::RemoveOspfv3Profile { .. }),
+                ConfigOp::RoutingTable(RoutingTableOp::RemoveOspfv3Instance { .. }),
+                ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete { .. }),
+            ]
+        ));
+
+        let rule = ops(&[
+            &base[..],
+            &[
+                "--static-route",
+                "2001:db8:77::/48",
+                "--static-gateway",
+                "2001:db8::1",
+                "--redistribute-to-ospfv3",
+                "--redistribute-to-ospfv3-instance",
+                "o2",
+            ],
+        ]
+        .concat())
+        .unwrap();
+        assert!(rule.iter().any(|o| matches!(o,
+            ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute { redistribute, .. })
+                if redistribute.instance.as_deref() == Some("o2"))));
+
+        // Base, base + extra, base again (every phase re-sends the base): the
+        // second profile stays attached.
+        let mut cfg = nos_proto::Config::default();
+        let with_extra = [&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2:1"]].concat();
+        for flags in [&base[..], &with_extra[..], &base[..]] {
+            for op in ops(flags).unwrap() {
+                op.apply(&mut cfg).unwrap();
+            }
+        }
+        let sub = &cfg.interfaces[0].subinterfaces[0];
+        assert_eq!(sub.ospfv3_profiles, ["p1", "p2"]);
+
+        assert!(err(&["--redistribute-to-ospfv3-instance", "o2"]).contains("requires"));
+        assert!(
+            err(&[&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2"]].concat())
+                .contains("expected")
+        );
     }
 
     #[test]

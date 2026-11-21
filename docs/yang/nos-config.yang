@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-26 {
+  revision 2026-11-27 {
     description "Generated.";
   }
 
@@ -625,9 +625,9 @@ module nos-config {
       type string;
       description "Associate an OSPF instance with a routing table.";
     }
-    leaf ospfv3_instance {
+    leaf-list ospfv3_instances {
       type string;
-      description "Associate an OSPFv3 instance with a routing table.";
+      description "Associate OSPFv3 instances with a routing table.";
     }
     list redistribute {
       key "to";
@@ -655,6 +655,10 @@ module nos-config {
       }
       leaf metric_type {
         type uint8;
+        description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
+      }
+      leaf instance {
+        type string;
         description "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.";
       }
     }

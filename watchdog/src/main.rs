@@ -1002,6 +1002,49 @@ mod tests {
         assert_eq!(got, ["bgp", "rt", "ospf", "ospfv3", "bd", "rt", "rt"]);
     }
 
+    /// #1279: nos-ospfv3d is driven by the `ospfv3_instances` sections, so two
+    /// instances claimed by one table are two spawns, and a change to the
+    /// table's claim list alone (a `routing_tables` diff) spawns none.
+    #[test]
+    fn ospfv3_spawns_follow_instance_sections_not_the_claiming_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let pki = Pki::start(
+            dir.path(),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let args = Args::try_parse_from(["x"]).unwrap();
+        let ms = managed_families(
+            &args,
+            &pki,
+            BackoffPolicy::default(),
+            &EndpointRegistry::default(),
+        );
+        // Index 3: the ospfv3 family (see the sibling selector test).
+        let v3 = &ms[3];
+        let sec = |name: &str| SectionDiff {
+            header: String::new(),
+            name: name.into(),
+            status: nos_proto::DiffStatus::Added,
+            fields: vec![],
+            subsections: vec![],
+        };
+        let two = ConfigDiff {
+            ospfv3_instances: vec![sec("a"), sec("b")],
+            routing_tables: vec![sec("rt")],
+            ..ConfigDiff::default()
+        };
+        let names: Vec<_> = (v3.section)(&two).iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, ["a", "b"]);
+        let table_only = ConfigDiff {
+            routing_tables: vec![sec("rt")],
+            ..ConfigDiff::default()
+        };
+        assert_eq!((v3.section)(&table_only).len(), 0);
+    }
+
     #[test]
     fn pki_rejects_rotation_slower_than_the_leaf_lifetime() {
         let dir = tempfile::tempdir().unwrap();
