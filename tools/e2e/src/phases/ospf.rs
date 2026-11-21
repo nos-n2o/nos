@@ -3968,9 +3968,31 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
         a.count(&full(OSPFV3_ROUTER_ID_B)),
         b.count(&full(OSPFV3_ROUTER_ID)),
     );
+    // #1028: the cut only logs a transition from an up link, so require every
+    // earlier `down` on eth1.0 to have been followed by its `up`.
+    let (kdown, kup) = (
+        "ospfv3 link kernel interface down link=eth1.0",
+        "ospfv3 link kernel interface up link=eth1.0",
+    );
+    for r in [a, b] {
+        let (downs, ups) = (r.count(kdown), r.count(kup));
+        if downs > ups {
+            bail!(
+                "{}: eth1.0 not up before the cut (down {downs} > up {ups})",
+                r.name()
+            );
+        }
+    }
     set_link(w, "router-b", "eth1", "down").await?;
-    a.wait_new(&reason("no-carrier"), nc0, 15).await?;
-    b.wait_new(&reason("admin-down"), ad0, 15).await?;
+    let diag = "link kernel interface\\|link stream\\|link state changed";
+    for (r, pat, n) in [
+        (a, reason("no-carrier"), nc0),
+        (b, reason("admin-down"), ad0),
+    ] {
+        if let Err(e) = r.wait_new(&pat, n, 15).await {
+            bail!("{e}\n{}: link events: {:#?}", r.name(), r.tail(diag, 15));
+        }
+    }
     if a.count(down) > down1.0 || b.count(down) > down1.1 {
         bail!("a dead timer expired: link-down detection did not come from the stream");
     }

@@ -597,6 +597,11 @@ impl Router {
         self.logs.count(pattern)
     }
 
+    /// The last `n` lines matching `pattern`, oldest first.
+    pub fn tail(&self, pattern: &str, n: usize) -> Vec<String> {
+        self.logs.tail(pattern, n)
+    }
+
     /// `count` after the log store has gone quiet (#884): use for baselines so
     /// lines still in flight from a previous step are not counted as new.
     pub async fn count_fresh(&self, pattern: &str) -> usize {
