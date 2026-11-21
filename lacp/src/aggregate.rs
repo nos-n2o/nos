@@ -119,6 +119,8 @@ pub struct AggregateManager {
     port_priorities: Arc<Mutex<HashMap<String, u16>>>,
     /// Same, for each member's `lacp-mode`.
     modes: Mutex<HashMap<String, LacpMode>>,
+    /// Per running member, the live `lacp-mode` (`true` = Active).
+    active_txs: Mutex<HashMap<String, watch::Sender<bool>>>,
     /// Assigned once, sequentially, the first time `reconcile.rs` sees this
     /// aggregate name (see `reconcile.rs`) — not persisted, only needs to
     /// differ between simultaneously-active aggregates on this instance.
@@ -173,6 +175,7 @@ impl AggregateManager {
             system_priority: Mutex::new(DEFAULT_PRIORITY),
             port_priorities,
             modes: Mutex::new(HashMap::new()),
+            active_txs: Mutex::new(HashMap::new()),
             key,
             members: Mutex::new(HashMap::new()),
             selected_txs,
@@ -197,7 +200,8 @@ impl AggregateManager {
     /// restarts every member, like a rate change: the id is fixed for a
     /// link task's lifetime. `system_priority` (config's
     /// `lacp-system-priority`) restarts every member the same way, and a
-    /// member's own `(name, port_priority)` change restarts just that member.
+    /// member's own `(name, port_priority)` change restarts just that member; a
+    /// `lacp-mode` change restarts nothing (applied in place).
     /// `min_links` (config's `min-links`) restarts nothing: it only gates the
     /// pushed active set.
     pub fn reconcile(
@@ -255,6 +259,7 @@ impl AggregateManager {
         let mut members = self.members.lock().unwrap();
         let mut selected_txs = self.selected_txs.lock().unwrap();
         let mut observations = self.observations.lock().unwrap();
+        let mut active_txs = self.active_txs.lock().unwrap();
 
         let to_remove: Vec<String> = members
             .keys()
@@ -262,9 +267,9 @@ impl AggregateManager {
                 rate_changed
                     || !desired_members.contains(k)
                     || old_v2.link_numbers.get(*k) != v2.link_numbers.get(*k)
-                    || desired.iter().any(|(n, p, m)| {
-                        n == *k && (port_priorities.get(*k) != Some(p) || modes.get(*k) != Some(m))
-                    })
+                    || desired
+                        .iter()
+                        .any(|(n, p, _)| n == *k && port_priorities.get(*k) != Some(p))
             })
             .cloned()
             .collect();
@@ -273,6 +278,7 @@ impl AggregateManager {
                 task.abort();
             }
             selected_txs.remove(&interface);
+            active_txs.remove(&interface);
             observations.remove(&interface);
             // A restart (rate/priority change) keeps its number; only a
             // member that left the aggregate frees it.
@@ -286,6 +292,11 @@ impl AggregateManager {
             // interface vanished) is not "running" — fall through and
             // respawn it on this pass, like `ospf::link::LinkManager` does.
             if members.get(interface).is_some_and(|t| !t.is_finished()) {
+                // A `lacp-mode` change is applied in place, no restart.
+                modes.insert(interface.clone(), *mode);
+                if let Some(tx) = active_txs.get(interface) {
+                    tx.send_replace(*mode == LacpMode::Active);
+                }
                 continue;
             }
             let Some(actor_port_number) = self.port_numbers.get_or_assign(interface) else {
@@ -295,6 +306,8 @@ impl AggregateManager {
             port_priorities.insert(interface.clone(), *port_priority);
             modes.insert(interface.clone(), *mode);
             let (selected_tx, selected_rx) = watch::channel(false);
+            let (active_tx, active_rx) = watch::channel(*mode == LacpMode::Active);
+            active_txs.insert(interface.clone(), active_tx);
             let config = LinkConfig {
                 interface: interface.clone(),
                 actor_system_id: system_id,
@@ -303,6 +316,7 @@ impl AggregateManager {
                 actor_port_priority: *port_priority,
                 actor_port_number,
                 actor_active: *mode == LacpMode::Active,
+                active_rx,
                 rate,
                 selected_rx,
                 churn_time: churn_time(),
@@ -320,7 +334,14 @@ impl AggregateManager {
         }
         port_priorities.retain(|k, _| members.contains_key(k));
         modes.retain(|k, _| members.contains_key(k));
-        drop((members, selected_txs, observations, port_priorities, modes));
+        drop((
+            members,
+            selected_txs,
+            observations,
+            port_priorities,
+            modes,
+            active_txs,
+        ));
         self.changed.notify_one();
     }
 

@@ -508,6 +508,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // #658: a LACPDU carrying router-a's own system id (a looped link) is
     // dropped with a warning and never becomes a partner.
     log("router-a ignores an injected LACPDU carrying its own system id");
+    lacp_settled(a, 0).await?;
     let loop_pattern = "lacp loopback detected, ignoring own LACPDUs interface=eth1";
     let loop_base = a.count(loop_pattern);
     let released = "removed interface from master enslavement interface=eth1";
@@ -523,11 +524,12 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // No partner recorded from the injected id: eth1 still shows router-b's
     // configured system id and keeps Distributing (and so its enslavement).
     let eth1 = lacp_port(a, "eth1").await?;
-    anyhow::ensure!(
-        eth1["partner_system_id"] == serde_json::json!([2, 0, 0, 0, 0x0b, 1])
-            && eth1["mux_state"] == "Distributing",
-        "the looped LACPDU disturbed eth1: {eth1}"
-    );
+    if eth1["partner_system_id"] != serde_json::json!([2, 0, 0, 0, 0x0b, 1])
+        || eth1["mux_state"] != "Distributing"
+    {
+        let dump = a.lacp_dump(a.log_mark().saturating_sub(20_000)).await;
+        bail!("the looped LACPDU disturbed eth1: {eth1}{dump}");
+    }
     a.assert_quiet(released, released_base, 5).await?;
 
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
@@ -737,7 +739,24 @@ async fn wait_lacp_ports(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    bail!("{}: {what} never held: {body}", r.name())
+    let dump = r.lacp_dump(r.log_mark().saturating_sub(40_000)).await;
+    bail!("{}: {what} never held: {body}{dump}", r.name())
+}
+
+/// State barrier (#1337): every port Distributing, in sync with its partner
+/// and not churned, held for `hold_ms` (re-checked after it, so a dip inside
+/// the window is not missed). Replaces counting log lines until they stop.
+async fn lacp_settled(r: &Router, hold_ms: u64) -> anyhow::Result<()> {
+    let settled = |p: &serde_json::Value| {
+        p["mux_state"] == "Distributing"
+            && p["synchronized"] == true
+            && p["actor_churn"] == false
+            && p["partner_churn"] == false
+            && p["individual"] == false
+    };
+    wait_lacp_ports(r, "all ports Distributing, in sync, no churn", settled).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
+    wait_lacp_ports(r, "all ports still settled after the hold", settled).await
 }
 
 /// One member port of `LACP_AGGREGATE` in `r`'s `GET /v1/lacp`.
@@ -769,18 +788,13 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     };
     let reconciled = format!("lacp reconciled aggregate members aggregate={LACP_AGGREGATE}");
     // The previous step ends as soon as REST shows Distributing, but the push
-    // that follows is coalesced (PUSH_COALESCE, 1s): wait until the push count
-    // has been stable for 3 polls (1.5s > the coalescing window), so a late
-    // push is not mistaken for a min-links effect.
-    let mut stable = 0;
-    let mut last = a.count(&reconciled);
-    while stable < 3 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let now = a.count(&reconciled);
-        stable = if now == last { stable + 1 } else { 0 };
-        last = now;
-    }
-    let base = a.count(&reconciled);
+    // that follows is coalesced (PUSH_COALESCE, 1s): hold a settled state
+    // across one full window (+margin) on both routers, then let the log
+    // store drain, so a late push is not mistaken for a min-links effect.
+    lacp_settled(b, 0).await?;
+    lacp_settled(a, 2500).await?;
+    a.count_fresh(&reconciled).await;
+    let base = a.count_fresh(&reconciled).await;
     log("min-links 2 with both members Distributing changes nothing");
     a.provision(&min_links("2")).await?;
     a.assert_quiet(&reconciled, base, 5).await?;
@@ -1396,6 +1410,7 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
             distributing(p) && p["mode"] == "Active"
         })
         .await?;
+        lacp_settled(r, 0).await?;
     }
     Ok(())
 }

@@ -677,6 +677,24 @@ impl Router {
             .collect()
     }
 
+    /// Every lacp/interface line stamped at or after `from` (`+<ms>ms` from
+    /// it, capped at 120): the context a failed LACP wait needs, since a
+    /// pattern's own matches never show the dip that caused them (#1337).
+    pub async fn lacp_dump(&self, from: u64) -> String {
+        self.logs.barrier().await;
+        let all = self
+            .logs
+            .matches_from("nos_lacp::\\|nos_interface\\|lacp \\|bond", from);
+        let mut s = format!("\n{}: lacp/interface lines from +0ms:", self.name());
+        for (t, l) in all.iter().take(120) {
+            let _ = write!(s, "\n  +{}ms {l}", t.saturating_sub(from));
+        }
+        if all.len() > 120 {
+            let _ = write!(s, "\n  and {} more", all.len() - 120);
+        }
+        s
+    }
+
     /// Waits (up to 60s) for the pattern to appear at all.
     pub async fn wait(&self, pattern: &str) -> anyhow::Result<()> {
         self.wait_new(pattern, 0, 60).await
@@ -750,9 +768,15 @@ impl Router {
         // The matches before the baseline show the transitions that preceded.
         let mut before = self.logs.tail(pattern, new.len() + 3);
         before.truncate(before.len().saturating_sub(new.len()));
+        let from = if origin > 0 {
+            origin
+        } else {
+            self.log_mark().saturating_sub(secs * 1000)
+        };
         bail!(
-            "{}",
-            quiet_failure(self.name(), pattern, secs, origin, &new, &before)
+            "{}{}",
+            quiet_failure(self.name(), pattern, secs, origin, &new, &before),
+            self.lacp_dump(from).await
         )
     }
 }
