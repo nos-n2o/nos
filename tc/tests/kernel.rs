@@ -1015,3 +1015,25 @@ fn dot1q_vlan_id_mirred_redirect_reads_back_and_counts() {
         println!("MIRRED_DUMP_REPLY {}", hex(&raw_dump(b, 0)));
     }
 }
+
+/// `Dot1Ad` + `vlan_id` (#895): the kernel accepts the S-tag ethertype with a vlan key.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn dot1ad_vlan_id_reads_back() {
+    let (_, b) = pair("n0", "n1", 26);
+    let keys = FlowerKeys {
+        vlan_id: Some(10),
+        ..FlowerKeys::default()
+    };
+    add(
+        b,
+        0,
+        3,
+        Protocol::Dot1Ad,
+        keys,
+        vec![Action::new(ActionKind::Gact(Verdict::Shot))],
+    );
+    let shown = show("n1", "ingress");
+    assert!(shown.contains("vlan_id 10"), "{shown}");
+    assert!(shown.contains("802.1ad"), "{shown}");
+}

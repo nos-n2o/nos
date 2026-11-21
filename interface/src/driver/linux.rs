@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,8 +24,9 @@ use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Reque
 
 use super::links::{self, Delta, LinkHub};
 use super::{
-    bridge_registry, port_aggregate_registry, rib_client, BridgePortRef, DriverError,
-    InterfaceDriver, LinkWatch, Lookup, DEFAULT_MTU,
+    bridge_registry, port_aggregate_registry, rib_client,
+    steering::{self, Op, SteeringState, Wanted, STEERING_PRIO},
+    BridgePortRef, DriverError, InterfaceDriver, LinkWatch, Lookup, DEFAULT_MTU,
 };
 use crate::state::{
     BroadcastDomainState, InterfaceState, PortAggregateState, StpPorts, SubinterfaceState,
@@ -294,6 +295,17 @@ pub struct LinuxInterfaceDriver {
     /// process.
     port_aggregate_registry_path: PathBuf,
     stp: Mutex<StpMemory>,
+    /// What `apply_conversation_steering` last installed per aggregate. The
+    /// kernel's filter handles are re-read on every call (self-healing); the
+    /// redirect targets are not readable back, so they come from here.
+    steering: Mutex<HashMap<String, Applied>>,
+}
+
+/// Steering last installed for one aggregate.
+#[derive(Debug, Clone, Default)]
+struct Applied {
+    s_vlan: bool,
+    wanted: Wanted,
 }
 
 impl LinuxInterfaceDriver {
@@ -313,6 +325,7 @@ impl LinuxInterfaceDriver {
             bridge_registry_path,
             port_aggregate_registry_path,
             stp: Mutex::new(StpMemory::default()),
+            steering: Mutex::new(HashMap::new()),
         })
     }
 
@@ -346,6 +359,226 @@ impl LinuxInterfaceDriver {
             .await
             .map_err(|e| DriverError::Other(e.to_string()))?
             .map_err(|e| DriverError::Other(format!("tc request failed: {e}")))
+    }
+
+    /// Handles and counters of our steering filters (`STEERING_PRIO`, action
+    /// `kind`) on `index`; empty when the device has no filters at all.
+    async fn steering_rows(&self, index: u32, hook: Hook, kind: &'static str) -> Vec<(u16, u64)> {
+        let rows = tokio::task::spawn_blocking(move || nos_tc::dump(index, hook, 0)).await;
+        match rows {
+            Ok(Ok(rows)) => rows
+                .into_iter()
+                .filter(|r| r.prio == STEERING_PRIO && r.action == kind)
+                .filter_map(|r| Some((u16::try_from(r.handle).ok()?, r.packets)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn steering_filter(
+        index: u32,
+        hook: Hook,
+        protocol: Protocol,
+        conversation: u16,
+        action: ActionKind,
+    ) -> Request {
+        Request::AddFilter(Filter {
+            ifindex: index,
+            hook,
+            chain: 0,
+            prio: STEERING_PRIO,
+            protocol,
+            handle: u32::from(conversation),
+            kind: Kind::Flower(FlowerKeys {
+                vlan_id: Some(conversation),
+                ..FlowerKeys::default()
+            }),
+            actions: vec![Action::new(action)],
+            replace: true,
+        })
+    }
+
+    fn steering_del(index: u32, hook: Hook, protocol: Protocol, c: u16) -> Request {
+        Request::DelFilter {
+            ifindex: index,
+            hook,
+            chain: 0,
+            prio: STEERING_PRIO,
+            protocol,
+            handle: u32::from(c),
+        }
+    }
+
+    /// The bond's kernel index, if it exists yet.
+    async fn bond_index(&self, aggregate: &str) -> Option<u32> {
+        let Lookup::Found(id) = port_aggregate_registry::lookup_port_aggregate_id(
+            &self.port_aggregate_registry_path,
+            aggregate,
+        ) else {
+            return None;
+        };
+        let link = self
+            .find_link(&port_aggregate_registry::port_aggregate_ifname(id))
+            .await
+            .ok()??;
+        Some(link.header.index)
+    }
+
+    /// Deletes the whole steering priority on the bond and on every member we
+    /// had drops on.
+    async fn steer_wipe(
+        &self,
+        bond: u32,
+        known: &Wanted,
+        protocol: Protocol,
+    ) -> Result<(), DriverError> {
+        let del = |index, hook| Request::DelFilter {
+            ifindex: index,
+            hook,
+            chain: 0,
+            prio: STEERING_PRIO,
+            protocol,
+            handle: 0,
+        };
+        self.tc(del(bond, Hook::Egress), NO_FILTER).await?;
+        for m in known.drops.keys() {
+            if let Some(l) = self.find_link(m).await? {
+                self.tc(del(l.header.index, Hook::Ingress), NO_FILTER)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn steer(&self, desired: &SteeringState) -> Result<(), DriverError> {
+        let want = Wanted::from_state(desired);
+        let prev = self
+            .steering
+            .lock()
+            .unwrap()
+            .get(&desired.aggregate)
+            .cloned()
+            .unwrap_or_default();
+        let Some(bond) = self.bond_index(&desired.aggregate).await else {
+            return Ok(());
+        };
+        let protocol = if desired.s_vlan {
+            Protocol::Dot1Ad
+        } else {
+            Protocol::Dot1Q
+        };
+        let mut known = prev.wanted.clone();
+        if !known.is_empty() && prev.s_vlan != desired.s_vlan {
+            // A priority holds one protocol: clear the old one first.
+            let old = if prev.s_vlan {
+                Protocol::Dot1Ad
+            } else {
+                Protocol::Dot1Q
+            };
+            self.steer_wipe(bond, &known, old).await?;
+            known = Wanted::default();
+        }
+        let names: BTreeSet<&String> = want
+            .redirects
+            .values()
+            .chain(want.drops.keys())
+            .chain(known.redirects.values())
+            .chain(known.drops.keys())
+            .collect();
+        let mut index = BTreeMap::new();
+        for n in names {
+            if let Some(l) = self.find_link(n).await? {
+                index.insert(n.clone(), l.header.index);
+            }
+        }
+        // What the kernel holds now: handles read back, targets from memory.
+        let mut have = Wanted::default();
+        for (c, _) in self.steering_rows(bond, Hook::Egress, "mirred").await {
+            have.redirects
+                .insert(c, known.redirects.get(&c).cloned().unwrap_or_default());
+        }
+        for (m, ix) in &index {
+            let cs: BTreeSet<u16> = self
+                .steering_rows(*ix, Hook::Ingress, "gact")
+                .await
+                .into_iter()
+                .map(|r| r.0)
+                .collect();
+            if !cs.is_empty() {
+                have.drops.insert(m.clone(), cs);
+            }
+        }
+        let ops = steering::plan(&want, &have);
+        if !want.redirects.is_empty() {
+            self.tc(Request::Clsact { ifindex: bond }, &[EEXIST])
+                .await?;
+        }
+        for m in want.drops.keys() {
+            if let Some(ix) = index.get(m) {
+                self.tc(Request::Clsact { ifindex: *ix }, &[EEXIST]).await?;
+            }
+        }
+        for op in ops {
+            let req = match op {
+                Op::AddDrop(m, c) => index.get(&m).map(|ix| {
+                    Self::steering_filter(
+                        *ix,
+                        Hook::Ingress,
+                        protocol,
+                        c,
+                        ActionKind::Gact(Verdict::Shot),
+                    )
+                }),
+                Op::Redirect(c, m) => index.get(&m).map(|ix| {
+                    Self::steering_filter(
+                        bond,
+                        Hook::Egress,
+                        protocol,
+                        c,
+                        ActionKind::Mirred { ifindex: *ix },
+                    )
+                }),
+                Op::DelRedirect(c) => Some(Self::steering_del(bond, Hook::Egress, protocol, c)),
+                Op::DelDrop(m, c) => index
+                    .get(&m)
+                    .map(|ix| Self::steering_del(*ix, Hook::Ingress, protocol, c)),
+            };
+            match req {
+                Some(r) => self.tc(r, NO_FILTER).await?,
+                None => {
+                    warn!(aggregate = %desired.aggregate, "steering member link not present, skipped");
+                }
+            }
+        }
+        let changed = prev.wanted != want;
+        {
+            let mut mem = self.steering.lock().unwrap();
+            if want.is_empty() {
+                mem.remove(&desired.aggregate);
+            } else {
+                mem.insert(
+                    desired.aggregate.clone(),
+                    Applied {
+                        s_vlan: desired.s_vlan,
+                        wanted: want.clone(),
+                    },
+                );
+            }
+        }
+        if changed {
+            if want.is_empty() {
+                info!(aggregate = %desired.aggregate, "lacp conversation steering removed");
+            } else {
+                info!(
+                    aggregate = %desired.aggregate,
+                    conversations = want.redirects.len(),
+                    links = desired.links.len(),
+                    discard_wrong = desired.discard_wrong,
+                    "lacp conversation steering installed"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// The kernel link of `port`, if it exists.
@@ -1303,6 +1536,14 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             return Ok(());
         };
         let ifname = port_aggregate_registry::port_aggregate_ifname(bond_id);
+        // Members outlive the bond: take our ingress drops off them first.
+        let gone = SteeringState {
+            aggregate: name.to_string(),
+            ..SteeringState::default()
+        };
+        if let Err(e) = self.steer(&gone).await {
+            warn!(port_aggregate = %name, error = %e, "failed to remove conversation steering");
+        }
         if let Some(link) = self.find_link(&ifname).await? {
             self.handle.link().del(link.header.index).execute().await?;
             info!(port_aggregate = %name, bond = %ifname, "deleted port aggregate bond");
@@ -1369,6 +1610,54 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         .await?;
         debug!(interface = %link_name(&link).unwrap_or_default(), "bridge port fdb flushed");
         Ok(())
+    }
+
+    async fn apply_conversation_steering(
+        &self,
+        desired: &SteeringState,
+    ) -> Result<(), DriverError> {
+        self.steer(desired).await
+    }
+
+    async fn steering_stats(&self, aggregate: &str) -> Vec<nos_proto::LacpLinkSteering> {
+        let Some(applied) = self.steering.lock().unwrap().get(aggregate).cloned() else {
+            return Vec::new();
+        };
+        let Some(bond) = self.bond_index(aggregate).await else {
+            return Vec::new();
+        };
+        let egress: HashMap<u16, u64> = self
+            .steering_rows(bond, Hook::Egress, "mirred")
+            .await
+            .into_iter()
+            .collect();
+        let w = &applied.wanted;
+        let members: BTreeSet<&String> = w.redirects.values().chain(w.drops.keys()).collect();
+        let mut out = Vec::new();
+        for m in members {
+            let owned: Vec<u16> = w
+                .redirects
+                .iter()
+                .filter(|(_, t)| *t == m)
+                .map(|(c, _)| *c)
+                .collect();
+            let dropped = match self.find_link(m).await {
+                Ok(Some(l)) => self
+                    .steering_rows(l.header.index, Hook::Ingress, "gact")
+                    .await
+                    .iter()
+                    .map(|r| r.1)
+                    .sum(),
+                _ => 0,
+            };
+            out.push(nos_proto::LacpLinkSteering {
+                member: m.clone(),
+                conversations: u32::try_from(owned.len()).unwrap_or(u32::MAX),
+                redirected_packets: owned.iter().filter_map(|c| egress.get(c)).sum(),
+                dropped_packets: dropped,
+            });
+        }
+        out
     }
 
     fn watch_links(&self) -> LinkWatch {

@@ -968,6 +968,7 @@ mod tests {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
         }];
         let mut got: Vec<(String, String)> =
             connected_entries("rt1", &interfaces, &aggregates, &domains)

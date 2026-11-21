@@ -889,3 +889,27 @@ fn vlan_and_mirred_refusals_and_edges() {
     one(Protocol::Dot1Q, vlan(Some(0)), g());
     one(Protocol::Dot1Q, vlan(Some(4094)), mirred(1));
 }
+
+#[test]
+fn dot1ad_vlan_golden_ethertype_and_edges() {
+    let m = add(filter(
+        Protocol::Dot1Ad,
+        Kind::Flower(vlan(Some(10))),
+        vec![Action::new(mirred(7))],
+    ));
+    assert_eq!(
+        u32_at(&m, 32),
+        1 << 16 | u32::from(u16::from_ne_bytes([0x88, 0xa8]))
+    );
+    let k = keys(&m);
+    assert_eq!(k[0], (TCA_FLOWER_KEY_ETH_TYPE, vec![0x88, 0xa8]));
+    assert_eq!(k[1], (TCA_FLOWER_KEY_VLAN_ID, 10u16.to_ne_bytes().to_vec()));
+    let l4 = FlowerKeys {
+        ip_proto: Some(6),
+        ..vlan(Some(10))
+    };
+    assert_eq!(
+        refused(Protocol::Dot1Ad, l4, ActionKind::Gact(Verdict::Ok)),
+        io::ErrorKind::InvalidInput
+    );
+}

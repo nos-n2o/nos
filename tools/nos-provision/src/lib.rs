@@ -160,6 +160,18 @@ fn parse_conversation_map(s: &str) -> Result<ConversationMapArg, String> {
     Ok(ConversationMapArg(out))
 }
 
+/// A parsed `--port-aggregate-vlan-address`: `TAG=ADDRESS`.
+#[derive(Clone, Debug)]
+pub struct VlanAddressArg(pub u16, pub IpNet);
+
+fn parse_vlan_address(s: &str) -> Result<VlanAddressArg, String> {
+    let (tag, address) = s.split_once('=').ok_or("want TAG=ADDRESS")?;
+    Ok(VlanAddressArg(
+        tag.parse().map_err(|_| "bad VLAN tag")?,
+        address.parse().map_err(|_| "bad address")?,
+    ))
+}
+
 /// Clap-facing mirror of `nos_proto::EsRedundancy` (`all-active` /
 /// `single-active`), for the same reason as `PortAggregateModeArg`.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1123,6 +1135,12 @@ pub struct Args {
     /// (`PortAggregateSubinterfaceOp::AddAddress` + `SetRoutingTable`).
     #[arg(long)]
     pub port_aggregate_address: Option<IpNet>,
+
+    /// Repeatable `TAG=ADDRESS` (requires `--port-aggregate`): an address on
+    /// the aggregate's `TAG` subinterface in `--routing-table`, like
+    /// `--port-aggregate-address` for tag 0.
+    #[arg(long, value_parser = parse_vlan_address)]
+    pub port_aggregate_vlan_address: Vec<VlanAddressArg>,
 
     /// If set (requires `--port-aggregate`), sets the aggregate's EVPN
     /// Ethernet Segment Identifier (`PortAggregateOp::SetEsi`).
@@ -3714,6 +3732,23 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
+        for VlanAddressArg(tag, address) in &args.port_aggregate_vlan_address {
+            ops.push(ConfigOp::PortAggregateSubinterface(
+                PortAggregateSubinterfaceOp::AddAddress {
+                    port_aggregate: name.clone(),
+                    tag: *tag,
+                    address: *address,
+                    label: None,
+                },
+            ));
+            ops.push(ConfigOp::PortAggregateSubinterface(
+                PortAggregateSubinterfaceOp::SetRoutingTable {
+                    port_aggregate: name.clone(),
+                    tag: *tag,
+                    routing_table: args.routing_table.clone(),
+                },
+            ));
+        }
         if let Some(esi) = args.port_aggregate_esi.clone() {
             ops.push(ConfigOp::StpPortProfile(StpPortProfileOp::Ensure {
                 name: STP_GUARD_PROFILE.to_string(),
@@ -3864,6 +3899,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }
     } else if args.port_aggregate_mtu.is_some()
         || args.port_aggregate_address.is_some()
+        || !args.port_aggregate_vlan_address.is_empty()
         || args.port_aggregate_esi.is_some()
         || args.delete_port_aggregate_esi
         || args.port_aggregate_redundancy_mode.is_some()
@@ -3884,7 +3920,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--port-aggregate-bfd/--port-aggregate-bfd-peer/--lacp-port-priority/--lacp-version/--lacp-port-algorithm/--lacp-conversation-map/--lacp-link-number/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-vlan-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--port-aggregate-bfd/--port-aggregate-bfd-peer/--lacp-port-priority/--lacp-version/--lacp-port-algorithm/--lacp-conversation-map/--lacp-link-number/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -8118,5 +8154,38 @@ mod tests {
             format!("{:?}", stp_mode(&parse(&["--stp-mode", "mstp"]))),
             "Mstp"
         );
+    }
+
+    #[test]
+    fn port_aggregate_vlan_address_adds_per_tag_subinterfaces() {
+        let o = ops(&[
+            "--port-aggregate",
+            "bond0",
+            "--port-aggregate-vlan-address",
+            "10=10.10.0.1/24",
+            "--port-aggregate-vlan-address",
+            "20=10.20.0.1/24",
+        ])
+        .unwrap();
+        let tags: Vec<u16> =
+            o.iter()
+                .filter_map(|op| match op {
+                    ConfigOp::PortAggregateSubinterface(
+                        PortAggregateSubinterfaceOp::AddAddress { tag, .. },
+                    ) => Some(*tag),
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(tags, [10, 20]);
+        assert!(
+            err(&["--port-aggregate-vlan-address", "10=10.10.0.1/24"]).contains("--port-aggregate")
+        );
+        assert!(err(&[
+            "--port-aggregate",
+            "b",
+            "--port-aggregate-vlan-address",
+            "x"
+        ])
+        .contains("TAG"));
     }
 }

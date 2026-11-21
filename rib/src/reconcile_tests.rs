@@ -802,6 +802,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
         },
     );
     ifaced.set_broadcast_domain(

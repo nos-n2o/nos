@@ -297,6 +297,7 @@ async fn interfaced_lookups_links_and_pushed() {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
         },
     );
     assert!(matches!(q(pa()).await, InterfaceEvent::PortAggregate(_)));

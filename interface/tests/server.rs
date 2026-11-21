@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_interface::driver::{
-    BridgePortRef, DriverError, InterfaceDriver, LinkWatch, NoopInterfaceDriver,
+    BridgePortRef, DriverError, InterfaceDriver, LinkWatch, NoopInterfaceDriver, SteeringState,
 };
 use nos_interface::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 use nos_interface::{server, Interfaces};
@@ -93,6 +93,7 @@ async fn next_event(
 #[derive(Default)]
 struct RecordingDriver {
     applied: std::sync::Mutex<Vec<(String, bool)>>,
+    steered: std::sync::Mutex<Vec<SteeringState>>,
 }
 
 #[async_trait::async_trait]
@@ -137,6 +138,13 @@ impl InterfaceDriver for RecordingDriver {
     }
     async fn flush_bridge_port(&self, p: &BridgePortRef) -> Result<(), DriverError> {
         NoopInterfaceDriver.flush_bridge_port(p).await
+    }
+    async fn apply_conversation_steering(&self, d: &SteeringState) -> Result<(), DriverError> {
+        self.steered.lock().unwrap().push(d.clone());
+        Ok(())
+    }
+    async fn steering_stats(&self, a: &str) -> Vec<nos_proto::LacpLinkSteering> {
+        NoopInterfaceDriver.steering_stats(a).await
     }
     fn watch_links(&self) -> LinkWatch {
         NoopInterfaceDriver.watch_links()
@@ -475,6 +483,93 @@ async fn push_lacp_members_applies_the_active_member() {
     .await
     .unwrap();
     driver.wait_applied(false).await;
+}
+
+fn mask_of(ids: &[u16]) -> Vec<u8> {
+    let mut m = vec![0u8; nos_proto::interface::LACP_CONVERSATION_MASK_LEN];
+    for c in ids {
+        m[usize::from(c / 8)] |= 0x80 >> (c % 8);
+    }
+    m
+}
+
+async fn wait_steered(
+    driver: &RecordingDriver,
+    want: impl Fn(&SteeringState) -> bool,
+) -> SteeringState {
+    for _ in 0..100 {
+        if let Some(s) = driver
+            .steered
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|s| want(s))
+        {
+            return s.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no matching steering: {:?}", driver.steered.lock().unwrap());
+}
+
+#[tokio::test]
+async fn push_lacp_conversations_steers_only_enslaved_members() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (driver, _interfaces, mut w, _server) = bond_server(
+        nos_proto::PortAggregateMode::Lacp,
+        false,
+        "lacpd",
+        tmp.path(),
+    )
+    .await;
+    let push = |discard_wrong| {
+        InterfaceRequest::PushLacpConversations(nos_proto::LacpAggregateConversations {
+            aggregate: "bond1".to_string(),
+            links: ["eth0", "ethX"]
+                .iter()
+                .zip([10u16, 20])
+                .map(|(m, c)| nos_proto::LacpLinkConversations {
+                    member: (*m).to_string(),
+                    link_number: 1,
+                    mask: mask_of(&[c]),
+                })
+                .collect(),
+            discard_wrong,
+        })
+    };
+    // eth0 is not enslaved yet: nothing to steer.
+    w.send(push(true)).await.unwrap();
+    let s = wait_steered(&driver, |s| s.aggregate == "bond1").await;
+    assert!(s.links.is_empty(), "not enslaved");
+
+    w.send(InterfaceRequest::PushLacpMembers(
+        nos_proto::LacpAggregateMembers {
+            aggregate: "bond1".to_string(),
+            active_members: vec!["eth0".to_string()],
+        },
+    ))
+    .await
+    .unwrap();
+    // The member push re-steers with the stored masks; ethX is not a member.
+    let s = wait_steered(&driver, |s| !s.links.is_empty()).await;
+    assert_eq!(s.links, [("eth0".to_string(), vec![10])]);
+    assert!(s.discard_wrong && !s.s_vlan);
+
+    // An empty push removes everything.
+    w.send(InterfaceRequest::PushLacpConversations(
+        nos_proto::LacpAggregateConversations {
+            aggregate: "bond1".to_string(),
+            links: vec![],
+            discard_wrong: false,
+        },
+    ))
+    .await
+    .unwrap();
+    let n = driver.steered.lock().unwrap().len();
+    let s = wait_steered(&driver, |s| !s.discard_wrong && s.links.is_empty()).await;
+    assert_eq!(s.aggregate, "bond1");
+    assert!(driver.steered.lock().unwrap().len() >= n);
 }
 
 #[tokio::test]

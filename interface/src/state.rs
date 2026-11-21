@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 
 use nos_proto::{
-    loopback_table_name, Config, InterfaceAddress, PortAggregateMode, StpMode, StpPortAssignment,
-    StpPortState, VlanTag,
+    loopback_table_name, Config, InterfaceAddress, LacpAggregateConversations, LacpPortAlgorithm,
+    PortAggregateMode, StpMode, StpPortAssignment, StpPortState, VlanTag,
 };
 use tracing::{debug, trace, warn};
 
+use crate::driver::steering::{conversations_of, SteeringState};
 use crate::driver::{BridgePortRef, InterfaceDriver};
 
 /// One subinterface's desired state, mirroring `nos_proto::Subinterface`.
@@ -131,6 +132,8 @@ pub struct PortAggregateState {
     /// `PortAggregate.bfd` is set: a member is only enslaved while
     /// `nos-bfdd` reports its micro-BFD session Up (`bfd_up_members`).
     pub bfd: bool,
+    /// `lacp-port-algorithm s-vlan`: conversations are S-VLAN ids (#895).
+    pub s_vlan: bool,
     /// Spanning-tree view of this aggregate's bridge ports.
     pub stp: StpPorts,
 }
@@ -180,6 +183,9 @@ pub struct Interfaces {
     /// `build_from_config` like `lacp_active_members`. No push = no member
     /// Up (fail closed).
     bfd_up_members: HashMap<String, Vec<String>>,
+    /// The last `PushLacpConversations` per aggregate (#895); carried forward
+    /// like `lacp_active_members`.
+    lacp_conversations: HashMap<String, LacpAggregateConversations>,
     /// `spanning-tree mode` is not `disabled` as of the last resync.
     stp_on: bool,
     /// The last state `nos-stpd` pushed per `(port, domain)`; carried forward
@@ -244,6 +250,49 @@ impl Interfaces {
         self.lacp_active_members
             .insert(aggregate.to_string(), active_members);
         self.recompute_members(aggregate)
+    }
+
+    /// Remembers a `nos-lacpd` conversation push (#895).
+    pub fn set_lacp_conversations(&mut self, push: LacpAggregateConversations) {
+        self.lacp_conversations.insert(push.aggregate.clone(), push);
+    }
+
+    /// The steering `aggregate` should have right now: the pushed masks of the
+    /// links that are enslaved (a redirect to a member the bond does not hold
+    /// would black-hole, 802.1AX 6.2.7), nothing unless it is an LACP
+    /// aggregate with an algorithm.
+    pub fn steering_state(&self, aggregate: &str) -> SteeringState {
+        let mut out = SteeringState {
+            aggregate: aggregate.to_string(),
+            ..SteeringState::default()
+        };
+        let (Some(agg), Some(push)) = (
+            self.by_port_aggregate.get(aggregate),
+            self.lacp_conversations.get(aggregate),
+        ) else {
+            return out;
+        };
+        if agg.mode != PortAggregateMode::Lacp {
+            return out;
+        }
+        out.s_vlan = agg.s_vlan;
+        out.discard_wrong = push.discard_wrong;
+        out.links = push
+            .links
+            .iter()
+            .filter(|l| {
+                self.by_name
+                    .get(&l.member)
+                    .is_some_and(|i| i.port_aggregate_active)
+            })
+            .map(|l| (l.member.clone(), conversations_of(&l.mask)))
+            .collect();
+        out
+    }
+
+    /// Names of every configured aggregate.
+    pub fn aggregate_names(&self) -> Vec<String> {
+        self.by_port_aggregate.keys().cloned().collect()
     }
 
     /// Applies a fresh `nos-bfdd` push (`InterfaceRequest::PushBfdMembers`):
@@ -360,6 +409,13 @@ impl Interfaces {
             {
                 self.bfd_up_members.insert(agg.clone(), members.clone());
                 touched.push(agg.clone());
+            }
+        }
+        for (agg, push) in &live.lacp_conversations {
+            if self.by_port_aggregate.contains_key(agg)
+                && self.lacp_conversations.get(agg) != Some(push)
+            {
+                self.lacp_conversations.insert(agg.clone(), push.clone());
             }
         }
         touched.sort();
@@ -504,6 +560,7 @@ pub async fn build_from_config(
             bond_name: None,
             link_local_address: None,
             bfd: agg.bfd.is_some(),
+            s_vlan: agg.lacp_port_algorithm == LacpPortAlgorithm::SVlan,
             stp: port_stp(&agg.name),
         };
         match driver.ensure_port_aggregate(&state).await {
@@ -596,6 +653,7 @@ pub async fn build_from_config(
         port_aggregates,
         lacp_active_members: previous.lacp_active_members.clone(),
         bfd_up_members: previous.bfd_up_members.clone(),
+        lacp_conversations: previous.lacp_conversations.clone(),
         stp_on,
         stp_port_states: previous.stp_port_states.clone(),
         err_disabled: previous.err_disabled.clone(),
@@ -827,6 +885,17 @@ mod tests {
             _port: &crate::driver::BridgePortRef,
         ) -> Result<(), DriverError> {
             Ok(())
+        }
+
+        async fn apply_conversation_steering(
+            &self,
+            _desired: &SteeringState,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        async fn steering_stats(&self, _aggregate: &str) -> Vec<nos_proto::LacpLinkSteering> {
+            Vec::new()
         }
 
         fn watch_links(&self) -> crate::driver::LinkWatch {
@@ -1330,6 +1399,63 @@ mod tests {
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &previous).await;
 
         assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    fn conversations_push(discard_wrong: bool) -> LacpAggregateConversations {
+        let mut mask = vec![0u8; nos_proto::interface::LACP_CONVERSATION_MASK_LEN];
+        mask[1] = 0x20; // conversation 10
+        LacpAggregateConversations {
+            aggregate: "bond1".to_string(),
+            links: vec![nos_proto::LacpLinkConversations {
+                member: "eth0".to_string(),
+                link_number: 1,
+                mask,
+            }],
+            discard_wrong,
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_follows_enslavement_algorithm_and_survives_a_resync() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let mut config = cfg_with_aggregate(PortAggregateMode::Lacp, iface);
+        config.port_aggregates[0].lacp_port_algorithm = LacpPortAlgorithm::SVlan;
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        interfaces.set_lacp_conversations(conversations_push(true));
+        // Not enslaved yet: nothing to steer.
+        assert!(
+            interfaces.steering_state("bond1").links.is_empty(),
+            "not enslaved"
+        );
+        interfaces.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+        let s = interfaces.steering_state("bond1");
+        assert_eq!(s.links, [("eth0".to_string(), vec![10])]);
+        assert!(s.s_vlan && s.discard_wrong);
+
+        let resynced = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert_eq!(resynced.steering_state("bond1"), s);
+
+        // Static bonds and unknown aggregates are never steered.
+        config.port_aggregates[0].mode = PortAggregateMode::Xor;
+        let xor = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
+        assert!(xor.steering_state("bond1").links.is_empty(), "xor");
+        assert!(xor.steering_state("nope").links.is_empty(), "unknown");
+    }
+
+    #[tokio::test]
+    async fn adopt_pushed_takes_a_conversation_push_made_during_a_resync() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let config = cfg_with_aggregate(PortAggregateMode::Lacp, iface);
+        let mut live = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let mut fresh = live.clone();
+        live.set_lacp_conversations(conversations_push(false));
+        fresh.adopt_pushed(&live);
+        assert_eq!(fresh.aggregate_names(), ["bond1"]);
+        fresh.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+        assert_eq!(fresh.steering_state("bond1").links.len(), 1);
     }
 
     fn bfd_config(mode: PortAggregateMode) -> Config {
