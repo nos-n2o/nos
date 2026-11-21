@@ -19,8 +19,7 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
-use crate::conversation::merge_mask;
-use crate::cscd::{self, Advert, Agreement, V2Cfg};
+use crate::cscd::{self, Advert, Agreement, PortIn, V2Cfg};
 use crate::interface_client::LacpPush;
 use crate::link::{self, LinkConfig, PortObservation};
 use crate::mux_machine::MuxState;
@@ -77,6 +76,9 @@ pub struct V2Shared {
     cfg: Mutex<V2Cfg>,
     advert_tx: watch::Sender<Advert>,
     out: Mutex<V2Out>,
+    /// Our `(system priority, system id)`, for the `Link_Number` adoption
+    /// comparison; kept current by `reconcile_v2`.
+    actor: Mutex<(u16, [u8; 6])>,
 }
 
 /// What `selection_loop` last decided, for `show lacp`.
@@ -90,6 +92,7 @@ impl V2Shared {
         Arc::new(Self {
             cfg: Mutex::new(V2Cfg::default()),
             advert_tx: watch::channel(Advert::default()).0,
+            actor: Mutex::new((DEFAULT_PRIORITY, [0; 6])),
             out: Mutex::new(V2Out {
                 agreement: Agreement::NotRequested,
                 conversations_per_link: Vec::new(),
@@ -243,6 +246,7 @@ impl AggregateManager {
             *current = rate;
             *id = system_id;
             *prio = system_priority;
+            *self.v2.actor.lock().unwrap() = (system_priority, system_id);
             changed
         };
         let mut port_priorities = self.port_priorities.lock().unwrap();
@@ -402,12 +406,14 @@ impl AggregateManager {
     }
 }
 
-/// What one push round carries: the active members and, only when both ends
-/// agreed, the per-link conversation masks (empty = plain hashing).
+/// What one push round carries: the active members, the per-link conversation
+/// masks of the Distributing links (empty = plain hashing) and whether the
+/// partner agreed (`Discard_Wrong_Conversation`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Want {
     members: Vec<String>,
     conversations: Vec<LacpLinkConversations>,
+    discard_wrong: bool,
 }
 
 /// Re-runs Selection Logic and recomputes the active (`Distributing`)
@@ -417,7 +423,7 @@ struct Want {
 /// conversation agreement, and pushes the members and conversations when they
 /// change — the one natural edge-triggered mutation point `interface_client`'s
 /// own doc comment refers to.
-#[allow(clippy::too_many_arguments)] // one task, one call site
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one task, one call site
 async fn selection_loop(
     aggregate: String,
     observations: Arc<Mutex<HashMap<String, PortObservation>>>,
@@ -433,6 +439,8 @@ async fn selection_loop(
     // Newest computed set held back by the 1 s coalescing window.
     let mut pending: Option<Want> = None;
     let mut last_agreement: Option<Agreement> = None;
+    let mut last_numbers: std::collections::BTreeMap<String, u16> =
+        std::collections::BTreeMap::new();
     loop {
         let deadline = match (&pending, last_push_at) {
             (Some(_), Some(t)) => t + PUSH_COALESCE,
@@ -480,11 +488,51 @@ async fn selection_loop(
         let mut active_members = active_set(&snapshot, &selected);
         active_members.sort();
 
-        // v2: advertise the map over the Distributing set (before the
-        // min-links gate: the partner compares the same set), then decide
-        // agreement over those ports' partner TLVs.
+        // v2 (802.1AX 6.6): the advert (algorithm, admin-map digest) is config
+        // only; the vector, `Link_Number` adoption and the agreement flags come
+        // from the Collecting ports (p.93, 99). Pushes list Distributing only.
         let cfg = v2.cfg.lock().unwrap().clone();
-        let (advert, map) = cscd::compute(&cfg, &active_members);
+        let (mut advert, map) = cscd::compute(&cfg);
+        let (sys_prio, sys_id) = *v2.actor.lock().unwrap();
+        let mut ports: Vec<PortIn> = snapshot
+            .iter()
+            .map(|(interface, obs)| PortIn {
+                name: interface.clone(),
+                collecting: selected.contains(interface)
+                    && matches!(obs.mux_state, MuxState::Collecting | MuxState::Distributing)
+                    && !obs.is_churned()
+                    && obs
+                        .partner
+                        .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
+                distributing: obs.mux_state == MuxState::Distributing,
+                partner_lower: obs.partner.is_some_and(|p| {
+                    cscd::partner_is_lower(
+                        (sys_prio, sys_id),
+                        (
+                            priorities
+                                .get(interface)
+                                .copied()
+                                .unwrap_or(DEFAULT_PRIORITY),
+                            obs.actor_port,
+                        ),
+                        &p,
+                    )
+                }),
+                v2: obs.v2,
+            })
+            .collect();
+        ports.sort_by(|a, b| a.name.cmp(&b.name));
+        let resolved = cscd::resolve(&cfg, &advert, map.as_ref(), &ports);
+        advert.link_numbers.clone_from(&resolved.link_numbers);
+        for (interface, n) in &resolved.link_numbers {
+            let before = last_numbers
+                .get(interface)
+                .or(cfg.link_numbers.get(interface));
+            if before != Some(n) && cfg.link_numbers.get(interface) != Some(n) {
+                info!(interface = %interface, from = before.copied().unwrap_or(0), to = *n, "lacp link number adopted");
+            }
+        }
+        last_numbers.clone_from(&resolved.link_numbers);
         v2.advert_tx.send_if_modified(|cur| {
             if *cur == advert {
                 false
@@ -493,13 +541,7 @@ async fn selection_loop(
                 true
             }
         });
-        let agreement = cscd::overall(
-            &advert,
-            active_members
-                .iter()
-                .filter_map(|m| snapshot.get(m))
-                .map(|o| &o.v2),
-        );
+        let agreement = resolved.agreement;
         if last_agreement != Some(agreement) {
             let (state, reason) = agreement.label();
             info!(aggregate = %aggregate, state = %state, reason = %reason, "lacp conversation agreement");
@@ -507,7 +549,8 @@ async fn selection_loop(
         }
 
         let min = min_links.load(Ordering::Relaxed);
-        if !min_links_met(active_members.len(), min) {
+        let min_met = min_links_met(active_members.len(), min);
+        if !min_met {
             // Only the pushed set is gated: ports stay selected and keep
             // negotiating, so the bond refills the moment the count is met.
             if last_pushed.as_ref().is_some_and(|l| !l.members.is_empty()) {
@@ -521,21 +564,20 @@ async fn selection_loop(
             active_members.clear();
         }
 
-        let conversations = match (&map, agreement) {
-            (Some(map), Agreement::Agreed) => active_members
-                .iter()
-                .filter_map(|m| {
-                    let link_number = *cfg.link_numbers.get(m)?;
-                    let mask = merge_mask(&map.masks_for_link(link_number)).to_vec();
-                    mask.iter().any(|b| *b != 0).then(|| LacpLinkConversations {
-                        member: m.clone(),
-                        link_number,
-                        mask,
-                    })
+        let conversations: Vec<LacpLinkConversations> = if min_met {
+            resolved
+                .steer
+                .into_iter()
+                .map(|s| LacpLinkConversations {
+                    member: s.member,
+                    link_number: s.link_number,
+                    mask: s.mask,
                 })
-                .collect(),
-            _ => Vec::new(),
+                .collect()
+        } else {
+            Vec::new()
         };
+        let discard_wrong = resolved.discard_wrong && !conversations.is_empty();
         *v2.out.lock().unwrap() = V2Out {
             agreement,
             conversations_per_link: conversations
@@ -549,6 +591,7 @@ async fn selection_loop(
         let want = Want {
             members: active_members,
             conversations,
+            discard_wrong,
         };
 
         if last_pushed.as_ref() == Some(&want) {
@@ -586,11 +629,14 @@ async fn push(
             return false;
         }
     }
-    if last.is_none_or(|l| l.conversations != want.conversations) {
-        info!(aggregate = %aggregate, links = want.conversations.len(), "lacp conversations pushed");
+    if last.is_none_or(|l| {
+        l.conversations != want.conversations || l.discard_wrong != want.discard_wrong
+    }) {
+        info!(aggregate = %aggregate, links = want.conversations.len(), discard_wrong = want.discard_wrong, "lacp conversations pushed");
         let msg = LacpPush::Conversations(LacpAggregateConversations {
             aggregate: aggregate.to_string(),
             links: want.conversations.clone(),
+            discard_wrong: want.discard_wrong,
         });
         if push_tx.send(msg).await.is_err() {
             warn!(aggregate = %aggregate, "lacp interface_client channel closed, stopping selection loop");
@@ -852,10 +898,11 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(next_members(&mut rx).is_none());
     }
-    /// Pushes conversations only when every Distributing link agreed; `summary`
-    /// reports the agreement and the per-link counts.
+    /// Steers whenever a map and a Distributing link exist, and sets
+    /// `discard_wrong` only once agreed; `summary` reports the agreement and
+    /// the per-link counts.
     #[tokio::test(start_paused = true)]
-    async fn conversations_are_pushed_only_when_agreed() {
+    async fn conversations_are_steered_and_discard_wrong_needs_agreement() {
         use crate::conversation::PortAlgorithm;
         use crate::packet::ConvDigest;
         let observations = Arc::new(Mutex::new(HashMap::new()));
@@ -866,9 +913,10 @@ mod tests {
             algorithm: nos_proto::LacpPortAlgorithm::CVlan,
             map: Vec::new(),
             link_numbers: [("eth1".to_string(), 1)].into(),
+            members: vec!["eth1".to_string()],
         };
         *v2.cfg.lock().unwrap() = cfg.clone();
-        let (advert, _) = cscd::compute(&cfg, &["eth1".to_string()]);
+        let (advert, _) = cscd::compute(&cfg);
         let (tx, mut rx) = mpsc::channel(16);
         tokio::spawn(selection_loop(
             "bond1".into(),
@@ -884,7 +932,7 @@ mod tests {
             let mut o = obs(true);
             o.partner = Some(PortInfo {
                 system: [9; 6],
-                state: state_bit::AGGREGATION,
+                state: state_bit::AGGREGATION | state_bit::SYNCHRONIZATION,
                 ..PortInfo::ADMINISTRATIVE_DEFAULT
             });
             o.v2 = crate::cscd::PartnerV2 {
@@ -902,7 +950,7 @@ mod tests {
             let mut last = None;
             while let Ok(m) = rx.try_recv() {
                 if let LacpPush::Conversations(c) = m {
-                    last = Some(c.links);
+                    last = Some((c.links, c.discard_wrong));
                 }
             }
             last
@@ -914,7 +962,9 @@ mod tests {
             v2.out.lock().unwrap().agreement,
             Agreement::Mismatch("digest")
         );
-        assert_eq!(last_conversations(&mut rx), Some(Vec::new()));
+        // Mismatch: still steered, but the collection filter stays off.
+        let (links, discard_wrong) = last_conversations(&mut rx).expect("steered");
+        assert_eq!((links.len(), discard_wrong), (1, false));
 
         set(advert.digest.unwrap());
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -922,7 +972,8 @@ mod tests {
         assert_eq!(out.agreement, Agreement::Agreed);
         assert_eq!(out.conversations_per_link, vec![("eth1".to_string(), 4096)]);
         drop(out);
-        let links = last_conversations(&mut rx).expect("pushed once agreed");
+        let (links, discard_wrong) = last_conversations(&mut rx).expect("pushed once agreed");
+        assert!(discard_wrong);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_number, 1);
         assert_eq!(

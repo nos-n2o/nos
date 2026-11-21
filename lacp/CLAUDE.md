@@ -20,19 +20,19 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 
 ## Explicitly deferred (documented, not silently missing)
 
-- **Marker Generator** (§6.5.4.1, optional) — only matters for frame ordering during a live port move between aggregators; irrelevant with config-fixed membership. The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester port/system/transaction id, without touching any LACP machine. Own `TxLimiter` (5/s); `decode_marker` reads fixed offsets only (details in `docs/internals/lacp.md`).
+- **Marker Generator** (§6.5.4.1, optional) — only matters for frame ordering during a live port move between aggregators; irrelevant with config-fixed membership. The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester port/system/transaction id, without touching any LACP machine. Own `TxLimiter` (5/s); `decode_marker` reads fixed offsets only.
 - **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above; permanent, not temporary.
 
 
 ## Invariants to keep
 
-- Each member port runs three pure `step(state, event) -> (state, Action)` machines (Receive §6.4.12, Periodic Transmission §6.4.13, Mux §6.4.15) driven by the impure `link::run`; **only `Distributing` belongs in the active-member set pushed to `nos-interfaced`**.
+- Each member port runs three pure `step(state, event) -> (state, Action)` machines (Receive 6.4.11, Periodic Tx 6.4.14, Mux 6.4.13, 2020 numbers) driven by the impure `link::run`; **only `Distributing` belongs in the active-member set pushed to `nos-interfaced`**.
 - Transmit rate follows the partner's `LACP_Timeout` bit, never our own `lacp-rate`; our `lacp-rate` sets our advertised TIMEOUT bit and our own `Current_While_Timer` (3s fast / 90s slow). Send on change (`link::needs_transmit`), not on every receipt.
 - `Expired` keeps the learned partner and the port selected (only Sync/Collecting clear); only `Defaulted` drops it (partner `None` = administrative default, reported as key 1/port 1/0xffff/0xff, zero system). Selectable = `PortObservation::selectable()`, never plain `current()` (#687).
 - A partner's Synchronization/Collecting count only when its Partner block matches our Actor (`link::partner_matches_actor`, §6.4.9); a changed partner identity drops the mux out of Distributing.
 - Selection is config-scoped, permanently: it only checks the wire agrees with the configured aggregate (`selection.rs`); it never discovers membership.
 - Actor System ID is derived (FNV-1a of hostname + machine-id, `aggregate::local_system_id`), never from a member port (bonding rewrites slave MACs), overridable by `lacp-system-id`; no persisted registry. Internal state types are never `nos_proto::lacp`'s wire types.
-- LACP v2 (#894, details in `docs/internals/lacp.md`): default `lacp-version 1`; `2` is an opt-in (sends v2 at once, downgrades per port on a v1 PDU: "v1 until the partner sends 2" would deadlock two NOS routers). Conversations are pushed only when every Distributing link is `Agreed`, else an empty set. Merge-gated on a v2 source.
+- LACP v2 (#894, 802.1AX-2020 6.6, details in `docs/internals/lacp-v2.md`): default `lacp-version 1`, `2` opt-in (downgrades per port on a v1 PDU). The digest is of the config-only admin map (never link state); `cscd::resolve` over the Collecting ports gives agreement, `Link_Number` adoption and the per-link masks; steering whenever a map exists, `discard_wrong` only when agreed. No mask TLVs.
 - Changing rate, system id, system priority, version or algorithm restarts every member link (a link number: that member); a port priority or `lacp-mode` change restarts only that member; `min-links` restarts nothing.
 
 ## Modules
@@ -40,17 +40,17 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | Module | Role |
 |---|---|
 | `main.rs` | Single-instance args (`--watchdog-socket`, `--listen-socket`, `--log-socket`); starts `server::start`, `reconcile::run`, `interface_client::run` |
-| `packet.rs` | Hand-rolled LACPDU and Marker PDU codec, pure; `Lacpdu.v2` = UNVERIFIED v2 TLVs (#893), sent only with `lacp-version 2` (#894) |
-| `conversation.rs` | Pure CSCD model: `ConversationMap`, `PortAlgorithm`, MD5 digest, masks, `send_version` (UNVERIFIED wire choices) |
-| `cscd.rs` | Pure v2 policy (#894): local map, `Advert`, `Agreement` |
+| `packet.rs` | Hand-rolled LACPDU and Marker PDU codec, pure; `Lacpdu.v2` = v2 TLVs (#893), sent only with `lacp-version 2` (#894) |
+| `conversation.rs` | Pure CSCD model: `ConversationMap` (preference lists), `PortAlgorithm`, MD5 digest, `send_version` |
+| `cscd.rs` | Pure v2 policy (#894): admin map, `Advert`, `resolve` (flags, adoption, masks) |
 | `socket.rs` | `LacpSocket` over `nos-l2-socket`: one member interface, ethertype `0x8809`, group `01:80:C2:00:00:02` |
-| `receive_machine.rs`, `periodic_tx_machine.rs`, `mux_machine.rs`, `churn_machine.rs` | The pure state machines (churn: 60s, `NOS_LACP_CHURN_SECS`) |
+| `receive_machine.rs`, `periodic_tx_machine.rs`, `mux_machine.rs`, `churn_machine.rs` | The pure state machines |
 | `selection.rs` | Config-scoped `select` |
-| `link.rs` | Per-port `run()` (open the socket, build a `Port`) and `drive()` (the event loop); `Port` has one method per event. Test seam (#346): `FrameSink`/`FrameLink` abstract the socket, so `link/port_tests.rs` needs no `CAP_NET_RAW`; deadlines use `tokio::time::Instant` so paused-time tests work |
+| `link.rs` | Per-port `run()` (open the socket, build a `Port`) and `drive()` (the event loop); `Port` has one method per event. Test seam (#346): `FrameSink`/`FrameLink` abstract the socket (no `CAP_NET_RAW` in `link/port_tests.rs`); deadlines use `tokio::time::Instant` so paused-time tests work |
 | `aggregate.rs` | `AggregateManager`: per-aggregate `reconcile` and `selection_loop` |
 | `interface_client.rs` | Full-resend push of `PushLacpMembers` and `PushLacpConversations` (`LacpPush`) to `nos-interfaced` |
 | `server.rs` | `LacpRequest::GetSummary` for `show lacp` |
 | `reconcile.rs` | Config diff resync plus a 10s tick |
 | (no `config_client`/`watchdog_client`) | config, watchdog and `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`) |
 
-Details: [internals](../docs/internals/lacp.md) (state machines, `lacp-rate`, selection, actor identity and the `nos-e2e lacp` narrative), [user guide](../docs/protocols/port-aggregation-lacp.md), [e2e phases](../docs/e2e-phases.md), [v2/CSCD research](../docs/internals/lacp-v2.md).
+Details: [internals](../docs/internals/lacp.md) (state machines, `lacp-rate`, selection, actor identity and the `nos-e2e lacp` narrative), [user guide](../docs/protocols/port-aggregation-lacp.md), [e2e phases](../docs/e2e-phases.md), [v2/CSCD](../docs/internals/lacp-v2.md).

@@ -176,7 +176,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - NOS itself never declares a link Individual: only configured members run LACP.
 - An Individual member stays out of the bond while the partner keeps it so, and joins as soon as the partner sets the bit again. Check the partner's configuration (for example a link it considers half duplex).
 
-**LACPDU versions.** NOS accepts version 1 and version 2 (802.1AX-2014) LACPDUs, so a LACPv2 partner bundles; it still sends version 1.
+**LACPDU versions.** NOS accepts version 1 and version 2 (802.1AX-2014) LACPDUs, so a LACPv2 partner bundles; it sends version 1 unless `lacp-version 2` is set (see below).
 
 - Any other Version byte is dropped without a log line and counted: `show lacp` ends each member's line with `unsupported-version PDUs <n>`; `GET /v1/lacp` has `"unsupported_version_pdus"`.
 - A count that keeps growing means the partner sends a version other than 1 or 2: check its LACP configuration. The count restarts at 0 when the member's link task restarts (member re-added, `nos-lacpd` restart).
@@ -219,9 +219,10 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-conversation-map | `set port-aggregate <pa> lacp-conversation-map <first> last <n> member <if>`; `delete port-aggregate <pa> lacp-conversation-map <first>` | `port-aggregate/<pa>/lacp-conversation-map/<first>` | `first <= last <= 4095`, no overlap, `member` is a member of `<pa>`; empty = automatic distribution (`conversation mod active-links`) | needs an algorithm other than `unspecified` | explicit conversation-to-link map | `show lacp` |
 
 **LACP v2 (#894).** The default `lacp-version 1` keeps today's wire format: no v2 PDU is ever sent, so v1-only partners are unaffected. With `lacp-version 2` the router advertises the algorithm (and, with `lacp-port-algorithm c-vlan|s-vlan`, a Link_Number + digest of its conversation map), downgrades to 1 per port when the partner sends version 1 and goes back to 2 when it sends 2.
-- Give every member an explicit `lacp-link-number` (the same numbering on both ends) when an algorithm is set; without one the agreement is `Mismatch no-link-number`.
-- `show lacp` shows `agreement`: `Agreed` (both ends v2, same algorithm, equal digests), `Mismatch` (plain hashing), `V1Partner` or `NotApplicable`; conversations are pushed to `nos-interfaced` only when every Distributing link agrees (all-or-nothing), which applies them from #895 on.
-- Merge gate: not released until a v2 source confirms the TLV layout (#890/#891).
+- Give every member an explicit `lacp-link-number` when an algorithm is set; without one the agreement is `Mismatch no-link-number`. The two ends need not number their ports alike: the end with the higher system id adopts the other's numbers (`lacp link number adopted` in the log), provided both sides describe the same map in Link_Numbers (the automatic map does).
+- The digest covers the configured map only, so a link going down never makes the ends disagree; its conversations move to the next link in their preference list (the other links, ascending).
+- `show lacp` shows `agreement`: `Agreed` (both ends v2, same algorithm, equal digests, Link_Numbers known), `Mismatch`, `V1Partner` or `NotApplicable`. Conversations are steered to the `Distributing` links whenever an algorithm and map exist, even towards a v1 partner; only the collection filter (`discard_wrong`) needs `Agreed`. The kernel steering lands with #895.
+- Interop: the standard does not state the digest's entry widths. NOS uses 16-bit big-endian; against a non-NOS v2 peer expect `Mismatch digest` until a capture confirms it (plain hashing, never a black hole).
 
 `delete mode`, `delete lacp-rate`, `delete redundancy-mode` and `delete df-algorithm` put them back to their default (`xor`, `slow`, `all-active`, `modulo`).
 

@@ -1,22 +1,21 @@
-//! Pure CSCD model for LACPDU v2 (802.1AX-2014): conversation-id -> link map,
-//! Port Algorithm, MD5 digest, mask slicing, adaptive version choice (#893).
+//! Pure CSCD model for LACPDU v2 (IEEE 802.1AX-2020 clause 6.6, #893/#894):
+//! the `Admin_Conv_Link_Map` (a preference list of `Link_Numbers` per
+//! conversation), Port Algorithm, MD5 digest, adaptive version choice. Port
+//! Conversation Masks are local state only, never on the wire (the four mask
+//! TLVs are deprecated, p.57); see `cscd.rs` for the vector computation.
 //!
-//! UNVERIFIED (#890, owner decision on #893): no v2 source (standard text or
-//! v2 peer capture) exists. Every wire-facing choice below is tagged
-//! `ponytail: UNVERIFIED` and is recollection, not evidence. #894/#895 stay
-//! parked until a source confirms or corrects them.
+//! Only the digest's entry width is not fixed by the standard text (see
+//! [`ConversationMap::digest`]); everything else here is clause-backed.
 
 use md5::{Digest, Md5};
 
 pub const CONVERSATIONS: usize = 4096;
-/// One of the four Port Conversation Mask TLVs: 1024 bits.
-pub const MASK_BYTES: usize = 128;
 
-/// ponytail: UNVERIFIED: IEEE 802 OUI 00-80-C2 prefixes the algorithm id.
+/// IEEE 802 OUI/CID 00-80-C2 prefixes the algorithm id (8.1, Fig 8-1, p.148).
 const OUI: [u8; 3] = [0x00, 0x80, 0xc2];
 
-/// Port Algorithm (OUI + id). Others (I-SID, TE-SID, ECMP, ...) are kept raw
-/// so a partner's value decodes and compares unequal to ours.
+/// Port Algorithm (OUI + id). Others (I-SID, TE-SID, Flow Hash, ...) are kept
+/// raw so a partner's value decodes and compares unequal to ours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortAlgorithm {
     Unspecified,
@@ -26,7 +25,7 @@ pub enum PortAlgorithm {
 }
 
 impl PortAlgorithm {
-    /// ponytail: UNVERIFIED: ids 0 unspecified, 1 C-VID, 2 S-VID.
+    /// Ids 0 Unspecified, 1 C-VID, 2 S-VID (Table 8-1, p.149).
     pub fn to_wire(self) -> [u8; 4] {
         match self {
             Self::Unspecified => [OUI[0], OUI[1], OUI[2], 0],
@@ -46,77 +45,52 @@ impl PortAlgorithm {
     }
 }
 
-/// Conversation id (0..4095, the VLAN id space for C-VID/S-VID) -> link
-/// number; 0 = not assigned to any link.
+/// The administrative conversation map: for each conversation id (0..4095,
+/// the VLAN id space for C-VID/S-VID) the preference-ordered `Link_Number`s;
+/// the first one on an active link carries it. An empty list = no link
+/// (digested as one 0, 7.3.1.1.34). Built from config only (never from link
+/// state), so its digest moves only on an administrative change.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationMap(Box<[u16; CONVERSATIONS]>);
+pub struct ConversationMap(Vec<Vec<u16>>);
 
 impl Default for ConversationMap {
     fn default() -> Self {
-        Self(Box::new([0; CONVERSATIONS]))
+        Self(vec![Vec::new(); CONVERSATIONS])
     }
 }
 
 impl ConversationMap {
-    pub fn set(&mut self, conversation: u16, link: u16) {
+    pub fn set_list(&mut self, conversation: u16, list: Vec<u16>) {
         if let Some(slot) = self.0.get_mut(conversation as usize) {
-            *slot = link;
+            *slot = list;
         }
     }
 
-    pub fn link_of(&self, conversation: u16) -> Option<u16> {
-        self.0.get(conversation as usize).copied()
+    pub fn list(&self, conversation: u16) -> &[u16] {
+        self.0.get(conversation as usize).map_or(&[], Vec::as_slice)
     }
 
-    /// MD5 over the 4096 link numbers, conversation 0 first.
-    /// ponytail: UNVERIFIED: entry width (2 bytes) and byte order (big
-    /// endian) of the digest input are assumed; the likeliest interop bug.
+    /// MD5 over the 4096 elements, element i = list i then the conversation id
+    /// i (6.6.3.1, p.92).
+    /// ponytail: UNVERIFIED for third-party interop: the standard states no
+    /// entry width; every field is 16-bit big-endian here (owner decision on
+    /// #894). A third-party v2 peer may show `Mismatch reason=digest` until a
+    /// capture settles it.
     pub fn digest(&self) -> [u8; 16] {
         // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- MD5 is the LACPDU wire digest (802.1AX), an integrity tag, not a security primitive
         let mut md5 = Md5::new();
-        for link in &self.0 {
-            md5.update(link.to_be_bytes());
+        for (id, list) in self.0.iter().enumerate() {
+            if list.is_empty() {
+                md5.update(0u16.to_be_bytes());
+            }
+            for link in list {
+                md5.update(link.to_be_bytes());
+            }
+            #[allow(clippy::cast_possible_truncation, reason = "id < 4096")]
+            md5.update((id as u16).to_be_bytes());
         }
         md5.finalize().into()
     }
-
-    /// 4096-bit membership mask of one link, as the four 1024-bit masks.
-    /// ponytail: UNVERIFIED: conversation 0 is the MSB of byte 0 of mask 1.
-    pub fn masks_for_link(&self, link: u16) -> [[u8; MASK_BYTES]; 4] {
-        let mut flat = [0u8; 4 * MASK_BYTES];
-        for (c, l) in self.0.iter().enumerate() {
-            if *l == link {
-                flat[c / 8] |= 0x80 >> (c % 8);
-            }
-        }
-        slice_mask(&flat)
-    }
-
-    /// Inverse of [`Self::masks_for_link`]: assign `link` to every set bit.
-    pub fn apply_masks(&mut self, link: u16, masks: &[[u8; MASK_BYTES]; 4]) {
-        let flat = merge_mask(masks);
-        for c in 0..CONVERSATIONS {
-            if flat[c / 8] & (0x80 >> (c % 8)) != 0 {
-                self.0[c] = link;
-            }
-        }
-    }
-}
-
-pub fn slice_mask(flat: &[u8; 4 * MASK_BYTES]) -> [[u8; MASK_BYTES]; 4] {
-    let mut out = [[0u8; MASK_BYTES]; 4];
-    for (i, chunk) in flat.as_chunks::<MASK_BYTES>().0.iter().enumerate() {
-        out[i] = *chunk;
-    }
-    out
-}
-
-pub fn merge_mask(masks: &[[u8; MASK_BYTES]; 4]) -> [u8; 4 * MASK_BYTES] {
-    let mut flat = [0u8; 4 * MASK_BYTES];
-    for (i, m) in masks.iter().enumerate() {
-        flat[i * MASK_BYTES..(i + 1) * MASK_BYTES].copy_from_slice(m);
-    }
-    flat
 }
 
 /// Adaptive downgrade (#865 3a, mandatory per #890: SR Linux drops v2 PDUs).
@@ -162,38 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_stable_and_sensitive() {
-        // MD5 of 8192 zero bytes, from md5sum, not from us.
+    fn digest_matches_independent_md5() {
+        // Expected values from `md5sum` over hand-built bytes (python
+        // struct.pack('>H') elements), not from this encoder.
         let empty = ConversationMap::default();
-        assert_eq!(
-            empty.digest(),
-            [
-                0x08, 0x29, 0xf7, 0x17, 0x40, 0xaa, 0xb1, 0xab, 0x98, 0xb3, 0x3e, 0xae, 0x21, 0xde,
-                0xe1, 0x22
-            ]
-        );
-        let mut one = ConversationMap::default();
-        one.set(100, 1);
-        assert_ne!(one.digest(), empty.digest());
-        assert_eq!(one.link_of(100), Some(1));
-        assert_eq!(one.link_of(4096), None);
-        one.set(5000, 1); // out of range ignored
-        assert_eq!(one.link_of(5000), None);
+        assert_eq!(hex(&empty.digest()), "9363c25f82227e8e4547d0f4ec632d80");
+        let mut m = ConversationMap::default();
+        m.set_list(0, vec![1, 2]);
+        m.set_list(5, vec![2, 1]);
+        assert_eq!(hex(&m.digest()), "cd29f6af2ccac5fba3abd789fed73f3c");
+        assert_ne!(m.digest(), empty.digest());
+        assert_eq!(m.list(0), &[1, 2]);
+        assert_eq!(m.list(4096), &[] as &[u16]);
+        m.set_list(5000, vec![1]); // out of range ignored
+        assert_eq!(m.list(5000), &[] as &[u16]);
     }
 
-    #[test]
-    fn masks_slice_merge_round_trip() {
-        let mut m = ConversationMap::default();
-        for c in [0u16, 1, 1023, 1024, 2047, 3000, 4095] {
-            m.set(c, 2);
-        }
-        let masks = m.masks_for_link(2);
-        assert_eq!(masks[0][0], 0xc0);
-        assert_eq!(masks[1][0], 0x80); // conversation 1024
-        assert_eq!(masks[3][MASK_BYTES - 1], 0x01); // conversation 4095
-        let mut back = ConversationMap::default();
-        back.apply_masks(2, &masks);
-        assert_eq!(back, m);
-        assert_eq!(slice_mask(&merge_mask(&masks)), masks);
+    fn hex(b: &[u8]) -> String {
+        use std::fmt::Write as _;
+        b.iter().fold(String::new(), |mut s, x| {
+            write!(s, "{x:02x}").unwrap();
+            s
+        })
     }
 }

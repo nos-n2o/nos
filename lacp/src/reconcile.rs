@@ -171,6 +171,7 @@ async fn resync(
                 .filter(|i| i.port_aggregate.as_deref() == Some(name))
                 .filter_map(|i| Some((i.name.clone(), i.lacp_link_number?)))
                 .collect(),
+            members: members.iter().map(|m| m.0.clone()).collect(),
         };
         manager.reconcile_v2(
             members,

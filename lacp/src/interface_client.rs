@@ -42,7 +42,7 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut cache: HashMap<String, Vec<String>> = HashMap::new();
-    let mut conversations: HashMap<String, Vec<LacpLinkConversations>> = HashMap::new();
+    let mut conversations: HashMap<String, (Vec<LacpLinkConversations>, bool)> = HashMap::new();
     let mut writer: Option<
         FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
     > = None;
@@ -73,10 +73,11 @@ pub async fn run(
                             break;
                         }
                     }
-                    for (aggregate, links) in &conversations {
+                    for (aggregate, (links, discard_wrong)) in &conversations {
                         let push = LacpPush::Conversations(LacpAggregateConversations {
                             aggregate: aggregate.clone(),
                             links: links.clone(),
+                            discard_wrong: *discard_wrong,
                         });
                         if !ok || send_push(&mut w, push).await.is_err() {
                             ok = false;
@@ -108,7 +109,7 @@ pub async fn run(
                         cache.insert(m.aggregate.clone(), m.active_members.clone());
                     }
                     LacpPush::Conversations(c) => {
-                        conversations.insert(c.aggregate.clone(), c.links.clone());
+                        conversations.insert(c.aggregate.clone(), (c.links.clone(), c.discard_wrong));
                     }
                 }
                 if let Some(w) = writer.as_mut()

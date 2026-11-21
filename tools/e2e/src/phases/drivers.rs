@@ -649,7 +649,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
-    lacp_v2(a, b, &both).await?;
+    lacp_v2(w, &both).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
@@ -907,11 +907,15 @@ async fn wait_lacp_aggregate(
     bail!("{}: {what} never held: {last}", r.name())
 }
 
-/// #894 (LACP v2): `lacp-version 2` is an explicit opt-in (the default is 1, so
-/// a v1-only partner never sees a v2 PDU). Two NOS routers agree on a map;
+/// #894 (LACP v2, 802.1AX-2020 6.6): `lacp-version 2` is an explicit opt-in
+/// (the default is 1, so a v1-only partner never sees a v2 PDU). Two NOS
+/// routers agree on a map (flap invariance of the digest is unit-tested: interfaced re-ups a downed veth and a recreated veth leaves the link task on a stale socket); a
+/// swapped `lacp-link-number` is reconciled by Link_Number adoption;
 /// `unspecified` advertises only the algorithm; a v1 partner makes a v2 router
-/// downgrade; and a different map digest is a mismatch with plain hashing.
-async fn lacp_v2(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+/// downgrade; and a different map digest is a mismatch. Conversations are
+/// steered whenever a map exists, the collection filter needs agreement.
+async fn lacp_v2(w: &World, both: &[&str]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
     let flags = |version: &str, algorithm: &str, map: Option<&str>| {
         let mut f = lacp_flags(&[
             "--lacp-rate",
@@ -967,6 +971,32 @@ async fn lacp_v2(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
     ))
     .await?;
 
+    log("router-b numbers its members the other way round: still Agreed, one end adopts the other's Link_Numbers");
+    let adopted = "lacp link number adopted";
+    let (adopted_a, adopted_b) = (a.count(adopted), b.count(adopted));
+    let mut swapped = flags("2", "c-vlan", None);
+    swapped.push("--lacp-link-number-descending".into());
+    b.provision(&swapped).await?;
+    let mut seen = false;
+    for _ in 0..90 {
+        if a.count(adopted) > adopted_a || b.count(adopted) > adopted_b {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !seen {
+        bail!("neither router adopted its partner's Link_Numbers after the swap");
+    }
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "Agreed with split conversations after the swap", |s| {
+            agreement_is("Agreed")(s)
+                && s["conversations_per_link"]
+                    == serde_json::json!([["eth1", 2048], ["eth2", 2048]])
+        })
+        .await?;
+    }
+
     log(
         "unspecified algorithm: v2 stays on the wire, agreement is not requested, no conversations",
     );
@@ -991,14 +1021,19 @@ async fn lacp_v2(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
     let down = "lacp sent version changed interface=eth1 version=1";
     let down_base = a.count(down);
     let (pa, ba) = state(a, "PartnerV1");
+    let steer =
+        format!("lacp conversations pushed aggregate={LACP_AGGREGATE} links=2 discard_wrong=false");
+    let steer_base = a.count(&steer);
     a.provision(&flags("2", "c-vlan", None)).await?;
     b.provision(&flags("1", "unspecified", None)).await?;
     a.wait_new(down, down_base, 90).await?;
     a.wait_new(&pa, ba, 90).await?;
     wait_lacp_aggregate(a, "V1Partner and Distributing", agreement_is("V1Partner")).await?;
+    // Steering needs no agreement; the collection filter stays off.
+    a.wait_new(&steer, steer_base, 30).await?;
     let s = lacp_aggregate(a).await?;
-    if s["conversations_per_link"] != serde_json::json!([]) {
-        bail!("conversations pushed towards a v1 partner: {s}");
+    if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]]) {
+        bail!("no steering towards a v1 partner: {s}");
     }
 
     log("router-b back on v2 with a different explicit map: digest mismatch, plain hashing");
@@ -1011,15 +1046,15 @@ async fn lacp_v2(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
     a.wait_new(&pa, ba, 90).await?;
     wait_lacp_aggregate(a, "Mismatch and Distributing", agreement_is("Mismatch")).await?;
     let s = lacp_aggregate(a).await?;
-    if s["conversations_per_link"] != serde_json::json!([]) {
-        bail!("conversations pushed on a digest mismatch: {s}");
+    if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]]) {
+        bail!("a digest mismatch must still steer (filter off): {s}");
     }
     Ok(())
 }
 
 /// #894 / #865: a real kernel 802.3ad bond (v1 only) as the peer of a
 /// `lacp-version 2` router-a on eth1: router-a downgrades to v1, the port
-/// bundles, no conversations are pushed. router-b's NOS aggregate is deleted
+/// bundles and is steered every conversation (the collection filter is off). router-b's NOS aggregate is deleted
 /// first; the helper image creates `bond0` in its namespace.
 async fn lacp_linux_peer(w: &World, a: &Router, b: &Router, off: &[String]) -> anyhow::Result<()> {
     log("a kernel 802.3ad bond as router-a's peer on eth1: v1 only, tolerated");
@@ -1046,8 +1081,10 @@ async fn lacp_linux_peer(w: &World, a: &Router, b: &Router, off: &[String]) -> a
         .await?;
         a.wait_new(down, down_base, 60).await?;
         let s = lacp_aggregate(a).await?;
-        if s["agreement"] != "V1Partner" || s["conversations_per_link"] != serde_json::json!([]) {
-            bail!("a kernel v1 bond must leave plain hashing: {s}");
+        if s["agreement"] != "V1Partner"
+            || s["conversations_per_link"] != serde_json::json!([["eth1", 4096]])
+        {
+            bail!("a kernel v1 bond: eth1 carries every conversation, filter off: {s}");
         }
         Ok(())
     }
@@ -3100,7 +3137,7 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
 
     // Cut router-b's pv-d1 root port: eth1 (blocked in pv-d1) takes over.
     log("cutting router-b eth2: pv-d1 must move to eth1");
-    w.set_link("router-b", "eth2", false).await?;
+    w.unlink_veth("eth2").await;
     pvst_wait(b, "pv-d1", 30, |i| {
         i.root_port.as_deref() == Some("eth1")
             && i.ports
@@ -3108,7 +3145,7 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
                 .any(|p| p.name == "eth1" && p.state == StpState::Forwarding)
     })
     .await?;
-    w.set_link("router-b", "eth2", true).await?;
+    w.ensure_veth("eth2").await?;
     pvst_wait(b, "pv-d1", 90, blocked("eth1")).await?;
     pvst_wait(a, "pv-d2", 90, blocked("eth2")).await?;
 

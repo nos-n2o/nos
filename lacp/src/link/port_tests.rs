@@ -810,13 +810,15 @@ async fn partner_v2_tlvs_are_recorded_and_the_advert_is_sent() {
     assert_eq!(v2.algorithm, Some(crate::conversation::PortAlgorithm::CVid));
     assert_eq!(v2.digest.unwrap().link_number, 4);
 
-    // The aggregate publishes an algorithm and digest: we send them, with
-    // our own Link_Number.
+    // The aggregate publishes an algorithm and digest: once attached we send
+    // them, with our operational `Link_Number`.
+    r.port.mux_state = MuxState::Attached;
     r.refill();
     r.port.on_advert(
         Advert {
             algorithm: crate::conversation::PortAlgorithm::CVid,
             digest: Ok([9; 16]),
+            link_numbers: [(r.port.config.interface.clone(), 5)].into(),
         },
         &r.sink,
     );
@@ -831,7 +833,7 @@ async fn partner_v2_tlvs_are_recorded_and_the_advert_is_sent() {
     assert_eq!(
         sent.conv_digest,
         Some(ConvDigest {
-            link_number: 1,
+            link_number: 5, // the operational number, not config's 1
             digest: [9; 16]
         })
     );
@@ -844,16 +846,54 @@ async fn partner_v2_tlvs_are_recorded_and_the_advert_is_sent() {
 
 #[test]
 fn unspecified_advert_sends_only_the_algorithm_tlv() {
-    let t = v2_tlvs(&Advert::default(), Some(1));
+    let t = v2_tlvs(&Advert::default(), Some(1), true);
     assert_eq!(
         t.algorithm,
         Some(crate::conversation::PortAlgorithm::Unspecified)
     );
     assert_eq!(t.conv_digest, None);
-    // No Link_Number: no digest either.
+    // No `Link_Number`: no digest either.
     let a = Advert {
         algorithm: crate::conversation::PortAlgorithm::CVid,
         digest: Ok([1; 16]),
+        link_numbers: std::collections::BTreeMap::default(),
     };
-    assert_eq!(v2_tlvs(&a, None).conv_digest, None);
+    assert_eq!(v2_tlvs(&a, None, true).conv_digest, None);
+    // Not attached yet: Unspecified and no digest, whatever the advert says.
+    let t = v2_tlvs(&a, Some(1), false);
+    assert_eq!(
+        t.algorithm,
+        Some(crate::conversation::PortAlgorithm::Unspecified)
+    );
+    assert_eq!(t.conv_digest, None);
+    assert!(v2_tlvs(&a, Some(1), true).conv_digest.is_some());
+}
+
+#[test]
+fn v1_pdu_tlvs_are_never_recorded() {
+    let (mut r, tlvs) = (rig_v(2), V2Tlvs::default());
+    let mut b = frame_v(2, Some(tlvs));
+    b[1] = 1; // a v1 PDU carrying bytes where v2 TLVs would sit
+    b[58..64].copy_from_slice(&[4, 6, 0x00, 0x80, 0xc2, 1]);
+    r.port.on_frame(&b, &r.sink);
+    let v2 = r.observed().v2;
+    assert_eq!((v2.version, v2.algorithm, v2.digest), (Some(1), None, None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_digest_tlv_before_the_port_is_attached() {
+    let mut r = rig_v(2);
+    r.port.advert = Advert {
+        algorithm: crate::conversation::PortAlgorithm::CVid,
+        digest: Ok([3; 16]),
+        link_numbers: std::collections::BTreeMap::default(),
+    };
+    let v2 = r.port.pdu().v2.unwrap();
+    assert_eq!(
+        v2.algorithm,
+        Some(crate::conversation::PortAlgorithm::Unspecified)
+    );
+    assert_eq!(v2.conv_digest, None);
+    r.port.mux_state = MuxState::Attached;
+    assert_eq!(r.port.pdu().v2.unwrap().conv_digest.unwrap().link_number, 1);
 }

@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::churn_machine::{self, ChurnState};
 use crate::conversation::send_version;
+use crate::conversation::PortAlgorithm;
 use crate::cscd::{Advert, PartnerV2};
 use crate::mux_machine::{self, MuxState};
 use crate::packet::{self, state_bit, ConvDigest, Lacpdu, PortInfo, V2Tlvs};
@@ -845,15 +846,32 @@ fn build_pdu(
         actor,
         partner,
         collector_max_delay: 0,
-        v2: (sent_version >= 2).then(|| v2_tlvs(advert, config.link_number)),
+        v2: (sent_version >= 2).then(|| {
+            let ln = advert
+                .link_numbers
+                .get(&config.interface)
+                .copied()
+                .or(config.link_number);
+            let attached = matches!(
+                mux_state,
+                MuxState::Attached | MuxState::Collecting | MuxState::Distributing
+            );
+            v2_tlvs(advert, ln, attached)
+        }),
     }
 }
 
-/// Version-2 TLVs: the Port Algorithm always (open decision 4 A, also for
-/// `unspecified`), the digest only with an algorithm, a digest and a `Link_Number`.
-/// ponytail: no Port Conversation Mask TLVs on the wire (the digest is what the
-/// peer compares); add them when a v2 peer capture shows they are required.
-fn v2_tlvs(advert: &Advert, link_number: Option<u16>) -> V2Tlvs {
+/// Version-2 TLVs (6.4.2.4, p.57-58): the Port Algorithm always, the Link
+/// Digest only with an algorithm, a digest and a `Link_Number` (the operational
+/// one: adopted or administrative). Until the port is attached to the
+/// aggregator it advertises Unspecified and no digest (6.6.3, p.91).
+fn v2_tlvs(advert: &Advert, link_number: Option<u16>, attached: bool) -> V2Tlvs {
+    if !attached {
+        return V2Tlvs {
+            algorithm: Some(PortAlgorithm::Unspecified),
+            ..V2Tlvs::default()
+        };
+    }
     let conv_digest = match (advert.digest, link_number) {
         (Ok(digest), Some(link_number)) => Some(ConvDigest {
             link_number,
