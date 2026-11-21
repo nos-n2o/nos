@@ -1555,6 +1555,23 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
         // #839: the last enslave can still cost one detection-time expiry (a
         // `down` +87ms into the window); let both sides settle Up first, then
         // baseline, so the quiet window judges only the steady state.
+        // #1064: an `Up` read right after the enslave bounce can still be the
+        // stale state: the peer's bounce silences us for one detection time
+        // (3 x 100 ms) and the expiry lands later, under CPU starvation even
+        // inside the window. So wait until no `down` was logged on either side
+        // for 2 s (> 6 detection times) before the Up check and the baseline.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+        loop {
+            let (ca, cb) = (a.count_fresh(&down).await, b.count_fresh(&down).await);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if (a.count_fresh(&down).await, b.count_fresh(&down).await) == (ca, cb) {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "micro-bfd sessions keep flapping after the enslave"
+            );
+        }
         micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
         micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
         let down_base = a.count_fresh(&down).await;
