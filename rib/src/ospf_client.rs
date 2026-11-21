@@ -31,7 +31,6 @@ use nos_daemon::watchdog::resolve_once;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// What differs between the two OSPF daemon families this client feeds.
-#[derive(Clone, Copy)]
 pub struct Peer<R> {
     /// How the broker names an instance of it.
     pub service: fn(String) -> ServiceRef,
@@ -40,6 +39,14 @@ pub struct Peer<R> {
     /// The role its certificate must prove (`nos_pki::connect`).
     pub role: Role,
 }
+
+// Manual: the derive would demand `R: Copy`, but only fn pointers are held.
+impl<R> Clone for Peer<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<R> Copy for Peer<R> {}
 
 /// `nos-ospfd` (`redistribute … to ospf`).
 pub const OSPFV2: Peer<OspfRequest> = Peer {
@@ -86,6 +93,47 @@ pub fn spawn<R: Serialize + Send + 'static>(
 ) -> watch::Sender<RedistributeTarget> {
     let (tx, rx) = watch::channel(RedistributeTarget::default());
     tokio::spawn(run(watchdog_socket, rx, shutdown, peer, chunk));
+    tx
+}
+
+/// One `run` task per instance named by the published set: the `OSPFv3`
+/// feed of a table claiming several instances (and `OSPFv2`'s single one).
+/// An instance that leaves the set gets an idle target (the task withdraws
+/// its routes) and its sender dropped, which ends the task.
+pub fn spawn_set<R: Serialize + Send + 'static>(
+    watchdog_socket: PathBuf,
+    shutdown: watch::Receiver<bool>,
+    peer: Peer<R>,
+    chunk: usize,
+) -> watch::Sender<Vec<RedistributeTarget>> {
+    let (tx, mut rx) = watch::channel(Vec::<RedistributeTarget>::new());
+    tokio::spawn(async move {
+        let mut feeds: HashMap<String, watch::Sender<RedistributeTarget>> = HashMap::new();
+        let mut shutdown_w = shutdown.clone();
+        loop {
+            let targets = rx.borrow_and_update().clone();
+            feeds.retain(|name, feed| {
+                let keep = targets.iter().any(|t| t.instance.as_ref() == Some(name));
+                if !keep {
+                    let _ = feed.send(RedistributeTarget::default());
+                }
+                keep
+            });
+            for t in targets {
+                let Some(name) = t.instance.clone() else {
+                    continue;
+                };
+                let feed = feeds.entry(name).or_insert_with(|| {
+                    spawn(watchdog_socket.clone(), shutdown.clone(), peer, chunk)
+                });
+                let _ = feed.send(t);
+            }
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() { return },
+                _ = shutdown_w.changed() => return,
+            }
+        }
+    });
     tx
 }
 
@@ -420,5 +468,70 @@ mod tests {
         assert_eq!(sent(2, all.clone()).await, [split.clone(), split]);
         let whole = vec![RedistributeUpdate::Full(all.clone())];
         assert_eq!(sent(5, all).await, [whole.clone(), whole]);
+    }
+
+    async fn saw(p: &nos_test_support::Server<OspfRequest>, want: RedistributeUpdate) -> bool {
+        for _ in 0..500 {
+            let seen = p.take_seen();
+            if seen
+                .iter()
+                .any(|r| matches!(r, OspfRequest::RedistributeRoutes(u) if *u == want))
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// #1279: `spawn_set` feeds each named instance its own connection, and an
+    /// instance leaving the set is told to withdraw.
+    #[tokio::test]
+    async fn spawn_set_feeds_each_instance_and_withdraws_a_dropped_one() {
+        use nos_test_support::{serve, FakeWatchdog, Reply};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = FakeWatchdog::new(&tmp.path().join("wd.sock"));
+        let peers: Vec<_> = ["i1", "i2"]
+            .into_iter()
+            .map(|n| {
+                let p = serve(
+                    &tmp.path().join(format!("{n}.sock")),
+                    "ospfd",
+                    n,
+                    |_: &OspfRequest| Reply::<()>::None,
+                );
+                wd.set(ServiceRef::OspfInstance(n.into()), p.path.clone());
+                p
+            })
+            .collect();
+        let (_stop, shutdown) = watch::channel(false);
+        let tx = spawn_set(wd.path().to_path_buf(), shutdown, OSPFV2, 100);
+        let target = |n: &str, r: &str| RedistributeTarget {
+            instance: Some(n.into()),
+            routes: vec![route(r, "10.0.0.1")],
+        };
+        tx.send(vec![
+            target("i1", "10.1.0.0/24"),
+            target("i2", "10.2.0.0/24"),
+        ])
+        .unwrap();
+        let wait = |i: usize, want: RedistributeUpdate| saw(&peers[i], want);
+        assert!(
+            wait(
+                0,
+                RedistributeUpdate::Full(vec![route("10.1.0.0/24", "10.0.0.1")])
+            )
+            .await
+        );
+        assert!(
+            wait(
+                1,
+                RedistributeUpdate::Full(vec![route("10.2.0.0/24", "10.0.0.1")])
+            )
+            .await
+        );
+        tx.send(vec![target("i1", "10.1.0.0/24")]).unwrap();
+        assert!(wait(1, RedistributeUpdate::Full(Vec::new())).await);
     }
 }

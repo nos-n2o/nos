@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let ospf_redistribute_tx = vec![
         (
             nos_proto::RedistributeTarget::Ospf,
-            ospf_client::spawn(
+            ospf_client::spawn_set(
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV2,
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         (
             nos_proto::RedistributeTarget::Ospfv3,
-            ospf_client::spawn(
+            ospf_client::spawn_set(
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV3,

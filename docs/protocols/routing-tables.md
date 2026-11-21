@@ -241,7 +241,7 @@ Only what is set is shown, so `ospf-instance` and `ospfv3-instance` appear once 
 
 ```sh
 $ $C $B/v1/transactions/rd2/routing-table/rt1
-{"bgp_instance":"r1","name":"rt1","ospf_instance":null,"ospfv3_instance":null,"redistribute":[{"from":"Static","metric":null,"metric_type":null,"policy":"no-lab","to":"Bgp"}],"rest_api":{"address":"10.50.0.2","port":8080},"static_routing_instance":"s1"}
+{"bgp_instance":"r1","name":"rt1","ospf_instance":null,"ospfv3_instances":[],"redistribute":[{"from":"Static","instance":null,"metric":null,"metric_type":null,"policy":"no-lab","to":"Bgp"}],"rest_api":{"address":"10.50.0.2","port":8080},"static_routing_instance":"s1"}
 ```
 
 ### Run the REST API in a routing table
@@ -341,7 +341,7 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | name | `edit routing-table <table>` | `routing-table/{table}`, body `{"name":"rt2"}` | string | 1-64 characters, unique | Creates the VRF | `show config` |
 | bgp-instance | `set routing-table <t> bgp-instance <i>` / `delete routing-table <t> bgp-instance` | `routing-table/{t}/bgp-instance`, `"r1"` | name, unset | instance exists; used by one table only | Runs the BGP instance in this VRF and installs its best routes | `show bgp brief`, `show route <t>` |
 | ospf-instance | `set routing-table <t> ospf-instance <i>` / `delete … ospf-instance` | `routing-table/{t}/ospf-instance`, `"o1"` | name, unset | as above | Runs the OSPF instance in this VRF | `show ospf neigh`, `show route <t>` |
-| ospfv3-instance | `set routing-table <t> ospfv3-instance <i>` / `delete … ospfv3-instance` | `routing-table/{t}/ospfv3-instance`, `"o3"` | name, unset | as above | Runs the OSPFv3 instance in this VRF | `show ospfv3 neigh`, `show route <t>` |
+| ospfv3-instance | `set routing-table <t> ospfv3-instance <i>` / `delete … ospfv3-instance <i>` | `routing-table/{t}/ospfv3-instance`, `["o3"]` | list of names, empty | each exists, listed once, claimed by one table only | Runs the OSPFv3 instance in this VRF | `show ospfv3 neigh`, `show route <t>` |
 | static-routing-instance | `set routing-table <t> static-routing-instance <s>` / `delete … static-routing-instance` | `routing-table/{t}/static-routing-instance`, `"s1"` | name, unset | as above | Installs the instance's routes | `show route <t>` |
 | redistribute | `set routing-table <t> redistribute bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
 | redistribute policy | `… redistribute <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
