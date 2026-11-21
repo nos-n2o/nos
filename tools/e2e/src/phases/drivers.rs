@@ -1230,14 +1230,14 @@ async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
     let (e1, e2) = {
         let rows = steering_rows(a).await?;
         (
-            row(&rows, "eth1").map(|r| r.redirected).unwrap_or(0),
+            row(&rows, "eth1").map_or(0, |r| r.redirected),
             row(&rows, "eth2")?.redirected,
         )
     };
     lacp_vlan(w, "router-a", &["udp", "10", "100", "1"]).await?;
     let rows = steering_rows(a).await?;
     if row(&rows, "eth2")?.redirected < e2 + 80
-        || row(&rows, "eth1").map(|r| r.redirected).unwrap_or(0) != e1
+        || row(&rows, "eth1").map_or(0, |r| r.redirected) != e1
     {
         bail!("VLAN 10 did not move to eth2 when eth1 left: {rows:?}");
     }

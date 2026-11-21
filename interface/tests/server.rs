@@ -541,7 +541,7 @@ async fn push_lacp_conversations_steers_only_enslaved_members() {
     // eth0 is not enslaved yet: nothing to steer.
     w.send(push(true)).await.unwrap();
     let s = wait_steered(&driver, |s| s.aggregate == "bond1").await;
-    assert!(s.links.is_empty());
+    assert!(s.links.is_empty(), "not enslaved");
 
     w.send(InterfaceRequest::PushLacpMembers(
         nos_proto::LacpAggregateMembers {

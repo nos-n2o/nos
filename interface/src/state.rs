@@ -1425,7 +1425,10 @@ mod tests {
             build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
         interfaces.set_lacp_conversations(conversations_push(true));
         // Not enslaved yet: nothing to steer.
-        assert!(interfaces.steering_state("bond1").links.is_empty());
+        assert!(
+            interfaces.steering_state("bond1").links.is_empty(),
+            "not enslaved"
+        );
         interfaces.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
         let s = interfaces.steering_state("bond1");
         assert_eq!(s.links, [("eth0".to_string(), vec![10])]);
@@ -1437,8 +1440,8 @@ mod tests {
         // Static bonds and unknown aggregates are never steered.
         config.port_aggregates[0].mode = PortAggregateMode::Xor;
         let xor = build_from_config(&config, &NoopInterfaceDriver, &interfaces).await;
-        assert!(xor.steering_state("bond1").links.is_empty());
-        assert!(xor.steering_state("nope").links.is_empty());
+        assert!(xor.steering_state("bond1").links.is_empty(), "xor");
+        assert!(xor.steering_state("nope").links.is_empty(), "unknown");
     }
 
     #[tokio::test]

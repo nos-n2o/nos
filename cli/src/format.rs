@@ -3326,7 +3326,6 @@ mod tests {
         assert!(render_port_aggregate_status(&held).contains("\n  Err-disabled: yes"));
         let held = InterfaceStatus {
             err_disabled: true,
-            steering: Vec::new(),
             ..iface.clone()
         };
         assert_eq!(

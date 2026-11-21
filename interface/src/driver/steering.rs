@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn mask_decoding_skips_zero_and_reserved() {
         assert_eq!(conversations_of(&mask(&[0, 10, 4094, 4095])), [10, 4094]);
-        assert!(conversations_of(&[0xff; 3]).is_empty());
+        assert!(conversations_of(&[0xff; 3]).is_empty(), "malformed");
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
     fn empty_want_removes_everything_and_unchanged_is_a_noop() {
         let s = state(&[("e1", &[10]), ("e2", &[20])], true);
         let have = Wanted::from_state(&s);
-        assert!(plan(&have, &have).is_empty());
+        assert!(plan(&have, &have).is_empty(), "unchanged");
         let ops = plan(&Wanted::default(), &have);
         assert_eq!(
             ops.iter()
