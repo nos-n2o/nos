@@ -746,5 +746,7 @@ pub const OSPFV3_INSTANCE_3_ID: &str = "64";
 /// The IPv6 static only instance 2 originates (`--redistribute-to-ospfv3-instance`);
 /// no other phase uses it, so `nos-ribd` logs a fresh install.
 pub const OSPFV3_INSTANCE_2_PREFIX: &str = "2001:db8:79::/48";
-/// router-a's loopback only instance 1 advertises, same freshness argument.
-pub const OSPFV3_INSTANCE_1_LOOPBACK: &str = "2001:db8:b::1/128";
+/// The IPv6 static router-b feeds into instance 1 only (a fresh prefix, like
+/// `OSPFV3_INSTANCE_2_PREFIX`), via router-a's address on the shared link.
+pub const OSPFV3_INSTANCE_1_PREFIX: &str = "2001:db8:7b::/48";
+pub const OSPFV3_GATEWAY_A: &str = "2001:db8:1::1";

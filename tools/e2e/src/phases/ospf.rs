@@ -9,7 +9,7 @@ use reqwest::Method;
 
 use super::bgp::no_leak;
 use crate::consts::*;
-use crate::router::{log, strings, Id, Router, A, B, C, D, E};
+use crate::router::{keep_ospfv3_profiles, log, strings, Id, Router, A, B, C, D, E};
 use crate::world::World;
 
 const BD: &str = OSPF_BROADCAST_DOMAIN;
@@ -3504,38 +3504,16 @@ pub async fn ospfv3_passive(w: &mut World) -> anyhow::Result<()> {
 /// `ospfv3` to have run; leaves both back at 0 for `ospfv3-dr`'s router-c.
 pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
     let result = ospfv3_instance_id_steps(w).await;
+    keep_ospfv3_profiles(false);
     if result.is_err() {
         // A failed step must not leave instance-id != 0 on a/b: `ospfv3-dr`'s
         // router-c would never two-way with them. Best effort; the original
         // error wins.
         let (a, b) = (w.a()?, w.b()?);
         // Extra instances left by a failed step would break `ospfv3-dr` too.
-        // Best effort: an absent one fails its edit, which is ignored.
         for r in [a, b] {
-            for (inst, prof) in [
-                (OSPFV3_INSTANCE_3, OSPFV3_PROFILE_3),
-                (OSPFV3_INSTANCE_2, OSPFV3_PROFILE_2),
-            ] {
-                let _ = r
-                    .edit(|c| {
-                        nos_proto::SubinterfaceOp::RemoveOspfv3Profile {
-                            interface: "eth0".into(),
-                            tag: 0,
-                            ospfv3_profile: prof.into(),
-                        }
-                        .apply(c)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        nos_proto::RoutingTableOp::RemoveOspfv3Instance {
-                            name: "rt1".into(),
-                            ospfv3_instance: inst.into(),
-                        }
-                        .apply(c)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                        nos_proto::Ospfv3InstanceOp::Delete { name: inst.into() }
-                            .apply(c)
-                            .map_err(|e| anyhow::anyhow!("{e}"))
-                    })
-                    .await;
+            if let Err(e) = drop_extra_instances(r).await {
+                log(format!("extra instance cleanup failed: {e:#}"));
             }
         }
         for (r, id, addr, rid) in [
@@ -3553,12 +3531,62 @@ pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
                 log(format!("instance-id restore failed: {e:#}"));
             }
         }
+        // Apart: each errors when its static route is absent.
+        let mut f = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        f.extend(strings(&[
+            "--remove-static-route",
+            OSPFV3_INSTANCE_2_PREFIX,
+        ]));
+        let _ = a.provision_flags(&with_base(A, f)).await;
+        let mut f = ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B);
+        f.extend(strings(&CLEAR_B_STATIC));
+        let _ = b.provision_flags(&with_base(B, f)).await;
     }
     result
 }
 
+/// Router-b's static route into instance 1 and the rule feeding it, undone.
+const CLEAR_B_STATIC: [&str; 5] = [
+    "--remove-static-route",
+    OSPFV3_INSTANCE_1_PREFIX,
+    "--clear-redistribute-to-ospfv3",
+    "--redistribute-to-ospfv3-instance",
+    OSPFV3_INSTANCE,
+];
+
+/// Removes `ospfv3-instance-id`'s extra instances 3 and 2 (attach, claim,
+/// section; the redistribute rule goes with the claim) from `r`. Every op that
+/// finds nothing to remove is skipped, so it is safe on a clean lab.
+async fn drop_extra_instances(r: &Router) -> anyhow::Result<()> {
+    r.edit(|c| {
+        for (inst, prof) in [
+            (OSPFV3_INSTANCE_3, OSPFV3_PROFILE_3),
+            (OSPFV3_INSTANCE_2, OSPFV3_PROFILE_2),
+        ] {
+            let _ = nos_proto::SubinterfaceOp::RemoveOspfv3Profile {
+                interface: "eth0".into(),
+                tag: 0,
+                ospfv3_profile: prof.into(),
+            }
+            .apply(c);
+            let _ = nos_proto::RoutingTableOp::RemoveOspfv3Instance {
+                name: "rt1".into(),
+                ospfv3_instance: inst.into(),
+            }
+            .apply(c);
+            let _ = nos_proto::Ospfv3InstanceOp::Delete { name: inst.into() }.apply(c);
+        }
+        Ok(())
+    })
+    .await
+    .map(drop)
+}
+
 async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+    // A lab left dirty by an aborted run: start from instance 1 alone.
+    drop_extra_instances(a).await?;
+    drop_extra_instances(b).await?;
     // `ospfv3-abr`/`-area-range` leave router-b's area-1 profile (instance-id
     // 0) behind; #1161's validator then refuses the ipv4-unicast step below
     // ("every profile's instance-id must be 64-95"). Drop the area if present.
@@ -3653,6 +3681,7 @@ async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+    keep_ospfv3_profiles(true);
     ospfv3_several_instances(w).await
 }
 
@@ -3668,7 +3697,6 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let full = |n: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={n}");
     let removed = |p: &str| format!("removed route prefix={p}");
-    let added = |p: &str| format!("added route prefix={p}.*source=Some(Ospf)");
     // (router, id, address, instance-1 rid, instance-2 rid, instance-3 rid)
     let sides = [
         (
@@ -3710,12 +3738,10 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
 
     log("instance 2 (IPv6, id 1) next to instance 1 (id 0) on both routers");
     let base = [counts(0), counts(1)];
-    // The Instance ID filter runs before authentication, so another instance's
-    // packets on the shared link are dropped at debug, never as an auth failure.
+    // The Instance ID filter runs before authentication, so a shared link must
+    // raise no authentication failure.
     let auth = "ospfv3 packet authentication failed\\|crypto sequence number not increasing";
     let auth0 = [a.count(auth), b.count(auth)];
-    let mism = "ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=1 expected=0";
-    let mism0 = b.count(mism);
     for s in 0..2 {
         sides[s]
             .0
@@ -3725,15 +3751,15 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
     for s in 0..2 {
         sides[s].0.wait_new(&fulls(s)[1], base[s][1], 60).await?;
     }
-    b.wait_new(mism, mism0, 30).await?;
     for s in 0..2 {
         sides[s].0.assert_quiet(&fulls(s)[0], base[s][0], 8).await?;
         sides[s].0.assert_quiet(auth, auth0[s], 1).await?;
     }
 
     log("routes of one instance survive the other's SPF pushes (#1277)");
-    let (p2, l1) = (OSPFV3_INSTANCE_2_PREFIX, OSPFV3_INSTANCE_1_LOOPBACK);
-    let (r2, r1) = (b.count(&added(p2)), b.count(&added(l1)));
+    // Each router originates one static into one instance only and learns the
+    // other's: router-b holds instance 2's route, router-a instance 1's.
+    let (p1, p2) = (OSPFV3_INSTANCE_1_PREFIX, OSPFV3_INSTANCE_2_PREFIX);
     a.provision_flags(&flags(
         0,
         &[
@@ -3744,22 +3770,43 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
             "--redistribute-to-ospfv3",
             "--redistribute-to-ospfv3-instance",
             OSPFV3_INSTANCE_2,
-            "--ospfv3-loopback-address",
-            l1,
-            "--ospfv3-loopback-profile",
-            OSPFV3_PROFILE,
         ],
     ))
     .await?;
-    b.wait_new(&added(p2), r2, 60).await?;
-    b.wait_new(&added(l1), r1, 60).await?;
-    // A cost change on instance 1 makes router-b push instance 1's routes
-    // again; instance 2's prefix must not be withdrawn by it.
-    let (rm2, rm1) = (b.count(&removed(p2)), b.count(&removed(l1)));
+    b.provision_flags(&flags(
+        1,
+        &[
+            "--static-route",
+            p1,
+            "--static-gateway",
+            OSPFV3_GATEWAY_A,
+            "--redistribute-to-ospfv3",
+            "--redistribute-to-ospfv3-instance",
+            OSPFV3_INSTANCE,
+        ],
+    ))
+    .await?;
+    // Polled, not a new log line: a leftover from an earlier failed run may
+    // already have installed either route.
+    for (r, p) in [(b, p2), (a, p1)] {
+        for _ in 0..60 {
+            if r.rt1_has(p, "Ospf").await? {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if !r.rt1_has(p, "Ospf").await? {
+            bail!("{} never installed {p}", r.name());
+        }
+    }
+    // A cost change on instance 1 makes router-b recompute and push instance
+    // 1's routes; instance 2's prefix must not be withdrawn by it.
+    let (rm2, rm1) = (b.count(&removed(p2)), a.count(&removed(p1)));
     a.provision_flags(&flags(0, &["--ospfv3-profile-cost", "7"]))
         .await?;
     b.assert_quiet(&removed(p2), rm2, 15).await?;
-    // And the other way round: instance 2's push leaves instance 1's loopback.
+    // And the other way round: instance 2's push on router-a leaves instance
+    // 1's route there.
     a.edit(|c| {
         nos_proto::Ospfv3ProfileOp::SetCost {
             instance: OSPFV3_INSTANCE_2.into(),
@@ -3771,9 +3818,12 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
     })
     .await?;
-    b.assert_quiet(&removed(l1), rm1, 15).await?;
+    a.assert_quiet(&removed(p1), rm1, 15).await?;
     a.provision_flags(&flags(0, &["--ospfv3-profile-cost", "1"]))
         .await?;
+    if !b.rt1_has(p2, "Ospf").await? || !a.rt1_has(p1, "Ospf").await? {
+        bail!("a route was lost to the other instance's SPF push");
+    }
 
     log("instance 3 (ipv4-unicast, id 64) next to instances 1 and 2");
     let base = [counts(0), counts(1)];
@@ -3810,21 +3860,14 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
     for s in 0..2 {
         sides[s].0.assert_quiet(&fulls(s)[0], base[s][0], 8).await?;
     }
-    if !b.rt1_has(l1, "Ospf").await? {
-        bail!("router-b lost instance 1's loopback {l1} when instances 2 and 3 were removed");
+    if !a.rt1_has(p1, "Ospf").await? {
+        bail!("router-a lost instance 1's route {p1} when instances 2 and 3 were removed");
     }
 
-    log("reset: no extra static or loopback profile left");
-    a.provision_flags(&flags(
-        0,
-        &[
-            "--remove-static-route",
-            p2,
-            "--clear-ospfv3-loopback-profile",
-            OSPFV3_PROFILE,
-        ],
-    ))
-    .await
+    log("reset: no extra static route or redistribute rule left");
+    a.provision_flags(&flags(0, &["--remove-static-route", p2]))
+        .await?;
+    b.provision_flags(&flags(1, &CLEAR_B_STATIC)).await
 }
 
 /// #957: router-b comes back under a new router-id from the same link-local

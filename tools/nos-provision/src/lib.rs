@@ -6136,6 +6136,22 @@ mod tests {
             ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute { redistribute, .. })
                 if redistribute.instance.as_deref() == Some("o2"))));
 
+        // Base, base + extra, base again (every phase re-sends the base): the
+        // second profile stays attached.
+        let mut cfg = nos_proto::Config::default();
+        let with_extra = [
+            &base[..],
+            &["--ospfv3-extra-instance", "o2:2.2.2.2:p2:1"],
+        ]
+        .concat();
+        for flags in [&base[..], &with_extra[..], &base[..]] {
+            for op in ops(flags).unwrap() {
+                op.apply(&mut cfg).unwrap();
+            }
+        }
+        let sub = &cfg.interfaces[0].subinterfaces[0];
+        assert_eq!(sub.ospfv3_profiles, ["p1", "p2"]);
+
         assert!(err(&["--redistribute-to-ospfv3-instance", "o2"]).contains("requires"));
         assert!(
             err(&[&base[..], &["--ospfv3-extra-instance", "o2:2.2.2.2:p2"]].concat())
