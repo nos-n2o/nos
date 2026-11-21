@@ -727,3 +727,24 @@ pub const CAP_EFF_NET_ADMIN_RAW: &str = "0000000000003000";
 pub const CAP_EFF_NET_RAW_BIND: &str = "0000000000002400";
 pub const CAP_EFF_NET_RAW: &str = "0000000000002000";
 pub const CAP_EFF_NONE: &str = "0000000000000000";
+
+// `ospfv3-instance-id`'s extra instances on router-a/b's one link (#1280). The
+// daemon's log lines do not name the instance, so each gets its own router-id
+// per side: `ospfv3 neighbor reached full ... neighbor=<rid>` is then unique
+// per instance. They are fixed because this phase always creates them as the
+// second and third instance of the lab, after `ospfv3` made the first.
+pub const OSPFV3_INSTANCE_2: &str = "ospfv3-2";
+pub const OSPFV3_PROFILE_2: &str = "ospfv3-profile2";
+pub const OSPFV3_RID_2_A: &str = "9.9.9.20";
+pub const OSPFV3_RID_2_B: &str = "9.9.9.21";
+/// RFC 5838 `ipv4-unicast` instance (Instance ID 64, `OSPFV3_INSTANCE_3_ID`).
+pub const OSPFV3_INSTANCE_3: &str = "ospfv3-3";
+pub const OSPFV3_PROFILE_3: &str = "ospfv3-profile3";
+pub const OSPFV3_RID_3_A: &str = "9.9.9.22";
+pub const OSPFV3_RID_3_B: &str = "9.9.9.23";
+pub const OSPFV3_INSTANCE_3_ID: &str = "64";
+/// The IPv6 static only instance 2 originates (`--redistribute-to-ospfv3-instance`);
+/// no other phase uses it, so `nos-ribd` logs a fresh install.
+pub const OSPFV3_INSTANCE_2_PREFIX: &str = "2001:db8:79::/48";
+/// router-a's loopback only instance 1 advertises, same freshness argument.
+pub const OSPFV3_INSTANCE_1_LOOPBACK: &str = "2001:db8:b::1/128";
