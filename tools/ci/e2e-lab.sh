@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The nos-e2e lab slot pool (#1049): tools/ci/e2e-lab.sh acquire | release <k> | status
-#   acquire    take the first free slot k in 0..NOS_E2E_LABS-1 (default 2), print k, exit 0;
+#   acquire    take the first free slot k in 0..NOS_E2E_LABS-1 (default 3), print k, exit 0;
 #              exit 1 (nothing printed) when all are held
 #   release k  free slot k
 #   status     list every slot: free, or its owner (worktree, pid, age); a slot whose
@@ -14,7 +14,7 @@
 set -eu
 
 PREFIX=${NOS_E2E_LOCK_PREFIX:-/tmp/nos-e2e.lock}
-LABS=${NOS_E2E_LABS:-2}
+LABS=${NOS_E2E_LABS:-3}
 
 usage() {
     echo "usage: e2e-lab.sh acquire | release <k> | status" >&2
