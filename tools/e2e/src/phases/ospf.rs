@@ -1962,19 +1962,21 @@ pub async fn ospf_push_chunked(w: &mut World) -> anyhow::Result<()> {
 }
 
 /// RFC 2328 §3.5/§3.6 stub areas and area ranges, self-contained. eth0.0 is
-/// in area 1, router-a's only area; router-b's loopback is in area 0, making
-/// router-b the ABR, and router-b redistributes a static route (a Type-5 that
+/// in area 1, router-a's only area; router-b's loopback and the bd-ospf bridge
+/// shared with router-c are in area 0, making router-b the ABR (a loopback
+/// alone does not attach it, RFC 3509), and router-b redistributes a static route (a Type-5 that
 /// must never reach the stub area).
 #[allow(clippy::too_many_lines)]
 pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
-    let (a, b) = (w.a()?, w.b()?);
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     let loopback = OSPF_STUB_LOOPBACK_ADDRESS;
     let loopback_id = loopback.trim_end_matches("/32");
     let range = OSPF_STUB_RANGE;
     let range_id = range.split('/').next().unwrap_or(range);
     let area = |router_id: &str, extra: &[&str]| {
-        let mut f = strings(&[
+        let mut flags = strings(&[
             "--ospf-instance",
             OSPF_INSTANCE,
             "--ospf-router-id",
@@ -1982,8 +1984,8 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
             "--ospf-area",
             OSPF_AREA_1,
         ]);
-        f.extend(strings(extra));
-        f
+        flags.extend(strings(extra));
+        flags
     };
     let on_eth0 = |router_id: &str, area_type: &str| {
         area(
@@ -2009,21 +2011,23 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
         .await?;
     b.provision_flags(&with_base(B, asbr(on_eth0(OSPF_ROUTER_ID_B, "normal"))))
         .await?;
-    b.provision(&[
-        "--ospf-instance",
-        OSPF_INSTANCE,
-        "--ospf-router-id",
-        OSPF_ROUTER_ID_B,
-        "--ospf-area",
-        OSPF_AREA,
-        "--ospf-profile",
-        OSPF_PROFILE,
+    // Router-b is an ABR only with a Full area-0 adjacency (RFC 3509, #1170): a
+    // loopback alone does not attach, so router-c joins it in area 0 on bd-ospf.
+    let abr_up = "ospf abr backbone attachment changed abr=true";
+    let abr0 = b.count_fresh(abr_up).await;
+    let mut b_area0 = ospf_instance_only(OSPF_ROUTER_ID_B);
+    b_area0.extend(strings(&[
         "--loopback-address",
         loopback,
         "--ospf-loopback-profile",
         OSPF_PROFILE,
-    ])
-    .await?;
+    ]));
+    b_area0.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_B));
+    b.provision(&b_area0).await?;
+    let mut c_flags = ospf_instance_only(OSPF_ROUTER_ID_C);
+    c_flags.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_C));
+    c.provision_flags(&with_base(C, c_flags)).await?;
+    b.wait_new(abr_up, abr0, 60).await?;
     a.wait(mismatch).await?;
     b.wait(mismatch).await?;
     b.wait("ospf lsa originated.*lsa_type=5").await?;
