@@ -6384,6 +6384,11 @@ pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
         .await?;
     }
 
+    // Only the loopback's first IPv6 address is originated: drop the one
+    // `ospfv3-stub-router` leaves first (absent when run standalone) (#1313).
+    let _ = b
+        .provision(&["--loopback-remove-address", OSPFV3_LFA_LOOPBACK_ADDRESS])
+        .await;
     let primary = format!("added route prefix={prefix}.*source=Some(Ospf) backup=false");
     let p0 = a.count(&primary);
     b.provision(&[
@@ -6414,6 +6419,7 @@ pub async fn ospfv3_vlan_nexthop_move(w: &mut World) -> anyhow::Result<()> {
     // Cleanup so the following phases see the lab they expect.
     b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE])
         .await?;
+    b.provision(&["--loopback-remove-address", prefix]).await?;
     for tag in OSPFV3_VLAN_TAGS {
         a.provision_flags(&vlan(A, OSPFV3_ROUTER_ID, tag, 1, true))
             .await?;
