@@ -34,6 +34,8 @@ pub enum Protocol {
     Ipv6,
     /// 802.1Q: tagged frames only, and the only protocol `vlan_id` accepts.
     Dot1Q,
+    /// 802.1ad (S-tag, 0x88a8): the same rules as `Dot1Q`, for S-VLAN ids.
+    Dot1Ad,
 }
 
 impl Protocol {
@@ -44,6 +46,7 @@ impl Protocol {
             Self::Ip => ETH_P_IP,
             Self::Ipv6 => ETH_P_IPV6,
             Self::Dot1Q => ETH_P_8021Q,
+            Self::Dot1Ad => ETH_P_8021AD,
         }
     }
 
@@ -306,10 +309,11 @@ fn check(f: &Filter) -> io::Result<()> {
         if k.vlan_id.is_some_and(|v| v > 4094) {
             return Err(invalid("vlan id over 4094"));
         }
-        if k.vlan_id.is_some() && f.protocol != Protocol::Dot1Q {
-            return Err(invalid("a vlan id needs Protocol::Dot1Q"));
+        let tagged = matches!(f.protocol, Protocol::Dot1Q | Protocol::Dot1Ad);
+        if k.vlan_id.is_some() && !tagged {
+            return Err(invalid("a vlan id needs Protocol::Dot1Q or Dot1Ad"));
         }
-        if f.protocol == Protocol::Dot1Q
+        if tagged
             && (k.ip_proto.is_some()
                 || k.src_ip.is_some()
                 || k.dst_ip.is_some()
@@ -321,7 +325,7 @@ fn check(f: &Filter) -> io::Result<()> {
                 || k.flags.is_some()
                 || k.ip_tos.is_some())
         {
-            return Err(invalid("Dot1Q with an L3/L4 key is not modelled"));
+            return Err(invalid("a VLAN protocol with an L3/L4 key is not modelled"));
         }
     }
     Ok(())
@@ -587,7 +591,10 @@ fn flower(o: &mut Vec<u8>, k: &FlowerKeys, protocol: Protocol) {
     }
     // Flower reads its L3 keys only once `n_proto` is set, which comes from
     // this key, not from the filter's protocol (iproute2 sends both too).
-    if matches!(protocol, Protocol::Ip | Protocol::Ipv6 | Protocol::Dot1Q) {
+    if matches!(
+        protocol,
+        Protocol::Ip | Protocol::Ipv6 | Protocol::Dot1Q | Protocol::Dot1Ad
+    ) {
         let ethertype = protocol.ethertype().to_be_bytes();
         nla(o, TCA_FLOWER_KEY_ETH_TYPE, &ethertype);
     }

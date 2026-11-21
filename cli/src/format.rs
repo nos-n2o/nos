@@ -3312,6 +3312,7 @@ mod tests {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
         };
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),
@@ -3325,6 +3326,7 @@ mod tests {
         assert!(render_port_aggregate_status(&held).contains("\n  Err-disabled: yes"));
         let held = InterfaceStatus {
             err_disabled: true,
+            steering: Vec::new(),
             ..iface.clone()
         };
         assert_eq!(

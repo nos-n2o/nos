@@ -34,6 +34,7 @@ pub const ETH_P_ALL: u16 = 0x0003;
 pub const ETH_P_802_2: u16 = 0x0004;
 pub const ETH_P_IP: u16 = 0x0800;
 pub const ETH_P_8021Q: u16 = 0x8100;
+pub const ETH_P_8021AD: u16 = 0x88A8;
 pub const ETH_P_IPV6: u16 = 0x86DD;
 
 // include/uapi/linux/pkt_cls.h: actions

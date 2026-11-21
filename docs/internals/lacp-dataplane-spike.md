@@ -74,6 +74,10 @@ Design record for the dataplane of LACP v2 conversation-sensitive collection and
 - Whether the CI runner image has `act_mirred`: the preflight row is merged (D3); it is in the same kernel package class as `cls_flower`/`act_gact`, already required, but this was not checked on a runner. The first CI run of the preflight confirms it.
 - Behaviour on real NICs with VLAN offload off/on (veth only here).
 
+## Closed by #895
+
+- Against the NOS image with `nos-lacpd` and `nos-interfaced`: LACPDUs keep flowing and both members stay `Distributing` with the filters installed (`lacp` phase). Release-before-rewrite is implemented (`steering::plan`); the member-release latency and ACL coexistence stay unmeasured.
+
 ## Verdict
 
 GO (owner decides on #891): option A is viable for steering of hw-accel-tagged traffic, with the member-release ordering above.

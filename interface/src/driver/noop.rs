@@ -3,7 +3,7 @@ use tracing::debug;
 
 use nos_proto::StpPortState;
 
-use super::{BridgePortRef, DriverError, InterfaceDriver, LinkWatch};
+use super::{steering::SteeringState, BridgePortRef, DriverError, InterfaceDriver, LinkWatch};
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
 /// Platform-agnostic default: logs the state that would be applied but
@@ -97,6 +97,22 @@ impl InterfaceDriver for NoopInterfaceDriver {
     async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError> {
         debug!(port = ?port, "would flush bridge port (noop driver — no OS effect)");
         Ok(())
+    }
+
+    async fn apply_conversation_steering(
+        &self,
+        desired: &SteeringState,
+    ) -> Result<(), DriverError> {
+        debug!(
+            aggregate = %desired.aggregate,
+            links = desired.links.len(),
+            "would apply conversation steering (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
+
+    async fn steering_stats(&self, _aggregate: &str) -> Vec<nos_proto::LacpLinkSteering> {
+        Vec::new()
     }
 
     fn watch_links(&self) -> LinkWatch {

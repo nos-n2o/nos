@@ -134,6 +134,19 @@ async fn resync(
                     warn!(port = ?port, error = %e, "failed to re-apply bridge port state");
                 }
             }
+            // Conversation steering (#895): idempotent, so every resync.
+            let desired: Vec<_> = {
+                let live = interfaces.read().await;
+                live.aggregate_names()
+                    .iter()
+                    .map(|a| live.steering_state(a))
+                    .collect()
+            };
+            for d in desired {
+                if let Err(e) = driver.apply_conversation_steering(&d).await {
+                    warn!(port_aggregate = %d.aggregate, error = %e, "failed to apply conversation steering");
+                }
+            }
         }
         Err(e) => {
             warn!(error = %e, "failed to fetch running config, keeping previous state");

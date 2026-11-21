@@ -311,6 +311,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 link_local_address: None,
                                 bond_name: None,
                                 err_disabled: false,
+                                steering: Vec::new(),
                             })
                         }
                         _ => InterfaceEvent::NotFound,

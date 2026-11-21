@@ -650,6 +650,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_passive(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
     lacp_v2(w, &both).await?;
+    lacp_steering(w, &both).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
@@ -1048,6 +1049,218 @@ async fn lacp_v2(w: &World, both: &[&str]) -> anyhow::Result<()> {
     let s = lacp_aggregate(a).await?;
     if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]]) {
         bail!("a digest mismatch must still steer (filter off): {s}");
+    }
+    Ok(())
+}
+
+/// One member's steering row of `GET /v1/port-aggregates` (#895).
+#[derive(Debug, Clone, PartialEq)]
+struct SteerRow {
+    member: String,
+    conversations: u64,
+    redirected: u64,
+    dropped: u64,
+}
+
+async fn steering_rows(r: &Router) -> anyhow::Result<Vec<SteerRow>> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/port-aggregates", None, 200)
+        .await?;
+    let all: serde_json::Value = serde_json::from_str(&body)?;
+    let agg = all
+        .as_array()
+        .and_then(|v| v.iter().find(|a| a["name"] == LACP_AGGREGATE))
+        .with_context(|| format!("no {LACP_AGGREGATE} in port aggregates: {body}"))?;
+    let n = |row: &serde_json::Value, k: &str| row[k].as_u64().unwrap_or(0);
+    Ok(agg["steering"]
+        .as_array()
+        .context("no steering field")?
+        .iter()
+        .map(|row| SteerRow {
+            member: row["member"].as_str().unwrap_or_default().to_string(),
+            conversations: n(row, "conversations"),
+            redirected: n(row, "redirected_packets"),
+            dropped: n(row, "dropped_packets"),
+        })
+        .collect())
+}
+
+fn row<'a>(rows: &'a [SteerRow], member: &str) -> anyhow::Result<&'a SteerRow> {
+    rows.iter()
+        .find(|r| r.member == member)
+        .with_context(|| format!("no steering row for {member}: {rows:?}"))
+}
+
+async fn lacp_vlan(w: &World, router: &str, args: &[&str]) -> anyhow::Result<()> {
+    let mut cmd = vec!["python3", "-c", include_str!("lacp_vlan.py")];
+    cmd.extend(args);
+    w.dock.in_netns(PYTHON_HELPER_IMAGE, router, &cmd).await?;
+    Ok(())
+}
+
+/// #895: conversation steering on the real kernel. Both routers run `c-vlan`
+/// with the same explicit map (VLAN 10 on eth1, VLAN 20 on eth2) and routed
+/// VLAN sub-interfaces on the aggregate: tc redirects on the bond egress pin
+/// each VLAN to its link, ingress drops on the members implement the
+/// collection filter, and the per-link counters on `show port-aggregate`
+/// (REST `steering`) prove both. Untagged traffic (conversation 0) cannot be
+/// matched by flower and stays on the bond hash, so the LACPDUs themselves
+/// (untagged) are the proof it is unaffected: both ports stay Distributing.
+async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flags = |me: u8, algorithm: &str| {
+        let mut f = lacp_flags(&[
+            "--lacp-rate",
+            "fast",
+            "--lacp-version",
+            "2",
+            "--lacp-port-algorithm",
+            algorithm,
+            "--lacp-link-number",
+            "1",
+            "--lacp-conversation-map",
+            "0-15:eth1,16-4095:eth2",
+        ]);
+        f.extend(strings(both));
+        for vlan in [10, 20] {
+            f.extend(strings(&[
+                "--port-aggregate-vlan-address",
+                &format!("{vlan}=10.{vlan}.0.{me}/24"),
+            ]));
+        }
+        f
+    };
+    let installed = |links: u8| {
+        format!(
+            "lacp conversation steering installed aggregate={LACP_AGGREGATE} conversations=4094 links={links}"
+        )
+    };
+    let distributing = |s: &serde_json::Value| {
+        s["ports"]
+            .as_array()
+            .is_some_and(|p| p.iter().all(|p| p["mux_state"] == "Distributing"))
+    };
+
+    log("c-vlan + identical explicit maps: both routers install the steering with the collection filter");
+    let full = format!("{} discard_wrong=true", installed(2));
+    let bases = [a.count(&full), b.count(&full)];
+    a.provision(&flags(1, "c-vlan")).await?;
+    b.provision(&flags(2, "c-vlan")).await?;
+    a.wait_new(&full, bases[0], 90).await?;
+    b.wait_new(&full, bases[1], 90).await?;
+    for r in [a, b] {
+        let rows = steering_rows(r).await?;
+        if rows.iter().map(|x| x.conversations).sum::<u64>() != 4094 || rows.len() != 2 {
+            bail!(
+                "{}: expected 4094 conversations over 2 links: {rows:?}",
+                r.name()
+            );
+        }
+    }
+
+    log("VLAN 10 traffic leaves on eth1 only, VLAN 20 on eth2 only, and nothing is dropped");
+    // ARP/ND of the other VLAN's interface is background noise, hence the slack.
+    let (before_a, before_b) = (steering_rows(a).await?, steering_rows(b).await?);
+    lacp_vlan(w, "router-a", &["udp", "10", "200", "1"]).await?;
+    let mid = steering_rows(a).await?;
+    let d10 = |m: &str| -> anyhow::Result<u64> {
+        Ok(row(&mid, m)?.redirected - row(&before_a, m)?.redirected)
+    };
+    if d10("eth1")? < 150 || d10("eth2")? > 30 {
+        bail!(
+            "VLAN 10 was not pinned to eth1: eth1 +{} eth2 +{}",
+            d10("eth1")?,
+            d10("eth2")?
+        );
+    }
+    lacp_vlan(w, "router-a", &["udp", "20", "200", "1"]).await?;
+    let after = steering_rows(a).await?;
+    let d20 = |m: &str| -> anyhow::Result<u64> {
+        Ok(row(&after, m)?.redirected - row(&mid, m)?.redirected)
+    };
+    if d20("eth2")? < 150 || d20("eth1")? > 30 {
+        bail!(
+            "VLAN 20 was not pinned to eth2: eth1 +{} eth2 +{}",
+            d20("eth1")?,
+            d20("eth2")?
+        );
+    }
+    let after_b = steering_rows(b).await?;
+    for (rows, base, who) in [
+        (&after, &before_a, "router-a"),
+        (&after_b, &before_b, "router-b"),
+    ] {
+        for m in ["eth1", "eth2"] {
+            if row(rows, m)?.dropped != row(base, m)?.dropped {
+                bail!("{who}: {m} dropped steered traffic: {rows:?}");
+            }
+        }
+    }
+
+    log("a frame for VLAN 10 arriving on eth2 (mapped to eth1) is dropped by router-b's collection filter");
+    let dropped = row(&after_b, "eth2")?.dropped;
+    lacp_vlan(w, "router-a", &["raw", "10", "20"]).await?;
+    let now = steering_rows(b).await?;
+    if row(&now, "eth2")?.dropped < dropped + 20
+        || row(&now, "eth1")?.dropped != row(&after_b, "eth1")?.dropped
+    {
+        bail!("the wrong-link VLAN 10 frames were not dropped on eth2 only: {now:?}");
+    }
+
+    log("LACPDUs (untagged) keep flowing with the filters installed");
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "Agreed and Distributing", |s| {
+            s["agreement"] == "Agreed" && distributing(s)
+        })
+        .await?;
+    }
+
+    log("router-b withdraws eth1: router-a steers everything over eth2, and again over both after the return");
+    let one = installed(1);
+    let one_base = a.count(&one);
+    let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
+    withdraw.extend(strings(&[
+        "--enslave-interface-into-port-aggregate",
+        "eth2",
+        "--clear-port-aggregate-member",
+        "eth1",
+    ]));
+    b.provision(&withdraw).await?;
+    a.wait_new(&one, one_base, 60).await?;
+    let (e1, e2) = {
+        let rows = steering_rows(a).await?;
+        (
+            row(&rows, "eth1").map(|r| r.redirected).unwrap_or(0),
+            row(&rows, "eth2")?.redirected,
+        )
+    };
+    lacp_vlan(w, "router-a", &["udp", "10", "100", "1"]).await?;
+    let rows = steering_rows(a).await?;
+    if row(&rows, "eth2")?.redirected < e2 + 80
+        || row(&rows, "eth1").map(|r| r.redirected).unwrap_or(0) != e1
+    {
+        bail!("VLAN 10 did not move to eth2 when eth1 left: {rows:?}");
+    }
+    let back_base = a.count(&full);
+    b.provision(&flags(2, "c-vlan")).await?;
+    a.wait_new(&full, back_base, 90).await?;
+    wait_lacp_aggregate(a, "Agreed and Distributing again", |s| {
+        s["agreement"] == "Agreed" && distributing(s)
+    })
+    .await?;
+
+    log("lacp-port-algorithm unspecified removes the steering on both routers");
+    let removed = format!("lacp conversation steering removed aggregate={LACP_AGGREGATE}");
+    let bases = [a.count(&removed), b.count(&removed)];
+    a.provision(&flags(1, "unspecified")).await?;
+    b.provision(&flags(2, "unspecified")).await?;
+    a.wait_new(&removed, bases[0], 60).await?;
+    b.wait_new(&removed, bases[1], 60).await?;
+    for r in [a, b] {
+        let rows = steering_rows(r).await?;
+        if !rows.is_empty() {
+            bail!("{}: steering rows left after removal: {rows:?}", r.name());
+        }
     }
     Ok(())
 }
