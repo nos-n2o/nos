@@ -95,7 +95,7 @@ pub use logging::{
 };
 pub use login_policy::{LoginPolicy, LOCKOUT_WINDOW_SECS_DEFAULT, MAX_FAILURES_DEFAULT};
 pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType, OspfVirtualLink};
-pub use ospf_instance::{OspfInstance, SpfThrottle};
+pub use ospf_instance::{OspfInstance, OspfPrefixSid, SegmentRouting, SpfThrottle};
 pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,
     HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,

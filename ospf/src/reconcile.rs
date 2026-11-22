@@ -499,7 +499,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
     links.set_traffic_engineering(own.traffic_engineering);
-    links.set_extended_prefixes(extended_prefixes(own.extended_prefix_lsa));
+    let (srgb, sids) = segment_routing(&own.segment_routing);
+    links.set_srgb(srgb);
+    links.set_extended_prefixes(sids);
     links.set_remote_lfa(own.remote_lfa);
     links.set_max_lsa(own.max_lsa);
     links.set_spf_timers(spf_timers(&own.spf_throttle));
@@ -1629,21 +1631,30 @@ mod tests {
     }
 }
 
-/// The configured RFC 8405 timers; unset fields keep `Timers::default()`.
-/// The RFC 7684 Extended Prefix entries the config asks for: one test-only
-/// /32 today (`OspfInstance.extended_prefix_lsa`), the SR config's list later.
-fn extended_prefixes(addr: Option<std::net::Ipv4Addr>) -> Vec<crate::lsa::ExtendedPrefix> {
-    addr.map(|prefix| crate::lsa::ExtendedPrefix {
-        route_type: crate::lsa::EXT_ROUTE_INTRA_AREA,
-        prefix,
-        prefix_len: 32,
-        flags: crate::lsa::EXT_PREFIX_FLAG_N,
-        sub_tlvs: Vec::new(),
-    })
-    .into_iter()
-    .collect()
+/// The SRGB to advertise and one RFC 7684 Extended Prefix entry (intra-area,
+/// N-flag, with its RFC 8665 Prefix-SID) per configured SID; nothing when
+/// segment routing is off.
+fn segment_routing(
+    sr: &nos_proto::SegmentRouting,
+) -> (Option<(u32, u32)>, Vec<crate::lsa::ExtendedPrefix>) {
+    if !sr.enabled {
+        return (None, Vec::new());
+    }
+    let sids = sr
+        .prefix_sids
+        .iter()
+        .map(|p| crate::lsa::ExtendedPrefix {
+            route_type: crate::lsa::EXT_ROUTE_INTRA_AREA,
+            prefix: p.prefix.addr(),
+            prefix_len: 32,
+            flags: crate::lsa::EXT_PREFIX_FLAG_N,
+            sub_tlvs: crate::lsa::encode_prefix_sid(p.index, p.no_php, p.explicit_null),
+        })
+        .collect();
+    (Some(sr.srgb()), sids)
 }
 
+/// The configured RFC 8405 timers; unset fields keep `Timers::default()`.
 fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
     use std::time::Duration;
     let d = nos_ospf_common::throttle::Timers::default();
@@ -1654,6 +1665,31 @@ fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
         long: ms(t.long_ms, d.long),
         holddown: ms(t.holddown_ms, d.holddown),
         time_to_learn: ms(t.time_to_learn_ms, d.time_to_learn),
+    }
+}
+
+#[cfg(test)]
+mod segment_routing_tests {
+    use super::segment_routing;
+
+    #[test]
+    fn off_advertises_nothing_on_gives_srgb_and_one_entry_per_sid() {
+        let mut sr = nos_proto::SegmentRouting::default();
+        sr.prefix_sids.push(nos_proto::OspfPrefixSid {
+            prefix: "1.1.1.1/32".parse().unwrap(),
+            index: 5,
+            ..Default::default()
+        });
+        assert_eq!(segment_routing(&sr), (None, Vec::new()));
+        sr.enabled = true;
+        let (srgb, sids) = segment_routing(&sr);
+        assert_eq!(srgb, Some((16000, 8000)));
+        assert_eq!(sids.len(), 1);
+        assert_eq!(sids[0].prefix.to_string(), "1.1.1.1");
+        assert_eq!(
+            crate::lsa::decode_prefix_sid(&sids[0].sub_tlvs).map(|s| s.value),
+            Some(5)
+        );
     }
 }
 

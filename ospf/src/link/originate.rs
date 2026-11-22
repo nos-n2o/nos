@@ -649,6 +649,7 @@ impl LinkManager {
         let host_router = self.host_router.load(Ordering::Relaxed);
         let te = self.traffic_engineering.load(Ordering::Relaxed);
         let ext_prefixes = self.extended_prefixes.lock().unwrap().clone();
+        let srgb = *self.srgb.lock().unwrap();
         let max_metric = max_metric || host_router;
         let mut router_lsa_installed = false;
         let snapshot: Vec<(LinkConfig, LinkStatus)> = self
@@ -767,12 +768,12 @@ impl LinkManager {
                 local_router_id,
                 lsa::LSA_TYPE_OPAQUE_AREA,
                 lsa::ROUTER_INFO_LINK_STATE_ID,
-                LsaBody::Opaque(lsa::encode_router_info(router_info_caps)),
+                LsaBody::Opaque(lsa::encode_router_info_sr(router_info_caps, srgb)),
             );
 
             // RFC 3630 TE and RFC 7684 extended LSAs; `withdraw_undesired` also flushes them when the
             // knob goes off or a link goes away (the RI LSA is always desired).
-            // ponytail: no Extended Link source yet (#1168 fills it).
+            // ponytail: no Extended Link source yet (Adj-SID origination is #1169).
             install_opaque_lsas(&mut lsdb, local_router_id, te, &links, &ext_prefixes, &[]);
 
             let mut network_ids = HashSet::new();

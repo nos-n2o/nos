@@ -4,7 +4,7 @@ Contributor-facing design for #1164 (RFC 8665), decided in #1165. The OSPF side 
 
 ## RFC 7684 framework (#1167)
 
-Extended Prefix (opaque type 7) and Extended Link (8) LSAs are built: codec, per-entry origination (`LinkManager.extended_prefixes`, one LSA per entry), flooding, withdrawal and the receive log. #1168 fills `ExtendedPrefix.sub_tlvs` with the SID/Label and Prefix-SID sub-TLVs and replaces the test-only `extended-prefix-lsa` knob; #1169 does the same for Extended Link (Adj-SID). Details: [OSPF internals](../protocols/ospf-internals.md).
+Extended Prefix (opaque type 7) and Extended Link (8) LSAs are built: codec, per-entry origination (`LinkManager.extended_prefixes`, one LSA per entry), flooding, withdrawal and the receive log. #1168 fills `ExtendedPrefix.sub_tlvs` with the Prefix-SID sub-TLV (and the RI LSA with the SRGB), replacing the test-only `extended-prefix-lsa` knob; the Adj-SID codec is there too; #1169 does the same for Extended Link (Adj-SID). Details: [OSPF internals](../protocols/ospf-internals.md).
 
 ## What already exists (do not redo)
 
@@ -15,7 +15,7 @@ Extended Prefix (opaque type 7) and Extended Link (8) LSAs are built: codec, per
 ## Decisions
 
 - **Label space: a static SRGB, configured.** The operator gives each router an SRGB (base, size); nothing allocates it. A Prefix-SID is an index into it, so the label a neighbour pushes for us is `its_srgb_base + index` and must agree network-wide (RFC 8402). Allocating it dynamically would make the advertised SRGB depend on `nos-ribd` state and break the all-routers-agree property.
-- **No clash with other label users.** The VPN label allocator (`table_registry::ensure_label`) starts at 1000 and is per-table. The SRGB default (16000-23999, the IANA/vendor convention) sits clear of it. `nos-ribd` refuses two sources claiming one label (`first wins`, logged `mpls label claimed by more than one source`); validating that the SRGB does not cover a configured `vpn.label` is config validation, done in #1168.
+- **No clash with other label users.** The VPN label allocator (`table_registry::ensure_label`) starts at 1000 and is per-table. The SRGB default (16000-23999, the IANA/vendor convention) sits clear of it. `nos-ribd` refuses two sources claiming one label (`first wins`, logged `mpls label claimed by more than one source`); the commit refuses an SRGB that covers a configured `vpn.label` (#1168).
 - **PHP by default.** The penultimate hop pops: its ILM entry for the egress router's Prefix-SID has an empty out-stack. Explicit null (labels 0/2) is accepted in an out-stack but is a per-SID flag (the NP/E bits of RFC 8665), set by #1168/#1169, never a global setting.
 - **Reserved labels are refused**: incoming labels must be 16..=1048574; outgoing ones may also be 0 or 2. Label 3 (implicit null) is never put on the wire: PHP is an empty stack. (`driver::mpls::check_ilm`, defence in depth behind config validation.)
 
