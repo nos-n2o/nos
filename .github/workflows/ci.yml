@@ -35,6 +35,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: make claude-md-size
 
+  yang:
+    name: YANG validation
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # yanglint (#1175): CI/dev tool only, never in the runtime image; version in docs/architecture/development.md
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libyang3-tools
+      - run: REQUIRE_YANG=1 make yang-check
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

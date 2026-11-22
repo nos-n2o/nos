@@ -130,6 +130,13 @@ cargo fmt --all
 - No baseline (first run, artifact expired after 90 days, token without actions access) prints a notice and passes.
 - Locally: `make coverage`, then `tools/ci/coverage-compare.sh lcov.info <file holding master's number>`. `make ci-scripts-test` (part of `make check`) tests the script.
 
+## YANG validation (#1175)
+
+- `make yang-check` (part of `make check`) runs `yanglint` on `docs/yang/nos-config.yang`, then on `target/yang/*.json` instance data written by `cargo test -p nos-config --test yang_instances` (`Config::default()`, nulls dropped like the RESTCONF facade). The live provisioned config is checked by the `restconf-conformance` e2e phase.
+- Tool: `yanglint` from the distro package `libyang3-tools` (`libyang2-tools` on older Debian/Ubuntu), unpinned like the other apt packages; tested with 3.12.2. Never installed in the runtime image.
+- Absent locally: the target prints a skip notice and passes. CI's `YANG validation` job sets `REQUIRE_YANG=1`, so absence fails there.
+- Bump: when the package major changes, run `make yang-check` and fix any new complaint in `proto/src/yang/`.
+
 ## Disk cleanup
 
 - `make prune-merged` lists (dry run) what it would remove; `make prune-merged APPLY=1` does it: worktrees under `.claude/worktrees/` whose branch is in `origin/master` or whose PR is merged, their `~/.cache/nos-target-<issue>*` dirs, then `docker image prune` and `docker buildx prune --keep-storage 100GB`.

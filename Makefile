@@ -12,7 +12,7 @@ COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image prune-merged toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build docker-build-release \
-        e2e-preflight e2e-soak docs-fix claude-md-size
+        e2e-preflight e2e-soak docs-fix yang-check claude-md-size
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -122,6 +122,9 @@ docs-fix: toolchain-check ## Regenerate docs/openapi.json and docs/yang/nos-conf
 	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 	UPDATE_YANG_SNAPSHOT=1 $(RUN) cargo test -p nos-config --test yang_snapshot docs_yang_snapshot
 
+yang-check: ## Validate docs/yang/nos-config.yang + default instance with yanglint (skips if absent; REQUIRE_YANG=1 fails)
+	YANG_RUN='$(RUN)' tools/ci/yang-check.sh
+
 ci-scripts-test: ## Shell tests for tools/ci scripts (coverage-compare.sh, prune-merged.sh, gh-plan-comment.sh)
 	tools/ci/coverage-compare-test.sh
 	tools/ci/prune-merged-test.sh
@@ -134,7 +137,7 @@ prune-merged: ## Remove worktrees/target dirs of merged work + docker cache; dry
 claude-md-size: ## Fail when a CLAUDE.md exceeds its ceiling in tools/ci/claude-md-budget.txt
 	tools/ci/check-claude-md.sh
 
-check: claude-md-size ci-scripts-test build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
+check: claude-md-size ci-scripts-test yang-check build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
 ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 
