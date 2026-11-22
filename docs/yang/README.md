@@ -21,4 +21,4 @@
 - Run `make docs-fix` to regenerate `nos-config.yang`.
 - Bump `YANG_REVISION` in `proto/src/yang/mod.rs`, then set `RECORDED_HASH` in `config/tests/yang_snapshot.rs` to the hash the test prints.
 - `cargo test -p nos-config --test yang_snapshot` fails on a stale file or a missing bump.
-- Validation by a real YANG compiler is a separate step (#1173, sub-issue 3).
+- `make yang-check` compiles the module and validates the default instance with `yanglint` (#1175, see `docs/architecture/development.md`).
