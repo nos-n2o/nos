@@ -16,6 +16,7 @@ use crate::validators::unique_key_in;
 
 /// What a matching rule (or the end of the list) does with the packet.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum AclAction {
     /// Let the packet through.
@@ -29,6 +30,7 @@ pub enum AclAction {
 /// Text form `tcp`, `udp`, `icmp`, `icmpv6` or a number (`89`); the numbers
 /// of the named protocols parse to the named variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum AclProtocol {
     /// TCP (6).
     Tcp,
@@ -86,6 +88,7 @@ impl FromStr for AclProtocol {
 /// An inclusive TCP/UDP port range. Text form `80` (one port) or
 /// `1024-65535`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PortRange {
     /// First port.
     pub start: u16,
@@ -143,6 +146,7 @@ text_scalar!(AclProtocol, PortRange);
 /// One match-and-act line of an `Acl`. A field left unset matches anything;
 /// all set fields must match.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 #[allow(
@@ -176,6 +180,7 @@ pub struct AclRule {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[cli(topic = AclRuleSource)]
     /// Source prefix; its family limits the rule to IPv4 or IPv6.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::opt_ip_net))]
     pub source: Option<IpNet>,
 
     #[serde(default)]
@@ -183,6 +188,7 @@ pub struct AclRule {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[cli(topic = AclRuleDestination)]
     /// Destination prefix, in the same family as `source`.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::opt_ip_net))]
     pub destination: Option<IpNet>,
 
     #[serde(default)]
@@ -226,6 +232,7 @@ pub struct AclRule {
 
 /// A named list of rules evaluated in order; the first match wins.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Acl {

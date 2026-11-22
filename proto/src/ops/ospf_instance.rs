@@ -88,12 +88,12 @@ pub enum OspfInstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
-    /// Sets or clears the RFC 7684 Extended Prefix LSA's host address.
-    SetExtendedPrefixLsa {
+    /// Replaces the RFC 8665 segment routing section.
+    SetSegmentRouting {
         /// Name of the OSPF instance this op targets.
         name: String,
-        /// The /32 to advertise, `None` to withdraw.
-        address: Option<std::net::Ipv4Addr>,
+        /// The new section (SRGB and Prefix-SIDs).
+        segment_routing: crate::schema::SegmentRouting,
     },
     /// Turns RFC 7490 remote LFA on or off.
     SetRemoteLfa {
@@ -137,7 +137,7 @@ impl OspfInstanceOp {
                         max_lsa: None,
                         host_router: false,
                         traffic_engineering: false,
-                        extended_prefix_lsa: None,
+                        segment_routing: crate::schema::SegmentRouting::default(),
                         remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
@@ -187,8 +187,11 @@ impl OspfInstanceOp {
                 find_instance_mut(config, name)?.traffic_engineering = *enabled;
                 Ok(())
             }
-            OspfInstanceOp::SetExtendedPrefixLsa { name, address } => {
-                find_instance_mut(config, name)?.extended_prefix_lsa = *address;
+            OspfInstanceOp::SetSegmentRouting {
+                name,
+                segment_routing,
+            } => {
+                find_instance_mut(config, name)?.segment_routing = segment_routing.clone();
                 Ok(())
             }
             OspfInstanceOp::SetRemoteLfa { name, enabled } => {
@@ -242,12 +245,30 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
-            extended_prefix_lsa: None,
+            segment_routing: crate::schema::SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
             spf_throttle: crate::schema::SpfThrottle::default(),
         }
+    }
+
+    #[test]
+    fn set_segment_routing_replaces_the_section() {
+        let mut cfg = Config::default();
+        cfg.ospf_instances.push(instance("o1"));
+        let sr = crate::schema::SegmentRouting {
+            enabled: true,
+            srgb_start: Some(17000),
+            ..Default::default()
+        };
+        OspfInstanceOp::SetSegmentRouting {
+            name: "o1".into(),
+            segment_routing: sr.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].segment_routing, sr);
     }
 
     #[test]

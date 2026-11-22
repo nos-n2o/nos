@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// currently-known neighbor (zero if none yet — there's no single fixed peer
 /// to show a placeholder for on a multi-access segment).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfNeighborState {
     /// No Hellos received (RFC 2328 section 10.1).
@@ -41,6 +42,7 @@ pub enum OspfNeighborState {
 /// `Dr`/`Backup`/`DrOther` once RFC 2328 §9.4 election runs (see
 /// `ospf::election`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkInterfaceState {
     /// Point-to-point interface (RFC 2328 section 9.1).
@@ -59,6 +61,7 @@ pub enum LinkInterfaceState {
 /// currently-known neighbor on a link (see `OspfNeighborState`'s doc
 /// comment for point-to-point vs. broadcast row-count semantics).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeighborSummary {
     /// The attach point's display name, matching
@@ -105,6 +108,7 @@ pub struct NeighborSummary {
 
 /// A neighbor's RFC 5613 Link-Local Signaling data (EOF TLV).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlsSummary {
     /// Raw Extended Options and Flags word.
@@ -119,6 +123,7 @@ pub struct LlsSummary {
 /// full LSA body, which this NOS has no operator-facing use for yet (no SPF
 /// consumer to explain a route's ancestry).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LsaSummary {
     /// Area the LSA belongs to.

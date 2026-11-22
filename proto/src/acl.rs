@@ -11,6 +11,7 @@ use crate::schema::AclAction;
 
 /// Which way an ACL filters on its device.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AclDirection {
     /// `acl in`: packets arriving on the device.
@@ -21,6 +22,7 @@ pub enum AclDirection {
 
 /// One device an ACL is installed on.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AclAttachment {
     /// The kernel device name (`eth1`, `eth1.100`, `bond3`).
@@ -32,6 +34,7 @@ pub struct AclAttachment {
 /// One user rule's counters, summed over every filter it compiled to and
 /// every device the ACL is attached to.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AclRuleStatus {
     /// The rule's name.
@@ -53,6 +56,7 @@ pub struct AclRuleStatus {
 
 /// One ACL: its compile shape, attachments and counters.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AclStatus {
     /// The ACL's name.
@@ -213,6 +217,7 @@ pub struct FlowspecSet {
 /// One flow rule's state in the dataplane, for `show acl` and
 /// `GET /v1/flowspec`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowspecRuleStatus {
     /// The BGP instance that pushed it.

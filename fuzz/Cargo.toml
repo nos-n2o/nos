@@ -20,9 +20,10 @@ nos-ospfv3    = { path = "../ospfv3" }
 nos-lldp      = { path = "../lldp" }
 nos-lacp      = { path = "../lacp" }
 nos-cli       = { path = "../cli" }
-nos-proto     = { path = "../proto" }
+nos-proto     = { path = "../proto", features = ["arbitrary"] }
 serde_json    = "1"
 reedline      = "0.53"
+arbitrary     = { version = "=1.5.0", features = ["derive"] }
 
 [profile.release]
 debug = 1
@@ -86,6 +87,13 @@ bench = false
 [[bin]]
 name = "cli_parser"
 path = "fuzz_targets/cli_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cli_format"
+path = "fuzz_targets/cli_format.rs"
 test = false
 doc = false
 bench = false

@@ -409,6 +409,194 @@ pub fn router_info_capabilities(lsa: &Lsa) -> Option<u32> {
     None
 }
 
+/// RFC 8665 §3.1/§3.2: the SR-Algorithm and SID/Label Range TLVs of the RI LSA.
+const TLV_RI_SR_ALGORITHM: u16 = 8;
+const TLV_RI_SID_LABEL_RANGE: u16 = 9;
+/// RFC 8665 §2.3 sub-TLV of the SID/Label Range TLV: a label (length 3) or SID.
+const SUB_SID_LABEL: u16 = 1;
+/// RFC 8665 §5/§6/§7 sub-TLV types (Extended Prefix, Extended Link).
+const SUB_PREFIX_SID: u16 = 2;
+const SUB_ADJ_SID: u16 = 2;
+const SUB_LAN_ADJ_SID: u16 = 3;
+/// The only algorithm built: SPF.
+pub const SR_ALGO_SPF: u8 = 0;
+/// RFC 8665 §5 Prefix-SID flags: NP (no PHP), E (explicit null), V (value is
+/// a label), L (local).
+pub const PREFIX_SID_FLAG_NP: u8 = 0x40;
+pub const PREFIX_SID_FLAG_E: u8 = 0x10;
+const PREFIX_FLAG_V: u8 = 0x08;
+const PREFIX_FLAG_L: u8 = 0x04;
+/// RFC 8665 §6 Adj-SID flags: B (backup), V, L.
+pub const ADJ_SID_FLAG_B: u8 = 0x80;
+const ADJ_FLAG_V: u8 = 0x40;
+const ADJ_FLAG_L: u8 = 0x20;
+
+/// A router's RFC 8665 SR capability from its RI LSA: the algorithms and the
+/// SRGB ranges `(first label, size)`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RouterInfoSr {
+    pub algorithms: Vec<u8>,
+    pub srgb: Vec<(u32, u32)>,
+}
+
+/// An RI LSA body: the capabilities TLV, and when `srgb` is set the
+/// SR-Algorithm (SPF only) and SID/Label Range TLVs.
+pub fn encode_router_info_sr(capabilities: u32, srgb: Option<(u32, u32)>) -> Vec<u8> {
+    let mut buf = encode_router_info(capabilities);
+    if let Some((start, range)) = srgb {
+        put_tlv(&mut buf, TLV_RI_SR_ALGORITHM, &[SR_ALGO_SPF]);
+        let r = range.to_be_bytes();
+        let mut v = vec![r[1], r[2], r[3], 0];
+        put_tlv(&mut v, SUB_SID_LABEL, &start.to_be_bytes()[1..]);
+        put_tlv(&mut buf, TLV_RI_SID_LABEL_RANGE, &v);
+    }
+    buf
+}
+
+/// A received RI LSA's SR TLVs; `None` for anything but a well-formed RI LSA
+/// carrying an SR-Algorithm TLV. Ranges with a SID (not label) base, and a
+/// malformed one, are skipped.
+pub fn decode_router_info_sr(lsa: &Lsa) -> Option<RouterInfoSr> {
+    if !matches!(
+        lsa.header.lsa_type,
+        LSA_TYPE_OPAQUE_AREA | LSA_TYPE_OPAQUE_AS
+    ) || opaque_type(lsa.header.link_state_id) != OPAQUE_TYPE_ROUTER_INFO
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    let mut sr = RouterInfoSr::default();
+    let mut seen = false;
+    for (t, v) in tlvs(body)? {
+        if t == TLV_RI_SR_ALGORITHM {
+            seen = true;
+            sr.algorithms.extend_from_slice(v);
+        } else if t == TLV_RI_SID_LABEL_RANGE && v.len() >= 4 {
+            let size = u32::from_be_bytes([0, v[0], v[1], v[2]]);
+            for (st, sv) in tlvs(&v[4..]).unwrap_or_default() {
+                if st == SUB_SID_LABEL && sv.len() == 3 {
+                    let first = u32::from_be_bytes([0, sv[0], sv[1], sv[2]]) & 0xF_FFFF;
+                    sr.srgb.push((first, size));
+                }
+            }
+        }
+    }
+    seen.then_some(sr)
+}
+
+/// One RFC 8665 §5 Prefix-SID: `value` is an index into the SRGB, or a label
+/// when `absolute` (V and L flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixSid {
+    pub flags: u8,
+    pub algorithm: u8,
+    pub value: u32,
+    pub absolute: bool,
+}
+
+/// The Prefix-SID sub-TLV for `index` (V and L clear, algorithm SPF), NP set
+/// by `no_php` and E by `explicit_null`.
+pub fn encode_prefix_sid(index: u32, no_php: bool, explicit_null: bool) -> Vec<u8> {
+    let mut flags = 0;
+    if no_php {
+        flags |= PREFIX_SID_FLAG_NP;
+    }
+    if explicit_null {
+        flags |= PREFIX_SID_FLAG_E;
+    }
+    let mut v = vec![flags, 0, SR_ALGO_SPF, 0];
+    v.extend_from_slice(&index.to_be_bytes());
+    let mut buf = Vec::new();
+    put_tlv(&mut buf, SUB_PREFIX_SID, &v);
+    buf
+}
+
+/// The first well-formed Prefix-SID in an Extended Prefix TLV's sub-TLV run.
+pub fn decode_prefix_sid(sub_tlvs: &[u8]) -> Option<PrefixSid> {
+    tlvs(sub_tlvs)?.into_iter().find_map(|(t, v)| {
+        if t != SUB_PREFIX_SID || v.len() < 7 {
+            return None;
+        }
+        let absolute = v[0] & PREFIX_FLAG_V != 0 && v[0] & PREFIX_FLAG_L != 0;
+        let value = if absolute {
+            u32::from_be_bytes([0, v[4], v[5], v[6]]) & 0xF_FFFF
+        } else {
+            u32_at(v.get(4..8)?)?
+        };
+        Some(PrefixSid {
+            flags: v[0],
+            algorithm: v[2],
+            value,
+            absolute,
+        })
+    })
+}
+
+/// One RFC 8665 §6/§7 Adj-SID or LAN Adj-SID; `neighbor` is the LAN form's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdjSid {
+    pub flags: u8,
+    pub weight: u8,
+    pub neighbor: Option<Ipv4Addr>,
+    pub value: u32,
+    pub absolute: bool,
+}
+
+/// An Adj-SID (`neighbor` None) or LAN Adj-SID sub-TLV carrying `label` (V and
+/// L set, 3 octets).
+pub fn encode_adj_sid(label: u32, weight: u8, backup: bool, neighbor: Option<Ipv4Addr>) -> Vec<u8> {
+    let flags = ADJ_FLAG_V | ADJ_FLAG_L | if backup { ADJ_SID_FLAG_B } else { 0 };
+    let mut v = vec![flags, 0, weight, 0];
+    if let Some(n) = neighbor {
+        v.extend_from_slice(&n.octets());
+    }
+    v.extend_from_slice(&label.to_be_bytes()[1..]);
+    let mut buf = Vec::new();
+    let t = if neighbor.is_some() {
+        SUB_LAN_ADJ_SID
+    } else {
+        SUB_ADJ_SID
+    };
+    put_tlv(&mut buf, t, &v);
+    buf
+}
+
+/// Every well-formed Adj-SID and LAN Adj-SID in an Extended Link TLV's
+/// sub-TLV run; a malformed one is skipped.
+pub fn decode_adj_sids(sub_tlvs: &[u8]) -> Vec<AdjSid> {
+    let mut out = Vec::new();
+    for (t, v) in tlvs(sub_tlvs).unwrap_or_default() {
+        let lan = t == SUB_LAN_ADJ_SID;
+        if (t != SUB_ADJ_SID && !lan) || v.len() < 4 {
+            continue;
+        }
+        let (neighbor, rest) = if lan {
+            match v.get(4..8).and_then(addr4) {
+                Some(n) => (Some(n), &v[8..]),
+                None => continue,
+            }
+        } else {
+            (None, &v[4..])
+        };
+        let absolute = v[0] & ADJ_FLAG_V != 0 && v[0] & ADJ_FLAG_L != 0;
+        let value = match (absolute, rest.len()) {
+            (true, 3) => u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) & 0xF_FFFF,
+            (false, 4) => u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
+            _ => continue,
+        };
+        out.push(AdjSid {
+            flags: v[0],
+            weight: v[2],
+            neighbor,
+            value,
+            absolute,
+        });
+    }
+    out
+}
+
 /// RFC 5250 §3: types 9-11. Only sent to a neighbor whose DBD set the O-bit.
 pub fn is_opaque(lsa_type: u8) -> bool {
     matches!(
@@ -1808,5 +1996,87 @@ mod tests {
         let mut area = te_lsa(id, good);
         area.header.lsa_type = LSA_TYPE_OPAQUE_AS;
         assert_eq!(decode_extended_prefix(&area), None);
+    }
+
+    #[test]
+    fn sr_tlvs_round_trip() {
+        let body = encode_router_info_sr(RI_CAP_GR_HELPER, Some((16000, 8000)));
+        let lsa = te_lsa(ROUTER_INFO_LINK_STATE_ID, body);
+        assert_eq!(router_info_capabilities(&lsa), Some(RI_CAP_GR_HELPER));
+        assert_eq!(
+            decode_router_info_sr(&lsa),
+            Some(RouterInfoSr {
+                algorithms: vec![0],
+                srgb: vec![(16000, 8000)]
+            })
+        );
+        let plain = te_lsa(ROUTER_INFO_LINK_STATE_ID, encode_router_info_sr(1, None));
+        assert_eq!(decode_router_info_sr(&plain), None);
+        let other = te_lsa(ext_state_id(OPAQUE_TYPE_TE, 1), Vec::new());
+        assert_eq!(decode_router_info_sr(&other), None);
+        // Truncations never panic.
+        let full = encode_router_info_sr(1, Some((16000, 8000)));
+        for n in 0..full.len() {
+            let _ = decode_router_info_sr(&te_lsa(ROUTER_INFO_LINK_STATE_ID, full[..n].to_vec()));
+        }
+    }
+
+    #[test]
+    fn prefix_sid_round_trips_inside_an_extended_prefix() {
+        let sub = encode_prefix_sid(7, true, true);
+        assert_eq!(sub.len(), 12);
+        let sid = decode_prefix_sid(&sub).unwrap();
+        assert_eq!(sid.value, 7);
+        assert!(!sid.absolute);
+        assert_eq!(sid.flags, PREFIX_SID_FLAG_NP | PREFIX_SID_FLAG_E);
+        assert_eq!(sid.algorithm, SR_ALGO_SPF);
+        let p = ExtendedPrefix {
+            sub_tlvs: sub,
+            ..ext_prefix()
+        };
+        let lsa = te_lsa(
+            ext_state_id(OPAQUE_TYPE_EXT_PREFIX, 1),
+            encode_extended_prefix(&p),
+        );
+        let got = decode_extended_prefix(&lsa).unwrap();
+        assert_eq!(decode_prefix_sid(&got.sub_tlvs), Some(sid));
+        assert_eq!(decode_prefix_sid(&ext_prefix().sub_tlvs), None);
+        // An absolute (label) SID, and a short one.
+        let mut abs = Vec::new();
+        put_tlv(&mut abs, SUB_PREFIX_SID, &[0x0c, 0, 0, 0, 0x03, 0xe8, 0x80]);
+        let s = decode_prefix_sid(&abs).unwrap();
+        assert_eq!((s.absolute, s.value), (true, 0x3_e880 & 0xF_FFFF));
+        let mut short = Vec::new();
+        put_tlv(&mut short, SUB_PREFIX_SID, &[0, 0, 0, 0, 1]);
+        assert_eq!(decode_prefix_sid(&short), None);
+    }
+
+    #[test]
+    fn adj_sids_round_trip() {
+        let mut run = encode_adj_sid(24001, 0, false, None);
+        run.extend(encode_adj_sid(
+            24002,
+            3,
+            true,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+        ));
+        let got = decode_adj_sids(&run);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].value, got[0].absolute, got[0].neighbor),
+            (24001, true, None)
+        );
+        assert_eq!(got[1].neighbor, Some(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            (got[1].weight, got[1].flags & ADJ_SID_FLAG_B),
+            (3, ADJ_SID_FLAG_B)
+        );
+        // Wrong lengths are skipped, never panic.
+        let mut bad = Vec::new();
+        put_tlv(&mut bad, SUB_ADJ_SID, &[0x60, 0, 0, 0, 1]);
+        put_tlv(&mut bad, SUB_LAN_ADJ_SID, &[0x60, 0, 0, 0, 1]);
+        put_tlv(&mut bad, SUB_ADJ_SID, &[0x00, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(decode_adj_sids(&bad).len(), 0);
+        assert_eq!(decode_adj_sids(&[0, 2, 0, 9]).len(), 0);
     }
 }

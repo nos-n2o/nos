@@ -18,6 +18,7 @@ pub const PORT_COST_MAX: u32 = 200_000_000;
 
 /// Edge-port (`PortFast`) behaviour (802.1Q 13.4 `AdminEdgePort`/`AutoEdge`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EdgePort {
     /// Always an edge port, until a BPDU arrives.
@@ -31,6 +32,7 @@ pub enum EdgePort {
 
 /// The link type for the RSTP rapid transitions (`AdminPointToPointMAC`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LinkType {
     #[default]
@@ -45,6 +47,7 @@ pub enum LinkType {
 /// This port's cost and priority in one MST instance, which must exist in
 /// `spanning-tree mst-instance`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct StpPortMstInstance {
     #[cli(key)]
@@ -71,6 +74,7 @@ impl Default for StpPortMstInstance {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 #[allow(

@@ -904,6 +904,10 @@ pub struct LinkManager {
     /// area): the list #1168's SR config fills, today the test-only
     /// `OspfInstance.extended_prefix_lsa`.
     extended_prefixes: std::sync::Mutex<Vec<lsa::ExtendedPrefix>>,
+    /// The SRGB `(start, range)` advertised in the RI LSA (RFC 8665), if any.
+    srgb: std::sync::Mutex<Option<(u32, u32)>>,
+    /// Per area, each other router's advertised SRGB, to log a change once.
+    sr_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, lsa::RouterInfoSr>>>,
     /// Per area, the other routers' Extended Prefix LSAs, to log a change once.
     ext_prefix_state: Mutex<HashMap<Ipv4Addr, ExtPrefixSeen>>,
     /// Per area, the Router Address of every other router's TE LSA, to log a
@@ -1053,6 +1057,8 @@ impl LinkManager {
             host_router: AtomicBool::new(false),
             traffic_engineering: AtomicBool::new(false),
             extended_prefixes: std::sync::Mutex::new(Vec::new()),
+            srgb: std::sync::Mutex::new(None),
+            sr_state: Mutex::new(HashMap::new()),
             ext_prefix_state: Mutex::new(HashMap::new()),
             te_state: Mutex::new(HashMap::new()),
             te_link_state: Mutex::new(HashMap::new()),
@@ -1135,6 +1141,31 @@ impl LinkManager {
         self.traffic_engineering.store(on, Ordering::Relaxed);
     }
 
+    pub fn set_srgb(&self, srgb: Option<(u32, u32)>) {
+        *self.srgb.lock().unwrap() = srgb;
+    }
+
+    /// Logs each other router's RFC 8665 SRGB once, and again when it changes
+    /// (the `nos-e2e ospf-sr-sid` anchor).
+    async fn log_sr_capabilities(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let seen: BTreeMap<Ipv4Addr, lsa::RouterInfoSr> = lsas
+            .iter()
+            .filter(|l| l.header.advertising_router != root)
+            .filter_map(|l| Some((l.header.advertising_router, lsa::decode_router_info_sr(l)?)))
+            .collect();
+        let mut state = self.sr_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (router, sr) in &seen {
+            if old.get(router) != Some(sr) {
+                info!(
+                    area = %area_id, router = %router, algorithms = ?sr.algorithms,
+                    srgb = ?sr.srgb, "ospf sr capabilities received"
+                );
+            }
+        }
+        *old = seen;
+    }
+
     pub fn set_extended_prefixes(&self, prefixes: Vec<lsa::ExtendedPrefix>) {
         *self.extended_prefixes.lock().unwrap() = prefixes;
     }
@@ -1160,6 +1191,12 @@ impl LinkManager {
                     route_type = p.route_type, flags = p.flags,
                     "ospf extended prefix received"
                 );
+                if let Some(sid) = lsa::decode_prefix_sid(&p.sub_tlvs) {
+                    info!(
+                        area = %area_id, router = %router, prefix = %p.prefix,
+                        index = sid.value, flags = sid.flags, "ospf prefix-sid received"
+                    );
+                }
             }
         }
         *old = seen;
@@ -1689,6 +1726,7 @@ impl LinkManager {
                 spf::h_bit_routers(&lsas).len(),
             );
             self.log_te_routers(area_id, &lsas, router_id).await;
+            self.log_sr_capabilities(area_id, &lsas, router_id).await;
             self.log_extended_prefixes(area_id, &lsas, router_id).await;
             if self.host_bit_state.lock().await.insert(area_id, state) != Some(state) {
                 info!(area = %area_id, honoured = state.0, host_routers = state.1, "ospf host-bit state changed");

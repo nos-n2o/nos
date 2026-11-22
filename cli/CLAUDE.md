@@ -26,7 +26,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `completer.rs`, `help_menu.rs` | `NosCompleter` (Tab and live `?`, one injected config source for the tree and `*Name` slots), `HelpMenu` (the `?` menu) |
 | `client.rs` | One-shot calls to `nos-configd`, plus `subscribe`, the one long-lived exception |
 | `*_client.rs` | `watchdog`, `rib`, `interface`, `log` (also long-lived `tail`), `bgp`, `lacp`, `lldp`, `stp`, `bfd`, `fdb`, `ospf`, `ospfv3`: one-shot query per daemon |
-| `format.rs` | Human-readable rendering. `render_config`/`render_transaction` are one call into `nos_proto::cli::render`, so a field can't be missing (`tests/render.rs`). `render_diff` is the only ANSI emitter (hand-rolled); `render_log_entry` the only `time` use |
+| `format.rs` | Human-readable rendering. `render_config`/`render_transaction` are one call into `nos_proto::cli::render`, so a field can't be missing (`tests/render.rs`). every output goes through `sanitize` (control/bidi chars shown as `\xNN`, #1365; `sanitize_line` for values in one-line records, source-scan test enforces it); `render_diff` is the only ANSI emitter (hand-rolled, escapes values itself); `render_log_entry` the only `time` use |
 
 ## Commands
 
@@ -49,6 +49,6 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 Details: [CLI guide, command table and internals](../docs/cli.md#command-table-developer-reference).
 
-**Escape surface (#1215).** `nos` is a login shell: a new command must not take a path, spawn a process or read env (only `NOS_LOGIN_TICKET`, `NO_COLOR`). Guards: `tests/escape_surface.rs` (source scan), `cli/clippy.toml` (`disallowed-methods`, repeats the root thresholds: keep in sync), the `cli_parser` fuzz target. `docs/cli.md` "Escape surface".
+**Escape surface (#1215).** `nos` is a login shell: a new command must not take a path, spawn a process or read env (only `NOS_LOGIN_TICKET`, `NO_COLOR`). Guards: `tests/escape_surface.rs` (source scan), `cli/clippy.toml` (`disallowed-methods`, repeats the root thresholds: keep in sync), the `cli_parser`/`cli_format` fuzz targets (`nos-proto/arbitrary` is fuzz-only, `make no-arbitrary`). `docs/cli.md` "Escape surface".
 
 Every input of the binary (flags, env, hidden `-c`, commands), who uses it (operator, e2e phase, tests) and its `dev-args` status: `docs/cli.md` "Input inventory of `nos`". Update it when an input is added or removed.

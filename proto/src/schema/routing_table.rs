@@ -12,6 +12,7 @@ use nos_proto_derive::Cli;
 /// see `Redistribute`'s doc comment for why this is an enum rather than a
 /// bare marker.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeSource {
     #[default]
@@ -37,6 +38,7 @@ impl std::fmt::Display for RedistributeSource {
 /// The target side of a `Redistribute` rule — `Bgp`, `Ospf` or `Ospfv3`. See
 /// `Redistribute`'s doc comment.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeTarget {
     #[default]
@@ -71,6 +73,7 @@ impl std::fmt::Display for RedistributeTarget {
 /// `OSPFv3` at once; an `Option<Redistribute>` from before the list is still
 /// read from disk (`deserialize_redistribute`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct Redistribute {
     #[cli(topic = RoutingTableRedistribute)]
@@ -113,6 +116,7 @@ pub struct Redistribute {
 /// Whether the address is actually configured on an interface in the VRF is
 /// operational state, not validated at commit: `nos-restd` retries the bind.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct RestApi {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
@@ -156,6 +160,7 @@ fn rest_api_valid(rest_api: Option<&RestApi>) -> garde::Result {
 /// the table's VRF. Same stance as `RestApi`: no wildcard, whether the address
 /// exists is operational state, not validated at commit.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct SshServer {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
@@ -208,6 +213,7 @@ fn ssh_server_valid(ssh_server: Option<&SshServer>) -> garde::Result {
 /// Setting `l3_vni` turns it on; every other field requires it — see
 /// `valid_table_evpn`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct RoutingTableEvpn {
     /// The L3 VNI (1-16777215), unique across every table and broadcast domain.
@@ -240,6 +246,7 @@ pub struct RoutingTableEvpn {
 /// table is not a VPN; any field requires the others, see `valid_table_vpn`.
 /// No daemon consumes it yet (later sub-issues of #573).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct RoutingTableVpn {
     /// Route Distinguisher prepended to every exported prefix.
@@ -271,6 +278,7 @@ pub struct RoutingTableVpn {
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
 /// reference them.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct RoutingTable {
@@ -743,7 +751,7 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
-            extended_prefix_lsa: None,
+            segment_routing: crate::schema::SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

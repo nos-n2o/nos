@@ -283,8 +283,22 @@ topics! {
     OspfInstanceHostRouter,
     /// `OspfInstance.traffic_engineering`
     OspfInstanceTrafficEngineering,
-    /// `OspfInstance.extended_prefix_lsa`
-    OspfInstanceExtendedPrefixLsa,
+    /// `OspfInstance.segment_routing`
+    OspfInstanceSegmentRouting,
+    /// `SegmentRouting.enabled`
+    OspfInstanceSegmentRoutingEnabled,
+    /// `SegmentRouting.srgb_start`
+    OspfInstanceSegmentRoutingSrgbStart,
+    /// `SegmentRouting.srgb_range`
+    OspfInstanceSegmentRoutingSrgbRange,
+    /// `SegmentRouting.prefix_sids`
+    OspfInstanceSegmentRoutingPrefixSid,
+    /// `OspfPrefixSid.index`
+    OspfPrefixSidIndex,
+    /// `OspfPrefixSid.no_php`
+    OspfPrefixSidNoPhp,
+    /// `OspfPrefixSid.explicit_null`
+    OspfPrefixSidExplicitNull,
     /// `OspfInstance.remote_lfa`
     OspfInstanceRemoteLfa,
     /// `OspfInstance.spf_throttle`

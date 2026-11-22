@@ -20,6 +20,7 @@ use nos_proto_derive::Cli;
 /// members are separate Linux links, so there is no conflict between this
 /// and any member's own VRF assignment.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct BroadcastDomain {
@@ -503,7 +504,7 @@ mod tests {
                 max_lsa: None,
                 host_router: false,
                 traffic_engineering: false,
-                extended_prefix_lsa: None,
+                segment_routing: crate::schema::SegmentRouting::default(),
                 remote_lfa: false,
                 redistribute_metric: None,
                 redistribute_metric_type: None,

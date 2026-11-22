@@ -7919,42 +7919,53 @@ pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// RFC 7684 Extended Prefix Opaque LSA (requires `ospf-lfa`, like `ospf-te`):
-/// each router advertises its own router id as an Extended Prefix (opaque
-/// type 7, area scope); the peer decodes and logs it. Withdrawing it again
-/// leaves the session up.
-pub async fn ospf_ext_lsa(w: &mut World) -> anyhow::Result<()> {
-    let (a, b) = (w.a()?, w.b()?);
-    let ext = |rid: &str, addr: &str| {
-        strings(&[
-            "--ospf-instance",
-            OSPF_INSTANCE,
-            "--ospf-router-id",
-            rid,
-            "--ospf-extended-prefix-lsa",
-            addr,
-        ])
+/// RFC 8665 SRGB and Prefix-SID (requires `ospf-lfa`, like `ospf-te`): each
+/// router advertises the default SRGB and a Prefix-SID for its router id (the
+/// two use different indexes); the peer decodes and logs both. Turning
+/// segment routing off again leaves the session up.
+pub async fn ospf_sr_sid(w: &mut World) -> anyhow::Result<()> {
+    let (ra, rb) = (w.a()?, w.b()?);
+    let sr = |rid: &str, prefix_sid: Option<&str>| {
+        let mut flags = strings(&["--ospf-instance", OSPF_INSTANCE, "--ospf-router-id", rid]);
+        match prefix_sid {
+            Some(sid) => flags.extend(strings(&["--ospf-prefix-sid", sid])),
+            None => flags.extend(strings(&["--ospf-segment-routing", "off"])),
+        }
+        flags
     };
-    let seen = |rid: &str| {
+    let caps = |rid: &str| {
         format!(
-            "ospf extended prefix received area={OSPF_AREA} router={rid} prefix={rid} length=32 route_type=1 flags=64"
+            "ospf sr capabilities received area={OSPF_AREA} router={rid} algorithms=\\[0\\] srgb=\\[(16000, 8000)\\]"
         )
     };
+    let sid = |rid: &str, index: u32| {
+        format!("ospf prefix-sid received area={OSPF_AREA} router={rid} prefix={rid} index={index} flags=0")
+    };
     let (a0, b0) = (
-        a.count(&seen(OSPF_ROUTER_ID_B)),
-        b.count(&seen(OSPF_ROUTER_ID)),
+        ra.count(&sid(OSPF_ROUTER_ID_B, 2)),
+        rb.count(&sid(OSPF_ROUTER_ID, 1)),
     );
-    log("originating an Extended Prefix LSA on router-a and router-b");
-    a.provision(&ext(OSPF_ROUTER_ID, OSPF_ROUTER_ID)).await?;
-    b.provision(&ext(OSPF_ROUTER_ID_B, OSPF_ROUTER_ID_B))
+    let (ac, bc) = (
+        ra.count(&caps(OSPF_ROUTER_ID_B)),
+        rb.count(&caps(OSPF_ROUTER_ID)),
+    );
+    log("advertising SRGB and a Prefix-SID on router-a (index 1) and router-b (index 2)");
+    ra.provision(&sr(OSPF_ROUTER_ID, Some(&format!("{OSPF_ROUTER_ID}=1"))))
         .await?;
-    a.wait_new(&seen(OSPF_ROUTER_ID_B), a0, 60).await?;
-    b.wait_new(&seen(OSPF_ROUTER_ID), b0, 60).await?;
+    rb.provision(&sr(
+        OSPF_ROUTER_ID_B,
+        Some(&format!("{OSPF_ROUTER_ID_B}=2")),
+    ))
+    .await?;
+    ra.wait_new(&caps(OSPF_ROUTER_ID_B), ac, 60).await?;
+    rb.wait_new(&caps(OSPF_ROUTER_ID), bc, 60).await?;
+    ra.wait_new(&sid(OSPF_ROUTER_ID_B, 2), a0, 60).await?;
+    rb.wait_new(&sid(OSPF_ROUTER_ID, 1), b0, 60).await?;
 
-    log("restoring: no Extended Prefix LSA");
-    a.provision(&ext(OSPF_ROUTER_ID, "off")).await?;
-    b.provision(&ext(OSPF_ROUTER_ID_B, "off")).await?;
-    both_full_p2p(a, b).await
+    log("restoring: segment routing off");
+    ra.provision(&sr(OSPF_ROUTER_ID, None)).await?;
+    rb.provision(&sr(OSPF_ROUTER_ID_B, None)).await?;
+    both_full_p2p(ra, rb).await
 }
 
 #[cfg(test)]

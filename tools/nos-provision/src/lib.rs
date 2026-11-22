@@ -1495,10 +1495,14 @@ pub struct Args {
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_traffic_engineering: Option<bool>,
-    /// RFC 7684 `extended-prefix-lsa` host address for that instance
-    /// (requires `--ospf-instance`), test-only; `off` withdraws it.
+    /// RFC 8665 `segment-routing` for that instance (requires
+    /// `--ospf-instance`): `off`, `on` (default SRGB) or `START:RANGE`.
     #[arg(long)]
-    pub ospf_extended_prefix_lsa: Option<String>,
+    pub ospf_segment_routing: Option<String>,
+    /// RFC 8665 Prefix-SID `ADDRESS=INDEX[,no-php][,explicit-null]`; repeat
+    /// for more (requires `--ospf-instance`; turns segment routing on).
+    #[arg(long)]
+    pub ospf_prefix_sid: Vec<String>,
     /// RFC 7490 `remote-lfa` for that instance (requires `--ospf-instance`):
     /// `true` turns it on, `false` off.
     #[arg(long)]
@@ -2760,6 +2764,34 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             r.bfd = Some(BFD_PROFILE.to_string());
         }
     }
+}
+
+/// The `SegmentRouting` section for `--ospf-segment-routing`/`--ospf-prefix-sid`.
+fn segment_routing(
+    mode: Option<&str>,
+    sids: &[String],
+) -> anyhow::Result<nos_proto::SegmentRouting> {
+    let mut sr = nos_proto::SegmentRouting {
+        enabled: mode != Some("off"),
+        ..Default::default()
+    };
+    if let Some((start, range)) = mode.and_then(|m| m.split_once(':')) {
+        sr.srgb_start = Some(start.parse()?);
+        sr.srgb_range = Some(range.parse()?);
+    }
+    for s in sids {
+        let (addr, rest) = s
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--ospf-prefix-sid needs ADDRESS=INDEX"))?;
+        let mut parts = rest.split(',');
+        sr.prefix_sids.push(nos_proto::OspfPrefixSid {
+            prefix: format!("{addr}/32").parse()?,
+            index: parts.next().unwrap_or_default().parse()?,
+            no_php: parts.clone().any(|p| p == "no-php"),
+            explicit_null: parts.any(|p| p == "explicit-null"),
+        });
+    }
+    Ok(sr)
 }
 
 #[allow(
@@ -4267,13 +4299,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 enabled,
             }));
         }
-        if let Some(address) = &args.ospf_extended_prefix_lsa {
-            ops.push(ConfigOp::OspfInstance(
-                OspfInstanceOp::SetExtendedPrefixLsa {
-                    name: name.clone(),
-                    address: (address != "off").then(|| address.parse()).transpose()?,
-                },
-            ));
+        if args.ospf_segment_routing.is_some() || !args.ospf_prefix_sid.is_empty() {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetSegmentRouting {
+                name: name.clone(),
+                segment_routing: segment_routing(
+                    args.ospf_segment_routing.as_deref(),
+                    &args.ospf_prefix_sid,
+                )?,
+            }));
         }
         if let Some(enabled) = args.ospf_traffic_engineering {
             ops.push(ConfigOp::OspfInstance(

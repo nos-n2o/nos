@@ -1216,9 +1216,37 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Advertise this router's links in an RFC 3630 traffic engineering LSA.",
             "Originates area-scope opaque LSAs (type 10, opaque type 1): one with this router's address and one per fully adjacent point-to-point or broadcast link with its link type, link id, local and remote interface address, TE metric (the OSPF cost), maximum bandwidth, maximum reservable bandwidth, unreserved bandwidth and administrative group. Advertisement only: nothing computes a constrained path from it. Bandwidth is advertised as 0 because the kernel link speed is not reported to nos-ospfd. `delete` turns it off.",
         ),
-        Topic::OspfInstanceExtendedPrefixLsa => (
-            "Advertise a host address in an RFC 7684 Extended Prefix LSA.",
-            "Originates one area-scope opaque LSA (type 10, opaque type 7) with an Extended Prefix TLV for this /32 (route type intra-area, N-flag, IPv4) and no sub-TLVs; the other routers log it and re-flood it. A test and interoperability aid until segment routing fills the framework. `delete` withdraws it.",
+        Topic::OspfInstanceSegmentRouting => (
+            "Segment routing for this instance (RFC 8665): SRGB and Prefix-SIDs.",
+            "Advertises this router's SR-Algorithm (0, SPF) and SRGB in its Router Information LSA and one Extended Prefix LSA per `prefix-sid`; the other routers log them. Advertisement only: nothing is installed in the MPLS dataplane yet. Needs `enabled`.",
+        ),
+        Topic::OspfInstanceSegmentRoutingEnabled => (
+            "Turn segment routing advertisement on.",
+            "Off by default. `delete` turns it off and withdraws the SRGB and every Prefix-SID.",
+        ),
+        Topic::OspfInstanceSegmentRoutingSrgbStart => (
+            "First label of the SRGB (default 16000).",
+            "The block is `start` to `start + range - 1` and must lie within labels 16 to 1048574 and cover no `vpn label`. Every router should use the same block, or a Prefix-SID maps to different labels per router.",
+        ),
+        Topic::OspfInstanceSegmentRoutingSrgbRange => (
+            "Number of labels in the SRGB (default 8000).",
+            "At least 1; see `srgb start`.",
+        ),
+        Topic::OspfInstanceSegmentRoutingPrefixSid => (
+            "Advertise a Prefix-SID for a host prefix, keyed by the /32.",
+            "Typically the loopback address. The label other routers use is the SRGB base plus the `index`. Prefixes and indexes must be unique.",
+        ),
+        Topic::OspfPrefixSidIndex => (
+            "Index of the SID in the SRGB.",
+            "Below the SRGB range and unique among this instance's Prefix-SIDs.",
+        ),
+        Topic::OspfPrefixSidNoPhp => (
+            "Ask the penultimate hop not to pop the label (NP-flag).",
+            "By default the penultimate hop pops it (PHP).",
+        ),
+        Topic::OspfPrefixSidExplicitNull => (
+            "Ask the penultimate hop to swap to explicit null (E-flag).",
+            "Needs `no-php`.",
         ),
         Topic::OspfInstanceRemoteLfa => (
             "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).",

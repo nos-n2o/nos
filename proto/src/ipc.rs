@@ -296,6 +296,7 @@ pub enum Event {
 /// One kept running config (#1141). `index` is what `Rollback` takes: `1` is
 /// the config replaced by the latest commit.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     /// Argument to `Rollback`.
@@ -321,6 +322,7 @@ pub enum TransactionBase {
 /// A named transaction's current state, returned after `OpenTransaction`,
 /// `ApplyOp`, and `GetTransaction`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionSnapshot {
     /// Name of the config.
