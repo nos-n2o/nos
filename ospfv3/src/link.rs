@@ -1149,7 +1149,14 @@ async fn handle_lsu(
         let LsaBody::Grace(body) = grace.body else {
             continue;
         };
+        let was = in_grace(status, grace.header.advertising_router);
         on_grace_lsa(cfg, status, &grace.header, body);
+        // #1027 (as v2): changes pending before this grace began are not
+        // "during" it (RFC 3623 §3.2 (c)).
+        if !was && in_grace(status, grace.header.advertising_router) {
+            stores.area.lock().await.forget_topology_changes();
+            stores.as_scope.lock().await.forget_topology_changes();
+        }
     }
 
     Some(finish_neighbor_event(
