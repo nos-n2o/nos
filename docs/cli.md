@@ -64,6 +64,14 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Three guards enforce it: `cli/tests/escape_surface.rs` (source scan with self-tests, plus parse tests), `cli/clippy.toml` (`disallowed-methods` on `std::env::var*`/`args_os`, per-crate: workspace-wide it would hit ~25 daemon and test sites), and the `cli_parser` fuzz target.
 - A new command must not break these rules; if one needs an exception, change the guards and this section in the same PR.
 
+### Terminal output safety
+
+- Every string a daemon or peer supplies (an LLDP name, a log message, a BGP peer-group, an error line) is untrusted: `format::sanitize` replaces control characters (C0 incl. ESC, DEL, C1) and bidi/zero-width characters with a visible `\x1b` / `\u{202e}`, so an escape sequence cannot move the cursor, retitle the window or write the clipboard.
+- All 42 `render_*` functions run it over their result, and the daemon error lines in `actions.rs` too. `render_diff` is the exception: it emits its own colour codes, so it escapes each value before adding them. A source-scan unit test in `format.rs` fails when a `render_*` lacks the call.
+- `\n` and `\t` survive (tables, policy source, config are multi-line by design). Inside a value of a one-record-per-line output (LLDP, log, BGP, interface) `\n` is escaped too (`sanitize_line`), so a multi-line LLDP name cannot forge a row.
+- A literal `\x1b` sent by a peer looks like an escaped ESC: accepted, the output is display-only. `nos-lldpd` and the other daemons do not sanitize at the source.
+- The `cli_format` fuzz target asserts no output holds a control character other than `\n` and `\t`.
+
 ## The two modes
 
 The shell is always in one of two modes, and the prompt shows which.
