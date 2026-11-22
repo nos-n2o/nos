@@ -6851,17 +6851,35 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
         a.count("ospf link resolution failed, keeping running link"),
         a.count("ospf link stream connected"),
     );
-    log("killing router-a's nos-interfaced");
-    w.dock.kill_process("router-a", "nos-interfaced").await?;
-    let mut flags = ring_flags(A, 1, "eth1", &format!("{RLFA_RING_PREFIX}.1.1/24"), true);
-    flags.extend(strings(&["--ospf-max-metric-on-startup", "5"]));
-    a.provision_flags(&flags).await?;
-    a.wait_new(
-        "ospf link resolution failed, keeping running link",
-        fallback0,
-        10,
-    )
-    .await?;
+    // The refused window is the watchdog's 1 s restart backoff: the fallback
+    // line lands 0.2 s after the kill when the provision is quick, but a
+    // loaded host can finish the resync after nos-interfaced is back, and
+    // then nothing falls back (#1343). A miss is retried with a new kill and
+    // a config change that really changes the link set (max-metric 5, 6, 7);
+    // the crash backoff grows, so each retry widens the window.
+    let mut fell_back = false;
+    for metric in ["5", "6", "7"] {
+        log("killing router-a's nos-interfaced");
+        w.dock.kill_process("router-a", "nos-interfaced").await?;
+        let mut flags = ring_flags(A, 1, "eth1", &format!("{RLFA_RING_PREFIX}.1.1/24"), true);
+        flags.extend(strings(&["--ospf-max-metric-on-startup", metric]));
+        a.provision_flags(&flags).await?;
+        if a.wait_new(
+            "ospf link resolution failed, keeping running link",
+            fallback0,
+            6,
+        )
+        .await
+        .is_ok()
+        {
+            fell_back = true;
+            break;
+        }
+        log("resync ran after nos-interfaced was back, retrying the kill");
+    }
+    if !fell_back {
+        bail!("router-a: no 'ospf link resolution failed' line after three nos-interfaced kills");
+    }
     a.wait_new("ospf link stream connected", stream0, 20)
         .await?;
     tokio::time::sleep(Duration::from_secs(15)).await;
