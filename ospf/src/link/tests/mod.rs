@@ -33,6 +33,7 @@ fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
         network_type: NetworkType::PointToPoint,
         priority: 1,
         mtu: 1500,
+        speed_mbps: None,
         mtu_ignore: false,
         lls: false,
         ifindex: 0,

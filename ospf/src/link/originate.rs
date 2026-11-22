@@ -344,8 +344,9 @@ pub(super) fn assign_link_state_ids(
 /// RFC 3630 LSAs for one area's `links`: the Router Address LSA, then one Link
 /// LSA per fully adjacent point-to-point or broadcast link, numbered by
 /// `local_addr` order. Pure, like `router_lsa_links`.
-// ponytail: bandwidths are advertised as 0 because the link speed is not in
-// `InterfaceStatus`; the router id stands in for a loopback Router Address.
+// Bandwidths (§2.5.6/7) are the kernel link speed in bytes/s, nothing reserved
+// (no RSVP-TE), 0 when the speed is unknown. ponytail: the router id stands in
+// for a loopback Router Address.
 pub(super) fn te_lsas(
     local_router_id: Ipv4Addr,
     links: &[(LinkConfig, LinkStatus)],
@@ -379,6 +380,7 @@ pub(super) fn te_lsas(
             _ => continue,
         };
         n += 1;
+        let bw = te_bandwidth(cfg.speed_mbps);
         out.push((
             lsa::te_link_state_id(n),
             lsa::encode_te_link(&lsa::TeLink {
@@ -387,14 +389,20 @@ pub(super) fn te_lsas(
                 local_addr: cfg.local_addr,
                 remote_addr,
                 metric: u32::from(cfg.cost),
-                max_bandwidth: 0.0,
-                max_reservable: 0.0,
-                unreserved: [0.0; 8],
+                max_bandwidth: bw,
+                max_reservable: bw,
+                unreserved: [bw; 8],
                 admin_group: 0,
             }),
         ));
     }
     out
+}
+
+/// Mbit/s to RFC 3630's bytes per second (IEEE f32); unknown is 0.
+#[allow(clippy::cast_precision_loss, reason = "an IEEE f32 on the wire")]
+fn te_bandwidth(speed_mbps: Option<u32>) -> f32 {
+    speed_mbps.map_or(0.0, |m| m as f32 * 125_000.0)
 }
 
 /// Installs `te_lsas` when `te`, one Extended Prefix LSA per entry of

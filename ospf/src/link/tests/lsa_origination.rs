@@ -2202,6 +2202,7 @@ fn te_lsas_advertise_router_address_and_full_links() {
     let rid = Ipv4Addr::new(1, 1, 1, 1);
     let mut p2p = link("eth0.0", 10);
     p2p.cost = 7;
+    p2p.speed_mbps = Some(10_000);
     let mut p2p_status = LinkStatus::new(NetworkType::PointToPoint);
     p2p_status.neighbors.insert(
         Ipv4Addr::new(9, 9, 9, 10),
@@ -2270,6 +2271,10 @@ fn te_lsas_advertise_router_address_and_full_links() {
             7
         )
     );
+    // 10 Gbit/s = 1.25e9 bytes/s, nothing reserved.
+    assert_eq!(l1.max_bandwidth, 1.25e9);
+    assert_eq!(l1.max_reservable, 1.25e9);
+    assert_eq!(l1.unreserved, [1.25e9; 8]);
     let lsa::TeBody::Link(l2) = decode(out[2].0, &out[2].1) else {
         panic!("link")
     };
@@ -2277,6 +2282,8 @@ fn te_lsas_advertise_router_address_and_full_links() {
         (l2.link_type, l2.link_id, l2.remote_addr),
         (lsa::TE_LINK_MULTI_ACCESS, Ipv4Addr::new(10, 1, 0, 2), None)
     );
+    // Unknown speed stays 0.
+    assert_eq!((l2.max_bandwidth, l2.unreserved), (0.0, [0.0; 8]));
 }
 
 /// The TE Router Address LSA appears with `traffic-engineering` and is
