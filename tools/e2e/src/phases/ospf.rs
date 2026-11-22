@@ -183,6 +183,30 @@ async fn quiet_settled(r: &Router, pat: &str, baseline: usize) -> anyhow::Result
     r.assert_quiet(pat, baseline, 0).await
 }
 
+/// Waits (60s at most) until no router has installed or originated a Router-,
+/// Network- or other topology LSA for 8s. LSAs are flooded every 5s and held
+/// back by MinLSInterval, so a change made just before a restart reaches a
+/// helper after it entered grace and, per RFC 3623 §3.2 (c), ends it: a
+/// conformant transient that is not what a restart phase measures (#1027).
+async fn topology_settled(routers: &[&Router]) -> anyhow::Result<()> {
+    let pat = "ospf lsa installed.*lsa_type=[1-57] \\|ospf lsa originated";
+    for _ in 0..8 {
+        let mut before = Vec::new();
+        for r in routers {
+            before.push(r.count_fresh(pat).await);
+        }
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let mut quiet = true;
+        for (r, n) in routers.iter().zip(before) {
+            quiet &= r.count_fresh(pat).await == n;
+        }
+        if quiet {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the ospf topology LSAs never settled for 8s within 64s")
+}
+
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let age0 = a.count_fresh("ospf lsa installed.*age=0$").await;
@@ -1500,6 +1524,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
+    // Let this phase's own provisioning finish flooding before the restart (#1027).
+    let mut settle: Vec<&Router> = vec![a, b];
+    settle.extend(w.c().ok());
+    topology_settled(&settle).await?;
+
     // Scoped to the restarter on the p2p link: the bridge adjacency may log down on its own (#886).
     let torn = format!(
         "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
@@ -1696,6 +1725,9 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
     );
     let (signal0, torn0) = (b.count(&signal), b.count_fresh(&torn).await);
+    let mut settle: Vec<&Router> = vec![a, b];
+    settle.extend(w.c().ok());
+    topology_settled(&settle).await?;
     let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
     let (full_b0, full_a0) = (b.count(&full_on_b), a.count(&full_on_a));
     let router_c = w.c().ok();
