@@ -55,6 +55,11 @@ fn config(active: bool, rate: LacpRate, selected_rx: watch::Receiver<bool>) -> L
         actor_port_priority: 200,
         actor_port_number: 1,
         actor_active: active,
+        active_rx: {
+            let (tx, rx) = watch::channel(active);
+            std::mem::forget(tx);
+            rx
+        },
         rate,
         selected_rx,
         churn_time: Duration::from_secs(5),
@@ -175,6 +180,22 @@ fn start_reports_expired_and_sends_the_first_pdu_at_once() {
     assert!(actor.has_state(state_bit::ACTIVITY) && actor.has_state(state_bit::EXPIRED));
     assert!(!actor.has_state(state_bit::TIMEOUT) && !actor.has_state(state_bit::SYNCHRONIZATION));
     assert!(r.port.tx.next_periodic_send > Instant::now());
+}
+
+#[test]
+fn a_live_mode_change_flips_activity_and_resumes_sending_without_a_restart() {
+    let mut r = rig(false, LacpRate::Slow);
+    assert!(r.port.tx.no_periodic);
+    r.port.on_activity(true, &r.sink);
+    assert!(!r.port.tx.no_periodic);
+    assert!(r.sink.last_actor().has_state(state_bit::ACTIVITY));
+    let sent = r.sink.count();
+    r.port.on_activity(true, &r.sink);
+    assert_eq!(r.sink.count(), sent, "same mode: nothing");
+    r.refill();
+    r.port.on_activity(false, &r.sink);
+    assert!(r.port.tx.no_periodic);
+    assert!(!r.port.pdu().actor.has_state(state_bit::ACTIVITY));
 }
 
 #[test]

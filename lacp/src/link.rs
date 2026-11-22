@@ -36,6 +36,9 @@ pub struct LinkConfig {
     pub actor_port_number: u16,
     /// `LACP_Activity`: `false` = Passive (see `periodic_tx_machine`).
     pub actor_active: bool,
+    /// Live `lacp-mode` changes (`true` = Active): applied in place, the link
+    /// is not restarted (it would bounce the partner's bundle).
+    pub active_rx: watch::Receiver<bool>,
     /// How fast we ask the partner to send (our advertised `LACP_Timeout`),
     /// and so how long we wait for it — see `receive_machine`.
     pub rate: LacpRate,
@@ -171,6 +174,7 @@ pub async fn run(
 /// PDUs, until the aggregate is gone or the link's receive side fails.
 async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>, link: &L) {
     let mut advert_rx = p.config.advert_rx.clone();
+    let mut active_rx = p.config.active_rx.clone();
     loop {
         tokio::select! {
             () = tokio::time::sleep_until(p.tx.next_periodic_send) => p.on_periodic(link),
@@ -194,6 +198,9 @@ async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>
             // `selected_rx` (the manager owns both), so just ignore the error.
             Ok(()) = advert_rx.changed() => {
                 p.on_advert(advert_rx.borrow_and_update().clone(), link);
+            }
+            Ok(()) = active_rx.changed() => {
+                p.on_activity(*active_rx.borrow_and_update(), link);
             }
             recv = link.recv() => {
                 let Ok(bytes) = recv else {
@@ -334,6 +341,24 @@ impl Port {
     fn settle(&mut self) {
         self.churn.eval(self.mux_state, self.partner);
         self.report();
+    }
+
+    /// A `lacp-mode` change: the Activity bit of our `Actor_State` and the
+    /// Periodic Tx machine follow at once; the PDU goes out if it differs.
+    fn on_activity(&mut self, active: bool, sink: &dyn FrameSink) {
+        if self.config.actor_active == active {
+            return;
+        }
+        self.config.actor_active = active;
+        self.tx.update_periodic(
+            &self.config.interface,
+            active,
+            self.receive_state,
+            self.partner,
+        );
+        self.settle();
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
     }
 
     fn on_periodic(&mut self, sink: &dyn FrameSink) {
