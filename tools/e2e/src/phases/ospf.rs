@@ -6298,6 +6298,10 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&primary, p0, 60).await?;
     a.wait_new(&backup_added, b0, 60).await?;
+    // Barrier (#1344): let the detach's resync and the backup slot churn settle,
+    // so a late re-install of the primary cannot land inside the window below.
+    let p1 = a.count(&primary);
+    a.assert_quiet(&primary, p1, 5).await?;
     let primary_removed0 = a.count(&primary_removed);
 
     log("router-c: max-metric router-lsa administrative; router-a must drop its lfa via c");
