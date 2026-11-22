@@ -83,6 +83,7 @@ mod tests {
                 mtu: 1500,
                 subinterfaces: vec![],
                 err_disabled: false,
+                speed_mbps: None,
             }))
         });
 
@@ -122,6 +123,7 @@ mod tests {
                 routing_table: Some("rt1".to_string()),
                 bridge_name: Some("br1".to_string()),
                 mtu: None,
+                speed_mbps: None,
             }))
         });
 

@@ -3133,6 +3133,15 @@
               "null"
             ]
           },
+          "speed_mbps": {
+            "description": "Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),\nsampled when the status is served; `None` = unknown (no carrier,\ndown, loopback, a kernel that does not say). The kernel's number is\nreported untouched for bond/bridge/veth.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "subinterfaces": {
             "description": "Subinterfaces (VLAN-tagged).",
             "items": {
@@ -5108,6 +5117,15 @@
           "name": {
             "description": "Name of the aggregate.",
             "type": "string"
+          },
+          "speed_mbps": {
+            "description": "See `InterfaceStatus.speed_mbps`; the bond's own device (the kernel\nsums its up slaves).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "steering": {
             "description": "Observed: the conversation steering `nos-interfaced` has installed\n(#895), one row per member link; empty when none. Appended last.",

@@ -3332,6 +3332,7 @@ mod tests {
             ],
             link_local_address: None,
             err_disabled: false,
+            speed_mbps: None,
         };
         let out = render_interface_statuses(&[iface.clone(), iface.clone()]);
         assert_eq!(
@@ -3352,6 +3353,7 @@ mod tests {
             bond_name: None,
             err_disabled: false,
             steering: Vec::new(),
+            speed_mbps: None,
         };
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),

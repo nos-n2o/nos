@@ -146,22 +146,28 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
     trace!(request = ?req, "serving interface query");
     match req {
         InterfaceRequest::GetInterfaces => {
-            let guard = ctx.interfaces.read().await;
-            Some(InterfaceEvent::Interfaces(
-                guard.all().into_iter().map(to_status).collect(),
-            ))
+            let all = ctx.interfaces.read().await.all();
+            let mut out = Vec::with_capacity(all.len());
+            for i in all {
+                out.push(status_with_speed(ctx, i).await);
+            }
+            Some(InterfaceEvent::Interfaces(out))
         }
         InterfaceRequest::GetInterface { name } => {
-            let guard = ctx.interfaces.read().await;
-            Some(match guard.get(&name) {
-                Some(iface) => InterfaceEvent::Interface(to_status(iface.clone())),
+            let iface = ctx.interfaces.read().await.get(&name).cloned();
+            Some(match iface {
+                Some(iface) => InterfaceEvent::Interface(status_with_speed(ctx, iface).await),
                 None => InterfaceEvent::NotFound,
             })
         }
         InterfaceRequest::GetBroadcastDomain { name } => {
-            let guard = ctx.interfaces.read().await;
-            Some(match guard.get_domain(&name) {
-                Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
+            let domain = ctx.interfaces.read().await.get_domain(&name).cloned();
+            Some(match domain {
+                Some(d) => {
+                    let mut s = to_domain_status(d);
+                    s.speed_mbps = sample_speed(ctx, s.bridge_name.as_deref()).await;
+                    InterfaceEvent::BroadcastDomain(s)
+                }
                 None => InterfaceEvent::NotFound,
             })
         }
@@ -330,8 +336,10 @@ async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
 
 async fn status_with_steering(ctx: &Context, agg: PortAggregateState) -> PortAggregateStatus {
     let steering = ctx.driver.steering_stats(&agg.name).await;
+    let speed_mbps = sample_speed(ctx, agg.bond_name.as_deref()).await;
     PortAggregateStatus {
         steering,
+        speed_mbps,
         ..to_port_aggregate_status(agg)
     }
 }
@@ -363,6 +371,20 @@ fn sub_status(s: crate::state::SubinterfaceState, parent_mtu: u32) -> Subinterfa
     }
 }
 
+/// Kernel link speed sampled now (it changes at runtime: renegotiation, bond
+/// slaves up/down), so never cached in the state.
+async fn sample_speed(ctx: &Context, kernel_name: Option<&str>) -> Option<u32> {
+    ctx.driver.link_speed_mbps(kernel_name?).await
+}
+
+async fn status_with_speed(ctx: &Context, iface: InterfaceState) -> InterfaceStatus {
+    let speed_mbps = sample_speed(ctx, Some(&iface.name)).await;
+    InterfaceStatus {
+        speed_mbps,
+        ..to_status(iface)
+    }
+}
+
 fn to_status(iface: InterfaceState) -> InterfaceStatus {
     let mtu = iface.mtu.unwrap_or(crate::driver::DEFAULT_MTU);
     InterfaceStatus {
@@ -382,6 +404,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         // never populated for this attach-point kind.
         link_local_address: None,
         err_disabled: iface.stp.err_disabled,
+        speed_mbps: None,
     }
 }
 
@@ -393,6 +416,7 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         bridge_name: domain.bridge_name,
         link_local_address: domain.link_local_address,
         mtu: domain.mtu,
+        speed_mbps: None,
     }
 }
 
@@ -412,6 +436,7 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
         bond_name: agg.bond_name,
         err_disabled: agg.stp.err_disabled,
         steering: Vec::new(),
+        speed_mbps: None,
     }
 }
 

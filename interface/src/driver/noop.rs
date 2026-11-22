@@ -81,6 +81,10 @@ impl InterfaceDriver for NoopInterfaceDriver {
         None
     }
 
+    async fn link_speed_mbps(&self, _kernel_interface: &str) -> Option<u32> {
+        None
+    }
+
     async fn set_bridge_port_state(
         &self,
         port: &BridgePortRef,

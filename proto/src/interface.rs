@@ -47,6 +47,11 @@ pub struct InterfaceStatus {
     /// Observed: held administratively down by `nos-stpd`'s BPDU guard
     /// (err-disabled). Read back by a restarting `nos-stpd`.
     pub err_disabled: bool,
+    /// Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),
+    /// sampled when the status is served; `None` = unknown (no carrier,
+    /// down, loopback, a kernel that does not say). The kernel's number is
+    /// reported untouched for bond/bridge/veth.
+    pub speed_mbps: Option<u32>,
 }
 
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
@@ -97,6 +102,11 @@ pub struct BroadcastDomainStatus {
     /// while nothing sets it explicitly). `None` until the bridge exists, or
     /// under the `noop` driver; consumers fall back to 1500 and retry.
     pub mtu: Option<u32>,
+    /// Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),
+    /// sampled when the status is served; `None` = unknown (no carrier,
+    /// down, loopback, a kernel that does not say). The kernel's number is
+    /// reported untouched for bond/bridge/veth.
+    pub speed_mbps: Option<u32>,
 }
 
 /// The wire twin of `schema::PortAggregate` — a static Linux bonding
@@ -130,6 +140,9 @@ pub struct PortAggregateStatus {
     /// Observed: the conversation steering `nos-interfaced` has installed
     /// (#895), one row per member link; empty when none. Appended last.
     pub steering: Vec<LacpLinkSteering>,
+    /// See `InterfaceStatus.speed_mbps`; the bond's own device (the kernel
+    /// sums its up slaves).
+    pub speed_mbps: Option<u32>,
 }
 
 /// One member link's installed conversation steering and its tc counters.
@@ -386,6 +399,31 @@ mod tests {
             carrier,
             port_aggregate: None,
         }
+    }
+
+    #[test]
+    fn interface_status_wire_ends_with_speed() {
+        let st = |speed_mbps| InterfaceStatus {
+            name: "e".into(),
+            addresses: vec![],
+            routing_table: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: vec![],
+            link_local_address: None,
+            err_disabled: false,
+            speed_mbps,
+        };
+        // name, 0 addrs, 3 None, mtu 1500 (2-byte varint), 0 subs, None, false, speed.
+        let none = postcard::to_allocvec(&st(None)).unwrap();
+        assert_eq!(none.last(), Some(&0));
+        let some = postcard::to_allocvec(&st(Some(1000))).unwrap();
+        assert_eq!(&some[some.len() - 3..], &[1, 0xE8, 0x07]);
+        assert_eq!(
+            postcard::from_bytes::<InterfaceStatus>(&some).unwrap(),
+            st(Some(1000))
+        );
     }
 
     #[test]
