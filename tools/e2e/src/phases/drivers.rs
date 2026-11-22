@@ -508,7 +508,11 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // #658: a LACPDU carrying router-a's own system id (a looped link) is
     // dropped with a warning and never becomes a partner.
     log("router-a ignores an injected LACPDU carrying its own system id");
+    // The injector sends from router-b's eth1: it must be settled too, or the
+    // send fails ENETDOWN while the bond re-enslavement still cycles the link
+    // (#1332, run 4). The script also retries ENETDOWN.
     lacp_settled(a, 0).await?;
+    lacp_settled(b, 0).await?;
     let loop_pattern = "lacp loopback detected, ignoring own LACPDUs interface=eth1";
     let loop_base = a.count(loop_pattern);
     let released = "removed interface from master enslavement interface=eth1";
