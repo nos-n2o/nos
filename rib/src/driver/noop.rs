@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use nos_proto::IpNet;
+use nos_proto::{IlmRoute, IpNet};
 use tracing::debug;
 
 use super::{mpls, DriverError, Mpls, RibDriver};
@@ -17,9 +17,20 @@ use crate::rib::RibEntry;
 #[derive(Debug, Default)]
 pub struct NoopRibDriver {
     mpls: Mutex<HashMap<String, u32>>,
+    ilm: Mutex<HashMap<String, Vec<IlmRoute>>>,
 }
 
 impl NoopRibDriver {
+    /// The ILM set `sync_ilm` last got for `table_name`.
+    pub fn ilm_routes(&self, table_name: &str) -> Vec<IlmRoute> {
+        self.ilm
+            .lock()
+            .unwrap()
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The label `sync_mpls` last set for `table_name`.
     pub fn mpls_label(&self, table_name: &str) -> Option<u32> {
         self.mpls.lock().unwrap().get(table_name).copied()
@@ -85,6 +96,16 @@ impl RibDriver for NoopRibDriver {
             );
         }
         Ok(None)
+    }
+
+    async fn sync_ilm(&self, table_name: &str, routes: &[IlmRoute]) -> Result<(), DriverError> {
+        routes.iter().try_for_each(mpls::check_ilm)?;
+        debug!(table = %table_name, routes = routes.len(), "would install mpls ilm routes (noop driver — no OS effect)");
+        self.ilm
+            .lock()
+            .unwrap()
+            .insert(table_name.to_string(), routes.to_vec());
+        Ok(())
     }
 
     async fn sync_mpls(&self, table_name: &str, m: Option<&Mpls>) -> Result<(), DriverError> {

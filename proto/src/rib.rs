@@ -276,6 +276,25 @@ pub struct OspfRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[serde(default)]
     pub backup_tunnel: Option<IpAddr>,
+    /// The MPLS label stack pushed toward each of `next_hops` (outermost
+    /// first), in `next_hops` order; empty, or an empty stack, is a plain IP
+    /// hop (segment routing, #1165).
+    #[serde(default)]
+    pub next_hop_labels: Vec<Vec<u32>>,
+}
+
+/// One incoming-label-map (ILM) entry: what a labelled packet arriving with
+/// `label` becomes (segment routing, #1165). Each hop is a next hop with
+/// the stack it is sent with: a non-empty stack is a swap, an empty one a
+/// pop (PHP, or a transit pop). No hop is a pop followed by an IP lookup in
+/// this table. Pushed by the OSPF daemons with `RibRequest::PushMplsRoutes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IlmRoute {
+    /// The incoming label; must be 16..=1048574 (RFC 3032 reserved range).
+    pub label: u32,
+    /// Where it goes, several are one ECMP route. `interface_id` is the
+    /// egress ifindex when the pusher knows it; else `nos-ribd` resolves it.
+    pub hops: Vec<NextHop>,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,
@@ -319,9 +338,10 @@ fn parse_chunk(raw: Option<&str>) -> usize {
 }
 
 impl OspfRoute {
-    /// Frame budget weight: one per next hop, plus one for the route itself.
+    /// Frame budget weight: one per next hop and per pushed label, plus one
+    /// for the route itself.
     fn weight(&self) -> usize {
-        self.next_hops.len() + 1
+        self.next_hops.len() + 1 + self.next_hop_labels.iter().map(Vec::len).sum::<usize>()
     }
 }
 
@@ -575,6 +595,17 @@ pub enum RibRequest {
         after: Option<IpNet>,
         /// Most prefixes wanted.
         limit: u32,
+    },
+    /// Fire-and-forget, `nos-ospfd`/`nos-ospfv3d` only (#1165): the complete
+    /// ILM set of one OSPF instance (segment routing), replacing its previous
+    /// one. `instance` must equal the pusher's identity name, as for
+    /// `PushOspfRoutes`. An instance's labels are removed from the kernel
+    /// when it pushes an empty set or leaves the config.
+    PushMplsRoutes {
+        /// The OSPF instance name.
+        instance: String,
+        /// The whole ILM set.
+        routes: Vec<IlmRoute>,
     },
 }
 
@@ -854,6 +885,7 @@ mod tests {
             metric: 10,
             discard: false,
             backup_tunnel: None,
+            next_hop_labels: Vec::new(),
         }
     }
 
@@ -942,6 +974,7 @@ mod tests {
             metric: u32::MAX,
             discard: true,
             backup_tunnel: Some(v6(4)),
+            next_hop_labels: Vec::new(),
         };
         for routes in [
             vec![worst(0); OSPF_PUSH_CHUNK],
@@ -961,5 +994,49 @@ mod tests {
                 .encode(frame, &mut buf)
                 .unwrap();
         }
+    }
+
+    /// Back-compat (#1165): `PushMplsRoutes` is appended after every older
+    /// variant, and an `OspfRoute` round-trips its label stacks.
+    #[test]
+    fn mpls_push_and_labelled_ospf_route_round_trip() {
+        let hop = |labels: Vec<u32>| NextHop {
+            gateway: "10.0.0.2".parse().unwrap(),
+            interface_id: Some(3),
+            labels,
+        };
+        let req = RibRequest::PushMplsRoutes {
+            instance: "o1".into(),
+            routes: vec![
+                IlmRoute {
+                    label: 16001,
+                    hops: vec![hop(vec![16002])],
+                },
+                IlmRoute {
+                    label: 16002,
+                    hops: vec![],
+                },
+            ],
+        };
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        // GetRoutesPage was the last variant: the new one is the next index.
+        let last = postcard::to_allocvec(&RibRequest::GetRoutesPage {
+            after: None,
+            limit: 0,
+        })
+        .unwrap()[0];
+        assert_eq!(bytes[0], last + 1);
+        let RibRequest::PushMplsRoutes { routes, .. } = postcard::from_bytes(&bytes).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(routes[0].hops[0].labels, vec![16002]);
+
+        let mut r = ospf_route(1, 2);
+        let plain = r.weight();
+        r.next_hop_labels = vec![vec![16001, 16002], vec![]];
+        assert_eq!(r.weight(), plain + 2);
+        let back: OspfRoute = postcard::from_bytes(&postcard::to_allocvec(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
     }
 }

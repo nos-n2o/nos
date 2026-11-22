@@ -33,6 +33,8 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 
 ## MPLS (L3VPN, `nos-ribd`, #581)
 
+Segment routing (ILM entries, `RibDriver::sync_ilm`, #1165): [segment-routing.md](segment-routing.md).
+
 - `RibDriver::sync_mpls(table, Some(Mpls { label, underlay }))` installs the AF_MPLS route `<label> dev <vrf>` (pop, then an IP lookup in the VRF; one route serves IPv4 and IPv6). Each call dumps the AF_MPLS routes, deletes any other label pointing at this VRF first (a changed `vpn.label`, a previous run), then adds ours with `NLM_F_REPLACE` if missing. `None` and `teardown` delete it. Logs: `installed mpls pop route` / `removed mpls pop route` with `table`, `vrf`, `label`.
 - Labels below 16 are refused (RFC 3032 reserved), as defence in depth behind config validation.
 - Ingress: a `Vpn` route is `RTA_ENCAP_TYPE=MPLS` pushing its labels, `via <gw> dev <if> onlink` in the customer table. Several next hops are one `RTA_MULTIPATH` route with an encap and `RTNH_F_ONLINK` per next hop (`nexthop encap mpls <l1> via <gw1> dev <if> onlink nexthop encap mpls <l2> via <gw2> …`); the same gateway twice with different labels is accepted. The gateway and ifindex come from `nos-bgpd`'s resolution in the underlay table; without an ifindex the driver asks the kernel (`RTM_GETROUTE` with `RTA_OIF` = the underlay VRF, `ip route get <gw> vrf <underlay>`). Logs: `installed labelled route` / `removed labelled route` with `prefix`, `labels` (one stack per hop), `gateway`.

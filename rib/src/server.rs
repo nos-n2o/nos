@@ -96,7 +96,10 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         | RibRequest::BgpRouteCount => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
-        RibRequest::PushOspfRoutes { .. } => matches!(role, Role::Ospfd | Role::Ospfv3d),
+        // The ILM set of segment routing (#1165) comes from the same daemons.
+        RibRequest::PushOspfRoutes { .. } | RibRequest::PushMplsRoutes { .. } => {
+            matches!(role, Role::Ospfd | Role::Ospfv3d)
+        }
         // `ResolveNextHop`: `nos-bgpd` resolving its VPN PE next hops.
         RibRequest::IgpCosts | RibRequest::ResolveNextHop { .. } => {
             matches!(role, Role::User | Role::Restd | Role::Bgpd)
@@ -128,7 +131,10 @@ async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ct
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
-            Ok(RibRequest::PushOspfRoutes { instance, .. }) if instance != name => {
+            Ok(
+                RibRequest::PushOspfRoutes { instance, .. }
+                | RibRequest::PushMplsRoutes { instance, .. },
+            ) if instance != name => {
                 // A daemon pushes only as itself (identity `nos://ospfd/<name>`,
                 // name = instance), never as a sibling instance.
                 warn!(
@@ -319,6 +325,20 @@ async fn dispatch(ctx: &Context, v3: bool, req: RibRequest) -> Option<RibEvent> 
         RibRequest::PushOspfRoutes { instance, updates } => {
             let owner = OspfOwner::new(v3, instance);
             apply_ospf_route_update(ctx, &owner, updates).await;
+            None
+        }
+        RibRequest::PushMplsRoutes { instance, routes } => {
+            let owner = OspfOwner::new(v3, instance);
+            let gate = ctx.kernel.lock().await;
+            ctx.rib.write().await.set_ilm(owner, routes);
+            crate::reconcile::sync_ilm(
+                &ctx.table,
+                &ctx.rib,
+                &ctx.kernel,
+                &gate,
+                ctx.driver.as_ref(),
+            )
+            .await;
             None
         }
         RibRequest::IgpCosts => Some(RibEvent::IgpCosts(ctx.rib.read().await.igp_costs())),
@@ -707,7 +727,16 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
         next_hops: if r.discard {
             Vec::new()
         } else {
-            r.next_hops.into_iter().map(Into::into).collect()
+            let labels = r.next_hop_labels;
+            r.next_hops
+                .into_iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let mut hop: nos_proto::NextHop = h.into();
+                    hop.labels = labels.get(i).cloned().unwrap_or_default();
+                    hop
+                })
+                .collect()
         },
         source: RouteSource::Ospf,
         backup: r.backup_next_hop.or(r.backup_tunnel).filter(|_| !r.discard),
@@ -781,6 +810,7 @@ mod authz_tests {
             metric: 3,
             discard: true,
             backup_tunnel: None,
+            next_hop_labels: Vec::new(),
         };
         let entry = ospf_entry(route.clone());
         assert!(entry.is_discard());
@@ -794,6 +824,69 @@ mod authz_tests {
     }
 
     #[test]
+    fn an_ospf_route_carries_its_labels_per_next_hop() {
+        let entry = ospf_entry(OspfRoute {
+            prefix: "10.9.0.0/16".parse().unwrap(),
+            next_hops: vec![
+                ("10.0.0.1".parse().unwrap(), None),
+                ("10.0.1.1".parse().unwrap(), None),
+            ],
+            backup_next_hop: None,
+            backup_interface_id: None,
+            metric: 3,
+            discard: false,
+            backup_tunnel: None,
+            next_hop_labels: vec![vec![16001, 16002]],
+        });
+        assert_eq!(entry.next_hops[0].labels, vec![16001, 16002]);
+        assert!(entry.next_hops[1].labels.is_empty(), "missing stack: plain");
+    }
+
+    /// The ILM set reaches the driver merged, per owner, and a pushed
+    /// set replaces the previous one (#1165).
+    #[tokio::test]
+    async fn pushed_ilm_sets_are_merged_and_replaced() {
+        use nos_proto::IlmRoute;
+        let driver = Arc::new(crate::NoopRibDriver::default());
+        let ctx = Context {
+            table: "rt1".into(),
+            rib: Arc::new(RwLock::new(Rib::new())),
+            kernel: Arc::new(KernelGate::default()),
+            driver: driver.clone(),
+        };
+        let ilm = |label| IlmRoute {
+            label,
+            hops: vec![],
+        };
+        let push = |instance: &str, labels: &[u32]| RibRequest::PushMplsRoutes {
+            instance: instance.into(),
+            routes: labels.iter().map(|&l| ilm(l)).collect(),
+        };
+        assert!(dispatch(&ctx, false, push("o1", &[16002, 16001]))
+            .await
+            .is_none());
+        dispatch(&ctx, true, push("o1", &[16003, 16001])).await;
+        let labels = |d: &crate::NoopRibDriver| {
+            d.ilm_routes("rt1")
+                .iter()
+                .map(|r| r.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&driver),
+            [16001, 16002, 16003],
+            "v2 and v3 merge, first wins"
+        );
+        dispatch(&ctx, false, push("o1", &[])).await;
+        assert_eq!(labels(&driver), [16001, 16003], "v2's set replaced by none");
+        dispatch(&ctx, true, push("o1", &[])).await;
+        assert_eq!(driver.ilm_routes("rt1").len(), 0);
+        // A label the kernel would refuse leaves the driver's set alone.
+        dispatch(&ctx, false, push("o1", &[3])).await;
+        assert_eq!(driver.ilm_routes("rt1").len(), 0);
+    }
+
+    #[test]
     fn a_remote_lfa_becomes_a_tunnel_backup() {
         let pq: std::net::IpAddr = "10.255.0.4".parse().unwrap();
         let entry = ospf_entry(OspfRoute {
@@ -804,6 +897,7 @@ mod authz_tests {
             metric: 2,
             discard: false,
             backup_tunnel: Some(pq),
+            next_hop_labels: Vec::new(),
         });
         assert_eq!((entry.backup, entry.backup_tunnel), (Some(pq), true));
         let shown = to_prefix_routes(entry.prefix, &[entry], &Rib::new());
@@ -822,6 +916,7 @@ mod authz_tests {
             metric: 2,
             discard,
             backup_tunnel,
+            next_hop_labels: Vec::new(),
         };
         let ip: std::net::IpAddr = "10.255.0.4".parse().unwrap();
         assert!(ospf_entry(route(None, Some(ip), false)).backup_tunnel);
@@ -857,6 +952,7 @@ mod authz_tests {
             backup_next_hop: None,
             backup_tunnel: None,
             backup_interface_id: None,
+            next_hop_labels: Vec::new(),
         });
         let rib = Rib::new();
         let flags = |e: RibEntry| {
@@ -907,6 +1003,16 @@ mod authz_tests {
                     &RibRequest::PushOspfRoutes {
                         instance: String::new(),
                         updates: vec![OspfRouteUpdate::FullPart(vec![])]
+                    }
+                ),
+                matches!(role, Role::Ospfd | Role::Ospfv3d)
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &RibRequest::PushMplsRoutes {
+                        instance: String::new(),
+                        routes: vec![]
                     }
                 ),
                 matches!(role, Role::Ospfd | Role::Ospfv3d)
@@ -992,6 +1098,7 @@ mod authz_tests {
             backup_next_hop: None,
             backup_tunnel: None,
             backup_interface_id: None,
+            next_hop_labels: Vec::new(),
         };
         apply_ospf_route_update(
             &ctx,
