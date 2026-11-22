@@ -1843,7 +1843,7 @@ async fn edit_policy_source_line(
     };
     let mut lines: Vec<String> = current.lines().map(str::to_string).collect();
     if let Err(e) = edit(&mut lines) {
-        eprintln!("error: {}", format::sanitize(&e.to_string()));
+        eprintln!("error: {}", format::sanitize(&e));
         return mode;
     }
     let mut new_source = lines.join("\n");
@@ -1870,7 +1870,7 @@ fn print_committed(transaction: &str, warnings: &[String], unsaved: bool) {
     let note = if unsaved { " (not saved)" } else { "" };
     println!("transaction '{transaction}' committed{note}");
     for w in warnings {
-        eprintln!("warning: {}", format::sanitize(&w));
+        eprintln!("warning: {}", format::sanitize(w));
     }
 }
 

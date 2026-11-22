@@ -2169,14 +2169,14 @@ fn render_field_diff(lines: &mut Vec<String>, field: &FieldDiff, indent: &str, c
     match (&old, &new) {
         (Some(old), Some(new)) => {
             let (old_h, new_h) = highlight(old, new, color);
-            lines.push(removed_line(&format!("{indent}{}: {old_h}", label), color));
-            lines.push(added_line(&format!("{indent}{}: {new_h}", label), color));
+            lines.push(removed_line(&format!("{indent}{label}: {old_h}"), color));
+            lines.push(added_line(&format!("{indent}{label}: {new_h}"), color));
         }
         (None, Some(new)) => {
-            lines.push(added_line(&format!("{indent}{}: {new}", label), color));
+            lines.push(added_line(&format!("{indent}{label}: {new}"), color));
         }
         (Some(old), None) => {
-            lines.push(removed_line(&format!("{indent}{}: {old}", label), color));
+            lines.push(removed_line(&format!("{indent}{label}: {old}"), color));
         }
         (None, None) => {}
     }
