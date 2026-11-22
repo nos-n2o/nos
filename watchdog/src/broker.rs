@@ -35,6 +35,12 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_VERIFIES: usize = 2;
 const LOGIN_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
+/// RADIUS exchanges in flight at once (#1360): each can hold a broker task for
+/// `timeout*(retries+1)` per server, so a few slow REST logins must not take
+/// every task. Beyond it a login waits `LOGIN_QUEUE_WAIT`, then `LOGIN_BUSY`.
+/// The total RADIUS time must stay under `nos-restd`'s 20s IPC call limit.
+const MAX_CONCURRENT_RADIUS: usize = 4;
+
 /// Anonymous (no client certificate) connections may only `Login`, so they are
 /// capped and dropped when idle; authenticated peers are neither (#950).
 const MAX_ANON_CONNECTIONS: usize = 64;
@@ -76,6 +82,7 @@ struct Ctx {
     sockets: Sockets,
     pki: Arc<Pki>,
     login_slots: Semaphore,
+    radius_slots: Semaphore,
     anon_slots: Arc<Semaphore>,
     anonymous_idle: Duration,
     /// `LoginPolicy.max_failures`, live (#1148).
@@ -125,6 +132,7 @@ pub fn start_with_limits(
         sockets,
         pki,
         login_slots: Semaphore::new(MAX_CONCURRENT_VERIFIES),
+        radius_slots: Semaphore::new(MAX_CONCURRENT_RADIUS),
         anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
         anonymous_idle: limits.anonymous_idle,
         max_failures,
@@ -369,16 +377,19 @@ async fn dispatch(
         } => {
             // The renewed certificate inherits the login time, so renewals
             // cannot outlast `--pki-rest-session-max`.
-            if let Some(started) = ctx.pki.rest_session(&serial, &user) {
-                renew(ctx, &user, &csr_der, Realm::Rest, started, None).await
+            // The claim is the stored session's, never the client's (#1360).
+            if let Some((started, claim)) = ctx.pki.rest_session_claim(&serial, &user) {
+                renew(ctx, &user, &csr_der, Realm::Rest, started, claim.as_deref()).await
             } else {
                 info!(user = ?user, "renewal refused, rest certificate revoked or past the session cap");
                 WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
             }
         }
         WatchdogRequest::RestCertCheck { user, serial } => {
-            if ctx.pki.rest_session(&serial, &user).is_some() {
-                WatchdogEvent::Ok
+            if let Some((_, claim)) = ctx.pki.rest_session_claim(&serial, &user) {
+                WatchdogEvent::RestSessionLive {
+                    claim: claim.as_deref().and_then(UserRole::from_claim),
+                }
             } else {
                 WatchdogEvent::Denied(SESSION_EXPIRED.to_string())
             }
@@ -434,23 +445,16 @@ async fn login(
     csr_der: &[u8],
     realm: Realm,
 ) -> WatchdogEvent {
-    // RADIUS serves direct IPC logins only: the REST and ticket paths stay
-    // local-only (the role claim would have to cross `nos-restd` / the ticket).
-    let claim = if matches!(realm, Realm::Ipc) {
-        match authenticate(ctx, user, password).await {
-            Ok(claim) => claim,
-            Err(denied) => return denied,
-        }
-    } else {
-        if let Err(denied) = verify_password(ctx, user, password).await {
-            return denied;
-        }
-        None
+    // One path for IPC and REST (#1360): `aaa login-order`, local fallthrough.
+    let claim = match authenticate(ctx, user, password).await {
+        Ok(claim) => claim,
+        Err(denied) => return denied,
     };
     let started = Instant::now();
     let event = issue(ctx, user, csr_der, realm, started, claim.as_deref());
     if matches!(event, WatchdogEvent::Issued { .. }) {
         info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
+        // ponytail: REST logins are accounted by #1361.
         if matches!(realm, Realm::Ipc) {
             account_session(ctx, user, started);
         }
@@ -545,15 +549,16 @@ async fn authenticate(
                 return verify_password(ctx, user, password).await.map(|()| None);
             }
             LoginBackend::Local => {}
-            LoginBackend::Radius => match radius_login(ctx, &cfg, user, &password).await {
+            LoginBackend::Radius => match radius_slot_login(ctx, &cfg, user, &password).await {
+                Err(None) => return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string())),
                 Ok(role) => {
                     info!(user = ?user, role = role.claim(), "login accepted by radius");
                     return Ok(Some(role.claim().to_string()));
                 }
-                Err(nos_radius::AuthError::Unreachable) => {
+                Err(Some(nos_radius::AuthError::Unreachable)) => {
                     warn!(user = ?user, "no radius server answered");
                 }
-                Err(e) => {
+                Err(Some(e)) => {
                     info!(user = ?user, reason = %e, "radius login rejected");
                     return Err(invalid());
                 }
@@ -645,6 +650,22 @@ async fn radius_servers(
         });
     }
     servers
+}
+
+/// `radius_login` holding one of `MAX_CONCURRENT_RADIUS` slots; `Err(None)`
+/// when none frees in time.
+async fn radius_slot_login(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    user: &str,
+    password: &str,
+) -> Result<UserRole, Option<nos_radius::AuthError>> {
+    let Ok(Ok(_slot)) = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.radius_slots.acquire()).await
+    else {
+        warn!(user = ?user, "login refused: too many radius exchanges in flight");
+        return Err(None);
+    };
+    radius_login(ctx, cfg, user, password).await.map_err(Some)
 }
 
 /// One Access-Request across the configured servers; the role comes from the
@@ -765,7 +786,7 @@ fn issue(
 ) -> WatchdogEvent {
     let signed = match realm {
         Realm::Ipc => ctx.pki.sign_user(csr_der, user, started, claim),
-        Realm::Rest => ctx.pki.sign_rest_user(csr_der, user, started),
+        Realm::Rest => ctx.pki.sign_rest_user(csr_der, user, started, claim),
     };
     match signed {
         Ok(cert_der) => WatchdogEvent::Issued {

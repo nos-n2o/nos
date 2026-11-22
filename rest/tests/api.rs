@@ -143,8 +143,13 @@ async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<
                 WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string())
             }
             // The watchdog's allowlist, reduced to: serial "revoked" is not live.
+            // Serials `claimed-<role>` stand for a RADIUS login granting that role.
             WatchdogRequest::RestCertCheck { serial, .. } if serial != "revoked" => {
-                WatchdogEvent::Ok
+                WatchdogEvent::RestSessionLive {
+                    claim: serial
+                        .strip_prefix("claimed-")
+                        .and_then(nos_proto::UserRole::from_claim),
+                }
             }
             WatchdogRequest::RestCertCheck { .. } => {
                 WatchdogEvent::Denied("session expired".to_string())
@@ -198,6 +203,7 @@ async fn send_full(
         .extension(PeerUser(
             user.map(str::to_string),
             user.map(|_| "live".to_string()),
+            None,
         ));
     if let Some((name, value)) = extra {
         req = req.header(name, value);
@@ -233,7 +239,11 @@ async fn send_headers(
     let mut req = HttpRequest::builder()
         .method(method)
         .uri(uri)
-        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+        .extension(PeerUser(
+            Some(USER.to_string()),
+            Some("live".to_string()),
+            None,
+        ));
     for (n, v) in headers {
         req = req.header(n, *v);
     }
@@ -1333,6 +1343,7 @@ async fn errors_are_problem_json_with_the_right_status() {
             .extension(PeerUser(
                 user.map(str::to_string),
                 user.map(|_| "live".to_string()),
+                None,
             ))
             .body(Body::empty())
             .unwrap();
@@ -1399,7 +1410,7 @@ async fn serves_swagger_ui_from_vendored_assets() {
     for (uri, csp) in [("/swagger-ui/", true), ("/openapi.json", false)] {
         let req = HttpRequest::builder()
             .uri(uri)
-            .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
+            .extension(PeerUser(Some(USER.to_string()), Some("live".into()), None))
             .body(Body::empty())
             .unwrap();
         let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1462,7 +1473,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?source=nos-x")
-        .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
+        .extension(PeerUser(Some(USER.to_string()), Some("live".into()), None))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1484,7 +1495,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
     // `limit` trims the backlog only: the newest backlog entry and the live line remain.
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?limit=1")
-        .extension(PeerUser(Some(USER.to_string()), Some("live".into())))
+        .extension(PeerUser(Some(USER.to_string()), Some("live".into()), None))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -1964,7 +1975,7 @@ async fn too_many_failed_logins_get_429_with_retry_after() {
             .method(Method::POST)
             .uri("/v1/login")
             .header(header::CONTENT_TYPE, "application/json")
-            .extension(PeerUser(None, None))
+            .extension(PeerUser(None, None, None))
             .body(Body::from(body.to_string()))
             .unwrap()
     };
@@ -2000,7 +2011,7 @@ async fn login_lockout_is_per_source_address() {
             .method(Method::POST)
             .uri("/v1/login")
             .header(header::CONTENT_TYPE, "application/json")
-            .extension(PeerUser(None, None))
+            .extension(PeerUser(None, None, None))
             .extension(nos_rest::login::ClientIp(ip.parse().unwrap()))
             .body(Body::from(body.to_string()))
             .unwrap()
@@ -2043,12 +2054,60 @@ async fn a_revoked_certificate_gets_401_everywhere_including_renew() {
             .method(method)
             .uri(uri)
             .header(header::CONTENT_TYPE, "application/json")
-            .extension(PeerUser(Some(USER.to_string()), Some("revoked".into())))
+            .extension(PeerUser(
+                Some(USER.to_string()),
+                Some("revoked".into()),
+                None,
+            ))
             .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
             .unwrap();
         let resp = f.app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
     }
+}
+
+/// #1360: a user with no local entry gets in only on a claimed (RADIUS)
+/// session, whose role `nos-configd` then enforces; the certificate's SAN and
+/// the watchdog's session must agree.
+#[tokio::test]
+async fn a_radius_claimed_session_reaches_the_api_with_its_role() {
+    use nos_proto::UserRole;
+    let f = fixture(vec![]).await;
+    let get = |serial: &str, cert_claim: Option<UserRole>, method: Method| {
+        let req = HttpRequest::builder()
+            .method(method)
+            .uri("/v1/config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(PeerUser(
+                Some("rad".to_string()),
+                Some(serial.to_string()),
+                cert_claim,
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let app = f.app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    let ro = Some(UserRole::ReadOnly);
+    assert_eq!(
+        get("claimed-read-only", ro, Method::GET).await,
+        StatusCode::OK
+    );
+    // No claim: an unknown user is refused as before.
+    assert_eq!(
+        get("live", None, Method::GET).await,
+        StatusCode::UNAUTHORIZED
+    );
+    // The certificate holds a stronger claim than the session: refused.
+    assert_eq!(
+        get("claimed-read-only", Some(UserRole::Admin), Method::GET).await,
+        StatusCode::UNAUTHORIZED
+    );
+    // A session claim the certificate does not carry: refused.
+    assert_eq!(
+        get("claimed-admin", None, Method::GET).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
@@ -2700,7 +2759,7 @@ async fn client_auth_probes_user_exists_and_never_fetches_the_config() {
         },
     );
     serve(&watchdog_socket, ("watchdog", ""), |_: WatchdogRequest| {
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { claim: None }
     });
     let app = api::router(Daemons::new(watchdog_socket, config_socket));
 
@@ -2721,7 +2780,7 @@ async fn client_auth_probes_user_exists_and_never_fetches_the_config() {
     let dir2 = tempfile::tempdir().unwrap();
     let watchdog = dir2.path().join("w.sock");
     serve(&watchdog, ("watchdog", ""), |_: WatchdogRequest| {
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { claim: None }
     });
     let app = api::router(Daemons::new(watchdog, dir2.path().join("missing.sock")));
     let (s, _) = send(&app, Method::GET, "/openapi.json", None).await;
@@ -2766,7 +2825,7 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         },
     );
     serve(&watchdog_socket, ("watchdog", ""), |_: WatchdogRequest| {
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { claim: None }
     });
     let daemons = Daemons::new(watchdog_socket, config_socket);
     let app = api::router(daemons.clone());
@@ -2801,7 +2860,11 @@ async fn patch(
         .method(Method::PATCH)
         .uri(uri)
         .header(header::CONTENT_TYPE, ctype)
-        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+        .extension(PeerUser(
+            Some(USER.to_string()),
+            Some("live".to_string()),
+            None,
+        ));
     if let Some(t) = if_match {
         req = req.header(header::IF_MATCH, t);
     }
@@ -2919,7 +2982,11 @@ async fn rc(
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/yang-data+json")
-        .extension(PeerUser(Some(USER.to_string()), Some("live".to_string())));
+        .extension(PeerUser(
+            Some(USER.to_string()),
+            Some("live".to_string()),
+            None,
+        ));
     if let Some((n, v)) = hdr {
         req = req.header(n, v);
     }

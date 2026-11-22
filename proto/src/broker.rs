@@ -306,8 +306,8 @@ pub enum WatchdogRequest {
     },
     /// `nos-restd` only, on every authenticated REST request: is the
     /// certificate with this serial, issued to `user`, still live? Answered
-    /// with `Ok` or `Denied` (the REST CA has no CRL; the watchdog keeps the
-    /// allowlist).
+    /// with `RestSessionLive` (carrying the role RADIUS granted, #1360) or
+    /// `Denied` (the REST CA has no CRL; the watchdog keeps the allowlist).
     RestCertCheck {
         /// Login name the certificate names.
         user: String,
@@ -436,6 +436,13 @@ pub enum WatchdogEvent {
         /// Seconds until it expires unredeemed.
         ttl_secs: u64,
     },
+    /// Reply to `RestCertCheck` (#1360): the certificate is live. `claim` is
+    /// the role RADIUS granted that login (`None` for a local-password one),
+    /// kept server side and never taken from the client.
+    RestSessionLive {
+        /// Role claimed by the login backend.
+        claim: Option<crate::UserRole>,
+    },
 }
 
 // Manual `Debug`: a `Ticket` is a credential.
@@ -468,6 +475,10 @@ impl fmt::Debug for WatchdogEvent {
                 .debug_struct("Ticket")
                 .field("ticket", &"<hidden>")
                 .field("ttl_secs", ttl_secs)
+                .finish(),
+            WatchdogEvent::RestSessionLive { claim } => f
+                .debug_struct("RestSessionLive")
+                .field("claim", claim)
                 .finish(),
         }
     }

@@ -80,6 +80,9 @@ struct RestSession {
     user: String,
     started: Instant,
     cert: Serial,
+    /// The role RADIUS granted this login (#1360): the authoritative copy,
+    /// also in the certificate's SAN. Only ever set by the broker.
+    claim: Option<String>,
 }
 
 /// Default for `--pki-ipc-session-max`: 24 hours.
@@ -331,15 +334,21 @@ impl Pki {
     /// `sign_user`, from the REST CA: the certificate a REST client presents
     /// to `nos-restd` (a different trust domain from IPC). `started` is when
     /// the password login behind it happened; the serial is allowlisted.
+    /// `claim` as on `sign_user` (#1360): kept in the session and the SAN.
     pub fn sign_rest_user(
         &self,
         csr_der: &[u8],
         user: &str,
         started: Instant,
+        claim: Option<&str>,
     ) -> io::Result<Vec<u8>> {
-        let cert = self
-            .rest_ca
-            .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)?;
+        let id = peer(Role::User, user);
+        let cert = match claim {
+            Some(c) => self
+                .rest_ca
+                .sign_csr_claiming(csr_der, &id, c, self.user_lifetime)?,
+            None => self.rest_ca.sign_csr(csr_der, &id, self.user_lifetime)?,
+        };
         let serial = Serial::of(&cert)?;
         let mut sessions = lock(&self.rest_sessions);
         sessions.retain(|_, s| !s.cert.expired());
@@ -349,6 +358,7 @@ impl Pki {
                 user: user.to_string(),
                 started,
                 cert: serial,
+                claim: claim.map(str::to_string),
             },
         );
         Ok(cert)
@@ -363,11 +373,22 @@ impl Pki {
     /// The login time behind the REST certificate `serial` of `user`, if it is
     /// still live: allowlisted, unexpired and within the session cap.
     pub fn rest_session(&self, serial: &str, user: &str) -> Option<Instant> {
+        self.rest_session_claim(serial, user)
+            .map(|(started, _)| started)
+    }
+
+    /// `rest_session` plus the stored role claim (#1360): what a renewal and
+    /// `RestCertCheck` use, never anything the client sent.
+    pub fn rest_session_claim(
+        &self,
+        serial: &str,
+        user: &str,
+    ) -> Option<(Instant, Option<String>)> {
         let max = Duration::from_secs(self.rest_session_max.load(Ordering::Relaxed));
         lock(&self.rest_sessions)
             .get(serial)
             .filter(|s| s.user == user && !s.cert.expired() && s.started.elapsed() < max)
-            .map(|s| s.started)
+            .map(|s| (s.started, s.claim.clone()))
     }
 
     /// The listener certificate for `nos-restd`, and the REST CA's own
@@ -507,7 +528,9 @@ mod tests {
         let (_tmp, pki) = pki();
         let sign = |user: &str| {
             let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
-            let cert = pki.sign_rest_user(&csr, user, Instant::now()).unwrap();
+            let cert = pki
+                .sign_rest_user(&csr, user, Instant::now(), None)
+                .unwrap();
             Serial::of(&cert).unwrap().to_string()
         };
         let (a, b) = (sign("alice"), sign("bob"));
@@ -524,6 +547,19 @@ mod tests {
 
         pki.set_rest_session_max(Duration::ZERO);
         assert!(pki.rest_session(&b, "bob").is_none(), "past the cap");
+    }
+
+    #[test]
+    fn rest_session_keeps_its_claim_server_side() {
+        let (_tmp, pki) = pki();
+        let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = pki
+            .sign_rest_user(&csr, "rad", Instant::now(), Some("operator"))
+            .unwrap();
+        let serial = Serial::of(&cert).unwrap().to_string();
+        let (_, claim) = pki.rest_session_claim(&serial, "rad").unwrap();
+        assert_eq!(claim.as_deref(), Some("operator"));
+        assert!(pki.rest_session_claim(&serial, "other").is_none());
     }
 
     #[test]
@@ -555,7 +591,9 @@ mod tests {
     async fn initial_diff_also_drops_rest_only_users_that_vanished() {
         let (_tmp, pki) = pki();
         let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
-        let cert = pki.sign_rest_user(&csr, "alice", Instant::now()).unwrap();
+        let cert = pki
+            .sign_rest_user(&csr, "alice", Instant::now(), None)
+            .unwrap();
         let serial = Serial::of(&cert).unwrap().to_string();
         let none = Path::new("/nonexistent");
         pki.users_changed(none, &[diff("alice", DiffStatus::Added)], true)
