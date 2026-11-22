@@ -169,9 +169,53 @@ pub struct Rib {
     pub vpn_info: HashMap<IpNet, Vec<nos_proto::VpnRouteInfo>>,
     /// This VRF's label (`vpn::VrfExport::label`), for `show route`.
     pub vpn_label: Option<u32>,
+    /// Each OSPF owner's ILM set (`PushMplsRoutes`, #1165), beside `ospf`.
+    ilm: BTreeMap<OspfOwner, Vec<nos_proto::IlmRoute>>,
+    /// ILM entries given on the command line (`--test-ilm`, e2e only).
+    pub ilm_fixed: Vec<nos_proto::IlmRoute>,
 }
 
 impl Rib {
+    /// Replaces `owner`'s ILM set (empty removes it).
+    pub fn set_ilm(&mut self, owner: OspfOwner, routes: Vec<nos_proto::IlmRoute>) {
+        if routes.is_empty() {
+            self.ilm.remove(&owner);
+        } else {
+            self.ilm.insert(owner, routes);
+        }
+    }
+
+    /// Every ILM entry of the table by label: the fixed ones, then each owner
+    /// in order; the first claim on a label wins, later ones are dropped
+    /// (the clash is the caller's to log: see `ilm_clashes`).
+    pub fn ilm_routes(&self) -> Vec<nos_proto::IlmRoute> {
+        let mut seen = HashSet::new();
+        let mut out: Vec<_> = self
+            .ilm_fixed
+            .iter()
+            .chain(self.ilm.values().flatten())
+            .filter(|r| seen.insert(r.label))
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| r.label);
+        out
+    }
+
+    /// Labels claimed by more than one pusher.
+    pub fn ilm_clashes(&self) -> Vec<u32> {
+        let mut seen = HashSet::new();
+        let mut dup: Vec<u32> = self
+            .ilm_fixed
+            .iter()
+            .chain(self.ilm.values().flatten())
+            .filter(|r| !seen.insert(r.label))
+            .map(|r| r.label)
+            .collect();
+        dup.sort_unstable();
+        dup.dedup();
+        dup
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -443,6 +487,7 @@ impl Rib {
             .filter(|o| !keep.contains(*o))
             .cloned()
             .collect();
+        self.ilm.retain(|o, _| keep.contains(o));
         for owner in &gone {
             if let Some(old) = self.ospf.remove(owner) {
                 for prefix in old.into_keys() {

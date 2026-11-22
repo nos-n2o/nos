@@ -751,3 +751,11 @@ pub const OSPFV3_INSTANCE_2_PREFIX: &str = "2001:db8:79::/48";
 /// `OSPFV3_INSTANCE_2_PREFIX`), via router-a's address on the shared link.
 pub const OSPFV3_INSTANCE_1_PREFIX: &str = "2001:db8:7b::/48";
 pub const OSPFV3_GATEWAY_A: &str = "2001:db8:1::1";
+
+/// `mpls-ilm` (#1165): the incoming labels of its three ILM entries (inside
+/// the 16..=1048574 unreserved range and `mpls_ready`'s label space) and the
+/// label the swap goes out with.
+pub const ILM_SWAP: u32 = 16001;
+pub const ILM_SWAP_OUT: u32 = 16002;
+pub const ILM_PHP: u32 = 16003;
+pub const ILM_LOCAL: u32 = 16004;

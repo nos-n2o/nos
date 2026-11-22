@@ -271,6 +271,7 @@ fn to_route(prefix: IpNet, (next_hops, backup, metric): &Hops) -> OspfRoute {
         backup_interface_id: None,
         metric: *metric,
         discard: next_hops.is_empty(),
+        next_hop_labels: Vec::new(),
     }
 }
 
@@ -333,6 +334,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -353,6 +355,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 5,
                 discard: true,
+                next_hop_labels: Vec::new(),
             })]
         );
         assert_eq!(
@@ -385,6 +388,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             }),
             OspfRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
         ];
@@ -409,6 +413,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -439,6 +444,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -488,6 +494,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })
             .collect();
 

@@ -494,6 +494,30 @@ pub(crate) async fn apply_to_kernel(
         error!(table = %table, error = %e, "failed to apply routes to kernel");
         kernel.mark_dirty();
     }
+    sync_ilm(table, rib, kernel, gate, driver).await;
+}
+
+/// Converges the kernel's ILM entries to the table's merged set (#1165). The
+/// caller holds the gate; a failure marks the gate dirty, so the whole table
+/// (ILM included) is re-applied.
+pub(crate) async fn sync_ilm(
+    table: &str,
+    rib: &RwLock<Rib>,
+    kernel: &KernelGate,
+    _gate: &GateGuard<'_>,
+    driver: &dyn RibDriver,
+) {
+    let (routes, clashes) = {
+        let g = rib.read().await;
+        (g.ilm_routes(), g.ilm_clashes())
+    };
+    for label in clashes {
+        warn!(table = %table, label, "mpls label claimed by more than one source, first wins");
+    }
+    if let Err(e) = driver.sync_ilm(table, &routes).await {
+        error!(table = %table, error = %e, "failed to apply mpls ilm routes");
+        kernel.mark_dirty();
+    }
 }
 
 /// A dirty-triggered full apply (from a fresh snapshot). `true` when it

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use nos_proto::IpNet;
+use nos_proto::{IlmRoute, IpNet};
 use thiserror::Error;
 
 use crate::evpn::{L3Vni, Mac};
@@ -128,6 +128,17 @@ pub trait RibDriver: Send + Sync {
     /// run before `apply` installs a labelled (`Vpn`) route. The default
     /// builds nothing.
     async fn sync_mpls(&self, _table_name: &str, _mpls: Option<&Mpls>) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    /// Segment routing (#1165): converges this table's `AF_MPLS` ILM entries
+    /// to exactly `routes` (the merged set of every pusher): installs or
+    /// replaces what changed, removes the entries a previous call or a crashed
+    /// predecessor left that are no longer wanted. An entry whose next hop
+    /// has no egress interface yet is deferred to the next call. `Err` for a
+    /// label the kernel would refuse (`mpls::check_ilm`). The default builds
+    /// nothing.
+    async fn sync_ilm(&self, _table_name: &str, _routes: &[IlmRoute]) -> Result<(), DriverError> {
         Ok(())
     }
 }

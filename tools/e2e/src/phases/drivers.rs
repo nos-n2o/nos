@@ -5480,3 +5480,88 @@ pub async fn sandbox_nnp(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet("exited.*signal: 31", 0, 1).await?;
     Ok(())
 }
+
+/// MPLS ILM entries (segment routing, #1165): `--ribd-arg=--test-ilm` stands
+/// in for the OSPF SR daemon, so the real `nos-ribd` programs real `AF_MPLS`
+/// routes, one of each kind: a swap, a PHP pop toward router-b, and a pop
+/// followed by a lookup in `rt1`. Self-contained. The proof is `nos-ribd`'s
+/// own log line, written only after the kernel accepted the route; removal
+/// is the daemon's clean shutdown (SIGINT, `teardown`; read from `docker logs`, the forwarder is already stopped), after which the
+/// watchdog's restart installs them again.
+pub async fn mpls_ilm(w: &mut World) -> anyhow::Result<()> {
+    let gw = IP_B.s();
+    w.up(&[
+        &format!("--ribd-arg=--test-ilm={ILM_SWAP}={gw},{ILM_SWAP_OUT}"),
+        &format!("--ribd-arg=--test-ilm={ILM_PHP}={gw}"),
+        &format!("--ribd-arg=--test-ilm={ILM_LOCAL}"),
+    ])
+    .await?;
+    // docker mounts /proc/sys read-only: the label space is the operator's.
+    super::bgp::mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    let installed = |label: u32, out: &str| {
+        format!("installed mpls ilm route table=rt1 label={label} out={out}")
+    };
+    a.wait_new(
+        &installed(ILM_SWAP, &format!("\\[\\[{ILM_SWAP_OUT}\\]\\]")),
+        0,
+        60,
+    )
+    .await?;
+    a.wait_new(&installed(ILM_PHP, "\\[\\[\\]\\]"), 0, 30)
+        .await?;
+    a.wait_new(&installed(ILM_LOCAL, "\\[\\]"), 0, 30).await?;
+    // A steady state rewrites nothing: the 10 s re-apply finds each entry in
+    // the kernel and in its shadow.
+    let steady = a.count_fresh("installed mpls ilm route").await;
+    a.assert_quiet("installed mpls ilm route", steady, 25)
+        .await?;
+
+    let labels = [ILM_SWAP, ILM_PHP, ILM_LOCAL];
+    let removed = |label: u32| format!("removed mpls ilm route table=rt1 label={label}");
+    let reinstalled = a.count("installed mpls ilm route");
+    let since = i32::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    w.dock
+        .signal_process("router-a", "nos-ribd", "-INT")
+        .await?;
+    // `teardown` runs after the log forwarder is stopped, so the removal lines
+    // reach `docker logs` (colour codes stripped) but never `nos-logd`.
+    let mut plain = String::new();
+    for _ in 0..30 {
+        plain = strip_ansi(&w.dock.logs_since("router-a", since).await?);
+        if labels.iter().all(|&l| plain.contains(&removed(l))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    for &l in &labels {
+        if !plain.contains(&removed(l)) {
+            bail!("router-a: no '{}' in docker logs after SIGINT", removed(l));
+        }
+    }
+    a.wait_new("installed mpls ilm route", reinstalled, 60)
+        .await?;
+    Ok(())
+}
+
+/// `s` without ANSI colour sequences (`docker logs` keeps the daemons' own).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
