@@ -11015,6 +11015,10 @@ pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&retained(153, 0xc0, 2), baseline.0, 60).await?;
     b.wait_new(&retained(153, 0xe0, 2), baseline.1, 60).await?;
 
+    log("#1036: GET /v1/bgp/routes lists the attribute (router-a as received, router-b with Partial)");
+    expect_unknown_attribute(a, UNKNOWN_ATTR_PREFIX, 0xc0).await?;
+    expect_unknown_attribute(b, UNKNOWN_ATTR_PREFIX, 0xe0).await?;
+
     log("the 1024-byte cap: the second 600-byte attribute is dropped, the first kept");
     a.wait_new(
         "dropping unrecognized optional transitive attribute over the per-route cap attr_type=155 len=600 cap=1024",
@@ -11045,6 +11049,34 @@ pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("bgp session established peer=", sessions, 90)
         .await?;
     Ok(())
+}
+
+/// #1036: polls `GET /v1/bgp/routes` until `prefix` lists attribute type 153
+/// with `flags` and the 2-byte value `0102` (hex `"0102"`).
+async fn expect_unknown_attribute(r: &Router, prefix: &str, flags: u8) -> anyhow::Result<()> {
+    let want = serde_json::json!([{"attr_type": 153, "flags": flags, "value": "0102"}]);
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bgp/routes", None, 200)
+            .await?;
+        let json: serde_json::Value = serde_json::from_str(&last)?;
+        let hit = json.as_array().into_iter().flatten().any(|inst| {
+            inst["result"]["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|rt| rt["prefix"] == prefix && rt["unknown_attributes"] == want)
+        });
+        if hit {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: GET /v1/bgp/routes never listed {prefix} with attribute 153 flags {flags:#x}: {last}",
+        r.name()
+    )
 }
 
 /// Replaces router-g with an ExaBGP running `conf`.

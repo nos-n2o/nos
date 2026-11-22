@@ -61,7 +61,8 @@ pub use bgp::{
     BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary, FamilyReeval,
     FlowspecRouteCursor, FlowspecRouteSummary, GrSummary, PeerSummary, RedistributeUpdate,
     RedistributedRoute, ReevalFamily, RpkiCacheStatus, RpkiSessionState, RpkiValidationState,
-    VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
+    UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary,
+    BGP_PAGE_MAX,
 };
 pub use broker::{
     ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,

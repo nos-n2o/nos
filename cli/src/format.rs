@@ -1421,13 +1421,13 @@ pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
     let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
     routes
         .iter()
-        .map(|r| {
+        .flat_map(|r| {
             let state = match r.validation_state {
                 S::Valid => "valid",
                 S::Invalid => "invalid",
                 S::NotFound => "not-found",
             };
-            format!(
+            let row = format!(
                 "  {} {} from {} next-hop {} as-path [{}] origin-as {} local-pref {} {}",
                 if r.best { ">" } else { " " },
                 r.prefix,
@@ -1437,7 +1437,17 @@ pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
                 opt(r.origin_as.map(|a| a.to_string())),
                 r.local_pref,
                 state
-            )
+            );
+            let attrs = r.unknown_attributes.iter().map(|a| {
+                format!(
+                    "      attr {} flags=0x{:02x} len={} {}",
+                    a.attr_type,
+                    a.flags,
+                    a.value.len() / 2,
+                    a.value
+                )
+            });
+            std::iter::once(row).chain(attrs)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -2533,6 +2543,7 @@ mod tests {
             local_pref: 100,
             best,
             validation_state: state,
+            unknown_attributes: vec![],
         };
         let local = BgpRouteSummary {
             as_path: String::new(),
@@ -2549,6 +2560,34 @@ mod tests {
                 ]
             ),
             "bgp instance r1:\n  > 192.0.2.0/24 from 10.0.0.2 next-hop 10.0.0.2 as-path [65001 65002] origin-as 65002 local-pref 100 valid\n    192.0.2.0/24 from 10.0.0.3 next-hop 10.0.0.3 as-path [65001 65002] origin-as 65002 local-pref 100 invalid\n    192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found"
+        );
+    }
+
+    #[test]
+    fn render_bgp_routes_lists_unknown_attributes_under_their_row() {
+        use nos_proto::{BgpRouteSummary, RpkiValidationState as S, UnknownAttributeSummary as U};
+        let r = |unknown_attributes| BgpRouteSummary {
+            prefix: "192.0.2.0/24".to_string(),
+            peer: None,
+            next_hop: None,
+            as_path: String::new(),
+            origin_as: None,
+            local_pref: 100,
+            best: true,
+            validation_state: S::Valid,
+            unknown_attributes,
+        };
+        let u = |attr_type, flags, value: &str| U {
+            attr_type,
+            flags,
+            value: value.into(),
+        };
+        let row =
+            "  > 192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 valid";
+        assert_eq!(render_bgp_route_lines(&[r(vec![])]), row);
+        assert_eq!(
+            render_bgp_route_lines(&[r(vec![u(0xfe, 0xe0, "deadbeef"), u(7, 0xc0, "")]), r(vec![])]),
+            format!("{row}\n      attr 254 flags=0xe0 len=4 deadbeef\n      attr 7 flags=0xc0 len=0 \n{row}")
         );
     }
 

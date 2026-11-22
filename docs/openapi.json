@@ -1500,6 +1500,13 @@
             "description": "The prefix, `192.0.2.0/24`.",
             "type": "string"
           },
+          "unknown_attributes": {
+            "description": "Retained unrecognized optional transitive attributes (RFC 4271 §5),\nsorted by type; empty for a local route.",
+            "items": {
+              "$ref": "#/components/schemas/UnknownAttributeSummary"
+            },
+            "type": "array"
+          },
           "validation_state": {
             "$ref": "#/components/schemas/RpkiValidationState",
             "description": "RFC 6811 origin validation state."
@@ -1510,7 +1517,8 @@
           "as_path",
           "local_pref",
           "best",
-          "validation_state"
+          "validation_state",
+          "unknown_attributes"
         ],
         "type": "object"
       },
@@ -7221,6 +7229,33 @@
           "dirty",
           "resumed",
           "generation"
+        ],
+        "type": "object"
+      },
+      "UnknownAttributeSummary": {
+        "description": "One retained unrecognized path attribute of a route, for `show bgp routes`.",
+        "properties": {
+          "attr_type": {
+            "description": "The attribute type code.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "flags": {
+            "description": "The flags byte as stored (Partial as received, Extended-Length cleared).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "value": {
+            "description": "The attribute value as lowercase hex, no separators.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attr_type",
+          "flags",
+          "value"
         ],
         "type": "object"
       },
