@@ -182,6 +182,15 @@ impl<L: Lsa> Lsdb<L> {
         self.topology_changes.drain().collect()
     }
 
+    /// Drops the pending topology changes unreported: a helper that just
+    /// entered grace reacts only to changes made after it (RFC 3623 §3.2 (c)),
+    /// not to ones still waiting for the next aging tick (#1027).
+    // ponytail: forgets them for every link of the area; a change that another
+    // neighbor's grace needed within the same tick is missed, the next one still ends it.
+    pub fn forget_topology_changes(&mut self) {
+        self.topology_changes.clear();
+    }
+
     /// Like `take_topology_changes`, only for LSAs that replaced or flushed
     /// one already held.
     pub fn take_superseded_changes(&mut self) -> Vec<Ipv4Addr> {
@@ -399,6 +408,11 @@ mod tests {
         assert_eq!(db.take_topology_changes(), vec![origin], "flush");
         db.install(with(0, 1, 5, 0));
         assert!(db.take_topology_changes().is_empty(), "not a topology LSA");
+        db.install(with(9, 5, 8, 0));
+        db.forget_topology_changes();
+        assert!(db.take_topology_changes().is_empty(), "forgotten (#1027)");
+        db.install(with(9, 6, 9, 0));
+        assert_eq!(db.take_topology_changes(), vec![origin], "later ones count");
     }
 
     fn key() -> u32 {
