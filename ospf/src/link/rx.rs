@@ -855,7 +855,14 @@ pub(super) async fn handle_lsu(
         .filter(|l| newly_installed.contains(&l.header))
     {
         if let LsaBody::Grace(body) = grace.body {
+            let was = in_grace(status, grace.header.advertising_router);
             on_grace_lsa(cfg, status, &grace.header, body);
+            // #1027: a change installed before this grace began, still waiting
+            // for the aging tick, is not "during" it (§3.2 (c)): without this a
+            // third router's LSA from just before the restart ends the grace.
+            if !was && in_grace(status, grace.header.advertising_router) {
+                lsdb.lock().await.forget_topology_changes();
+            }
         }
     }
 
