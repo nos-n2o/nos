@@ -1475,6 +1475,76 @@ async fn restd_and_users_can_edit() {
     }
 }
 
+/// #1360: what `Restd` may assert. A claim applies only to a name with no
+/// local entry, and only from a `Restd` connection.
+#[tokio::test]
+async fn restd_claim_applies_to_unknown_names_only() {
+    use nos_proto::{Actor, User, UserRole};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let cfg = Config {
+        users: vec![User {
+            name: "local-ro".into(),
+            password: String::new(),
+            role: UserRole::ReadOnly,
+        }],
+        ..Config::default()
+    };
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    let claim = |name: &str, c| Actor {
+        name: name.into(),
+        claim: Some(c),
+    };
+    // An unknown name takes the claimed role: admin edits, read-only may not.
+    let (mut reader, mut writer) = connect_as(&path, "restd", "rt1").await;
+    writer
+        .send(Request::OpenTransaction {
+            name: "t".into(),
+            base: TransactionBase::Blank,
+            actor: Some(claim("rad", UserRole::ReadOnly)),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Transaction(_)
+    ));
+    let send_apply = |who: Actor| Request::ApplyOp {
+        name: "t".into(),
+        op: ensure_op("x"),
+        actor: Some(who),
+    };
+    writer
+        .send(send_apply(claim("rad", UserRole::Admin)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Transaction(_)
+    ));
+    for who in [
+        claim("rad", UserRole::ReadOnly),
+        // a local name: the forged admin claim is ignored
+        claim("local-ro", UserRole::Admin),
+        Actor::local("rad"),
+    ] {
+        writer.send(send_apply(who.clone())).await.unwrap();
+        assert!(
+            matches!(next_event(&mut reader).await, Event::Error(m) if m.starts_with("forbidden")),
+            "{who:?}"
+        );
+    }
+    // A person's own connection ignores a body claim.
+    let (mut ur, mut uw) = connect_as(&path, "user", "stranger").await;
+    uw.send(send_apply(claim("stranger", UserRole::Admin)))
+        .await
+        .unwrap();
+    assert!(matches!(next_event(&mut ur).await, Event::Error(m) if m.starts_with("forbidden")));
+}
+
 /// A certificate from some other CA never gets as far as a request.
 #[tokio::test]
 async fn a_peer_from_another_ca_is_rejected() {

@@ -109,7 +109,8 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
 # inside its routing table's VRF (see rest/CLAUDE.md).
 # nos-sshd has no file capabilities: it runs as root (uid 0) and drops its own
-# bounding set at startup (see ssh/CLAUDE.md).
+# bounding set at startup (see ssh/CLAUDE.md). Root is inherent: OpenSSH only switches
+# to the login user when uid 0, even with CAP_SETUID/SETGID (#1187).
 # nos-sandbox-exec (#1211) is the trampoline every daemon but nos-sshd is exec'd
 # through (NO_NEW_PRIVS): it must hold, in permitted, every capability any daemon
 # gets, so it carries the union of the lines above (keep them equal). It trims itself

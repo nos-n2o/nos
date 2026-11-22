@@ -296,6 +296,7 @@ impl FakeRibd {
                 }
                 RibRequest::PushBgpRoutes(_)
                 | RibRequest::PushOspfRoutes { .. }
+                | RibRequest::PushMplsRoutes { .. }
                 | RibRequest::PushEvpnRoutes(_)
                 | RibRequest::PushVpnRoutes(_) => Reply::None,
             }

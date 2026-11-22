@@ -30,6 +30,7 @@ Audit of every flag and environment variable of every binary the `Dockerfile` sh
 | `nos` | `--watchdog-socket`, `--pki-ca` | `cli/tests/login_shell.rs`; a relocated `--pki-dir` |
 | `nos-ribd`, `nos-interfaced`, `nos-fdbd`, `nos-acld` | `--driver linux\|noop` (default `linux`; `noop` is log-only) | `watchdog/tests/system.rs` |
 | `nos-ribd` | `--redistribute-chunk` (hidden) | e2e `ospf-push-chunked` |
+| `nos-ribd` | `--test-ilm` (hidden, repeatable) | e2e `mpls-ilm` |
 | `nos-acld` | `--flowspec-file` (hidden) | e2e: every router starts with it; the `acl` phase writes the file |
 | `nos-ospfd`, `nos-ospfv3d` | `--lsa-age-multiplier` | e2e `ospf-aging` |
 | `nos-ospfd`, `nos-ospfv3d` | `--dbd-fault`, `--push-chunk` (hidden) | e2e `ospf-dbd-pagination`, `ospf-push-chunked`, `ospfv3-mtu-pagination` |

@@ -6,6 +6,7 @@ How NOS is built internally. Operators: see [docs/README.md](../README.md). The 
 - [supervision.md](supervision.md): how `nos-watchdogd` spawns, reconciles and restarts every daemon
 - [endpoint-broker.md](endpoint-broker.md): `ServiceRef` resolution and each daemon's query listener
 - [linux-drivers.md](linux-drivers.md): `Driver` traits, VRFs, bridges, connected routes, the LACP push
+- [segment-routing.md](segment-routing.md): OSPF segment routing on the MPLS dataplane: SRGB, ILM entries, PHP, who owns what
 - [ipc-security.md](ipc-security.md): mutual post-quantum TLS, identities, rotation, revocation, allow-lists
 - [auth.md](auth.md): users, login flows, BGP session authentication
 - [pam.md](pam.md): `pam_nos.so`, the PAM module that checks logins against `nos-watchdogd`, and `libnss_nos`, the account mapping

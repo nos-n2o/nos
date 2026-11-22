@@ -537,7 +537,7 @@ async fn only_restd_may_use_the_rest_requests() {
         let event = ask(&mut conn, request).await;
         match event {
             WatchdogEvent::Denied(m) => assert!(unknown_serial && m == "session expired"),
-            _ => assert!(!unknown_serial || matches!(event, WatchdogEvent::Ok)),
+            _ => assert!(!unknown_serial || matches!(event, WatchdogEvent::RestSessionLive { .. })),
         }
     }
 }
@@ -633,7 +633,7 @@ async fn revoking_a_user_kills_their_rest_certificates() {
     );
     assert!(matches!(
         ask(&mut conn, check("alice", &a)).await,
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { .. }
     ));
     // A certificate is only good for the user it names.
     assert!(matches!(
@@ -657,12 +657,12 @@ async fn revoking_a_user_kills_their_rest_certificates() {
     ));
     assert!(matches!(
         ask(&mut conn, check("bob", &b)).await,
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { .. }
     ));
     let fresh = rest_serial(&mut conn, "alice").await;
     assert!(matches!(
         ask(&mut conn, check("alice", &fresh)).await,
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { .. }
     ));
 }
 
@@ -698,7 +698,7 @@ async fn rest_renewals_stop_at_the_session_cap() {
     let third = rest_serial(&mut conn, "alice").await;
     assert!(matches!(
         ask(&mut conn, check("alice", &third)).await,
-        WatchdogEvent::Ok
+        WatchdogEvent::RestSessionLive { .. }
     ));
 }
 
@@ -1119,6 +1119,74 @@ async fn radius_accept_mints_a_transient_user_with_the_role_in_the_certificate()
         panic!("renewal refused");
     };
     assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+}
+
+/// #1360: a REST login honours `login-order` like IPC; the role stays in the
+/// session (and the SAN), `RestCertCheck` returns it and a renewal keeps it.
+#[tokio::test]
+async fn rest_login_through_radius_keeps_the_claim_in_the_session() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(false).await, vec![Radius, Local]);
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut conn, rest_login("alice", "pw", csr)).await
+    else {
+        panic!("rest radius login refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+    let serial = nos_pki::Serial::of(&cert_der).unwrap().to_string();
+    assert!(matches!(
+        ask(&mut conn, check("alice", &serial)).await,
+        WatchdogEvent::RestSessionLive {
+            claim: Some(nos_proto::UserRole::Operator)
+        }
+    ));
+
+    // The renewal's claim is the stored session's: the client cannot change it.
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let renew = WatchdogRequest::RestRenew {
+        user: "alice".into(),
+        serial,
+        csr_der: csr,
+    };
+    let WatchdogEvent::Issued { cert_der, .. } = ask(&mut conn, renew).await else {
+        panic!("renewal refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+    let serial = nos_pki::Serial::of(&cert_der).unwrap().to_string();
+    assert!(matches!(
+        ask(&mut conn, check("alice", &serial)).await,
+        WatchdogEvent::RestSessionLive {
+            claim: Some(nos_proto::UserRole::Operator)
+        }
+    ));
+
+    // A reject never falls back to the local user; a local login has no claim.
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let event = ask(&mut conn, rest_login("bob", "localpw", csr)).await;
+    assert!(matches!(&event, WatchdogEvent::Denied(m) if m == nos_proto::INVALID_CREDENTIALS));
+}
+
+#[tokio::test]
+async fn rest_local_first_login_has_no_claim() {
+    use nos_proto::LoginBackend::{Local, Radius};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_radius(&e, radius_stub(false).await, vec![Local, Radius]);
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut conn, rest_login("bob", "localpw", csr)).await
+    else {
+        panic!("local rest login refused");
+    };
+    assert_eq!(claim_of(&cert_der), None);
+    let serial = nos_pki::Serial::of(&cert_der).unwrap().to_string();
+    assert!(matches!(
+        ask(&mut conn, check("bob", &serial)).await,
+        WatchdogEvent::RestSessionLive { claim: None }
+    ));
 }
 
 #[tokio::test]

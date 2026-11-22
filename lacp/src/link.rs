@@ -131,7 +131,16 @@ trait FrameSink {
 /// A [`FrameSink`] that also yields the next received PDU.
 trait FrameLink: FrameSink {
     async fn recv(&self) -> io::Result<Vec<u8>>;
+    /// The netdev was recreated: the socket is bound to the old ifindex and
+    /// will never see a frame again (the task must end, `reconcile` respawns).
+    fn is_stale(&self) -> bool {
+        false
+    }
 }
+
+/// How often [`drive`] checks [`FrameLink::is_stale`] (a lost `sk_err`, or a
+/// MAC-only change, is invisible to `recv`).
+const STALE_POLL: Duration = Duration::from_secs(5);
 
 impl FrameSink for LacpSocket {
     fn send(&self, pdu: &[u8]) -> io::Result<()> {
@@ -142,6 +151,9 @@ impl FrameSink for LacpSocket {
 impl FrameLink for LacpSocket {
     async fn recv(&self) -> io::Result<Vec<u8>> {
         LacpSocket::recv(self).await
+    }
+    fn is_stale(&self) -> bool {
+        LacpSocket::is_stale(self)
     }
 }
 
@@ -175,8 +187,16 @@ pub async fn run(
 async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>, link: &L) {
     let mut advert_rx = p.config.advert_rx.clone();
     let mut active_rx = p.config.active_rx.clone();
+    let mut stale_poll = tokio::time::interval(STALE_POLL);
     loop {
         tokio::select! {
+            _ = stale_poll.tick() => {
+                if link.is_stale() {
+                    warn!(interface = %p.config.interface, "lacp interface recreated, link task exiting");
+                    p.detach();
+                    return;
+                }
+            }
             () = tokio::time::sleep_until(p.tx.next_periodic_send) => p.on_periodic(link),
             () = tokio::time::sleep_until(p.current_while_deadline) => {
                 p.on_current_while_expired(link);
@@ -205,6 +225,7 @@ async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>
             recv = link.recv() => {
                 let Ok(bytes) = recv else {
                     warn!(interface = %p.config.interface, error = ?recv.err(), "lacp socket closed, link task exiting");
+                    p.detach();
                     return;
                 };
                 p.on_frame(&bytes, link);
@@ -441,6 +462,15 @@ impl Port {
         self.settle();
         self.tx
             .send_if_changed(sink, &self.config.interface, self.pdu());
+    }
+
+    /// The task is ending on its own: forget the observation so selection does
+    /// not keep a stale Distributing verdict until `reconcile` respawns it.
+    fn detach(&self) {
+        if let Ok(mut o) = self.observations.lock() {
+            o.remove(&self.config.interface);
+        }
+        self.changed.notify_one();
     }
 
     fn on_selection(&mut self, selected: bool, sink: &dyn FrameSink) {

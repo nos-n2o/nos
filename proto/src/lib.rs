@@ -64,7 +64,8 @@ pub use bgp::{
     BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary, FamilyReeval,
     FlowspecRouteCursor, FlowspecRouteSummary, GrSummary, PeerSummary, RedistributeUpdate,
     RedistributedRoute, ReevalFamily, RpkiCacheStatus, RpkiSessionState, RpkiValidationState,
-    VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
+    UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate, VpnRouteCursor, VpnRouteSummary,
+    BGP_PAGE_MAX,
 };
 pub use broker::{
     ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,
@@ -87,7 +88,7 @@ pub use interface::{
     LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LacpLinkSteering,
     LinkState, PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
 };
-pub use ipc::{Event, HistoryEntry, Request, TransactionBase, TransactionSnapshot};
+pub use ipc::{Actor, Event, HistoryEntry, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
 pub use lacp::{
     LacpAgreement, LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
@@ -113,9 +114,9 @@ pub use paths::{
     DEFAULT_WATCHDOG_SOCKET,
 };
 pub use rib::{
-    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, NextHop, OspfRoute, OspfRouteUpdate, PrefixRoutes,
-    ResolvedNextHop, RibEvent, RibRequest, RouteEntry, RouteSourceKind, VpnPath, VpnRoute,
-    VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
+    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, IlmRoute, NextHop, OspfRoute, OspfRouteUpdate,
+    PrefixRoutes, ResolvedNextHop, RibEvent, RibRequest, RouteEntry, RouteSourceKind, VpnPath,
+    VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
 };
 pub use schema::{
     loopback_table_name, parse_fingerprint, redact_at, Aaa, AddressFamily, Admin, AdminKey,

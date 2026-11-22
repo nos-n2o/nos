@@ -35,6 +35,17 @@ pub struct Rest {
     session: Arc<Mutex<Option<Session>>>,
 }
 
+impl Identity {
+    /// A renewed certificate (`POST /v1/renew`) on the key it was issued for.
+    pub fn new(cert: Vec<u8>, key: nos_pki::Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            cert,
+            key,
+            lifetime: Duration::from_secs(60),
+        }
+    }
+}
+
 impl Rest {
     pub fn new(ip: &str, port: u16, ca_pem: Vec<u8>) -> Self {
         Self {

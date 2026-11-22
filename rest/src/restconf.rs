@@ -21,13 +21,13 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
-use axum::{Extension, Router};
+use axum::Router;
 use nos_proto::config_path::{self, PathError};
 use nos_proto::{Event, Request, TransactionBase};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::{json, Value};
 
-use crate::auth::PeerUser;
+use crate::auth::PeerActor;
 use crate::error::{ApiError, ApiResult, PROBLEM_JSON};
 use crate::ipc::{unexpected, Daemons};
 use crate::merge_patch;
@@ -513,7 +513,7 @@ static NEXT_TX: AtomicU64 = AtomicU64::new(0);
 /// Open, edit, commit; the transaction is discarded on any failure.
 async fn write(
     d: &Daemons,
-    actor: Option<String>,
+    actor: Option<nos_proto::Actor>,
     headers: &HeaderMap,
     uri: &Uri,
     t: &Target,
@@ -551,7 +551,7 @@ async fn write(
 #[allow(clippy::too_many_arguments)]
 async fn edit_and_commit(
     d: &Daemons,
-    actor: Option<String>,
+    actor: Option<nos_proto::Actor>,
     uri: &Uri,
     t: &Target,
     op: Op,
@@ -675,7 +675,7 @@ fn scalar(v: &Value) -> Option<String> {
 
 async fn modify(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
     method: axum::http::Method,

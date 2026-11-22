@@ -657,6 +657,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_min_links(w, &both).await?;
     lacp_v2(w, &both).await?;
     lacp_steering(w, &both).await?;
+    lacp_recreated_member(w, a).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
@@ -671,6 +672,73 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
 
     w.unlink_veths().await;
     Ok(())
+}
+
+/// #1333: a member netdev deleted and recreated under the same name (new
+/// ifindex) must be picked up again: the old `AF_PACKET` socket is bound to
+/// the dead ifindex and never sees a frame. An in-container veth pair
+/// `lpx0`/`lpx1` on router-a, `lpx0` in a throwaway Lacp aggregate, `lpx1`
+/// played by `lacp_partner.py`. `nos-lacpd` notices within its 5 s stale poll,
+/// the task exits and `reconcile`'s 10 s tick respawns it.
+async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
+    log("a recreated member netdev is reopened by nos-lacpd");
+    let netns = async |script: &str| {
+        w.dock
+            .in_netns(NETNS_HELPER_IMAGE, "router-a", &["sh", "-c", script])
+            .await
+    };
+    let mkpair =
+        "ip link add lpx0 type veth peer name lpx1 && ip link set lpx0 up && ip link set lpx1 up";
+    let heard = "lacp lacpdu received interface=lpx0";
+    let partner = async |secs: &str| {
+        w.dock
+            .in_netns(
+                PYTHON_HELPER_IMAGE,
+                "router-a",
+                &["python3", "-c", include_str!("lacp_partner.py"), secs],
+            )
+            .await
+    };
+    netns(mkpair).await?;
+    let flags = strings(&[
+        "--port-aggregate",
+        "lpxagg",
+        "--port-aggregate-mode",
+        "lacp",
+        "--lacp-rate",
+        "fast",
+        "--enslave-interface-into-port-aggregate",
+        "lpx0",
+    ]);
+    let base = a.count(heard);
+    a.provision(&flags).await?;
+    let result = async {
+        partner("8").await?;
+        a.wait_new(heard, base, 20).await?;
+
+        let (heard_base, exit_base) = (
+            a.count(heard),
+            a.count("lacp interface recreated, link task exiting interface=lpx0"),
+        );
+        netns("ip link del lpx0").await?;
+        netns(mkpair).await?;
+        // Up to 5 s (stale poll) + 10 s (reconcile tick) of silence; keep sending.
+        partner("25").await?;
+        a.wait_new(heard, heard_base, 5).await?;
+        a.wait_new(
+            "lacp interface recreated, link task exiting interface=lpx0",
+            exit_base,
+            5,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    let mut del = flags;
+    del.push("--delete-port-aggregate".into());
+    let _ = a.provision(&del).await;
+    let _ = netns("ip link del lpx0").await;
+    result
 }
 
 /// #657: three live `lacp-system-id` changes on router-a against the real
@@ -5479,4 +5547,89 @@ pub async fn sandbox_nnp(w: &mut World) -> anyhow::Result<()> {
     // #1217: no daemon was killed by the seccomp deny-list (SIGSYS) since the run began.
     a.assert_quiet("exited.*signal: 31", 0, 1).await?;
     Ok(())
+}
+
+/// MPLS ILM entries (segment routing, #1165): `--ribd-arg=--test-ilm` stands
+/// in for the OSPF SR daemon, so the real `nos-ribd` programs real `AF_MPLS`
+/// routes, one of each kind: a swap, a PHP pop toward router-b, and a pop
+/// followed by a lookup in `rt1`. Self-contained. The proof is `nos-ribd`'s
+/// own log line, written only after the kernel accepted the route; removal
+/// is the daemon's clean shutdown (SIGINT, `teardown`; read from `docker logs`, the forwarder is already stopped), after which the
+/// watchdog's restart installs them again.
+pub async fn mpls_ilm(w: &mut World) -> anyhow::Result<()> {
+    let gw = IP_B.s();
+    w.up(&[
+        &format!("--ribd-arg=--test-ilm={ILM_SWAP}={gw},{ILM_SWAP_OUT}"),
+        &format!("--ribd-arg=--test-ilm={ILM_PHP}={gw}"),
+        &format!("--ribd-arg=--test-ilm={ILM_LOCAL}"),
+    ])
+    .await?;
+    // docker mounts /proc/sys read-only: the label space is the operator's.
+    super::bgp::mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    let installed = |label: u32, out: &str| {
+        format!("installed mpls ilm route table=rt1 label={label} out={out}")
+    };
+    a.wait_new(
+        &installed(ILM_SWAP, &format!("\\[\\[{ILM_SWAP_OUT}\\]\\]")),
+        0,
+        60,
+    )
+    .await?;
+    a.wait_new(&installed(ILM_PHP, "\\[\\[\\]\\]"), 0, 30)
+        .await?;
+    a.wait_new(&installed(ILM_LOCAL, "\\[\\]"), 0, 30).await?;
+    // A steady state rewrites nothing: the 10 s re-apply finds each entry in
+    // the kernel and in its shadow.
+    let steady = a.count_fresh("installed mpls ilm route").await;
+    a.assert_quiet("installed mpls ilm route", steady, 25)
+        .await?;
+
+    let labels = [ILM_SWAP, ILM_PHP, ILM_LOCAL];
+    let removed = |label: u32| format!("removed mpls ilm route table=rt1 label={label}");
+    let reinstalled = a.count("installed mpls ilm route");
+    let since = i32::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    w.dock
+        .signal_process("router-a", "nos-ribd", "-INT")
+        .await?;
+    // `teardown` runs after the log forwarder is stopped, so the removal lines
+    // reach `docker logs` (colour codes stripped) but never `nos-logd`.
+    let mut plain = String::new();
+    for _ in 0..30 {
+        plain = strip_ansi(&w.dock.logs_since("router-a", since).await?);
+        if labels.iter().all(|&l| plain.contains(&removed(l))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    for &l in &labels {
+        if !plain.contains(&removed(l)) {
+            bail!("router-a: no '{}' in docker logs after SIGINT", removed(l));
+        }
+    }
+    a.wait_new("installed mpls ilm route", reinstalled, 60)
+        .await?;
+    Ok(())
+}
+
+/// `s` without ANSI colour sequences (`docker logs` keeps the daemons' own).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

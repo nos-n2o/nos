@@ -599,6 +599,7 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
             metric: 100_000,
             discard: false,
             backup_tunnel: Some(v6(N + 3)),
+            next_hop_labels: Vec::new(),
         })
         .collect();
     let whole = RibRequest::PushOspfRoutes {
@@ -914,6 +915,7 @@ async fn ospf_pushes_land_only_from_the_ospf_daemons() {
                 metric: 10,
                 discard: false,
                 backup_tunnel: None,
+                next_hop_labels: Vec::new(),
             })],
         })
         .await
@@ -1041,6 +1043,7 @@ fn ospf_route(prefix: &str, metric: u32) -> OspfRoute {
         metric,
         discard: false,
         backup_tunnel: None,
+        next_hop_labels: Vec::new(),
     }
 }
 

@@ -158,6 +158,15 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceHostRouter, words = "host-router")]
     pub host_router: bool,
 
+    /// RFC 3630 traffic engineering: originate area-scope TE LSAs (opaque
+    /// type 1): a Router Address LSA and a Link LSA per `Full`
+    /// point-to-point or broadcast link. Advertisement only, no CSPF. Off by
+    /// default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstanceTrafficEngineering, words = "traffic-engineering")]
+    pub traffic_engineering: bool,
+
     /// RFC 7490 remote loop-free alternates: for a destination with no basic
     /// LFA, a backup that tunnels (IP-in-IP) to a PQ node's loopback. Also
     /// makes this router's routing table decapsulate IP-in-IP from any
@@ -241,6 +250,7 @@ impl Default for OspfInstance {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
@@ -296,6 +306,7 @@ mod tests {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

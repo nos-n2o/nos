@@ -264,6 +264,21 @@ pub struct BgpRouteSummary {
     pub best: bool,
     /// RFC 6811 origin validation state.
     pub validation_state: RpkiValidationState,
+    /// Retained unrecognized optional transitive attributes (RFC 4271 §5),
+    /// sorted by type; empty for a local route.
+    pub unknown_attributes: Vec<UnknownAttributeSummary>,
+}
+
+/// One retained unrecognized path attribute of a route, for `show bgp routes`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownAttributeSummary {
+    /// The attribute type code.
+    pub attr_type: u8,
+    /// The flags byte as stored (Partial as received, Extended-Length cleared).
+    pub flags: u8,
+    /// The attribute value as lowercase hex, no separators.
+    pub value: String,
 }
 
 /// RFC 8210 session state of one configured RPKI cache, as seen by one

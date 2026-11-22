@@ -175,6 +175,7 @@ impl Pushed {
             // No next hop at all is an area range's discard route.
             discard: self.next_hops.is_empty(),
             backup_tunnel: None,
+            next_hop_labels: Vec::new(),
         }
     }
 }
@@ -333,6 +334,7 @@ mod tests {
                 metric: 10,
                 discard: false,
                 backup_tunnel: None,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -367,6 +369,7 @@ mod tests {
                 metric: 10,
                 discard: false,
                 backup_tunnel: None,
+                next_hop_labels: Vec::new(),
             }),
             OspfRouteUpdate::Remove("2001:db8:2::/64".parse().unwrap()),
         ];
@@ -416,6 +419,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })
             .collect();
 

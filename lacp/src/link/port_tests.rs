@@ -466,6 +466,7 @@ async fn run_returns_when_the_interface_cannot_be_opened() {
 struct ChanLink {
     sink: VecSink,
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<io::Result<Vec<u8>>>>,
+    stale: std::sync::atomic::AtomicBool,
 }
 
 impl FrameSink for ChanLink {
@@ -483,6 +484,29 @@ impl FrameLink for ChanLink {
             .await
             .unwrap_or_else(|| Err(io::Error::other("closed")))
     }
+    fn is_stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_exits_and_forgets_its_observation_when_the_link_goes_stale() {
+    let (_sel_tx, sel_rx) = watch::channel(false);
+    let (_frames_tx, frames_rx) = mpsc::unbounded_channel();
+    let observations = Arc::new(Mutex::new(HashMap::new()));
+    let port = Port::new(
+        config(true, LacpRate::Fast, sel_rx.clone()),
+        observations.clone(),
+        Arc::new(Notify::new()),
+        3,
+    );
+    let link = ChanLink {
+        sink: VecSink::default(),
+        rx: tokio::sync::Mutex::new(frames_rx),
+        stale: true.into(),
+    };
+    drive(port, sel_rx, &link).await;
+    assert!(observations.lock().unwrap().get("eth1").is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -499,6 +523,7 @@ async fn drive_follows_timers_selection_and_frames_until_the_link_fails() {
     let link = ChanLink {
         sink: VecSink::default(),
         rx: tokio::sync::Mutex::new(frames_rx),
+        stale: false.into(),
     };
     let observed = || *observations.lock().unwrap().get("eth1").unwrap();
     let mut driver = Box::pin(drive(port, sel_rx, &link));
@@ -556,6 +581,7 @@ async fn drive_exits_when_the_aggregate_manager_is_gone() {
     let link = ChanLink {
         sink: VecSink::default(),
         rx: tokio::sync::Mutex::new(frames_rx),
+        stale: false.into(),
     };
     drop(sel_tx);
     drive(port, sel_rx, &link).await;

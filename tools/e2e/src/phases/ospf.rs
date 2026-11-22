@@ -1005,6 +1005,41 @@ async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Res
     )
 }
 
+/// RFC 3630 traffic engineering LSAs (requires `ospf-lfa`, which leaves
+/// router-a and router-b in OSPF): with `traffic-engineering` on both, each
+/// installs the other's Router Address LSA (opaque type 1, area scope) and
+/// logs the address it carries; turning it off again leaves the session up.
+pub async fn ospf_te(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let te = |rid: &str, on: bool| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            rid,
+            "--ospf-traffic-engineering",
+            &on.to_string(),
+        ])
+    };
+    let seen = |rid: &str| {
+        format!("ospf te router address received area={OSPF_AREA} router={rid} address={rid}")
+    };
+    let (a0, b0) = (
+        a.count(&seen(OSPF_ROUTER_ID_B)),
+        b.count(&seen(OSPF_ROUTER_ID)),
+    );
+    log("enabling traffic-engineering on router-a and router-b");
+    a.provision(&te(OSPF_ROUTER_ID, true)).await?;
+    b.provision(&te(OSPF_ROUTER_ID_B, true)).await?;
+    a.wait_new(&seen(OSPF_ROUTER_ID_B), a0, 60).await?;
+    b.wait_new(&seen(OSPF_ROUTER_ID), b0, 60).await?;
+
+    log("restoring: traffic-engineering off");
+    a.provision(&te(OSPF_ROUTER_ID, false)).await?;
+    b.provision(&te(OSPF_ROUTER_ID_B, false)).await?;
+    both_full_p2p(a, b).await
+}
+
 /// RFC 6860 prefix suppression (requires `ospf-lfa`: router-c on the bridge,
 /// router-b's loopback addressed but out of OSPF). Router-c's eth0 is on
 /// `SUBNET` too, so the connected route always wins its kernel table (#139):
