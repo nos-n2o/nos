@@ -1176,6 +1176,11 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
     for r in [b, c] {
         r.established().await?;
     }
+    // The first IGP poll can beat nos-ribd's connected-prefix resolve and
+    // return {}: every next hop is then unresolvable until the next poll
+    // (#1347). Settle it before the route exists.
+    a.wait(&format!("igp costs updated costs={{.*{SUBNET}: 0"))
+        .await?;
 
     // router-b first, so its path is the older one (decision step 8) and
     // stays best while router-c's comes and goes as the sibling.
