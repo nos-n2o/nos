@@ -872,6 +872,10 @@ mod tests {
             self.bridge_mtu
         }
 
+        async fn link_speed_mbps(&self, _kernel_interface: &str) -> Option<u32> {
+            None
+        }
+
         async fn set_bridge_port_state(
             &self,
             _port: &crate::driver::BridgePortRef,

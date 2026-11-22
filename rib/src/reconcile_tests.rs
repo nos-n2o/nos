@@ -170,6 +170,7 @@ fn if_status(name: &str, flat: &[&str], tag0: &[&str]) -> InterfaceStatus {
         },
         link_local_address: None,
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 
@@ -803,6 +804,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             bond_name: None,
             err_disabled: false,
             steering: Vec::new(),
+            speed_mbps: None,
         },
     );
     ifaced.set_broadcast_domain(
@@ -814,6 +816,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             link_local_address: None,
             bridge_name: None,
             mtu: None,
+            speed_mbps: None,
         },
     );
     let wd = f.watchdog_socket();

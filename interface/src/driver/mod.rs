@@ -161,6 +161,10 @@ pub trait InterfaceDriver: Send + Sync {
     /// resolvable now (retried on the next resync).
     async fn bridge_mtu(&self, kernel_interface: &str) -> Option<u32>;
 
+    /// Observed kernel link speed of `kernel_interface` in Mbit/s, a pure
+    /// read sampled per query. `None` = unknown (`-1`, `0`, unreadable).
+    async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32>;
+
     /// Puts one bridge port in `state` right now (`InterfaceRequest::
     /// SetStpPortStates`). The port must exist and be a bridge port. A
     /// resync keeps the state through `InterfaceState.stp`.

@@ -942,6 +942,7 @@ mod tests {
                 .collect(),
             link_local_address: None,
             err_disabled: false,
+            speed_mbps: None,
         }
     }
 
@@ -953,6 +954,7 @@ mod tests {
             link_local_address: None,
             bridge_name: None,
             mtu: None,
+            speed_mbps: None,
         }
     }
 
@@ -993,6 +995,7 @@ mod tests {
             bond_name: None,
             err_disabled: false,
             steering: Vec::new(),
+            speed_mbps: None,
         }];
         let mut got: Vec<(String, String)> =
             connected_entries("rt1", &interfaces, &aggregates, &domains)

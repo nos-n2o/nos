@@ -155,6 +155,7 @@ mod tests {
                     link_local_address: None,
                     bridge_name: None,
                     mtu: None,
+                    speed_mbps: None,
                 })
             }
             _ => InterfaceEvent::NotFound,

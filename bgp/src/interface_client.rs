@@ -78,6 +78,7 @@ mod tests {
                 mtu: 1500,
                 subinterfaces: vec![],
                 err_disabled: false,
+                speed_mbps: None,
             }))
         });
 

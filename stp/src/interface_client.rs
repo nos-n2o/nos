@@ -205,6 +205,7 @@ mod tests {
             subinterfaces: vec![],
             link_local_address: None,
             err_disabled: d,
+            speed_mbps: None,
         };
         let a = |n: &str, d| PortAggregateStatus {
             name: n.into(),
@@ -216,6 +217,7 @@ mod tests {
             bond_name: None,
             err_disabled: d,
             steering: Vec::new(),
+            speed_mbps: None,
         };
         let held = held_names(
             &InterfaceEvent::Interfaces(vec![i("eth1", true), i("eth2", false)]),

@@ -237,6 +237,37 @@ async fn expect_sub_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #1368: `speed_mbps` on the interface status is the kernel's
+/// `/sys/class/net/<dev>/speed` read at query time (null when it reads -1/0),
+/// and never set for `lo`. What a veth really reports is logged, not assumed.
+pub async fn interface_speed(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let (_, raw) = w
+        .dock
+        .exec("router-a", &["cat", "/sys/class/net/eth0/speed"])
+        .await?;
+    let want = raw.trim().parse::<u32>().ok().filter(|&v| v > 0);
+    log(format!("router-a: kernel eth0 speed reads {raw:?}"));
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let status: serde_json::Value = serde_json::from_str(&body)?;
+    let got = status["speed_mbps"].as_u64();
+    if got != want.map(u64::from) {
+        bail!("router-a: GET /v1/interfaces/eth0 reports speed_mbps {got:?}, sysfs says {want:?}");
+    }
+    log(format!("router-a: rest reports eth0 speed_mbps {got:?}"));
+    // `lo` is not a configured interface (404), or if listed has no speed.
+    let (code, text) = a.rest(Method::GET, "/v1/interfaces/lo", None).await?;
+    if code == 200 {
+        let lo: serde_json::Value = serde_json::from_str(&text)?;
+        if !lo["speed_mbps"].is_null() {
+            bail!("router-a: lo reports speed_mbps {}", lo["speed_mbps"]);
+        }
+    }
+    Ok(())
+}
+
 async fn expect_eth0_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
     let body = a
         .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)

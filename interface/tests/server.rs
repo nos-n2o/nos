@@ -129,6 +129,9 @@ impl InterfaceDriver for RecordingDriver {
     async fn bridge_mtu(&self, k: &str) -> Option<u32> {
         NoopInterfaceDriver.bridge_mtu(k).await
     }
+    async fn link_speed_mbps(&self, k: &str) -> Option<u32> {
+        NoopInterfaceDriver.link_speed_mbps(k).await
+    }
     async fn set_bridge_port_state(
         &self,
         p: &BridgePortRef,

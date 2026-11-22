@@ -1582,6 +1582,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         })
     }
 
+    async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32> {
+        let path = format!("/sys/class/net/{kernel_interface}/speed");
+        let raw = tokio::fs::read_to_string(path).await.ok()?;
+        parse_speed_mbps(&raw)
+    }
+
     async fn set_bridge_port_state(
         &self,
         port: &BridgePortRef,
@@ -2093,5 +2099,24 @@ mod tests {
             .unwrap();
         assert!(is_up("pa"), "{}", flags("pa"));
         assert!(is_up("pa.10"), "{}", flags("pa.10"));
+    }
+}
+
+/// sysfs `speed`: Mbit/s; `-1` (unknown) and `0` are `None`.
+fn parse_speed_mbps(s: &str) -> Option<u32> {
+    s.trim().parse::<u32>().ok().filter(|&v| v > 0)
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::parse_speed_mbps;
+
+    #[test]
+    fn sysfs_speed_values() {
+        assert_eq!(parse_speed_mbps("1000\n"), Some(1000));
+        assert_eq!(parse_speed_mbps("-1\n"), None);
+        assert_eq!(parse_speed_mbps("0"), None);
+        assert_eq!(parse_speed_mbps("junk"), None);
+        assert_eq!(parse_speed_mbps(""), None);
     }
 }
