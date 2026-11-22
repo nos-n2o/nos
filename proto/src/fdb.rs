@@ -203,6 +203,7 @@ pub enum FdbEvent {
 
 /// A broadcast domain's forwarding table, for `show fdb`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FdbTable {
     /// Broadcast domain name.
@@ -233,6 +234,7 @@ pub struct FdbTable {
 
 /// One locally attached Ethernet Segment, as seen from one broadcast domain.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // wire status flags, one per independent fact
 pub struct EsEntry {
@@ -272,6 +274,7 @@ pub struct EsEntry {
 
 /// One MAC in a domain's forwarding table.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacEntry {
     /// `aa:bb:cc:dd:ee:ff`.
@@ -292,6 +295,7 @@ pub struct MacEntry {
 
 /// One IP-to-MAC neighbor entry of an IP-VRF.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeighEntry {
     /// IP address.
@@ -308,6 +312,7 @@ pub struct NeighEntry {
 
 /// How a MAC or neighbor entry was learned.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MacSource {
     /// Learned by the bridge on a local port.

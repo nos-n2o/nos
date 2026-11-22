@@ -15,6 +15,7 @@ use crate::schema::{BfdAuthMethod, BfdProfile};
 /// the path to it (RFC 5881 single-hop is bound to an interface, RFC 5883
 /// multihop is not).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionKey {
     /// Routing table (VRF) the session runs in.
@@ -37,6 +38,7 @@ pub struct SessionKey {
 
 /// RFC 5880 §4.1 `Sta` values.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BfdState {
     /// `AdminDown` (RFC 5880 section 4.1): administratively held down.
@@ -85,6 +87,7 @@ impl fmt::Display for BfdState {
 
 /// RFC 5880 §4.1 diagnostic codes 0-8.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BfdDiag {
     /// No diagnostic (code 0, RFC 5880 section 4.1).
@@ -158,6 +161,7 @@ impl fmt::Display for BfdDiag {
 
 /// One session, for `show bfd sessions`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BfdSessionView {
     /// Session identity.
@@ -195,6 +199,7 @@ pub struct BfdSessionView {
 /// What a session is: a classical RFC 5880 peer, or an RFC 7880 S-BFD
 /// initiator probing a stateless reflector.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BfdSessionKind {
     /// A regular BFD session (RFC 5880).
@@ -218,6 +223,7 @@ impl fmt::Display for BfdSessionKind {
 
 /// Why the S-BFD reflector dropped a packet, counted per reason.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectorDiscards {
     /// Not a valid BFD Control packet.
@@ -240,6 +246,7 @@ pub struct ReflectorDiscards {
 
 /// The S-BFD reflector, for `show bfd reflector`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectorView {
     /// The discriminators answered for, as 32-bit values.
@@ -254,6 +261,7 @@ pub struct ReflectorView {
 
 /// Requests to `nos-bfdd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BfdRequest {
     /// Start (or refresh) a session; the reply stream is `BfdEvent::State`.
@@ -290,6 +298,7 @@ pub enum BfdRequest {
 
 /// Events and replies from `nos-bfdd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BfdEvent {
     /// A session changed state.

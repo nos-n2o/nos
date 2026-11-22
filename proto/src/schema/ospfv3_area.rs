@@ -14,6 +14,7 @@ use nos_proto_derive::Cli;
 /// id — mirrors `OspfArea` exactly. Unique only within its owning instance,
 /// enforced on the parent's `areas` field (`ospfv3_instance::unique_area_ids`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Area {
@@ -92,6 +93,7 @@ pub struct Ospfv3Area {
 /// endpoint's router id. Timers and authentication are the link's own, not a
 /// profile's: a virtual link has no attach point.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3VirtualLink {
@@ -170,11 +172,13 @@ fn valid_virtual_links(area: &Ospfv3Area) -> garde::Result {
 
 /// One RFC 5340 §4.4.3.3 area address range, keyed by `cidr`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub struct Ospfv3AreaRange {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// The summarised IPv6 prefix; the key.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ipv6_net))]
     pub cidr: Ipv6Net,
     /// `DoNotAdvertise`: the covered prefixes are hidden from the other areas
     /// entirely. `false` (the default) advertises the range.

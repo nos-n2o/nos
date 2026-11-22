@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// `nos-rib`'s own domain type doesn't need to derive wire traits it has no
 /// other use for.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteSourceKind {
     /// A statically configured route.
@@ -30,6 +31,7 @@ pub enum RouteSourceKind {
 /// hop, resolved in the underlay into the candidate's gateway) and the
 /// Route Distinguisher it was received under.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnRouteInfo {
     /// The remote PE: the VPN route's BGP next hop.
@@ -68,6 +70,7 @@ impl From<(IpAddr, Option<u32>)> for NextHop {
 /// What an `Evpn`-sourced candidate is reached through: the remote VTEP (its
 /// one gateway), the remote PE's Router's MAC and the L3 VNI.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnRouteInfo {
     /// Remote VTEP the route is tunnelled to.
@@ -81,6 +84,7 @@ pub struct EvpnRouteInfo {
 
 /// One candidate route for a prefix.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteEntry {
     /// Every next hop of this candidate — two or more is an equal-cost
@@ -122,10 +126,12 @@ pub struct RouteEntry {
 /// One prefix's full candidate list, ordered best (winner) to worst by
 /// source preference.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrefixRoutes {
     /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// All candidate routes for the prefix.
     pub candidates: Vec<RouteEntry>,
@@ -145,10 +151,12 @@ impl PrefixRoutes {
 /// never pushed at all, to avoid a pointless static→bgp→rib→kernel round
 /// trip on the same table it came from.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BgpRoute {
     /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// The best path's next hop plus every multipath sibling's
     /// (`BgpInstance.maximum_paths`), sorted, never empty unless `discard`. Two or more
@@ -236,10 +244,12 @@ impl BgpRouteUpdate {
 /// directly-connected destination (root's own subnet) — see
 /// `ospf::spf::compute`'s directly-connected filter.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OspfRoute {
     /// The destination prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// Every equal-cost next hop (RFC 2328 §16.1 2(d)), non-empty unless
     /// `discard` is set, each

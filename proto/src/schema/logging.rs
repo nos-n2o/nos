@@ -14,6 +14,7 @@ use super::Config;
 
 /// System-wide logging settings.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct LoggingSettings {
@@ -29,6 +30,7 @@ pub struct LoggingSettings {
 
 /// One remote syslog collector (RFC 5424 messages).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct SyslogServer {
@@ -90,6 +92,7 @@ pub struct SyslogServer {
 /// Authentication of a TLS syslog collector (RFC 5425 §4.2). Server
 /// authentication only: `nos-logd` presents no client certificate.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct SyslogTls {
     /// PEM CA certificate(s) the collector's certificate must chain to
@@ -223,6 +226,7 @@ fn valid_port(p: Option<u16>) -> garde::Result {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 /// How a syslog server is reached.
 pub enum SyslogTransport {
@@ -238,6 +242,7 @@ pub enum SyslogTransport {
 /// The user-level facilities, `local0`-`local7`; the others are reserved for
 /// operating-system subsystems.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum SyslogFacility {
     /// Facility `local0` (code 16).

@@ -12,7 +12,7 @@ COVERAGE_MIN ?= 90
 
 .PHONY: help ci-image prune-merged toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants fuzz-smoke check ci tools docker-lint docker-build docker-build-release \
-        e2e-preflight e2e-soak docs-fix claude-md-size
+        e2e-preflight e2e-soak docs-fix claude-md-size no-arbitrary
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -112,7 +112,7 @@ mutants: ## Run mutation testing, memory-capped (needs nightly; MUTANTS_JOBS/MUT
 FUZZ_SECS ?= 60
 FUZZ_RSS_MB ?= 2048
 FUZZ_CARGO ?= cargo +nightly
-FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet cli_parser
+FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet cli_parser cli_format
 
 fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightly + cargo-fuzz; nightly CI job, not part of check)
 	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }
@@ -134,7 +134,10 @@ prune-merged: ## Remove worktrees/target dirs of merged work + docker cache; dry
 claude-md-size: ## Fail when a CLAUDE.md exceeds its ceiling in tools/ci/claude-md-budget.txt
 	tools/ci/check-claude-md.sh
 
-check: claude-md-size ci-scripts-test build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
+no-arbitrary: ## Fail when the fuzz-only `arbitrary` crate is in the workspace build graph (#1216)
+	tools/ci/no-arbitrary.sh
+
+check: claude-md-size no-arbitrary ci-scripts-test build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
 ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 

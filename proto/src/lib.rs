@@ -5,6 +5,9 @@
 extern crate self as nos_proto;
 
 pub mod acl;
+#[cfg(feature = "arbitrary")]
+#[allow(missing_docs)]
+pub mod arbitrary_support;
 pub mod bfd;
 pub mod bgp;
 /// Watchdog endpoint broker: roles, service references and the watchdog wire types.

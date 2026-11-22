@@ -16,6 +16,7 @@ pub const LOCKOUT_WINDOW_SECS_DEFAULT: u32 = 60;
 
 /// Login lockout settings.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct LoginPolicy {

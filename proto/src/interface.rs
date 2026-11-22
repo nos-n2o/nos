@@ -13,6 +13,7 @@ use crate::schema::InterfaceAddress;
 /// (flat L3 config, unchanged); every other interface's L3 config lives in
 /// `subinterfaces` instead — see `schema::Subinterface`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterfaceStatus {
     /// Interface name.
@@ -52,6 +53,7 @@ pub struct InterfaceStatus {
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
 /// point on a physical interface, `tag == 0` for the untagged/native case.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubinterfaceStatus {
     /// 802.1Q VLAN ID.
@@ -73,6 +75,7 @@ pub struct SubinterfaceStatus {
 /// device's flat L3 config (same shape as a loopback interface's, see
 /// `schema::BroadcastDomain`'s doc comment).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastDomainStatus {
     /// Name of the interface.
@@ -104,6 +107,7 @@ pub struct BroadcastDomainStatus {
 /// loopback-only flat `addresses`/`routing_table` fields (a bond is never a
 /// loopback — all its L3 config lives in `subinterfaces`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateStatus {
     /// Name of the aggregate.
@@ -134,6 +138,7 @@ pub struct PortAggregateStatus {
 
 /// One member link's installed conversation steering and its tc counters.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LacpLinkSteering {
     /// Member interface name.
@@ -158,6 +163,7 @@ pub struct LacpLinkSteering {
 /// `PortAggregateMode::Lacp` aggregate — `nos-lacpd` never pushes for a
 /// `Xor` one, whose members are enslaved unconditionally regardless.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LacpAggregateMembers {
     /// Name of the port aggregate.
@@ -173,6 +179,7 @@ pub const LACP_CONVERSATION_MASK_LEN: usize = 512;
 
 /// One member link's share of an aggregate's conversations (#865).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LacpLinkConversations {
     /// Member interface name.
@@ -188,6 +195,7 @@ pub struct LacpLinkConversations {
 /// PushLacpConversations`): per-link conversation masks of one aggregate.
 /// Always the whole set (full resend); an empty `links` means plain hashing.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LacpAggregateConversations {
     /// Name of the port aggregate.
@@ -207,6 +215,7 @@ pub struct LacpAggregateConversations {
 /// like `LacpAggregateMembers`); a member absent from it is not enslaved.
 /// Only meaningful for an aggregate with `bfd` set.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BfdAggregateMembers {
     /// Name of the port aggregate.

@@ -10,6 +10,7 @@ use nos_proto_derive::Cli;
 /// A dot1q tag, or the absence of one. `Dot1q`'s value is restricted to
 /// `1..=4094` — 802.1Q reserves 0 and 4095.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum VlanTag {
     #[default]
@@ -22,6 +23,7 @@ pub enum VlanTag {
 /// One broadcast domain's membership in a `SwitchingProfile`, tagged as
 /// either a specific dot1q VLAN or untagged.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct SwitchingProfileMember {
@@ -75,6 +77,7 @@ fn valid_vlan_tag(tag: VlanTag) -> garde::Result {
 /// their dot1q tagging. Will be assigned to a future "switched interface"
 /// config object — not modeled yet.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct SwitchingProfile {

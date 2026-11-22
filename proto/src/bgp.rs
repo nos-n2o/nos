@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// `OpenConfirm`/`Established`, but is the natural "nothing established yet"
 /// value to report over this protocol.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BgpSessionState {
     /// `Idle` (RFC 4271 section 8.2.2).
@@ -29,6 +30,7 @@ pub enum BgpSessionState {
 
 /// One configured peer's one-line summary, for `show bgp brief`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerSummary {
     /// The peer's address.
@@ -89,6 +91,7 @@ pub struct PeerSummary {
 
 /// A peer's RFC 4724 / RFC 8538 graceful restart capability.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrSummary {
     /// Its Restart Time, in seconds.
@@ -105,6 +108,7 @@ pub struct GrSummary {
 /// NLRI rendered by `nos-bgpd` (`[2]:[65000:1]:[<esi>]:[<tag>]:...`) — nothing
 /// downstream interprets it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvpnRouteSummary {
     /// The advertising peer.
@@ -155,6 +159,7 @@ pub fn fmt_communities(cs: &[u32]) -> String {
 /// One received Flowspec (RFC 8955) route, for `show bgp flowspec`. `nlri` is
 /// the component list rendered by `nos-bgpd`; nothing downstream interprets it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlowspecRouteSummary {
     /// The advertising peer.
@@ -191,6 +196,7 @@ pub struct FlowspecRouteSummary {
 /// One received VPN-IPv4/VPN-IPv6 path (RFC 4364/4659, SAFI 128), for
 /// `show bgp vpnv4|vpnv6`. RD and Route Targets are rendered by `nos-bgpd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VpnRouteSummary {
     /// The advertising peer.
@@ -224,6 +230,7 @@ pub struct VpnRouteSummary {
 
 /// RFC 6811 origin validation state of a route, for `show bgp routes`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RpkiValidationState {
     /// A covering VRP validates the origin AS.
@@ -236,6 +243,7 @@ pub enum RpkiValidationState {
 
 /// One IPv4/IPv6 unicast route known to a BGP instance, for `show bgp routes`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BgpRouteSummary {
     /// The prefix, `192.0.2.0/24`.
@@ -261,6 +269,7 @@ pub struct BgpRouteSummary {
 /// RFC 8210 session state of one configured RPKI cache, as seen by one
 /// `nos-bgpd`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RpkiSessionState {
     /// Not connected (or a lower-preference cache is in use).
@@ -273,6 +282,7 @@ pub enum RpkiSessionState {
 
 /// One configured RPKI cache's status, for `show bgp rpki`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpkiCacheStatus {
     /// The cache's address.
@@ -309,10 +319,12 @@ pub struct RpkiCacheStatus {
 /// and `gateway` are always the same address family (v4/v6 alike, inferred
 /// from `prefix`'s own `IpNet` variant — no separate AFI tag needed).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedistributedRoute {
     /// The redistributed prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// Next-hop address of the redistributed route.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
@@ -610,10 +622,12 @@ pub const BGP_PAGE_MAX: u32 = 1000;
 /// peer (a locally redistributed route) sorts first. Its text form (REST
 /// `after` / `pagination.next`) is opaque, see [`crate::page`].
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BgpRouteCursor {
     /// The prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// The advertising peer; `None` for a locally redistributed route.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
@@ -638,6 +652,7 @@ impl std::str::FromStr for BgpRouteCursor {
 /// Position in `show bgp evpn`: the existing sort key of a route, the
 /// advertising peer then the NLRI text. Opaque text form, see [`crate::page`].
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EvpnRouteCursor {
     /// The advertising peer.
@@ -649,6 +664,7 @@ pub struct EvpnRouteCursor {
 
 /// Position in `show bgp flowspec`: peer, address family text, rule text.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FlowspecRouteCursor {
     /// The advertising peer.
@@ -662,6 +678,7 @@ pub struct FlowspecRouteCursor {
 
 /// Position in `show bgp vpnv4|vpnv6`: peer, RD (8 wire bytes), prefix, path id.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VpnRouteCursor {
     /// The advertising peer.
@@ -671,6 +688,7 @@ pub struct VpnRouteCursor {
     pub rd: [u8; 8],
     /// The customer prefix.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// The RFC 7911 path id of the copy (0 without Add-Path).
     #[serde(default)]
@@ -763,6 +781,7 @@ pub enum BgpEvent {
 
 /// Connection state of one `bmp-station`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BmpStationState {
     /// Dialing the collector.
@@ -776,6 +795,7 @@ pub enum BmpStationState {
 
 /// BMP messages sent to one station, by type, since its task started.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BmpFrameCounts {
     /// Initiation.
@@ -799,6 +819,7 @@ pub struct BmpFrameCounts {
 
 /// One `bmp-station`'s status, for `show bgp bmp`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BmpStationStatus {
     /// The `bmp-station` name.
@@ -832,6 +853,7 @@ pub struct BmpStationStatus {
 /// ever appended (postcard is positional); all are defined up front so the
 /// later EVPN/Flowspec/VPN retention (#866) never changes the wire.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ReevalFamily {
     /// IPv4 unicast.
@@ -879,6 +901,7 @@ impl std::fmt::Display for ReevalFamily {
 
 /// One family's result of a soft-reconfiguration re-evaluation.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilyReeval {
     /// The family.

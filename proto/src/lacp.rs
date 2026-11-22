@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// 802.1AX §6.4.12 Receive Machine states.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpReceiveState {
     /// `INITIALIZE` (IEEE 802.1AX section 6.4.12).
@@ -29,6 +30,7 @@ pub enum LacpReceiveState {
 /// which this port belongs in the aggregate's active-member set pushed to
 /// `nos-interfaced` (`nos_proto::interface::LacpAggregateMembers`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpMuxState {
     /// `DETACHED` (IEEE 802.1AX section 6.4.15).
@@ -45,6 +47,7 @@ pub enum LacpMuxState {
 
 /// One member port's current LACP state, for `show lacp`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // wire status flags, one per fact
 pub struct LacpPortStatus {
@@ -102,6 +105,7 @@ pub struct LacpPortStatus {
 
 /// Whether both ends agreed on conversation-sensitive operation.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpAgreement {
     /// Not running version 2 with an algorithm, or nothing negotiated yet.
@@ -116,6 +120,7 @@ pub enum LacpAgreement {
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateLacpSummary {
     /// Port aggregate name.

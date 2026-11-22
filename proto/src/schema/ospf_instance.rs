@@ -14,6 +14,7 @@ use nos_proto_derive::Cli;
 /// beyond what a nested area's profiles can be attached to yet, and no wire
 /// protocol — this is a config-only skeleton, see `docs/protocols/ospf-internals.md`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 #[allow(clippy::struct_excessive_bools)] // one independent RFC knob per flag
@@ -179,6 +180,7 @@ pub struct OspfInstance {
 /// default of `nos-ospfd` (initial 50, short 200, long 5000, holddown 10000,
 /// time-to-learn 3000).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct SpfThrottle {
     /// Delay of the first change after a quiet period.

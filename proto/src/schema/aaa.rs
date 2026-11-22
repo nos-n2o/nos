@@ -22,6 +22,7 @@ pub const RADIUS_RETRIES_DEFAULT: u8 = 2;
 
 /// Where a password login is checked.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LoginBackend {
     /// The local `users` list.
@@ -34,6 +35,7 @@ pub enum LoginBackend {
 /// The Access-Accept attribute whose text names the user's role
 /// (`admin`, `operator` or `read-only`; anything else is read-only).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum RoleAttribute {
     /// Filter-Id (11).
@@ -47,6 +49,7 @@ pub enum RoleAttribute {
 
 /// Login and accounting backends.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Aaa {
@@ -82,6 +85,7 @@ pub struct Aaa {
 
 /// One RADIUS server.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct RadiusServer {

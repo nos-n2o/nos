@@ -23,6 +23,7 @@ pub const SSH_HOST_KEY_LABEL: &str = "ssh-host-key";
 
 /// The admin section: labelled secrets for other sections to reference.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Admin {
@@ -35,6 +36,7 @@ pub struct Admin {
 
 /// One labelled secret.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct AdminKey {

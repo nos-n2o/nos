@@ -18,6 +18,7 @@ pub const PASSWORD_HASH_PREFIX: &str = "$argon2id$";
 /// What a local user may do (RFC 8341 NACM style), enforced by `nos-configd`
 /// on every request, so a role change applies without a re-login.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum UserRole {
     /// Everything: edit, commit, save, manage users, read secrets.
@@ -52,6 +53,7 @@ impl UserRole {
 /// A local user who may log in to `nos-cli` and call the REST API (mutual
 /// TLS after a password login). What it may do is its `role`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct User {

@@ -14,6 +14,7 @@ use super::sugar;
 /// this must never be derived from, or cross-validated against, either
 /// address's IP version.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Cli)]
 pub enum AddressFamily {
     #[cli(words = "ipv4")]
@@ -97,6 +98,7 @@ impl std::fmt::Display for AddressFamily {
 /// addresses to use when it carries more than one; `None` requires the
 /// interface to carry exactly one address.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum SourceAddress {
     /// An explicitly named interface.
@@ -167,6 +169,7 @@ pub const ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS: u16 = 360;
 /// iBGP or route-server-client one — standard BGP practice, since an iBGP speaker must not silently
 /// mask a route's real eBGP-learned next-hop unless explicitly told to.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NextHopMode {
     #[cli(words = "self")]
@@ -180,6 +183,7 @@ pub enum NextHopMode {
 /// OPEN's Role capability (code 9); the pair must be legal (Provider/Customer,
 /// RS/RS-Client, Peer/Peer) or the session is refused with Role Mismatch.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpRole {
     /// The local AS is the provider of the peer (RFC 9234).
@@ -248,6 +252,7 @@ impl BgpRole {
 /// What is actually used per family is negotiated against the peer's own
 /// capability (RFC 7911 §5).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAddPath {
     /// Offer to receive several paths per prefix.
@@ -284,6 +289,7 @@ impl BgpAddPath {
 /// no session is opened or accepted; an established one is closed with a
 /// NOTIFICATION carrying `message` as an RFC 9003 shutdown communication.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpShutdown {
     #[cli(topic = BgpPeerGroupShutdown)]
@@ -297,6 +303,7 @@ pub struct BgpShutdown {
 /// never exceeds the ceiling implied by `max_suppress`. `Default` is RFC 7196's
 /// conservative recommendation. eBGP peer-groups only (`bgp_instance`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct BgpDamping {
     #[cli(topic = BgpPeerGroupDamping)]
@@ -342,6 +349,7 @@ pub(super) fn valid_damping(d: Option<&BgpDamping>) -> garde::Result {
 /// External (non-confederation eBGP) peer-groups only
 /// (`bgp_instance::valid_route_reflection_and_server`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpLocalAs {
     #[cli(topic = BgpPeerGroupLocalAs)]
@@ -363,6 +371,7 @@ pub struct BgpLocalAs {
 /// `restart_interval` (seconds) re-allows the session after that long; `0`
 /// keeps the peer down until `clear bgp <instance> <peer>` or a shut/no-shut.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpPrefixLimit {
     #[cli(topic = BgpPeerGroupMaximumPrefixLimit)]
@@ -383,6 +392,7 @@ pub struct BgpPrefixLimit {
 /// closed, and three fields give the same CLI/REST shape with no enum-keyed
 /// list support in the config path grammar.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpMaximumPrefix {
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
@@ -471,6 +481,7 @@ pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
@@ -752,6 +763,7 @@ pub struct BgpPeerGroup {
 /// best, installed as a discard route. It still runs through `import_policy`,
 /// which under the default deny-all must accept it. eBGP peer-groups only.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpBlackhole {
     #[cli(topic = BgpPeerGroupBlackhole)]
@@ -771,6 +783,7 @@ pub(super) fn valid_blackhole(b: Option<&BgpBlackhole>, ctx: &Config) -> garde::
 /// Knobs of the Flowspec validation procedure (RFC 8955 §6 as updated by
 /// RFC 9117, which is the default).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpFlowspecValidation {
     #[serde(default)]
@@ -832,6 +845,7 @@ fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result 
 /// `TCP_MD5SIG` or TCP-AO keys, never both at once). Keys are labels of
 /// `Config.admin` keystore entries; the secret itself never appears here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAuth {
     /// RFC 2385 TCP MD5 signature — a single shared password.
@@ -858,6 +872,7 @@ pub enum BgpAuth {
 /// behavior) excludes TCP options from this key's MAC coverage — both peers
 /// must agree, or authentication fails.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 #[cli(no_default)]
 pub struct BgpAoKey {
@@ -887,6 +902,7 @@ pub struct BgpAoKey {
 
 /// RFC 5925's two mandatory-to-implement algorithms.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAoAlgorithm {
     #[cli(words = "hmac-sha1")]
