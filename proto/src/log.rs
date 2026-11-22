@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Wire twin of `tracing::Level` — kept separate so no component needs to
 /// depend on `tracing`'s own (de)serialization support.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nos_proto_derive::Cli)]
 pub enum LogLevel {
     /// Very fine-grained diagnostics.
@@ -21,6 +22,7 @@ pub enum LogLevel {
 /// `nos-logd` (`LogRequest::Push`) or returned to a querying client
 /// (`LogEvent::Logs`/`Line`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry {
     /// Milliseconds since the Unix epoch, from the forwarding process's own

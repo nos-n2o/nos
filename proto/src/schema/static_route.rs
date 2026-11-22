@@ -17,6 +17,7 @@ use nos_proto_derive::Cli;
 /// `StaticRoute` in isolation has no notion of which instance owns it under
 /// garde's whole-`Config` validation context.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoute {
@@ -26,6 +27,7 @@ pub struct StaticRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// Destination prefix; the key within the instance.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub subnet: IpNet,
 
     #[garde(custom(gateway_matches_subnet_family(self.subnet)))]

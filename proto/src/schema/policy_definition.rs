@@ -12,6 +12,7 @@ use nos_proto_derive::Cli;
 /// matching the existing "each daemon re-resolves its own state from config
 /// diffs" idiom, rather than `nos-proto` carrying a bytecode wire format.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct PolicyDefinition {

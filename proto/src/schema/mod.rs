@@ -129,6 +129,7 @@ use crate::validators::hostname_charset;
 use nos_proto_derive::Cli;
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 /// The whole device configuration: each field is one top-level section, and `validate` checks the cross-references between them.

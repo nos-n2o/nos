@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// `discriminators`, on UDP 7784 in every routing table's VRF. Off while the
 /// list is empty. Keeps no per-initiator state.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct SbfdReflector {
     /// Each an S-BFD discriminator (RFC 7880 §4.1), written as an IPv4
@@ -25,6 +26,7 @@ pub struct SbfdReflector {
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     #[cli(topic = SbfdReflectorAllowFrom, words = "allow-from")]
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::vec_ip_net))]
     pub allow_from: Vec<IpNet>,
 }
 

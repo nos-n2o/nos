@@ -8,12 +8,19 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut codec = nos_bgp::message::BgpCodec {
-        add_path_afis: [(1u16, 1u8), (2, 1), (1, 134), (2, 134), (25, 70), (0xffff, 1)]
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| (flags >> (2 + i)) & 1 == 1)
-            .map(|(_, a)| a)
-            .collect(),
+        add_path_afis: [
+            (1u16, 1u8),
+            (2, 1),
+            (1, 134),
+            (2, 134),
+            (25, 70),
+            (0xffff, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| (flags >> (2 + i)) & 1 == 1)
+        .map(|(_, a)| a)
+        .collect(),
         two_octet_as: flags & 1 == 1,
         extended: flags & 2 == 2,
     };

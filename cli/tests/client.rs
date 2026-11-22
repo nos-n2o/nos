@@ -498,3 +498,22 @@ async fn describe_returns_daemon_error() {
 
     server.await.unwrap();
 }
+
+/// A daemon's error string is attacker-reachable text (#1365): the line the
+/// shell prints for it goes through `format::sanitize`.
+#[tokio::test]
+async fn a_daemon_error_with_escape_codes_prints_escaped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Get,
+        Event::Error("\x1b]0;pwn\x07boom\u{9b}".to_string()),
+    ));
+    let err = fetch_running_config(&path).await.unwrap_err();
+    let line = nos_cli::format::sanitize(&err.to_string()).into_owned();
+    assert!(line.contains("\\x1b]0;pwn\\x07boom\\x9b"), "{line}");
+    assert!(!line.chars().any(char::is_control));
+    server.await.unwrap();
+}

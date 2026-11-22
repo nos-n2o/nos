@@ -15,6 +15,7 @@ use nos_proto_derive::Cli;
 /// `OspfProfile.name` — so uniqueness is enforced on the parent's `areas`
 /// field (`ospf_instance::unique_area_ids`), not here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct OspfArea {
@@ -93,6 +94,7 @@ pub struct OspfArea {
 /// the far endpoint's router id. Timers and authentication are the link's own
 /// (Appendix C.3), not a profile's: a virtual link has no attach point.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct OspfVirtualLink {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
@@ -116,6 +118,7 @@ pub struct OspfVirtualLink {
 
 /// What kind of RFC 2328 area an `OspfArea` is.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum OspfAreaType {
     #[default]
@@ -156,11 +159,13 @@ impl OspfAreaType {
 
 /// One RFC 2328 §3.5 area address range, keyed by `cidr`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub struct OspfAreaRange {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// The summarised address range; the key.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ipv4_net))]
     pub cidr: Ipv4Net,
     /// RFC 2328's `DoNotAdvertise`: the covered prefixes are hidden from the
     /// other areas entirely. `false` (the default) advertises the range.

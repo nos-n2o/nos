@@ -18,6 +18,7 @@ use nos_proto_derive::Cli;
 /// difference is only which control plane decides which members are
 /// actually enslaved into it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum PortAggregateMode {
     /// Static: every member named by an `Interface.port_aggregate`
@@ -40,6 +41,7 @@ pub enum PortAggregateMode {
 /// Linux bonding's `lacp_rate`, it's a request to the partner — each end
 /// transmits at the rate the *other* end asks for.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpRate {
     #[default]
@@ -53,6 +55,7 @@ pub enum LacpRate {
 /// whenever the link is up; `Passive` ones stay silent until they hear an
 /// `Active` partner (two `Passive` ends never form a bundle).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpMode {
     #[default]
@@ -69,6 +72,7 @@ pub enum LacpMode {
 /// blocked outright. Announced to the other PEs in the per-ES Ethernet A-D
 /// route's ESI Label community. Only meaningful with an `esi`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EsRedundancy {
     #[default]
@@ -83,6 +87,7 @@ pub enum EsRedundancy {
 /// community. `Hrw` only takes effect when every PE on the segment advertises
 /// it; otherwise every PE falls back to `Modulo` (RFC 8584 §2.2.3).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum DfAlgorithm {
     /// RFC 7432 §8.5 service carving: `VNI mod N` over the ordered PEs.
@@ -94,6 +99,7 @@ pub enum DfAlgorithm {
 
 /// The 802.1AX-2014 LACP version an aggregate advertises (`1` or `2` in the CLI).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LacpVersion {
     /// Version 1 LACPDUs (110 bytes, no conversation TLVs).
@@ -116,6 +122,7 @@ impl Default for LacpVersion {
 
 /// The Port Algorithm an aggregate maps frames to conversation ids with.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LacpPortAlgorithm {
     /// No algorithm: plain hashing, no conversation steering.
@@ -140,6 +147,7 @@ impl Default for LacpPortAlgorithm {
 /// One entry of an aggregate's explicit conversation map: conversation ids
 /// `first..=last` are carried by the `member` link.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct ConversationRange {
     /// First conversation id of the range (0-4095).
@@ -168,6 +176,7 @@ pub struct ConversationRange {
 /// `Interface.switching_profile` already uses for L2 trunk membership —
 /// rather than this type holding a member list itself.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct PortAggregate {

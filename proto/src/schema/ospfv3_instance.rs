@@ -16,6 +16,7 @@ use nos_proto_derive::Cli;
 /// (on `Ospfv3Area`) stay `Ipv4Addr`: RFC 5340 keeps these as opaque 32-bit
 /// identifiers, not real addresses, exactly like RFC 2328.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Instance {
@@ -142,6 +143,7 @@ pub struct Ospfv3Instance {
 
 /// An RFC 5838 §2.1 address family of an `Ospfv3Instance`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum Ospfv3AddressFamily {
     #[default]
