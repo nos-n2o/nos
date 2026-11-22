@@ -1163,6 +1163,24 @@ impl LinkManager {
         *self.extended_prefixes.lock().unwrap() = prefixes;
     }
 
+    /// The ILM (#1165) for `routes`, the output of `compute_routes`: swap and
+    /// PHP entries toward each Prefix-SID route, an egress entry per SID this
+    /// router advertises. Empty without an SRGB.
+    pub fn ilm_routes(&self, routes: &[spf::RouteEntry]) -> Vec<nos_proto::IlmRoute> {
+        let srgb = *self.srgb.lock().unwrap();
+        if srgb.is_none() {
+            return Vec::new();
+        }
+        let own: Vec<lsa::PrefixSid> = self
+            .extended_prefixes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|p| lsa::decode_prefix_sid(&p.sub_tlvs))
+            .collect();
+        spf::ilm_routes(srgb, &own, routes)
+    }
+
     /// Logs each other router's RFC 7684 Extended Prefix LSAs once, and again
     /// when one changes (the `nos-e2e ospf-ext-lsa` anchor).
     async fn log_extended_prefixes(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {

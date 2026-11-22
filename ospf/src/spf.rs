@@ -30,18 +30,18 @@
 //! (`merge_equal`). `RouteEntry.next_hops` is that set, sorted and deduped.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::Ipv4Net;
 
 use crate::lsa::{
-    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLink, RouterLsaBody, SummaryLsaBody,
-    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK, LINK_TYPE_VIRTUAL,
-    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, LSA_TYPE_NSSA_EXTERNAL,
-    MAX_AGE, MAX_LINK_METRIC, OPTION_P, RI_CAP_HOST_ROUTER, ROUTER_FLAG_B, ROUTER_FLAG_H,
-    ROUTER_FLAG_NT, ROUTER_FLAG_V,
+    AdjSid, AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, PrefixSid, RouterLink, RouterLsaBody,
+    SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
+    LINK_TYPE_VIRTUAL, LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY,
+    LSA_TYPE_NSSA_EXTERNAL, MAX_AGE, MAX_LINK_METRIC, OPTION_P, RI_CAP_HOST_ROUTER, ROUTER_FLAG_B,
+    ROUTER_FLAG_H, ROUTER_FLAG_NT, ROUTER_FLAG_V,
 };
 
 /// RFC 2328 §12.4.4 `LSInfinity`: an AS-external metric that is never routed.
@@ -93,6 +93,13 @@ pub struct RouteEntry {
     egress: Vertex,
     /// RFC 2328 §16.4 path class, what `prefer` ranks first.
     class: PathClass,
+    /// Segment routing (#1169): the label stack to push toward each next hop
+    /// (outermost first); an empty stack is a PHP hop, a next hop with no
+    /// entry is plain IP. Set only for an intra-area route whose destination
+    /// router advertised a Prefix-SID (`attach_labels`).
+    pub labels: BTreeMap<Ipv4Addr, Vec<u32>>,
+    /// The Prefix-SID those labels come from.
+    pub sid: Option<PrefixSid>,
 }
 
 /// RFC 2328 §11: intra-area beats inter-area beats Type 1 beats Type 2
@@ -150,6 +157,8 @@ impl RouteEntry {
             backup_tunnel: None,
             egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
             class: PathClass::Inter,
+            labels: BTreeMap::new(),
+            sid: None,
         }
     }
 }
@@ -193,6 +202,10 @@ pub fn apply_transit(existing: &mut RouteEntry, candidate: RouteEntry) {
             // a transit-replaced route.
             existing.backup_next_hop = None;
             existing.backup_tunnel = None;
+            // ponytail: SR labels are intra-area only; a transit-replaced
+            // route is plain IP.
+            existing.labels.clear();
+            existing.sid = None;
         }
         Ordering::Equal => merge_equal(existing, candidate),
         Ordering::Greater => {}
@@ -428,6 +441,7 @@ pub fn compute_in(root: Ipv4Addr, lsas: &[Arc<Lsa>], ctx: &Context) -> Vec<Route
         &mut out,
     );
 
+    attach_labels(&routers, &SrDb::from_lsas(lsas), &mut out);
     let alternates = alternates(root, &routers, &networks, &hosts);
     for route in out.values_mut() {
         route.backup_next_hop = pick_backup(route, &alternates, &dist);
@@ -439,6 +453,152 @@ pub fn compute_in(root: Ipv4Addr, lsas: &[Arc<Lsa>], ctx: &Context) -> Vec<Route
     }
 
     out.into_values().collect()
+}
+
+/// One area's received segment routing state (RFC 8665), decoded from its
+/// opaque LSAs: the LSDB is the store, so it is always current. `pub` for
+/// `show ospf segment-routing` (#1382).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SrDb {
+    /// Router to its first SRGB range `(first label, size)`. `ponytail:` only
+    /// the first range is used; ceiling: a Prefix-SID index past it.
+    pub srgb: HashMap<Ipv4Addr, (u32, u32)>,
+    /// `(advertising router, prefix)` to its SPF-algorithm Prefix-SID.
+    pub prefix_sids: HashMap<(Ipv4Addr, Ipv4Net), PrefixSid>,
+    /// Router to the Adj-SIDs it advertises: `(link id, link data, sid)`.
+    pub adj_sids: HashMap<Ipv4Addr, Vec<(Ipv4Addr, Ipv4Addr, AdjSid)>>,
+}
+
+impl SrDb {
+    pub fn from_lsas(lsas: &[Arc<Lsa>]) -> Self {
+        let mut db = SrDb::default();
+        for l in lsas {
+            let router = l.header.advertising_router;
+            if let Some(sr) = crate::lsa::decode_router_info_sr(l) {
+                if let Some(&range) = sr.srgb.first() {
+                    db.srgb.insert(router, range);
+                }
+            } else if let Some(p) = crate::lsa::decode_extended_prefix(l) {
+                if let Some(sid) = crate::lsa::decode_prefix_sid(&p.sub_tlvs)
+                    .filter(|s| s.algorithm == crate::lsa::SR_ALGO_SPF)
+                    && let Ok(net) = Ipv4Net::new(p.prefix, p.prefix_len)
+                {
+                    db.prefix_sids.insert((router, net.trunc()), sid);
+                }
+            } else if let Some(e) = crate::lsa::decode_extended_link(l) {
+                for sid in crate::lsa::decode_adj_sids(&e.sub_tlvs) {
+                    db.adj_sids
+                        .entry(router)
+                        .or_default()
+                        .push((e.link_id, e.link_data, sid));
+                }
+            }
+        }
+        db
+    }
+
+    /// The label a packet for `sid` carries toward `router`'s SRGB; `None`
+    /// when `router` has no SRGB or the index is outside it.
+    fn label_in(&self, router: Ipv4Addr, sid: PrefixSid) -> Option<u32> {
+        if sid.absolute {
+            return Some(sid.value);
+        }
+        let &(base, size) = self.srgb.get(&router)?;
+        (sid.value < size).then(|| base + sid.value)
+    }
+}
+
+/// RFC 8660 per-next-hop labels for every intra-area route whose destination
+/// router advertised a Prefix-SID: toward next hop `N` the label is `N`'s SRGB
+/// base plus the index. When `N` is the destination itself the stack is empty
+/// (PHP, RFC 8665 §5), unless NP asks to keep the label or E for explicit null.
+/// A hop whose neighbour has no usable SRGB stays plain IP.
+fn attach_labels(
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    sr: &SrDb,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
+) {
+    if sr.prefix_sids.is_empty() {
+        return;
+    }
+    for route in out.values_mut() {
+        let Vertex::Router(owner) = route.egress else {
+            continue;
+        };
+        let Some(&sid) = sr.prefix_sids.get(&(owner, route.prefix)) else {
+            continue;
+        };
+        if !matches!(route.class, PathClass::Intra) {
+            continue;
+        }
+        for &hop in &route.next_hops {
+            // The neighbour is the router owning that interface address.
+            let Some(n) = routers.iter().find_map(|(id, r)| {
+                r.links
+                    .iter()
+                    .any(|l| {
+                        l.link_data == hop
+                            && matches!(
+                                l.link_type,
+                                LINK_TYPE_POINT_TO_POINT | LINK_TYPE_TRANSIT_NETWORK
+                            )
+                    })
+                    .then_some(*id)
+            }) else {
+                continue;
+            };
+            let stack = if n != owner || sid.flags & crate::lsa::PREFIX_SID_FLAG_NP != 0 {
+                sr.label_in(n, sid).map(|l| vec![l])
+            } else if sid.flags & crate::lsa::PREFIX_SID_FLAG_E != 0 {
+                Some(vec![0])
+            } else {
+                Some(Vec::new())
+            };
+            if let Some(stack) = stack {
+                route.labels.insert(hop, stack);
+                route.sid = Some(sid);
+            }
+        }
+    }
+}
+
+/// The local ILM (#1165) for `routes`: a swap or PHP pop per Prefix-SID route
+/// (`incoming = our SRGB base + index`, the route's own per-hop stacks out),
+/// plus an egress entry (no hops: pop, then an IP lookup) per `own` SID.
+/// `ponytail:` no explicit-null egress entries (labels 0/2); ceiling: a
+/// neighbour that pushes explicit null toward our SID.
+pub fn ilm_routes(
+    srgb: Option<(u32, u32)>,
+    own: &[PrefixSid],
+    routes: &[RouteEntry],
+) -> Vec<nos_proto::IlmRoute> {
+    let in_label = |sid: &PrefixSid| match srgb {
+        _ if sid.absolute => Some(sid.value),
+        Some((base, size)) if sid.value < size => Some(base + sid.value),
+        _ => None,
+    };
+    let mut ilm: BTreeMap<u32, Vec<nos_proto::NextHop>> = BTreeMap::new();
+    for sid in own {
+        if let Some(label) = in_label(sid) {
+            ilm.insert(label, Vec::new());
+        }
+    }
+    for r in routes {
+        let (Some(sid), false) = (&r.sid, r.labels.is_empty()) else {
+            continue;
+        };
+        let Some(label) = in_label(sid) else { continue };
+        ilm.entry(label)
+            .or_default()
+            .extend(r.labels.iter().map(|(&gw, stack)| nos_proto::NextHop {
+                gateway: gw.into(),
+                interface_id: None,
+                labels: stack.clone(),
+            }));
+    }
+    ilm.into_iter()
+        .map(|(label, hops)| nos_proto::IlmRoute { label, hops })
+        .collect()
 }
 
 /// One candidate first hop for a loop-free alternate: a router adjacent to
@@ -1201,6 +1361,8 @@ fn collect_network_routes(
                 backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Intra,
+                labels: BTreeMap::new(),
+                sid: None,
             },
         );
     }
@@ -1249,6 +1411,8 @@ fn collect_stub_routes(
                     backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
+                    labels: BTreeMap::new(),
+                    sid: None,
                 },
             );
         }
@@ -1305,6 +1469,8 @@ fn collect_intra_area_stub_routes(
                     backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
+                    labels: BTreeMap::new(),
+                    sid: None,
                 },
             );
         }
@@ -1348,6 +1514,8 @@ fn collect_summary_routes(
                 backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Inter,
+                labels: BTreeMap::new(),
+                sid: None,
             },
         );
     }
@@ -1443,6 +1611,8 @@ fn collect_external_routes(
                 } else {
                     PathClass::External1
                 },
+                labels: BTreeMap::new(),
+                sid: None,
             },
         );
     }
@@ -1547,6 +1717,10 @@ fn insert_best(out: &mut HashMap<Ipv4Net, RouteEntry>, candidate: RouteEntry) {
 /// `insert_best` and `LinkManager::compute_routes`' cross-area merge.
 pub(crate) fn merge_equal(existing: &mut RouteEntry, other: RouteEntry) {
     existing.next_hops.extend(other.next_hops);
+    for (hop, stack) in other.labels {
+        existing.labels.entry(hop).or_insert(stack);
+    }
+    existing.sid = existing.sid.or(other.sid);
     existing.next_hops.sort_unstable();
     existing.next_hops.dedup();
     if existing
@@ -1868,6 +2042,8 @@ mod tests {
             backup_tunnel: None,
             egress: Vertex::Router(router_id(3)),
             class,
+            labels: BTreeMap::new(),
+            sid: None,
         };
         let applied = |metric, class| {
             let mut r = backbone(metric, class);
@@ -3368,5 +3544,231 @@ mod tests {
         assert!(!reaches_r3(build(vec![r1, r2, r3], vec![])));
         assert!(!reaches_r3(build(vec![r1, r2], back())));
         assert!(!reaches_r3(build(vec![r2, r3], back())));
+    }
+
+    // ---- Segment routing labels (#1381) ----
+
+    fn opaque(adv: Ipv4Addr, ty: u8, id: Ipv4Addr, body: Vec<u8>) -> Arc<Lsa> {
+        let _ = ty;
+        Arc::new(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: crate::lsa::LSA_TYPE_OPAQUE_AREA,
+                link_state_id: id,
+                advertising_router: adv,
+                sequence_number: 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Opaque(body),
+        })
+    }
+
+    fn ri(router: Ipv4Addr, base: u32) -> Arc<Lsa> {
+        opaque(
+            router,
+            4,
+            crate::lsa::ROUTER_INFO_LINK_STATE_ID,
+            crate::lsa::encode_router_info_sr(0, Some((base, 8000))),
+        )
+    }
+
+    fn sid_lsa(router: Ipv4Addr, prefix: Ipv4Addr, index: u32, flags: (bool, bool)) -> Arc<Lsa> {
+        let p = crate::lsa::ExtendedPrefix {
+            route_type: 1,
+            prefix,
+            prefix_len: 32,
+            flags: 0,
+            sub_tlvs: crate::lsa::encode_prefix_sid(index, flags.0, flags.1),
+        };
+        opaque(
+            router,
+            7,
+            crate::lsa::ext_state_id(crate::lsa::OPAQUE_TYPE_EXT_PREFIX, index),
+            crate::lsa::encode_extended_prefix(&p),
+        )
+    }
+
+    fn host32(n: u8) -> Ipv4Addr {
+        addr(9, 9, 9, n)
+    }
+
+    fn loopback(n: u8) -> RouterLink {
+        stub(host32(n), addr(255, 255, 255, 255), 0)
+    }
+
+    fn route_for(routes: &[RouteEntry], n: u8) -> RouteEntry {
+        let p = Ipv4Net::new(host32(n), 32).unwrap();
+        routes.iter().find(|r| r.prefix == p).cloned().unwrap()
+    }
+
+    /// root(1) - mid(2) - far(3), each with a /32 loopback, SRGBs 16000,
+    /// 17000, 18000.
+    fn sr_chain(far_sid: (bool, bool), mid_srgb: bool) -> Vec<Arc<Lsa>> {
+        let (r, m, f) = (router_id(1), router_id(2), router_id(3));
+        let mut v = vec![
+            router_lsa(r, vec![p2p(m, addr(10, 0, 0, 1), 1)]),
+            router_lsa(
+                m,
+                vec![
+                    p2p(r, addr(10, 0, 0, 2), 1),
+                    p2p(f, addr(10, 0, 1, 1), 1),
+                    loopback(2),
+                ],
+            ),
+            router_lsa(f, vec![p2p(m, addr(10, 0, 1, 2), 1), loopback(3)]),
+            ri(r, 16000),
+            ri(f, 18000),
+            sid_lsa(m, host32(2), 2, (false, false)),
+            sid_lsa(f, host32(3), 3, far_sid),
+        ];
+        if mid_srgb {
+            v.push(ri(m, 17000));
+        }
+        v
+    }
+
+    #[test]
+    fn sr_label_is_the_next_hops_srgb_plus_index() {
+        let routes = compute(router_id(1), &sr_chain((false, false), true));
+        let far = route_for(&routes, 3);
+        assert_eq!(far.next_hops, vec![addr(10, 0, 0, 2)]);
+        assert_eq!(far.labels[&addr(10, 0, 0, 2)], vec![17003]);
+    }
+
+    #[test]
+    fn sr_php_toward_the_owner_is_an_empty_stack() {
+        let routes = compute(router_id(1), &sr_chain((false, false), true));
+        assert_eq!(
+            route_for(&routes, 2).labels[&addr(10, 0, 0, 2)],
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn sr_no_php_keeps_the_label_and_explicit_null_is_zero() {
+        let np = compute(router_id(1), &sr_chain((true, false), true));
+        assert_eq!(route_for(&np, 3).labels[&addr(10, 0, 0, 2)], vec![17003]);
+        // NP on the far SID only matters for its direct neighbour: mid.
+        let mid_np = sid_lsa(router_id(2), host32(2), 2, (true, false));
+        let mut lsas = sr_chain((false, false), true);
+        lsas.retain(|l| l.header.link_state_id != mid_np.header.link_state_id);
+        lsas.push(mid_np);
+        assert_eq!(
+            route_for(&compute(router_id(1), &lsas), 2).labels[&addr(10, 0, 0, 2)],
+            vec![17002]
+        );
+        let mut lsas = sr_chain((false, false), true);
+        lsas.retain(|l| l.header.link_state_id != ext_id(2));
+        lsas.push(sid_lsa(router_id(2), host32(2), 2, (false, true)));
+        assert_eq!(
+            route_for(&compute(router_id(1), &lsas), 2).labels[&addr(10, 0, 0, 2)],
+            vec![0]
+        );
+    }
+
+    fn ext_id(n: u32) -> Ipv4Addr {
+        crate::lsa::ext_state_id(crate::lsa::OPAQUE_TYPE_EXT_PREFIX, n)
+    }
+
+    #[test]
+    fn sr_prefix_without_sid_stays_plain_ip() {
+        let mut lsas = sr_chain((false, false), true);
+        lsas.retain(|l| l.header.link_state_id != ext_id(3));
+        let far = route_for(&compute(router_id(1), &lsas), 3);
+        assert!(far.labels.is_empty() && far.sid.is_none());
+    }
+
+    #[test]
+    fn sr_next_hop_without_srgb_stays_plain_ip() {
+        let far = route_for(&compute(router_id(1), &sr_chain((false, false), false)), 3);
+        assert!(far.labels.is_empty());
+    }
+
+    #[test]
+    fn sr_index_outside_the_srgb_gets_no_label() {
+        let mut lsas = sr_chain((false, false), true);
+        lsas.retain(|l| l.header.link_state_id != ext_id(3));
+        lsas.push(sid_lsa(router_id(3), host32(3), 9000, (false, false)));
+        assert!(route_for(&compute(router_id(1), &lsas), 3)
+            .labels
+            .is_empty());
+    }
+
+    #[test]
+    fn sr_ecmp_has_one_label_per_next_hop_from_each_srgb() {
+        let (r, a, b, f) = (router_id(1), router_id(2), router_id(4), router_id(3));
+        let lsas = vec![
+            router_lsa(
+                r,
+                vec![p2p(a, addr(10, 0, 0, 1), 1), p2p(b, addr(10, 0, 2, 1), 1)],
+            ),
+            router_lsa(
+                a,
+                vec![p2p(r, addr(10, 0, 0, 2), 1), p2p(f, addr(10, 0, 1, 1), 1)],
+            ),
+            router_lsa(
+                b,
+                vec![p2p(r, addr(10, 0, 2, 2), 1), p2p(f, addr(10, 0, 3, 1), 1)],
+            ),
+            router_lsa(
+                f,
+                vec![
+                    p2p(a, addr(10, 0, 1, 2), 1),
+                    p2p(b, addr(10, 0, 3, 2), 1),
+                    loopback(3),
+                ],
+            ),
+            ri(a, 17000),
+            ri(b, 20000),
+            sid_lsa(f, host32(3), 3, (false, false)),
+        ];
+        let far = route_for(&compute(r, &lsas), 3);
+        assert_eq!(far.next_hops.len(), 2);
+        assert_eq!(far.labels[&addr(10, 0, 0, 2)], vec![17003]);
+        assert_eq!(far.labels[&addr(10, 0, 2, 2)], vec![20003]);
+    }
+
+    #[test]
+    fn sr_db_collects_srgb_prefix_and_adj_sids() {
+        let mut lsas = sr_chain((false, false), true);
+        let link = crate::lsa::ExtendedLink {
+            link_type: 1,
+            link_id: router_id(3),
+            link_data: addr(10, 0, 1, 1),
+            sub_tlvs: crate::lsa::encode_adj_sid(24001, 0, false, None),
+        };
+        lsas.push(opaque(
+            router_id(2),
+            8,
+            crate::lsa::ext_state_id(crate::lsa::OPAQUE_TYPE_EXT_LINK, 1),
+            crate::lsa::encode_extended_link(&link),
+        ));
+        let db = SrDb::from_lsas(&lsas);
+        assert_eq!(db.srgb[&router_id(2)], (17000, 8000));
+        assert_eq!(db.prefix_sids.len(), 2);
+        assert_eq!(db.adj_sids[&router_id(2)][0].2.value, 24001);
+    }
+
+    #[test]
+    fn ilm_has_swap_php_and_egress_entries() {
+        let routes = compute(router_id(1), &sr_chain((false, false), true));
+        let own = [PrefixSid {
+            flags: 0,
+            algorithm: 0,
+            value: 1,
+            absolute: false,
+        }];
+        let ilm = ilm_routes(Some((16000, 8000)), &own, &routes);
+        let by = |l| ilm.iter().find(|e| e.label == l).unwrap();
+        assert_eq!(by(16001).hops.len(), 0);
+        assert_eq!(by(16003).hops[0].labels, vec![17003]);
+        assert_eq!(by(16002).hops[0].labels.len(), 0);
+        assert_eq!(
+            by(16002).hops[0].gateway,
+            std::net::IpAddr::V4(addr(10, 0, 0, 2))
+        );
+        assert_eq!(ilm_routes(Some((16000, 8000)), &[], &[]).len(), 0);
     }
 }

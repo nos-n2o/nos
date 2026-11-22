@@ -59,6 +59,12 @@ An `IlmRoute { label, hops: Vec<NextHop> }` says what a packet arriving with `la
 - Unit: wire round trip and variant index (`proto/src/rib.rs`), message building and checks (`driver/mpls.rs`), merge/replace/classification (`server.rs` tests, noop driver).
 - e2e `mpls-ilm` (drivers group, [e2e-phases.md](../e2e-phases.md)): a hidden `nos-ribd --test-ilm` stands in for the OSPF daemon and programs one swap, one PHP and one egress entry into the real kernel; the phase asserts the install lines, steady-state quiet, and removal on SIGINT. Forwarding a labelled packet across routers is the epic's own acceptance (#1169).
 
+## SPF to labels and the ILM push (#1381)
+
+- `nos-ospfd` derives labels in `spf::attach_labels` and the ILM in `spf::ilm_routes`; `rib_push_client` sends both (`next_hop_labels` on `PushOspfRoutes`, the full ILM set on `PushMplsRoutes` whenever it changes, empty to withdraw). Rules and ceilings: [OSPF internals](../protocols/ospf-internals.md).
+- ILM per Prefix-SID: incoming label = our SRGB base + index; hops = the route's next hops with the stack each is sent with (empty = PHP pop); our own SIDs are egress entries.
+- Observable until 5d (#1383): the `installed mpls ilm route` / labelled route install lines of `nos-ribd`.
+
 ## Not here
 
 SRGB/Prefix-SID/Adj-SID configuration and TLVs, the SPF-to-label mapping, the `show` for the ILM (the log lines are the observable until #1169), SR-MS and TI-LFA.

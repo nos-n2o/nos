@@ -4061,6 +4061,7 @@ mod tests {
             port_aggregate: None,
             mtu: 1500,
             subinterfaces: Vec::new(),
+            speed_mbps: None,
             err_disabled: false,
         };
         let out = render_interface_status(&status);
