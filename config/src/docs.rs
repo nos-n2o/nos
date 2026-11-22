@@ -1216,6 +1216,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Advertise this router's links in an RFC 3630 traffic engineering LSA.",
             "Originates area-scope opaque LSAs (type 10, opaque type 1): one with this router's address and one per fully adjacent point-to-point or broadcast link with its link type, link id, local and remote interface address, TE metric (the OSPF cost), maximum bandwidth, maximum reservable bandwidth, unreserved bandwidth and administrative group. Advertisement only: nothing computes a constrained path from it. Bandwidth is advertised as 0 because the kernel link speed is not reported to nos-ospfd. `delete` turns it off.",
         ),
+        Topic::OspfInstanceExtendedPrefixLsa => (
+            "Advertise a host address in an RFC 7684 Extended Prefix LSA.",
+            "Originates one area-scope opaque LSA (type 10, opaque type 7) with an Extended Prefix TLV for this /32 (route type intra-area, N-flag, IPv4) and no sub-TLVs; the other routers log it and re-flood it. A test and interoperability aid until segment routing fills the framework. `delete` withdraws it.",
+        ),
         Topic::OspfInstanceRemoteLfa => (
             "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).",
             "For a destination whose only next hop has no basic loop-free alternate, installs a backup route that tunnels the traffic (IP-in-IP) to a PQ node: a router reachable without the protected link that itself reaches the destination without it — typical on rings of five or more routers. Link protection only. Also creates an IP-in-IP device in this router's routing table that decapsulates tunnelled traffic from any source, so this router can be another one's PQ node: enable it on every router of the area. `delete` turns it off.",

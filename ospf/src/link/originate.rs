@@ -397,26 +397,45 @@ pub(super) fn te_lsas(
     out
 }
 
-/// Installs `te_lsas` when `te` and withdraws every other self-originated
+/// Installs `te_lsas` when `te`, one Extended Prefix LSA per entry of
+/// `ext_prefixes` and one Extended Link LSA per entry of `ext_links` (opaque
+/// ID = position, RFC 7684 §2), and withdraws every other self-originated
 /// area opaque LSA but the RI LSA, which is always wanted.
-fn install_te_lsas(
+pub(super) fn install_opaque_lsas(
     lsdb: &mut Lsdb,
     local_router_id: Ipv4Addr,
     te: bool,
     links: &[(LinkConfig, LinkStatus)],
+    ext_prefixes: &[lsa::ExtendedPrefix],
+    ext_links: &[lsa::ExtendedLink],
 ) {
     let mut wanted = HashSet::from([lsa::ROUTER_INFO_LINK_STATE_ID]);
-    if te {
-        for (id, body) in te_lsas(local_router_id, links) {
-            wanted.insert(id);
-            install_self_originated(
-                lsdb,
-                local_router_id,
-                lsa::LSA_TYPE_OPAQUE_AREA,
-                id,
-                LsaBody::Opaque(body),
-            );
-        }
+    let mut lsas = if te {
+        te_lsas(local_router_id, links)
+    } else {
+        Vec::new()
+    };
+    for (n, p) in (1..).zip(ext_prefixes) {
+        lsas.push((
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_PREFIX, n),
+            lsa::encode_extended_prefix(p),
+        ));
+    }
+    for (n, l) in (1..).zip(ext_links) {
+        lsas.push((
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_LINK, n),
+            lsa::encode_extended_link(l),
+        ));
+    }
+    for (id, body) in lsas {
+        wanted.insert(id);
+        install_self_originated(
+            lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_OPAQUE_AREA,
+            id,
+            LsaBody::Opaque(body),
+        );
     }
     withdraw_undesired(lsdb, local_router_id, lsa::LSA_TYPE_OPAQUE_AREA, &wanted);
 }
@@ -629,6 +648,7 @@ impl LinkManager {
     ) -> bool {
         let host_router = self.host_router.load(Ordering::Relaxed);
         let te = self.traffic_engineering.load(Ordering::Relaxed);
+        let ext_prefixes = self.extended_prefixes.lock().unwrap().clone();
         let max_metric = max_metric || host_router;
         let mut router_lsa_installed = false;
         let snapshot: Vec<(LinkConfig, LinkStatus)> = self
@@ -750,9 +770,10 @@ impl LinkManager {
                 LsaBody::Opaque(lsa::encode_router_info(router_info_caps)),
             );
 
-            // RFC 3630 TE LSAs; `withdraw_undesired` also flushes them when the
+            // RFC 3630 TE and RFC 7684 extended LSAs; `withdraw_undesired` also flushes them when the
             // knob goes off or a link goes away (the RI LSA is always desired).
-            install_te_lsas(&mut lsdb, local_router_id, te, &links);
+            // ponytail: no Extended Link source yet (#1168 fills it).
+            install_opaque_lsas(&mut lsdb, local_router_id, te, &links, &ext_prefixes, &[]);
 
             let mut network_ids = HashSet::new();
             for (cfg, status) in &links {

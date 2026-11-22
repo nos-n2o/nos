@@ -166,6 +166,16 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceTrafficEngineering, words = "traffic-engineering")]
     pub traffic_engineering: bool,
 
+    /// RFC 7684 Extended Prefix LSA: originate one area-scope opaque LSA
+    /// (type 10, opaque type 7) advertising this host address (a /32, route
+    /// type intra-area, N-flag). Carries no sub-TLVs: a test and
+    /// interoperability aid until segment routing uses the framework.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = OspfInstanceExtendedPrefixLsa, words = "extended-prefix-lsa")]
+    pub extended_prefix_lsa: Option<Ipv4Addr>,
+
     /// RFC 7490 remote loop-free alternates: for a destination with no basic
     /// LFA, a backup that tunnels (IP-in-IP) to a PQ node's loopback. Also
     /// makes this router's routing table decapsulate IP-in-IP from any
@@ -249,6 +259,7 @@ impl Default for OspfInstance {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
+            extended_prefix_lsa: None,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
@@ -305,6 +316,7 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
+            extended_prefix_lsa: None,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

@@ -1495,6 +1495,10 @@ pub struct Args {
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_traffic_engineering: Option<bool>,
+    /// RFC 7684 `extended-prefix-lsa` host address for that instance
+    /// (requires `--ospf-instance`), test-only; `off` withdraws it.
+    #[arg(long)]
+    pub ospf_extended_prefix_lsa: Option<String>,
     /// RFC 7490 `remote-lfa` for that instance (requires `--ospf-instance`):
     /// `true` turns it on, `false` off.
     #[arg(long)]
@@ -4262,6 +4266,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: name.clone(),
                 enabled,
             }));
+        }
+        if let Some(address) = &args.ospf_extended_prefix_lsa {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetExtendedPrefixLsa {
+                    name: name.clone(),
+                    address: (address != "off").then(|| address.parse()).transpose()?,
+                },
+            ));
         }
         if let Some(enabled) = args.ospf_traffic_engineering {
             ops.push(ConfigOp::OspfInstance(

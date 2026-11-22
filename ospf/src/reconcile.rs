@@ -499,6 +499,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
     links.set_traffic_engineering(own.traffic_engineering);
+    links.set_extended_prefixes(extended_prefixes(own.extended_prefix_lsa));
     links.set_remote_lfa(own.remote_lfa);
     links.set_max_lsa(own.max_lsa);
     links.set_spf_timers(spf_timers(&own.spf_throttle));
@@ -1629,6 +1630,20 @@ mod tests {
 }
 
 /// The configured RFC 8405 timers; unset fields keep `Timers::default()`.
+/// The RFC 7684 Extended Prefix entries the config asks for: one test-only
+/// /32 today (`OspfInstance.extended_prefix_lsa`), the SR config's list later.
+fn extended_prefixes(addr: Option<std::net::Ipv4Addr>) -> Vec<crate::lsa::ExtendedPrefix> {
+    addr.map(|prefix| crate::lsa::ExtendedPrefix {
+        route_type: crate::lsa::EXT_ROUTE_INTRA_AREA,
+        prefix,
+        prefix_len: 32,
+        flags: crate::lsa::EXT_PREFIX_FLAG_N,
+        sub_tlvs: Vec::new(),
+    })
+    .into_iter()
+    .collect()
+}
+
 fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
     use std::time::Duration;
     let d = nos_ospf_common::throttle::Timers::default();

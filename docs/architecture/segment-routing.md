@@ -2,6 +2,10 @@
 
 Contributor-facing design for #1164 (RFC 8665), decided in #1165. The OSPF side (TE/Extended LSAs, SR TLVs, SPF to labels) is #1166-#1169; this page fixes what they program and who owns it. Built here: the wire types, `nos-ribd`'s ILM handling and the Linux driver.
 
+## RFC 7684 framework (#1167)
+
+Extended Prefix (opaque type 7) and Extended Link (8) LSAs are built: codec, per-entry origination (`LinkManager.extended_prefixes`, one LSA per entry), flooding, withdrawal and the receive log. #1168 fills `ExtendedPrefix.sub_tlvs` with the SID/Label and Prefix-SID sub-TLVs and replaces the test-only `extended-prefix-lsa` knob; #1169 does the same for Extended Link (Adj-SID). Details: [OSPF internals](../protocols/ospf-internals.md).
+
 ## What already exists (do not redo)
 
 - Per-next-hop label stacks: `nos_proto::NextHop.labels`, `RibEntry.next_hops`, installed as `RTA_ENCAP` MPLS (ingress push), one `RTA_MULTIPATH` hop each (#594, #581). See [linux-drivers.md](linux-drivers.md#mpls-l3vpn-nos-ribd-581).
