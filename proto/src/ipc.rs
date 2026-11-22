@@ -5,6 +5,30 @@ use crate::docs::{CommandDoc, Topic};
 use crate::ops::ConfigOp;
 use crate::schema::Config;
 
+/// The person `nos-restd` calls on behalf of (#1360): the REST user's name
+/// and, for a user with no local entry, the role RADIUS granted at login.
+/// `nos-configd` trusts it only from a `Restd` connection and ignores `claim`
+/// for any name the config has a local entry for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Actor {
+    /// The authenticated REST user.
+    pub name: String,
+    /// The role an external login backend granted (never client supplied:
+    /// `nos-restd` takes it from the watchdog's `RestSessionLive`).
+    pub claim: Option<crate::UserRole>,
+}
+
+impl Actor {
+    /// An actor with no claim (a local user).
+    #[must_use]
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            claim: None,
+        }
+    }
+}
+
 /// Messages sent from a component client to the config daemon.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -22,7 +46,7 @@ pub enum Request {
     /// config-file path.
     Save {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Opens a named transaction, creating it from `base` if it doesn't
     /// already exist, or resuming its current in-progress config unchanged
@@ -36,7 +60,7 @@ pub enum Request {
         /// REST user), for the audit log. `None` from every other client;
         /// `nos-configd` ignores it unless the caller is `Restd` and uses
         /// the certificate name for a `User`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Applies one edit to a named transaction's in-progress config.
     ApplyOp {
@@ -45,7 +69,7 @@ pub enum Request {
         /// The edit to apply.
         op: ConfigOp,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// One-shot fetch of a named transaction's current in-progress config.
     GetTransaction {
@@ -64,7 +88,7 @@ pub enum Request {
         /// Only act if the transaction is at this revision.
         if_match: Option<Vec<u64>>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
         /// Confirmed commit (RFC 6241 8.4, #1144): `Some(secs)` (30..=86400)
         /// rolls the commit back unless confirmed within `secs`.
         confirm_timeout: Option<u32>,
@@ -72,12 +96,12 @@ pub enum Request {
     /// Confirms a pending confirmed commit (#1144): disarms its rollback timer.
     ConfirmCommit {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Rolls a pending confirmed commit back now (#1144).
     CancelCommit {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Deletes a named transaction without touching the running config.
     /// `if_match` as on `CommitTransaction`.
@@ -144,7 +168,7 @@ pub enum Request {
         /// consumer must pass it.
         position: Option<crate::config_path::ListPosition>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Cheap auth probe (#755): is there a user called `name` in the running
     /// config? Replies `Event::UserExists`, carrying no config data.
@@ -182,7 +206,7 @@ pub enum Request {
         /// As on `SetTransactionPath`.
         position: Option<crate::config_path::ListPosition>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// `nos-sshd`-only set-if-absent (#1104): stores `seed` (base64 of a
     /// 32-byte ed25519 seed) as the admin key `ssh-host-key` in the running
@@ -205,7 +229,7 @@ pub enum Request {
         /// How many commits to go back.
         index: u32,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
 }
 

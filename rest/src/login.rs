@@ -356,7 +356,7 @@ pub async fn login(
 )]
 pub async fn renew(
     State(d): State<Daemons>,
-    Extension(PeerUser(user, serial)): Extension<PeerUser>,
+    Extension(PeerUser(user, serial, _)): Extension<PeerUser>,
     Json(body): Json<RenewRequest>,
 ) -> ApiResult<Json<Certificate>> {
     // The middleware only lets a request with a certificate this far.

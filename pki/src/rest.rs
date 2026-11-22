@@ -77,6 +77,8 @@ pub struct Accepted {
     pub user: Option<String>,
     /// Hex serial of that certificate (`Serial`'s spelling), for the watchdog's liveness check.
     pub serial: Option<String>,
+    /// The role claim SAN (`Ca::sign_csr_claiming`) of that certificate, if any (#1360).
+    pub claim: Option<String>,
     /// `true` when HTTP/2 was negotiated.
     pub h2: bool,
 }
@@ -135,6 +137,9 @@ impl RestServer {
             .and_then(|c| Serial::of(c).ok())
             .filter(|_| user.is_some())
             .map(|s| s.to_string());
+        let claim = leaf
+            .and_then(|c| PeerId::claim_from_cert_der(c))
+            .filter(|_| user.is_some());
         let h2 = conn.alpn_protocol() == Some(b"h2");
         debug!(
             user = ?user.as_deref().unwrap_or("none"),
@@ -147,6 +152,7 @@ impl RestServer {
             stream,
             user,
             serial,
+            claim,
             h2,
         })
     }
