@@ -377,6 +377,17 @@ impl Pki {
             .map(|(started, _)| started)
     }
 
+    /// Whether a REST certificate of the login that began at `started` is
+    /// still usable (unexpired, allowlisted, within the session cap):
+    /// renewals inherit `started`, so a Stop (#1361) fires only once none is.
+    pub fn rest_session_live(&self, user: &str, started: Instant) -> bool {
+        let max = Duration::from_secs(self.rest_session_max.load(Ordering::Relaxed));
+        started.elapsed() < max
+            && lock(&self.rest_sessions)
+                .values()
+                .any(|s| s.user == user && s.started == started && !s.cert.expired())
+    }
+
     /// `rest_session` plus the stored role claim (#1360): what a renewal and
     /// `RestCertCheck` use, never anything the client sent.
     pub fn rest_session_claim(
@@ -547,6 +558,26 @@ mod tests {
 
         pki.set_rest_session_max(Duration::ZERO);
         assert!(pki.rest_session(&b, "bob").is_none(), "past the cap");
+    }
+
+    #[test]
+    fn rest_session_live_spans_renewals_until_revoked_or_capped() {
+        let (_tmp, pki) = pki();
+        let t0 = Instant::now();
+        let sign = |started| {
+            let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+            pki.sign_rest_user(&csr, "alice", started, None).unwrap();
+        };
+        assert!(!pki.rest_session_live("alice", t0));
+        sign(t0);
+        sign(t0); // a renewal inherits `started`
+        assert!(pki.rest_session_live("alice", t0));
+        assert!(!pki.rest_session_live("bob", t0));
+        pki.revoke_user("alice");
+        assert!(!pki.rest_session_live("alice", t0), "revoked");
+        sign(t0);
+        pki.set_rest_session_max(Duration::ZERO);
+        assert!(!pki.rest_session_live("alice", t0), "past the cap");
     }
 
     #[test]

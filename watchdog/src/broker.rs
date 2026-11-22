@@ -454,10 +454,7 @@ async fn login(
     let event = issue(ctx, user, csr_der, realm, started, claim.as_deref());
     if matches!(event, WatchdogEvent::Issued { .. }) {
         info!(user = ?user, rest = matches!(realm, Realm::Rest), "login accepted");
-        // ponytail: REST logins are accounted by #1361.
-        if matches!(realm, Realm::Ipc) {
-            account_session(ctx, user, started);
-        }
+        account_session(ctx, user, started, realm);
     }
     event
 }
@@ -467,8 +464,9 @@ const SESSION_POLL: Duration = Duration::from_secs(5);
 
 /// Queues a Start now and, from a task, the Stop once no certificate of this
 /// login is live any more (expired, or revoked by a password change or a
-/// deleted user). The Stop is therefore up to `SESSION_POLL` late.
-fn account_session(ctx: &Ctx, user: &str, started: Instant) {
+/// deleted user; for REST also past the session cap). The Stop is therefore up
+/// to `SESSION_POLL` late.
+fn account_session(ctx: &Ctx, user: &str, started: Instant, realm: Realm) {
     let session = accounting::session_id();
     let user = user.to_string();
     accounting::offer(
@@ -480,7 +478,10 @@ fn account_session(ctx: &Ctx, user: &str, started: Instant) {
     );
     let (tx, pki) = (ctx.acct.clone(), ctx.pki.clone());
     tokio::spawn(async move {
-        while pki.session_live(&user, started) {
+        while match realm {
+            Realm::Ipc => pki.session_live(&user, started),
+            Realm::Rest => pki.rest_session_live(&user, started),
+        } {
             tokio::time::sleep(SESSION_POLL).await;
         }
         let secs = u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX);
