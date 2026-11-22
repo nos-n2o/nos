@@ -7894,6 +7894,44 @@ pub async fn ospf_throttle(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 7684 Extended Prefix Opaque LSA (requires `ospf-lfa`, like `ospf-te`):
+/// each router advertises its own router id as an Extended Prefix (opaque
+/// type 7, area scope); the peer decodes and logs it. Withdrawing it again
+/// leaves the session up.
+pub async fn ospf_ext_lsa(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let ext = |rid: &str, addr: &str| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            rid,
+            "--ospf-extended-prefix-lsa",
+            addr,
+        ])
+    };
+    let seen = |rid: &str| {
+        format!(
+            "ospf extended prefix received area={OSPF_AREA} router={rid} prefix={rid} length=32 route_type=1 flags=64"
+        )
+    };
+    let (a0, b0) = (
+        a.count(&seen(OSPF_ROUTER_ID_B)),
+        b.count(&seen(OSPF_ROUTER_ID)),
+    );
+    log("originating an Extended Prefix LSA on router-a and router-b");
+    a.provision(&ext(OSPF_ROUTER_ID, OSPF_ROUTER_ID)).await?;
+    b.provision(&ext(OSPF_ROUTER_ID_B, OSPF_ROUTER_ID_B))
+        .await?;
+    a.wait_new(&seen(OSPF_ROUTER_ID_B), a0, 60).await?;
+    b.wait_new(&seen(OSPF_ROUTER_ID), b0, 60).await?;
+
+    log("restoring: no Extended Prefix LSA");
+    a.provision(&ext(OSPF_ROUTER_ID, "off")).await?;
+    b.provision(&ext(OSPF_ROUTER_ID_B, "off")).await?;
+    both_full_p2p(a, b).await
+}
+
 #[cfg(test)]
 mod timeline_tests {
     use super::format_timeline;

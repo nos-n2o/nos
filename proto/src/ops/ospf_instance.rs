@@ -88,6 +88,13 @@ pub enum OspfInstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Sets or clears the RFC 7684 Extended Prefix LSA's host address.
+    SetExtendedPrefixLsa {
+        /// Name of the OSPF instance this op targets.
+        name: String,
+        /// The /32 to advertise, `None` to withdraw.
+        address: Option<std::net::Ipv4Addr>,
+    },
     /// Turns RFC 7490 remote LFA on or off.
     SetRemoteLfa {
         /// Name of the OSPF instance this op targets.
@@ -130,6 +137,7 @@ impl OspfInstanceOp {
                         max_lsa: None,
                         host_router: false,
                         traffic_engineering: false,
+                        extended_prefix_lsa: None,
                         remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
@@ -177,6 +185,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetTrafficEngineering { name, enabled } => {
                 find_instance_mut(config, name)?.traffic_engineering = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetExtendedPrefixLsa { name, address } => {
+                find_instance_mut(config, name)?.extended_prefix_lsa = *address;
                 Ok(())
             }
             OspfInstanceOp::SetRemoteLfa { name, enabled } => {
@@ -230,6 +242,7 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
+            extended_prefix_lsa: None,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

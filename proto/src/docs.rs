@@ -283,6 +283,8 @@ topics! {
     OspfInstanceHostRouter,
     /// `OspfInstance.traffic_engineering`
     OspfInstanceTrafficEngineering,
+    /// `OspfInstance.extended_prefix_lsa`
+    OspfInstanceExtendedPrefixLsa,
     /// `OspfInstance.remote_lfa`
     OspfInstanceRemoteLfa,
     /// `OspfInstance.spf_throttle`

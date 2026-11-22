@@ -2334,3 +2334,49 @@ async fn traffic_engineering_toggle_originates_and_flushes() {
     assert!(!live(lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID).await);
     assert!(live(lsa::ROUTER_INFO_LINK_STATE_ID).await);
 }
+
+/// RFC 7684: one Extended Prefix / Link LSA per entry (opaque ID = position),
+/// held as type 10, and withdrawn (premature aging) when the entry goes.
+#[test]
+fn extended_lsas_originate_and_withdraw_with_their_entry() {
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    let prefixes = [lsa::ExtendedPrefix {
+        route_type: lsa::EXT_ROUTE_INTRA_AREA,
+        prefix: rid,
+        prefix_len: 32,
+        flags: lsa::EXT_PREFIX_FLAG_N,
+        sub_tlvs: vec![0x77, 0x77, 0, 0],
+    }];
+    let links = [lsa::ExtendedLink {
+        link_type: lsa::LINK_TYPE_POINT_TO_POINT,
+        link_id: Ipv4Addr::new(2, 2, 2, 2),
+        link_data: Ipv4Addr::new(10, 0, 0, 1),
+        sub_tlvs: Vec::new(),
+    }];
+    let live = |lsdb: &Lsdb| -> Vec<Ipv4Addr> {
+        let mut ids: Vec<_> = lsdb
+            .headers()
+            .into_iter()
+            .filter(|h| h.lsa_type == lsa::LSA_TYPE_OPAQUE_AREA && h.age < lsa::MAX_AGE)
+            .map(|h| h.link_state_id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let mut lsdb = Lsdb::new();
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &prefixes, &links);
+    assert_eq!(
+        live(&lsdb),
+        [
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_PREFIX, 1),
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_LINK, 1)
+        ]
+    );
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &links);
+    assert_eq!(
+        live(&lsdb),
+        [lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_LINK, 1)]
+    );
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &[]);
+    assert_eq!(live(&lsdb), Vec::<Ipv4Addr>::new());
+}

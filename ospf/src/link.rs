@@ -809,6 +809,9 @@ struct LinkEntry {
     link_local_lsdb: Arc<Mutex<Lsdb>>,
 }
 
+/// (advertising router, link state id) to a decoded Extended Prefix LSA.
+type ExtPrefixSeen = BTreeMap<(Ipv4Addr, Ipv4Addr), lsa::ExtendedPrefix>;
+
 /// Owns every OSPF link's driver task for one `nos-ospfd` process, plus its
 /// per-area LSDBs. `reconcile` is the sole entry point, called by
 /// `crate::reconcile::run` on every resync; it's idempotent and safe to
@@ -892,6 +895,12 @@ pub struct LinkManager {
     /// RFC 3630 TE LSAs (`OspfInstance.traffic_engineering`): an atomic like
     /// `host_router`, so a toggle re-originates without restarting a link.
     traffic_engineering: AtomicBool,
+    /// RFC 7684 Extended Prefix entries to originate (one LSA each, every
+    /// area): the list #1168's SR config fills, today the test-only
+    /// `OspfInstance.extended_prefix_lsa`.
+    extended_prefixes: std::sync::Mutex<Vec<lsa::ExtendedPrefix>>,
+    /// Per area, the other routers' Extended Prefix LSAs, to log a change once.
+    ext_prefix_state: Mutex<HashMap<Ipv4Addr, ExtPrefixSeen>>,
     /// Per area, the Router Address of every other router's TE LSA, to log a
     /// change once (`log_te_routers`).
     te_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, Ipv4Addr>>>,
@@ -1037,6 +1046,8 @@ impl LinkManager {
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
             traffic_engineering: AtomicBool::new(false),
+            extended_prefixes: std::sync::Mutex::new(Vec::new()),
+            ext_prefix_state: Mutex::new(HashMap::new()),
             te_state: Mutex::new(HashMap::new()),
             max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             remote_lfa: AtomicBool::new(false),
@@ -1115,6 +1126,36 @@ impl LinkManager {
 
     pub fn set_traffic_engineering(&self, on: bool) {
         self.traffic_engineering.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_extended_prefixes(&self, prefixes: Vec<lsa::ExtendedPrefix>) {
+        *self.extended_prefixes.lock().unwrap() = prefixes;
+    }
+
+    /// Logs each other router's RFC 7684 Extended Prefix LSAs once, and again
+    /// when one changes (the `nos-e2e ospf-ext-lsa` anchor).
+    async fn log_extended_prefixes(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let seen: ExtPrefixSeen = lsas
+            .iter()
+            .filter(|l| l.header.advertising_router != root)
+            .filter_map(|l| {
+                let p = lsa::decode_extended_prefix(l)?;
+                Some(((l.header.advertising_router, l.header.link_state_id), p))
+            })
+            .collect();
+        let mut state = self.ext_prefix_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (key, p) in &seen {
+            let router = key.0;
+            if old.get(key) != Some(p) {
+                info!(
+                    area = %area_id, router = %router, prefix = %p.prefix, length = p.prefix_len,
+                    route_type = p.route_type, flags = p.flags,
+                    "ospf extended prefix received"
+                );
+            }
+        }
+        *old = seen;
     }
 
     /// Logs each other router's RFC 3630 Router Address LSA once, and again
@@ -1623,6 +1664,7 @@ impl LinkManager {
                 spf::h_bit_routers(&lsas).len(),
             );
             self.log_te_routers(area_id, &lsas, router_id).await;
+            self.log_extended_prefixes(area_id, &lsas, router_id).await;
             if self.host_bit_state.lock().await.insert(area_id, state) != Some(state) {
                 info!(area = %area_id, honoured = state.0, host_routers = state.1, "ospf host-bit state changed");
             }

@@ -414,6 +414,7 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
+            extended_prefix_lsa: None,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

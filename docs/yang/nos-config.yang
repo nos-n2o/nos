@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-28 {
+  revision 2026-11-29 {
     description "Generated.";
   }
 
@@ -993,6 +993,10 @@ module nos-config {
     leaf traffic_engineering {
       type boolean;
       description "Advertise this router's links in an RFC 3630 traffic engineering LSA.";
+    }
+    leaf extended_prefix_lsa {
+      type inet:ipv4-address;
+      description "Advertise a host address in an RFC 7684 Extended Prefix LSA.";
     }
     leaf remote_lfa {
       type boolean;
