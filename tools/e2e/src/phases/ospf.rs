@@ -183,6 +183,30 @@ async fn quiet_settled(r: &Router, pat: &str, baseline: usize) -> anyhow::Result
     r.assert_quiet(pat, baseline, 0).await
 }
 
+/// Waits (60s at most) until no router has installed or originated a Router-,
+/// Network- or other topology LSA for 8s. LSAs are flooded every 5s and held
+/// back by MinLSInterval, so a change made just before a restart reaches a
+/// helper after it entered grace and, per RFC 3623 §3.2 (c), ends it: a
+/// conformant transient that is not what a restart phase measures (#1027).
+async fn topology_settled(routers: &[&Router]) -> anyhow::Result<()> {
+    let pat = "ospf lsa installed.*lsa_type=[1-57] \\|ospf lsa originated";
+    for _ in 0..8 {
+        let mut before = Vec::new();
+        for r in routers {
+            before.push(r.count_fresh(pat).await);
+        }
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let mut quiet = true;
+        for (r, n) in routers.iter().zip(before) {
+            quiet &= r.count_fresh(pat).await == n;
+        }
+        if quiet {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the ospf topology LSAs never settled for 8s within 64s")
+}
+
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let age0 = a.count_fresh("ospf lsa installed.*age=0$").await;
@@ -653,7 +677,12 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
 /// 500 ms sample (strict, #1209). On a loss it first prints a timeline of the
 /// daemon events since SIGTERM (`marks` = each router's last log stamp just
 /// before it) so the next flake names its cause (#1212).
-async fn route_held(a: &Router, b: &Router, marks: (u64, u64)) -> anyhow::Result<()> {
+async fn route_held(
+    a: &Router,
+    b: &Router,
+    c: Option<&Router>,
+    marks: (u64, u64, u64),
+) -> anyhow::Result<()> {
     let started = tokio::time::Instant::now();
     loop {
         if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
@@ -665,26 +694,54 @@ async fn route_held(a: &Router, b: &Router, marks: (u64, u64)) -> anyhow::Result
             let mut entries = b
                 .timeline_since(
                     &format!(
-                        "removed route prefix={lo}\\|added route prefix={lo}\\|ospf lsa installed.*advertising_router={OSPF_ROUTER_ID}\\|ospf neighbor\\|ospf spf\\|ospf graceful\\|ospf helper"
+                        "removed route prefix={lo}\\|added route prefix={lo}\\|ospf lsa installed.*lsa_type=[12] \\|ospf neighbor\\|ospf spf\\|ospf graceful\\|ospf helper\\|ospf interface became\\|ospf lsa originated\\|ospf restart mode"
                     ),
                     marks.1,
                 )
                 .await;
             entries.extend(
                 a.timeline_since(
-                    "ospf lsa originated\\|ospf neighbor reached full\\|ospf graceful",
+                    "ospf lsa originated\\|ospf neighbor\\|ospf graceful\\|ospf helper\\|ospf interface became\\|ospf restart mode\\|ospf lsa installed.*lsa_type=[12] ",
                     marks.0,
                 )
                 .await,
             );
-            let lines = format_timeline(entries, 80);
+            if let Some(c) = c {
+                entries.extend(
+                    c.timeline_since(
+                        "ospf lsa originated\\|ospf neighbor\\|ospf helper\\|ospf graceful\\|ospf interface became\\|ospf lsa installed.*lsa_type=[12] ",
+                        marks.2,
+                    )
+                    .await,
+                );
+            }
+            let lines = format_timeline(entries, 120);
             for l in &lines {
                 log(l);
             }
+            // How long the gap lasts, and router-b's OSPF state during it (#1027).
+            let mut gap = Vec::new();
+            for _ in 0..12 {
+                gap.push(format!(
+                    "{}ms:{}",
+                    started.elapsed().as_millis(),
+                    b.rt1_has(lo, "Ospf").await.unwrap_or(false)
+                ));
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let mut state = Vec::new();
+            for route in ["/v1/ospf/neighbors", "/v1/ospf/database"] {
+                let body = b.rest_expect(Method::GET, route, None, 200).await;
+                state.push(format!(
+                    "{route}: {}",
+                    body.unwrap_or_else(|e| e.to_string())
+                ));
+            }
+            let state = state.join("\n");
             bail!(
-                "router-b lost its ospf route to {lo} during the restart (sample {lost_after}ms after SIGTERM, own clock); daemon timeline (first 20 of {}):\n{}",
+                "router-b lost its ospf route to {lo} during the restart (sample {lost_after}ms after SIGTERM, own clock); route present at {gap:?}; router-b state after:\n{state}\ndaemon timeline ({} lines):\n{}",
                 lines.len(),
-                lines.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+                lines.join("\n")
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1467,6 +1524,11 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
+    // Let this phase's own provisioning finish flooding before the restart (#1027).
+    let mut settle: Vec<&Router> = vec![a, b];
+    settle.extend(w.c().ok());
+    topology_settled(&settle).await?;
+
     // Scoped to the restarter on the p2p link: the bridge adjacency may log down on its own (#886).
     let torn = format!(
         "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
@@ -1501,7 +1563,12 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         a.count(&grace_flush),
         a.count(&removed),
     );
-    let marks = (a.log_mark(), b.log_mark());
+    let router_c = w.c().ok();
+    let marks = (
+        a.log_mark(),
+        b.log_mark(),
+        router_c.map_or(0, Router::log_mark),
+    );
     log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
     w.dock
         .signal_process("router-a", "nos-ospfd", "-TERM")
@@ -1549,7 +1616,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // (Its next hops may still change — the bridge adjacency, not covered by
     // this phase, can come up meanwhile — which the kernel driver logs as a
     // remove + add, so the kernel log alone can't tell a drop from that.)
-    let route_held = route_held(a, b, marks);
+    let route_held = route_held(a, b, router_c, marks);
     tokio::select! {
         r = restart => r?,
         r = route_held => r?,
@@ -1658,9 +1725,17 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         "ospf neighbor adjacency torn down, back to init link=eth0.0 neighbor={OSPF_ROUTER_ID}\\|ospf neighbor state changed to down link=eth0.0 neighbor={OSPF_ROUTER_ID}"
     );
     let (signal0, torn0) = (b.count(&signal), b.count_fresh(&torn).await);
+    let mut settle: Vec<&Router> = vec![a, b];
+    settle.extend(w.c().ok());
+    topology_settled(&settle).await?;
     let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
     let (full_b0, full_a0) = (b.count(&full_on_b), a.count(&full_on_a));
-    let marks = (a.log_mark(), b.log_mark());
+    let router_c = w.c().ok();
+    let marks = (
+        a.log_mark(),
+        b.log_mark(),
+        router_c.map_or(0, Router::log_mark),
+    );
     log("sending SIGTERM to router-a's nos-ospfd; its last Hello carries RS");
     w.dock
         .signal_process("router-a", "nos-ospfd", "-TERM")
@@ -1680,7 +1755,7 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(5)).await;
         anyhow::Ok(())
     };
-    let route_held = route_held(a, b, marks);
+    let route_held = route_held(a, b, router_c, marks);
     tokio::select! {
         r = restart => r?,
         r = route_held => r?,
@@ -6223,6 +6298,10 @@ pub async fn ospfv3_stub_router(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&primary, p0, 60).await?;
     a.wait_new(&backup_added, b0, 60).await?;
+    // Barrier (#1344): let the detach's resync and the backup slot churn settle,
+    // so a late re-install of the primary cannot land inside the window below.
+    let p1 = a.count(&primary);
+    a.assert_quiet(&primary, p1, 5).await?;
     let primary_removed0 = a.count(&primary_removed);
 
     log("router-c: max-metric router-lsa administrative; router-a must drop its lfa via c");
