@@ -269,6 +269,18 @@ pub async fn diff_transaction(socket_path: &Path, name: &str) -> Result<ConfigDi
     }
 }
 
+/// One external-user request (#1374) and its reply (`Event::ExternalUser(s)`).
+pub async fn external_users(socket_path: &Path, req: Request) -> Result<Event, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(req).await?;
+    match reader.next().await {
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(e)) => Ok(e),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
 /// `Request::ListHistory`: newest first.
 pub async fn list_history(socket_path: &Path) -> Result<Vec<nos_proto::HistoryEntry>, ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;

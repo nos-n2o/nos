@@ -139,6 +139,16 @@ pub enum Command {
         interface: String,
     },
     Save,
+    /// `show aaa users` (#1374): the external users with an ssh account entry.
+    ShowAaaUsers,
+    /// `allocate aaa user <name>` (#1374).
+    AllocateAaaUser {
+        name: String,
+    },
+    /// `clear aaa user <name>` (#1374).
+    ClearAaaUser {
+        name: String,
+    },
     /// `show configuration history`
     ShowHistory,
     /// `rollback <n>` — configuration mode.
@@ -715,6 +725,27 @@ mod tests {
         assert_eq!(
             Command::parse("show ospfv3 database"),
             Command::ShowOspfv3Database
+        );
+    }
+
+    #[test]
+    fn aaa_user_commands() {
+        assert_eq!(Command::parse("show aaa users"), Command::ShowAaaUsers);
+        assert_eq!(
+            Command::parse("allocate aaa user alice"),
+            Command::AllocateAaaUser {
+                name: "alice".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("clear aaa user alice"),
+            Command::ClearAaaUser {
+                name: "alice".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("clear aaa user"),
+            Command::Unknown("clear aaa user".to_string())
         );
     }
 

@@ -324,8 +324,29 @@ async fn dispatch_unmasked(
                 Event::Error(e.to_string())
             }
         },
+        Request::AllocateExternalUser { name } | Request::AdminAllocateExternalUser { name } => {
+            external_reply(store.allocate_external_user(&name).await, &name)
+        }
+        Request::ClearExternalUser { name } => {
+            external_reply(store.clear_external_user(&name).await, &name)
+        }
+        Request::ListExternalUsers => match store.list_external_users() {
+            Ok(l) => Event::ExternalUsers(l),
+            Err(e) => Event::Error(e.to_string()),
+        },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
+}
+
+fn external_reply(r: Result<u32, crate::ConfigError>, name: &str) -> Event {
+    match r {
+        Ok(uid) => Event::ExternalUser { uid },
+        Err(e) => {
+            // The name came from a caller: Debug-escaped, never raw into the log.
+            warn!(user = ?name, error = %e, "external user refused");
+            Event::Error(e.to_string())
+        }
+    }
 }
 
 async fn history_reply(store: &ConfigStore) -> Event {

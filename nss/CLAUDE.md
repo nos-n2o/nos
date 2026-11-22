@@ -12,5 +12,5 @@
 
 - Read-only, no network, no secrets, no config: the path is a const (this runs inside sshd and every `ls`).
 - A panic must never cross `extern "C"`; a too-small buffer is `ERANGE` (libnss turns it into TryAgain + errno).
-- `nos-configd` (`config/src/nss_users.rs`) writes the file; this crate only reads it.
+- `nos-configd` (`config/src/nss_users.rs`) writes the file; this crate only reads it (local users plus the external AAA users, #1374; same format, this crate is unchanged).
 - Install as `libnss_nos.so.2` (the Dockerfile does); `nm -D` must show `_nss_nos_getpwnam_r` etc.

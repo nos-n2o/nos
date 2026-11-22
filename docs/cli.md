@@ -401,6 +401,7 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutesPage` over one connection — every prefix, every candidate route ordered best to worst, printed page by page as it arrives (works in any mode). The table is not snapshotted: routes that change during the walk may be missed or shown, but never repeated |
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `show configuration history` | `Request::ListHistory`; prints index, UTC time, kind and user of the commits kept on disk (works in any mode) |
+| `show aaa users`, `allocate aaa user <name>`, `clear aaa user <name>` | `ListExternalUsers`, `AdminAllocateExternalUser`, `ClearExternalUser` (#1374, admin role; any mode): external (RADIUS/TACACS+) users with an ssh account entry; `clear` keeps the uid reserved |
 | `rollback <n>` | `Request::Rollback { index: n }`; restores the config `n` commits back as a normal commit (configuration mode) |
 | `commit confirmed [<minutes>]`, `commit confirm`, `commit cancel` | `CommitTransaction { confirm_timeout }`, `ConfirmCommit`, `CancelCommit` (#1144) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |

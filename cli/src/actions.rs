@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use nos_proto::{
-    CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
+    CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, Request, ServiceRef, Topic,
     DEFAULT_CONFIG_SOCKET,
 };
 
@@ -197,6 +197,12 @@ pub async fn handle_action(
         }
         Resolved::ShowHistory => {
             show_history(socket).await;
+            Outcome::Continue(mode)
+        }
+        action @ (Resolved::ShowAaaUsers
+        | Resolved::AllocateAaaUser { .. }
+        | Resolved::ClearAaaUser { .. }) => {
+            aaa_users(socket, action).await;
             Outcome::Continue(mode)
         }
         Resolved::Rollback { n } => {
@@ -1479,6 +1485,36 @@ async fn diff(mode: &Mode, socket: &Path) {
     match client::diff_transaction(socket, &transaction).await {
         Ok(d) if d.is_empty() => println!("no changes"),
         Ok(d) => println!("{}", format::render_diff(&d, use_color())),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// `show aaa users`, `allocate aaa user`, `clear aaa user` (#1374): admin-only requests to
+/// `nos-configd`; the daemon's refusal text is printed as is.
+async fn aaa_users(socket: &Path, action: Resolved) {
+    let (req, name) = match action {
+        Resolved::AllocateAaaUser { name } => (
+            Request::AdminAllocateExternalUser { name: name.clone() },
+            name,
+        ),
+        Resolved::ClearAaaUser { name } => {
+            (Request::ClearExternalUser { name: name.clone() }, name)
+        }
+        _ => (Request::ListExternalUsers, String::new()),
+    };
+    let clear = matches!(req, Request::ClearExternalUser { .. });
+    match client::external_users(socket, req).await {
+        Ok(Event::ExternalUsers(l)) if l.is_empty() => println!("no external users"),
+        Ok(Event::ExternalUsers(l)) => {
+            for (name, uid) in l {
+                println!("{name:<32} {uid}");
+            }
+        }
+        Ok(Event::ExternalUser { uid }) if clear => {
+            println!("{name}: entry removed, uid {uid} stays reserved");
+        }
+        Ok(Event::ExternalUser { uid }) => println!("{name}: uid {uid}"),
+        Ok(_) => eprintln!("error: unexpected reply"),
         Err(e) => eprintln!("error: {e}"),
     }
 }
