@@ -13,6 +13,7 @@ use super::sugar;
 /// session config (remote-as, source-address, address-families) lives on
 /// the referenced `BgpPeerGroup`, not here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeer {

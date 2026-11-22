@@ -26,6 +26,7 @@ pub const PRIORITY_DEFAULT: u8 = 1;
 /// `OspfProfile.network_type` is `Option` — see its doc comment for how an
 /// unset value is resolved.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NetworkType {
     /// Point-to-point link: no DR election.
@@ -47,6 +48,7 @@ pub enum NetworkType {
 /// Keys are labels of `Config.admin` keystore entries, never inline secrets.
 /// `OspfProfile.auth == None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfAuth {
     /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
@@ -74,6 +76,7 @@ pub enum OspfAuth {
 /// D.5), which is how graceful key rollover works without dropping the
 /// adjacency.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 #[cli(no_default)]
 pub struct OspfCryptoKey {
@@ -96,6 +99,7 @@ pub struct OspfCryptoKey {
 /// five — there's no separate "algorithm" field on the wire, so `key_id`
 /// alone must unambiguously determine which algorithm a receiver uses.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfCryptoAlgorithm {
     /// Keyed MD5 (RFC 2328 Appendix D.3).
@@ -184,6 +188,7 @@ pub(crate) fn valid_auth(auth: Option<&OspfAuth>, cfg: &Config) -> garde::Result
 /// qualifier — so, like `BgpPeerGroup.name`, its uniqueness is enforced
 /// globally across the whole config, not just within its owning area.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 #[allow(
@@ -432,7 +437,7 @@ mod tests {
             max_lsa: None,
             host_router: false,
             traffic_engineering: false,
-            extended_prefix_lsa: None,
+            segment_routing: crate::schema::SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

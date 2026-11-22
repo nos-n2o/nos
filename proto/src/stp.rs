@@ -9,6 +9,7 @@ use crate::schema::StpMode;
 
 /// IEEE 802.1Q 13.4 port role (the CIST's).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StpRole {
@@ -40,6 +41,7 @@ impl StpRole {
 
 /// The port state as the core sees it (the kernel's `Blocking` is `Discarding`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StpState {
@@ -67,6 +69,7 @@ impl StpState {
 /// They count since the bridge was last (re)built; in `mode mstp` the MSTIs
 /// share the CIST's counters (one BPDU carries them all).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpPortCounters {
     /// Configuration BPDUs received.
@@ -99,6 +102,7 @@ pub struct StpPortCounters {
 
 /// What started a topology change.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StpTcCause {
@@ -110,6 +114,7 @@ pub enum StpTcCause {
 
 /// Topology changes of one tree (RFC 4318 `TopChanges`, `TimeSinceTopologyChange`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpTopology {
     /// Topology changes seen.
@@ -125,6 +130,7 @@ pub struct StpTopology {
 /// One spanning-tree port. Bridge and port ids are display strings
 /// (`8000.02:aa:bb:cc:dd:ee`, `128.1`), as `LldpNeighbor` does.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "one independent flag per protection, reported as-is"
@@ -185,6 +191,7 @@ pub struct StpPortInfo {
 
 /// One port in one spanning-tree instance of an MST region (#321).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "one independent flag per fact, reported as-is"
@@ -228,6 +235,7 @@ pub struct StpInstancePort {
 
 /// One tree of an MST region: instance 0 is the CIST.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpInstance {
     /// Instance ID.
@@ -254,6 +262,7 @@ pub struct StpInstance {
 
 /// The MST region and its trees (`mode mstp`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpMst {
     /// MST configuration name (IEEE 802.1Q section 13.8).
@@ -273,6 +282,7 @@ pub struct StpMst {
 ///
 /// Fields are only ever appended.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StpSummary {
     /// Spanning tree is enabled.

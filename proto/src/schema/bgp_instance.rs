@@ -11,6 +11,7 @@ use super::{sugar, BgpAuth, BgpPeer, BgpPeerGroup, Config};
 use nos_proto_derive::Cli;
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 /// One BGP speaker: identity, peer-groups and peers; served by one `nos-bgpd` process.
@@ -146,6 +147,7 @@ fn rpki_rtr_port_default() -> u16 {
 
 /// One RPKI-to-Router cache (RFC 8210), keyed by its address.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct RpkiCache {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
@@ -197,6 +199,7 @@ fn valid_rpki_caches(caches: &[RpkiCache], cfg: &Config) -> garde::Result {
 
 /// One BMP station (RFC 7854), keyed by its name.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct BmpStation {
     /// Name of the station; the key.
@@ -231,6 +234,7 @@ pub struct BmpStation {
 /// The Adj-RIB-Out views a `bmp-station` monitors (RFC 8671). Variant order
 /// is the postcard index: `None` first, it is the default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum BmpMonitorOut {
     /// No Adj-RIB-Out monitoring.
@@ -258,6 +262,7 @@ impl BmpMonitorOut {
 
 /// The policy view a `bmp-station` monitors (RFC 7854 section 5).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum BmpMonitor {
     /// Only routes after the import policy (what the Adj-RIB-In holds).
@@ -313,11 +318,13 @@ fn valid_bmp_stations(stations: &[BmpStation]) -> garde::Result {
 
 /// One aggregate (RFC 4271 §9.2.2.2), keyed by its prefix.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub struct BgpAggregate {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// Aggregate prefix to originate; the key.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub prefix: IpNet,
     /// Carry the contributors' ASNs as an `AS_SET` instead of setting
     /// `ATOMIC_AGGREGATE`.
@@ -357,6 +364,7 @@ fn valid_aggregates(aggregates: &[BgpAggregate]) -> garde::Result {
 /// `remote_as` is one of them is a confederation-external peer, not an
 /// external one.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub struct BgpConfederation {
     #[serde(default)]
@@ -388,6 +396,7 @@ pub const GR_RESTART_TIME_MAX: u16 = 4095;
 /// RFC 4724 / RFC 8538 graceful restart of one BGP instance. `Default` is
 /// on, with every timer at its default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub struct BgpGracefulRestart {
     /// Turn graceful restart off: no capability is advertised, and no

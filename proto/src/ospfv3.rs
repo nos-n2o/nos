@@ -16,6 +16,7 @@ use crate::ospf::{LinkInterfaceState, OspfNeighborState};
 /// `ospf::NeighborSummary` exactly (nothing in it is an address field beyond
 /// router-ids, so it needs no IPv6-specific fields either).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ospfv3NeighborSummary {
     /// The attach point's display name, matching `nos-ospfv3d`'s own
@@ -53,6 +54,7 @@ pub struct Ospfv3NeighborSummary {
 /// `ospf::LsaSummary`, with `lsa_type` widened to `u16`: RFC 5340's LS Type
 /// word carries the U-bit/S2/S1 scope bits alongside the function code.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ospfv3LsaSummary {
     /// Area the interface or LSA belongs to.

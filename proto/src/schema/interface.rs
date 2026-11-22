@@ -35,11 +35,13 @@ pub fn loopback_table_name(name: &str) -> Option<&str> {
 /// stored from commit time onward but not yet applied to the kernel by any
 /// driver (no `ip addr ... label` call) — schema/plumbing only for now.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Cli, Default)]
 pub struct InterfaceAddress {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// Address with prefix length, e.g. `192.0.2.1/24`; the key.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub address: IpNet,
     #[cli(topic = InterfaceAddress)]
     /// Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.
@@ -58,6 +60,7 @@ pub struct InterfaceAddress {
 /// `valid_subinterface_and_switching_profile_tags`. Loopback interfaces
 /// never have any `Subinterface`s — see `valid_addressing_split`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Subinterface {
@@ -250,6 +253,7 @@ pub(crate) fn valid_subinterface_mtus(
 /// fields — the same reason `RoutingTable`'s redistribute rule is wired on
 /// `Config.routing_tables`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Interface {
@@ -1129,7 +1133,7 @@ mod tests {
                 max_lsa: None,
                 host_router: false,
                 traffic_engineering: false,
-                extended_prefix_lsa: None,
+                segment_routing: crate::schema::SegmentRouting::default(),
                 remote_lfa: false,
                 redistribute_metric: None,
                 redistribute_metric_type: None,

@@ -5,6 +5,9 @@
 extern crate self as nos_proto;
 
 pub mod acl;
+#[cfg(feature = "arbitrary")]
+#[allow(missing_docs)]
+pub mod arbitrary_support;
 pub mod bfd;
 pub mod bgp;
 /// Watchdog endpoint broker: roles, service references and the watchdog wire types.
@@ -127,20 +130,20 @@ pub use schema::{
     Interface, InterfaceAddress, LacpMode, LacpPortAlgorithm, LacpRate, LacpVersion,
     LldpDestination, LldpSettings, LoggingSettings, LoginBackend, LoginPolicy, NetworkType,
     NextHopMode, OspfArea, OspfAreaRange, OspfAreaType, OspfAuth, OspfCryptoAlgorithm,
-    OspfCryptoKey, OspfInstance, OspfProfile, OspfVirtualLink, Ospfv3AddressFamily, Ospfv3Area,
-    Ospfv3AreaRange, Ospfv3Instance, Ospfv3Profile, Ospfv3VirtualLink, PolicyDefinition,
-    PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, RadiusServer, Redistribute,
-    RedistributeSource, RedistributeTarget, RestApi, RoleAttribute, RoutingTable, RoutingTableEvpn,
-    RoutingTableVpn, RpkiCache, SourceAddress, SpfThrottle, SshServer, StaticRoute,
-    StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile, SwitchingProfileMember,
-    SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User, UserRole, VlanTag,
-    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
-    GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT,
-    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOCKOUT_WINDOW_SECS_DEFAULT, LOOPBACK_PREFIX,
-    MAX_FAILURES_DEFAULT, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, RADIUS_ACCT_PORT_DEFAULT,
-    RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS,
-    REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
-    SSH_HOST_KEY_LABEL, SSH_SERVER_PORT_DEFAULT,
+    OspfCryptoKey, OspfInstance, OspfPrefixSid, OspfProfile, OspfVirtualLink, Ospfv3AddressFamily,
+    Ospfv3Area, Ospfv3AreaRange, Ospfv3Instance, Ospfv3Profile, Ospfv3VirtualLink,
+    PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, RadiusServer,
+    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoleAttribute, RoutingTable,
+    RoutingTableEvpn, RoutingTableVpn, RpkiCache, SegmentRouting, SourceAddress, SpfThrottle,
+    SshServer, StaticRoute, StaticRoutingInstance, StpMode, Subinterface, SwitchingProfile,
+    SwitchingProfileMember, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport, User,
+    UserRole, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
+    GR_RESTART_TIME_DEFAULT, GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT,
+    HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOCKOUT_WINDOW_SECS_DEFAULT,
+    LOOPBACK_PREFIX, MAX_FAILURES_DEFAULT, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
+    RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
+    RADIUS_TIMEOUT_DEFAULT_SECS, REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS,
+    RPKI_RTR_PORT_DEFAULT, SSH_HOST_KEY_LABEL, SSH_SERVER_PORT_DEFAULT,
 };
 pub use stp::{
     StpEvent, StpInstance, StpInstancePort, StpMst, StpPortCounters, StpPortInfo, StpRequest,

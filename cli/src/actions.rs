@@ -112,7 +112,8 @@ pub async fn resolve_config_socket(watchdog_socket: &Path) -> PathBuf {
         }
         Err(e) => {
             eprintln!(
-                "warning: could not resolve nos-configd via nos-watchdogd ({e}); falling back to {DEFAULT_CONFIG_SOCKET}"
+                "warning: could not resolve nos-configd via nos-watchdogd ({}); falling back to {DEFAULT_CONFIG_SOCKET}",
+                format::sanitize(&e.to_string())
             );
             PathBuf::from(DEFAULT_CONFIG_SOCKET)
         }
@@ -224,14 +225,14 @@ pub async fn handle_action(
         Resolved::ConfirmCommit => {
             match client::confirm_commit(socket).await {
                 Ok(_) => println!("commit confirmed"),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
             Outcome::Continue(mode)
         }
         Resolved::CancelCommit => {
             match client::cancel_commit(socket).await {
                 Ok(_) => println!("pending commit rolled back"),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
             Outcome::Continue(mode)
         }
@@ -287,7 +288,7 @@ pub async fn handle_action(
             Outcome::Continue(mode)
         }
         Resolved::Error(msg) => {
-            eprintln!("error: {msg}");
+            eprintln!("error: {}", format::sanitize(&msg));
             Outcome::Continue(mode)
         }
         action @ (Resolved::ShowRunningConfig
@@ -349,7 +350,7 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         Resolved::ShowAdminConfig => {
             match client::fetch_running_config(socket).await {
                 Ok(cfg) => println!("{}", format::render_admin_config(&cfg)),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
             Outcome::Continue(mode)
         }
@@ -506,13 +507,16 @@ async fn handle_leave_prompt(
                 Mode::Operational
             }
             Err(e) => {
-                eprintln!("error: {e} (transaction left open — fix and retry)");
+                eprintln!(
+                    "error: {} (transaction left open — fix and retry)",
+                    format::sanitize(&e.to_string())
+                );
                 mode
             }
         },
         LeaveChoice::Discard => {
             if let Err(e) = client::discard_transaction(socket, &transaction).await {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
             }
             Mode::Operational
         }
@@ -548,7 +552,7 @@ pub fn navigate_to(mode: &Mode, path: session::Path) -> Mode {
 async fn show_running_config(socket: &Path) {
     match client::fetch_running_config(socket).await {
         Ok(cfg) => println!("{}", format::render_config(&cfg)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -557,7 +561,7 @@ async fn show_transaction(mode: &Mode, socket: &Path) {
     let path = current_path(mode);
     match client::get_transaction(socket, &transaction).await {
         Ok(snap) => println!("{}", format::render_transaction(&snap, &path)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -577,7 +581,7 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -599,13 +603,13 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
             match walked {
                 Ok(()) if !any => println!("{}", format::render_prefix_routes(&[])),
                 Ok(()) => {}
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
         }
         Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
-            Ok(None) => println!("no route matches {addr}"),
-            Err(e) => eprintln!("error: {e}"),
+            Ok(None) => println!("no route matches {}", format::sanitize(&addr.to_string())),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
 }
@@ -625,13 +629,13 @@ async fn show_fdb(watchdog_socket: &Path, domain: &str) {
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
     match fdb_client::get_table(&fdb_socket).await {
         Ok(t) => println!("{}", format::render_fdb_table(&t)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -648,7 +652,7 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
                 return;
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
                 return;
             }
         };
@@ -656,12 +660,12 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
     match name {
         None => match interface_client::get_interfaces(&interface_socket).await {
             Ok(statuses) => println!("{}", format::render_interface_statuses(&statuses)),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
         Some(name) => match interface_client::get_interface(&interface_socket, name).await {
             Ok(Some(status)) => println!("{}", format::render_interface_statuses(&[status])),
             Ok(None) => println!("interface '{name}' not found"),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
 }
@@ -677,7 +681,7 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
                 return;
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
                 return;
             }
         };
@@ -697,7 +701,7 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
                 }
             }
         },
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -710,7 +714,7 @@ async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
             None
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             None
         }
     }
@@ -727,7 +731,7 @@ async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool) {
             println!("{}", format::render_lldp_neighbors_detail(&neighbors));
         }
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -740,7 +744,7 @@ async fn resolve_bfd(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
             None
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             None
         }
     }
@@ -752,7 +756,7 @@ async fn show_bfd_sessions(watchdog_socket: &Path, peer: Option<std::net::IpAddr
     };
     match bfd_client::get_sessions(&bfd_socket, peer).await {
         Ok(sessions) => println!("{}", format::render_bfd_sessions(&sessions)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -762,7 +766,7 @@ async fn show_bfd_reflector(watchdog_socket: &Path) {
     };
     match bfd_client::get_reflector(&bfd_socket).await {
         Ok(view) => println!("{}", format::render_bfd_reflector(&view)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -774,7 +778,7 @@ async fn clear_stp_mcheck(watchdog_socket: &Path, interface: Option<String>) {
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -784,7 +788,7 @@ async fn clear_stp_mcheck(watchdog_socket: &Path, interface: Option<String>) {
             interface.as_deref().unwrap_or("any interface")
         ),
         Ok(n) => println!("mcheck sent to {n} port(s)"),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -796,14 +800,14 @@ async fn clear_stp_err_disabled(watchdog_socket: &Path, interface: String) {
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
     match stp_client::clear_err_disabled(&socket, interface.clone()).await {
         Ok(true) => println!("{interface} is up again"),
         Ok(false) => eprintln!("error: {interface} is not err-disabled"),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -827,7 +831,7 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -843,7 +847,7 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
                     format::render_stp_detail(&s, instance, domain.as_deref()),
             }
         ),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -856,7 +860,7 @@ async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
                 return;
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
                 return;
             }
         };
@@ -865,13 +869,13 @@ async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
             println!("acl '{}' not found", name.unwrap_or_default());
         }
         Ok(acls) => println!("{}", format::render_acls(&acls)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
     if name.is_none() {
         match acl_client::show_flowspec(&acl_socket).await {
             Ok(rules) if rules.is_empty() => {}
             Ok(rules) => println!("{}", format::render_flowspec_rules(&rules)),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -882,7 +886,7 @@ async fn show_lldp_statistics(watchdog_socket: &Path) {
     };
     match lldp_client::get_statistics(&lldp_socket).await {
         Ok(stats) => println!("{}", format::render_lldp_statistics(&stats)),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -895,7 +899,7 @@ async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
                 return;
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
                 return;
             }
         };
@@ -903,12 +907,12 @@ async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
     match name {
         None => match interface_client::get_port_aggregates(&interface_socket).await {
             Ok(statuses) => println!("{}", format::render_port_aggregate_statuses(&statuses)),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
         Some(name) => match interface_client::get_port_aggregate(&interface_socket, name).await {
             Ok(Some(status)) => println!("{}", format::render_port_aggregate_statuses(&[status])),
             Ok(None) => println!("port aggregate '{name}' not found"),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
 }
@@ -925,7 +929,7 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
             return;
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -933,7 +937,7 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
     if !follow {
         match log_client::get_logs(&log_socket, source, None).await {
             Ok(logs) => println!("{}", format::render_log_entries(&logs)),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
         return;
     }
@@ -941,7 +945,7 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
     let mut reader = match log_client::tail(&log_socket, source).await {
         Ok(reader) => reader,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -952,11 +956,11 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
                 Some(Ok(LogEvent::Logs(logs))) => println!("{}", format::render_log_entries(&logs)),
                 Some(Ok(LogEvent::Line(entry))) => println!("{}", format::render_log_entry(&entry)),
                 Some(Ok(LogEvent::Error(msg))) => {
-                    eprintln!("error: {msg}");
+                    eprintln!("error: {}", format::sanitize(&msg));
                     break;
                 }
                 Some(Err(e)) => {
-                    eprintln!("error: {e}");
+                    eprintln!("error: {}", format::sanitize(&e.to_string()));
                     break;
                 }
                 None => {
@@ -982,7 +986,7 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1001,10 +1005,10 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_summary(&bgp_socket).await {
                 Ok(peers) => println!("{}", format::render_bgp_summary(&instance.name, &peers)),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1040,7 +1044,7 @@ impl<'a> PagedOut<'a> {
         match walked {
             Ok(()) if !self.any => println!("{none}"),
             Ok(()) => {}
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1051,7 +1055,7 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1077,7 +1081,7 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
                 out.finish(walked, &format::render_bgp_evpn(&instance.name, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1092,7 +1096,7 @@ async fn show_bgp_flowspec(
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1119,7 +1123,7 @@ async fn show_bgp_flowspec(
                 out.finish(walked, &format::render_bgp_flowspec(&instance.name, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1134,7 +1138,7 @@ async fn show_bgp_vpn(
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1161,7 +1165,7 @@ async fn show_bgp_vpn(
                 out.finish(walked, &format::render_bgp_vpn(&instance.name, family, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1171,7 +1175,7 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1195,7 +1199,7 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
                 out.finish(walked, &format::render_bgp_routes(&instance.name, &[]));
             }
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1205,7 +1209,7 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1222,10 +1226,10 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_rpki_summary(&bgp_socket).await {
                 Ok(caches) => println!("{}", format::render_bgp_rpki(&instance.name, &caches)),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1235,7 +1239,7 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1254,10 +1258,10 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
                 .await
             {
                 Ok(stations) => println!("{}", format::render_bgp_bmp(&instance.name, &stations)),
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1270,7 +1274,7 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1294,10 +1298,10 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
                         format::render_ospf_neighbors(&instance.name, &neighbors)
                     );
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospf instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1309,7 +1313,7 @@ async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1330,10 +1334,10 @@ async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
                 Ok(entries) => {
                     println!("{}", format::render_ospf_database(&instance.name, &entries));
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospf instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1344,7 +1348,7 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1368,10 +1372,10 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
                         format::render_ospfv3_neighbors(&instance.name, &neighbors)
                     );
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1382,7 +1386,7 @@ async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1406,10 +1410,10 @@ async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
                         format::render_ospfv3_database(&instance.name, &entries)
                     );
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
 }
@@ -1427,7 +1431,7 @@ async fn clear_bgp(
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };
@@ -1459,16 +1463,16 @@ async fn clear_bgp(
                 Ok(bgp_client::SoftIn::NotFound) => {
                     eprintln!("error: no established session with {peer} on '{instance}'");
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
         }
         Ok(Some(bgp_socket)) => match bgp_client::clear_peer(&bgp_socket, peer).await {
             Ok(true) => println!("cleared {peer}"),
             Ok(false) => eprintln!("error: no peer {peer} on '{instance}'"),
-            Err(e) => eprintln!("error: {e}"),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
         Ok(None) => println!("bgp instance '{instance}' is not running"),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -1485,7 +1489,7 @@ async fn diff(mode: &Mode, socket: &Path) {
     match client::diff_transaction(socket, &transaction).await {
         Ok(d) if d.is_empty() => println!("no changes"),
         Ok(d) => println!("{}", format::render_diff(&d, use_color())),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -1537,7 +1541,7 @@ async fn show_history(socket: &Path) {
                 );
             }
         }
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -1547,17 +1551,17 @@ async fn rollback(socket: &Path, n: u32) {
             let note = if unsaved { " (not saved)" } else { "" };
             println!("rolled back {n} commit(s){note}");
             for w in warnings {
-                eprintln!("warning: {w}");
+                eprintln!("warning: {}", format::sanitize(&w));
             }
         }
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
 async fn save_running_config(socket: &Path) {
     match client::save_running_config(socket).await {
         Ok(()) => println!("configuration saved"),
-        Err(e) => eprintln!("error: {e}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
@@ -1583,7 +1587,7 @@ async fn open_transaction(
             }
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             Mode::Operational
         }
     }
@@ -1599,7 +1603,7 @@ async fn apply_op(mode: Mode, socket: &Path, op: ConfigOp) -> Mode {
             dirty: snap.dirty,
         },
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             mode
         }
     }
@@ -1615,7 +1619,7 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
     let snap = match client::get_transaction(socket, &transaction).await {
         Ok(snap) => snap,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return mode;
         }
     };
@@ -1637,7 +1641,7 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
         {
             Ok(d) => dirty = d,
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
                 return mode;
             }
         }
@@ -1647,7 +1651,7 @@ async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
     let snap = match client::get_transaction(socket, &transaction).await {
         Ok(snap) => snap,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return Mode::Configuration {
                 transaction,
                 path,
@@ -1680,7 +1684,7 @@ async fn fetch_policy_source(socket: &Path, transaction: &str, name: &str) -> Op
                 .map_or_else(String::new, |p| p.source.clone()),
         ),
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             None
         }
     }
@@ -1729,7 +1733,7 @@ async fn compile_against_transaction(
     let snap = match client::get_transaction(socket, transaction).await {
         Ok(snap) => snap,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return None;
         }
     };
@@ -1841,7 +1845,10 @@ async fn edit_policy_source(mode: Mode, socket: &Path, name: String) -> Mode {
     match compile_against_transaction(socket, &transaction, &edited).await {
         Some(Ok(())) => apply_policy_source(mode, socket, name, edited).await,
         Some(Err(e)) => {
-            eprintln!("policy did not compile, edit discarded: {e}");
+            eprintln!(
+                "policy did not compile, edit discarded: {}",
+                format::sanitize(&e.to_string())
+            );
             mode
         }
         None => mode,
@@ -1872,7 +1879,7 @@ async fn edit_policy_source_line(
     };
     let mut lines: Vec<String> = current.lines().map(str::to_string).collect();
     if let Err(e) = edit(&mut lines) {
-        eprintln!("error: {e}");
+        eprintln!("error: {}", format::sanitize(&e));
         return mode;
     }
     let mut new_source = lines.join("\n");
@@ -1885,7 +1892,8 @@ async fn edit_policy_source_line(
         Some(Ok(())) => apply_policy_source(mode, socket, name, new_source).await,
         Some(Err(e)) => {
             eprintln!(
-                "warning: policy does not compile yet: {e} (commit will refuse it until fixed)"
+                "warning: policy does not compile yet: {} (commit will refuse it until fixed)",
+                format::sanitize(&e.to_string())
             );
             apply_policy_source(mode, socket, name, new_source).await
         }
@@ -1898,7 +1906,7 @@ fn print_committed(transaction: &str, warnings: &[String], unsaved: bool) {
     let note = if unsaved { " (not saved)" } else { "" };
     println!("transaction '{transaction}' committed{note}");
     for w in warnings {
-        eprintln!("warning: {w}");
+        eprintln!("warning: {}", format::sanitize(w));
     }
 }
 
@@ -1916,7 +1924,10 @@ async fn commit(mode: Mode, socket: &Path, confirm_secs: Option<u32>) -> Mode {
             Mode::Operational
         }
         Err(e) => {
-            eprintln!("error: {e} (transaction left open — fix and retry)");
+            eprintln!(
+                "error: {} (transaction left open — fix and retry)",
+                format::sanitize(&e.to_string())
+            );
             mode
         }
     }
@@ -1930,7 +1941,7 @@ async fn discard(mode: Mode, socket: &Path) -> Mode {
             Mode::Operational
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             mode
         }
     }
@@ -1963,7 +1974,7 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
     let doc = match client::get_transaction(socket, transaction).await {
         Ok(snap) => serde_json::to_value(&snap.config).expect("a config serializes"),
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
             return;
         }
     };

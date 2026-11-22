@@ -10,6 +10,7 @@ use nos_proto_derive::Cli;
 /// table — only `RoutingTable.static_routing_instance` names it, never the
 /// other way around.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoutingInstance {

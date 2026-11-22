@@ -35,6 +35,7 @@ pub const PADDED_PDU_MAX: u16 = 9000;
 /// (`bfd <name>`). Declaration only for now: no daemon consumes it yet, so
 /// attaching one is inert.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct BfdProfile {
@@ -132,6 +133,7 @@ pub struct BfdProfile {
 /// Which BFD a session runs: the classical RFC 5880 handshake, or the RFC
 /// 7880 S-BFD initiator (Down/Up only, against a stateless reflector).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum BfdMode {
     #[default]
@@ -172,6 +174,7 @@ fn sbfd_compatible(
 /// which then slows to one packet a second. `Unaffiliated` (RFC 9747): Echo
 /// is the whole session, for a peer that runs no BFD at all.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EchoMode {
     #[default]
@@ -221,6 +224,7 @@ impl Default for BfdProfile {
 /// RFC 5880 §4.2/§4.3 authentication section: the method picks the
 /// `AuthType`, `key_id` is the wire Auth Key ID.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BfdAuth {
     #[cli(topic = BfdProfileAuth)]
@@ -235,6 +239,7 @@ pub struct BfdAuth {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 /// BFD authentication mechanism (RFC 5880 §4.2 and §4.3).
 pub enum BfdAuthMethod {
