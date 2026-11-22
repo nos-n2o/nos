@@ -81,6 +81,13 @@ pub enum OspfInstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Turns RFC 3630 traffic engineering LSA origination on or off.
+    SetTrafficEngineering {
+        /// Name of the OSPF instance this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
     /// Turns RFC 7490 remote LFA on or off.
     SetRemoteLfa {
         /// Name of the OSPF instance this op targets.
@@ -122,6 +129,7 @@ impl OspfInstanceOp {
                         max_metric_administrative: false,
                         max_lsa: None,
                         host_router: false,
+                        traffic_engineering: false,
                         remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
@@ -165,6 +173,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetHostRouter { name, enabled } => {
                 find_instance_mut(config, name)?.host_router = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetTrafficEngineering { name, enabled } => {
+                find_instance_mut(config, name)?.traffic_engineering = *enabled;
                 Ok(())
             }
             OspfInstanceOp::SetRemoteLfa { name, enabled } => {
@@ -217,6 +229,7 @@ mod tests {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
@@ -287,6 +300,10 @@ mod tests {
                 name: name(),
                 enabled: true,
             },
+            OspfInstanceOp::SetTrafficEngineering {
+                name: name(),
+                enabled: true,
+            },
         ] {
             op.apply(&mut cfg).unwrap();
         }
@@ -300,6 +317,7 @@ mod tests {
             (Some(30), Some(3), true)
         );
         assert!(i.host_router);
+        assert!(i.traffic_engineering);
         OspfInstanceOp::SetMaxMetricOnStartup {
             name: name(),
             seconds: None,

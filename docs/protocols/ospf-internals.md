@@ -247,6 +247,12 @@ A port of `nos-ospfv3d`'s RFC 5187 work ([OSPFv3 internals](ospfv3-internals.md)
   - Body: the Informational Capabilities TLV only (`lsa::encode_router_info`), kept as `LsaBody::Opaque`. Bits: GR helper (`RI_CAP_GR_HELPER`, always — helping is always on), stub router support (`RI_CAP_STUB_ROUTER`, bit 2, always — RFC 6987 is implemented), GR capable (`RI_CAP_GR_CAPABLE`) while `graceful_restart_grace_period` is set.
   - Originated by `originate_router_lsas` beside the Router-LSA, so it shares its pacing, refresh, flush on leaving an area, and shutdown flush.
   - Also host router support (`RI_CAP_HOST_ROUTER`, bit 7, always — RFC 8770 is implemented). A received RI's capabilities are read by `lsa::router_info_capabilities` (type 10 or 11), for the H-bit check below; its body stays `LsaBody::Opaque`.
+- **TE LSAs** (RFC 3630, #1166):
+  - Opaque type 1, type 10; `lsa::{encode_te_router_address, encode_te_link, decode_te}` over `LsaBody::Opaque` (the raw bytes are what is re-flooded, so an unknown sub-TLV survives; `decode_te` skips it). One top-level TLV per LSA: ID `1.0.0.0` the Router Address, `te_link_state_id(n)` the `n`th Link TLV.
+  - `OspfInstance.traffic_engineering` -> `LinkManager::set_traffic_engineering` (an atomic, no link restart); `originate::te_lsas` (pure) is installed in each area pass and `withdraw_undesired` flushes the opaque LSAs not wanted (the RI LSA is always wanted).
+  - `ponytail:` bandwidths are 0 (no link speed in `InterfaceStatus`); the router id stands in for a loopback Router Address; Link LSA numbers follow local-address order, so one appearing renumbers the later ones.
+  - Receive: `LinkManager::log_te_routers` (in `compute_routes`) logs `ospf te router address received`.
+  - Tests: `lsa::tests::te_*`, `link::tests::te_lsas_advertise_router_address_and_full_links`, `traffic_engineering_toggle_originates_and_flushes`; `nos-e2e ospf-te`.
 - Tests: `lsa::tests::opaque_lsas_round_trip_as_raw_bytes`, `packet::tests::lsu_skips_an_unknown_lsa_type_and_keeps_the_rest`, `exchange::tests::opaque_*`, `link::tests::opaque_lsas_are_flooded_by_scope` (in-memory wire), `lsa::tests::router_info_body_is_one_capabilities_tlv`, `link::tests::originate_router_lsas_originates_router_info_per_area`; `nos-e2e ospf-opaque` (FRR, which also accepts router-a's RI LSA).
 
 ### Not applicable RFCs (#45)
