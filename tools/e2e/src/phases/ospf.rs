@@ -4097,6 +4097,14 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     ospfv3_link_state(w).await
 }
 
+/// Waits for a fresh `reconciled interfaces` on `r` (#1338): `nos-interfaced`
+/// re-ups every configured link on each 10 s reapply tick, so a `link set
+/// down` must land right after one to survive the next 5 s of assertions.
+async fn sync_to_reapply(r: &Router) -> anyhow::Result<()> {
+    let base = r.count("reconciled interfaces");
+    r.wait_new("reconciled interfaces", base, 12).await
+}
+
 /// `ip link set <dev> <state>` in `router`'s netns.
 async fn set_link(w: &World, router: &str, dev: &str, state: &str) -> anyhow::Result<()> {
     w.dock
@@ -4227,6 +4235,7 @@ async fn ospfv3_link_state(w: &mut World) -> anyhow::Result<()> {
             );
         }
     }
+    sync_to_reapply(b).await?;
     set_link(w, "router-b", "eth1", "down").await?;
     let diag = "link kernel interface\\|link stream\\|link state changed";
     for (r, pat, n) in [
@@ -6940,6 +6949,7 @@ pub async fn ospf_remote_lfa(w: &mut World) -> anyhow::Result<()> {
         a.count("ospf neighbor state changed to down"),
         b.count("ospf neighbor state changed to down"),
     );
+    sync_to_reapply(b).await?;
     set_eth2(w, "down").await?;
     a.wait_new(
         "ospf link kernel interface down link=eth1.0 .*reason=no-carrier",
