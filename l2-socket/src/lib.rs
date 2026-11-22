@@ -144,6 +144,7 @@ const BPDU_RECV_BUF_LEN: usize = 1536;
 /// A raw L2 socket for one ethertype and one multicast group on one interface.
 pub struct L2Socket {
     inner: AsyncFd<Socket>,
+    interface: String,
     own_hw_addr: [u8; 6],
     ifindex: i32,
     ethertype: u16,
@@ -212,6 +213,7 @@ impl L2Socket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: register_fd(socket)?,
+            interface: interface.to_owned(),
             own_hw_addr,
             ifindex,
             ethertype,
@@ -255,6 +257,7 @@ impl L2Socket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: register_fd(socket)?,
+            interface: interface.to_owned(),
             own_hw_addr,
             ifindex,
             ethertype: ETH_P_ALL,
@@ -286,12 +289,25 @@ impl L2Socket {
                     }
                 }
                 Ok(Err(e)) if is_link_down(&e) => {
+                    if self.is_stale() {
+                        return Err(recreated_error());
+                    }
                     tokio::time::sleep(LINK_DOWN_RETRY).await;
                 }
                 Ok(Err(e)) => return Err(e),
                 Err(_would_block) => {}
             }
         }
+    }
+
+    /// Whether the netdev this socket was opened on has been recreated: the
+    /// name now resolves to another ifindex or MAC, or to nothing. A socket is
+    /// bound to an ifindex, so the kernel unhooks it when the netdev is
+    /// unregistered (veth deleted, VF removed, driver reload) and it never
+    /// sees a frame again. Callers must treat it as fatal for the task and
+    /// reopen (the recv paths return a `NotConnected` error once they see it).
+    pub fn is_stale(&self) -> bool {
+        is_recreated(self.ifindex, if_index(&self.interface).ok())
     }
 
     /// Whether `frame` carries the bound ethertype. An `AF_PACKET` socket also
@@ -353,6 +369,9 @@ impl L2Socket {
                 // surfaces as `ENETDOWN` on read — a normal, recoverable
                 // state, so wait and retry rather than end the caller's task.
                 Ok(Err(e)) if is_link_down(&e) => {
+                    if self.is_stale() {
+                        return Err(recreated_error());
+                    }
                     tokio::time::sleep(LINK_DOWN_RETRY).await;
                 }
                 Ok(Err(e)) => return Err(e),
@@ -565,6 +584,17 @@ pub fn is_link_down(e: &io::Error) -> bool {
     e.raw_os_error() == Some(libc::ENETDOWN)
 }
 
+fn recreated_error() -> io::Error {
+    io::Error::new(io::ErrorKind::NotConnected, "interface recreated")
+}
+
+/// Pure core of [`L2Socket::is_stale`]: `now_ifindex` is the live lookup
+/// (`None` when the interface is gone). The MAC is deliberately not compared:
+/// bonding rewrites an enslaved member's MAC while its ifindex stays.
+fn is_recreated(ifindex: i32, now_ifindex: Option<i32>) -> bool {
+    now_ifindex != Some(ifindex)
+}
+
 /// Whether the frame's ethertype field (bytes 12..14) is `bound`. False for a
 /// frame shorter than the header; a VLAN-tagged frame has 0x8100 there.
 fn ethertype_matches(frame: &[u8], bound: u16) -> bool {
@@ -713,6 +743,13 @@ fn parse_hw_addr(text: &str) -> Option<[u8; 6]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recreated_detects_new_ifindex_and_gone() {
+        assert!(!is_recreated(3, Some(3)));
+        assert!(is_recreated(3, Some(4)));
+        assert!(is_recreated(3, None));
+    }
+
     use super::*;
 
     const GROUP: [u8; 6] = [0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E];

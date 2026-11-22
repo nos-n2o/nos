@@ -657,6 +657,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_min_links(w, &both).await?;
     lacp_v2(w, &both).await?;
     lacp_steering(w, &both).await?;
+    lacp_recreated_member(w, a).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
@@ -671,6 +672,72 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
 
     w.unlink_veths().await;
     Ok(())
+}
+
+/// #1333: a member netdev deleted and recreated under the same name (new
+/// ifindex) must be picked up again: the old `AF_PACKET` socket is bound to
+/// the dead ifindex and never sees a frame. An in-container veth pair
+/// `lpx0`/`lpx1` on router-a, `lpx0` in a throwaway Lacp aggregate, `lpx1`
+/// played by `lacp_partner.py`. `nos-lacpd` notices within its 5 s stale poll,
+/// the task exits and `reconcile`'s 10 s tick respawns it.
+async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
+    log("a recreated member netdev is reopened by nos-lacpd");
+    let netns = async |script: &str| {
+        w.dock
+            .in_netns(NETNS_HELPER_IMAGE, "router-a", &["sh", "-c", script])
+            .await
+    };
+    let mkpair =
+        "ip link add lpx0 type veth peer name lpx1 && ip link set lpx0 up && ip link set lpx1 up";
+    let heard = "lacp lacpdu received interface=lpx0";
+    let partner = async |secs: &str| {
+        w.dock
+            .in_netns(
+                PYTHON_HELPER_IMAGE,
+                "router-a",
+                &["python3", "-c", include_str!("lacp_partner.py"), secs],
+            )
+            .await
+    };
+    netns(mkpair).await?;
+    let flags = strings(&[
+        "--port-aggregate",
+        "lpxagg",
+        "--port-aggregate-mode",
+        "lacp",
+        "--lacp-rate",
+        "fast",
+        "--enslave-interface-into-port-aggregate",
+        "lpx0",
+    ]);
+    let base = a.count(heard);
+    a.provision(&flags).await?;
+    let result = async {
+        partner("8").await?;
+        a.wait_new(heard, base, 20).await?;
+
+        let (heard_base, exit_base) = (
+            a.count(heard),
+            a.count("lacp interface recreated, link task exiting interface=lpx0"),
+        );
+        netns("ip link del lpx0").await?;
+        netns(mkpair).await?;
+        // Up to 5 s (stale poll) + 10 s (reconcile tick) of silence; keep sending.
+        partner("25").await?;
+        a.wait_new(
+            "lacp interface recreated, link task exiting interface=lpx0",
+            exit_base,
+            5,
+        )
+        .await?;
+        a.wait_new(heard, heard_base, 5).await
+    }
+    .await;
+    let mut del = flags;
+    del.push("--delete-port-aggregate".into());
+    let _ = a.provision(&del).await;
+    let _ = netns("ip link del lpx0").await;
+    result
 }
 
 /// #657: three live `lacp-system-id` changes on router-a against the real
