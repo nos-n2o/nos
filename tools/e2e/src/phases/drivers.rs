@@ -724,13 +724,14 @@ async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
         netns(mkpair).await?;
         // Up to 5 s (stale poll) + 10 s (reconcile tick) of silence; keep sending.
         partner("25").await?;
+        a.wait_new(heard, heard_base, 5).await?;
         a.wait_new(
             "lacp interface recreated, link task exiting interface=lpx0",
             exit_base,
             5,
         )
         .await?;
-        a.wait_new(heard, heard_base, 5).await
+        Ok(())
     }
     .await;
     let mut del = flags;

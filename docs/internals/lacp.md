@@ -82,6 +82,13 @@ Unlike `interface::driver::port_aggregate_registry`'s YAML-backed bond-id alloca
 
 - **Tagged frames.** A frame that carried an 802.1Q tag is dropped by a kernel BPF filter (`L2Socket::open_untagged`), even when the NIC/veth offloaded the tag so the bytes read look untagged (#690).
 
+## A recreated member netdev (#1333)
+
+- A raw `AF_PACKET` socket is bound to an ifindex. When the netdev is unregistered (veth deleted, VF removed, driver reload) the kernel unhooks the socket, raises `ENETDOWN` once, and a same-name netdev with a new ifindex is never seen.
+- `nos_l2_socket::L2Socket::is_stale` (name now resolves to another ifindex or nothing; the MAC is not compared, bonding rewrites it) makes `recv` return an error instead of retrying `ENETDOWN`. Callers must treat it as fatal for their task.
+- `link::drive` also polls `is_stale` every 5s (the one-shot `sk_err` can be lost), logs `lacp interface recreated, link task exiting`, removes its observation and returns. `aggregate::reconcile` respawns the task on its next tick (up to 10s), with the same port number and a fresh `Port`; expect up to about 15s of silence.
+- `nos-e2e lacp` covers it with an in-container veth pair (`lpx0` member, `lpx1` played by `lacp_partner.py`).
+
 ## `nos-e2e lacp`
 
 After the passive/active steps the phase runs `min-links` (`lacp_min_links`): `--min-links 2` with both members `Distributing` changes nothing; router-b withdrawing `eth2` makes router-a log `lacp min-links not met, bond emptied`, release `eth1` from the kernel bond while `GET /v1/lacp` still shows it `Distributing`/`selected`; then `tools/e2e/src/phases/individual.py` (a scripted partner in router-b's netns, 10s of LACPDUs on `eth2` with Actor_State.Aggregation clear) makes router-a report `eth2` `individual=true`, `Current` but not selected; router-b restoring `eth2` refills the bond. **A real Linux bond cannot play the Individual partner**: the kernel bonding driver advertises Aggregation on every slave it was tried with (veth full duplex, dummy/tun unknown or full duplex: port state `0x45`/`0x3d`), and no virtual device here can report half duplex, so the speaker is scripted.
