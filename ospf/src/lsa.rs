@@ -73,6 +73,182 @@ pub const RI_CAP_GR_HELPER: u32 = 1 << 30;
 pub const RI_CAP_STUB_ROUTER: u32 = 1 << 29;
 pub const RI_CAP_HOST_ROUTER: u32 = 1 << 24;
 
+/// RFC 3630 §2.1: the Traffic Engineering LSA's opaque type (1), so its Link
+/// State IDs are `1.x.y.z`. Area scope (type 10). One top-level TLV per LSA
+/// (§2.3.1): opaque ID 0 holds the Router Address TLV, ID `n >= 1` one Link
+/// TLV (`te_link_state_id`).
+pub const OPAQUE_TYPE_TE: u8 = 1;
+const TLV_TE_ROUTER_ADDRESS: u16 = 1;
+const TLV_TE_LINK: u16 = 2;
+/// RFC 3630 §2.5 Link TLV sub-TLVs.
+const TE_LINK_TYPE: u16 = 1;
+const TE_LINK_ID: u16 = 2;
+const TE_LOCAL_ADDR: u16 = 3;
+const TE_REMOTE_ADDR: u16 = 4;
+const TE_METRIC: u16 = 5;
+const TE_MAX_BW: u16 = 6;
+const TE_MAX_RESERVABLE_BW: u16 = 7;
+const TE_UNRESERVED_BW: u16 = 8;
+const TE_ADMIN_GROUP: u16 = 9;
+/// RFC 3630 §2.5.1 link types.
+pub const TE_LINK_POINT_TO_POINT: u8 = 1;
+pub const TE_LINK_MULTI_ACCESS: u8 = 2;
+
+/// The Router Address LSA's Link State ID (opaque type 1, ID 0).
+pub const TE_ROUTER_ADDRESS_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_TE, 0, 0, 0);
+
+/// The Link State ID of the `n`th (`n >= 1`) Link TLV LSA.
+pub fn te_link_state_id(n: u32) -> Ipv4Addr {
+    let b = n.to_be_bytes();
+    Ipv4Addr::new(OPAQUE_TYPE_TE, b[1], b[2], b[3])
+}
+
+/// One RFC 3630 Link TLV. Bandwidths are IEEE 754 single precision, bytes per
+/// second (§2.5.6-8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeLink {
+    /// `TE_LINK_POINT_TO_POINT` or `TE_LINK_MULTI_ACCESS`.
+    pub link_type: u8,
+    /// The neighbor's router id (point-to-point) or the DR's interface address.
+    pub link_id: Ipv4Addr,
+    /// This router's interface address.
+    pub local_addr: Ipv4Addr,
+    /// The neighbor's interface address (point-to-point only).
+    pub remote_addr: Option<Ipv4Addr>,
+    /// TE metric, here the OSPF cost.
+    pub metric: u32,
+    /// Maximum bandwidth.
+    pub max_bandwidth: f32,
+    /// Maximum reservable bandwidth.
+    pub max_reservable: f32,
+    /// Unreserved bandwidth per priority 0-7.
+    pub unreserved: [f32; 8],
+    /// Administrative group bit mask.
+    pub admin_group: u32,
+}
+
+/// A decoded TE LSA body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TeBody {
+    /// The Router Address TLV: a stable, always-reachable address.
+    RouterAddress(Ipv4Addr),
+    /// A Link TLV.
+    Link(TeLink),
+}
+
+/// A Router Address LSA body (RFC 3630 §2.4.1).
+pub fn encode_te_router_address(addr: Ipv4Addr) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    put_tlv(&mut buf, TLV_TE_ROUTER_ADDRESS, &addr.octets());
+    buf
+}
+
+/// A Link LSA body (RFC 3630 §2.4.2).
+pub fn encode_te_link(l: &TeLink) -> Vec<u8> {
+    let mut sub = Vec::new();
+    put_tlv(&mut sub, TE_LINK_TYPE, &[l.link_type]);
+    put_tlv(&mut sub, TE_LINK_ID, &l.link_id.octets());
+    put_tlv(&mut sub, TE_LOCAL_ADDR, &l.local_addr.octets());
+    if let Some(r) = l.remote_addr {
+        put_tlv(&mut sub, TE_REMOTE_ADDR, &r.octets());
+    }
+    put_tlv(&mut sub, TE_METRIC, &l.metric.to_be_bytes());
+    put_tlv(&mut sub, TE_MAX_BW, &l.max_bandwidth.to_be_bytes());
+    put_tlv(
+        &mut sub,
+        TE_MAX_RESERVABLE_BW,
+        &l.max_reservable.to_be_bytes(),
+    );
+    let unreserved: Vec<u8> = l.unreserved.iter().flat_map(|f| f.to_be_bytes()).collect();
+    put_tlv(&mut sub, TE_UNRESERVED_BW, &unreserved);
+    put_tlv(&mut sub, TE_ADMIN_GROUP, &l.admin_group.to_be_bytes());
+    let mut buf = Vec::with_capacity(sub.len() + 4);
+    put_tlv(&mut buf, TLV_TE_LINK, &sub);
+    buf
+}
+
+/// Splits a TLV run into `(type, value)`; `None` when a TLV overruns it.
+fn tlvs(mut data: &[u8]) -> Option<Vec<(u16, &[u8])>> {
+    let mut out = Vec::new();
+    while data.len() >= 4 {
+        let t = u16::from_be_bytes([data[0], data[1]]);
+        let len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+        out.push((t, data.get(4..4 + len)?));
+        data = data.get(4 + len.next_multiple_of(4)..).unwrap_or_default();
+    }
+    Some(out)
+}
+
+fn addr4(v: &[u8]) -> Option<Ipv4Addr> {
+    <[u8; 4]>::try_from(v).ok().map(Ipv4Addr::from)
+}
+
+fn f32_at(v: &[u8]) -> Option<f32> {
+    <[u8; 4]>::try_from(v).ok().map(f32::from_be_bytes)
+}
+
+fn u32_at(v: &[u8]) -> Option<u32> {
+    <[u8; 4]>::try_from(v).ok().map(u32::from_be_bytes)
+}
+
+/// A received type 10 opaque type 1 LSA's first known top-level TLV. Unknown
+/// top-level TLVs and Link sub-TLVs are skipped on decode (the LSA itself is
+/// held and re-flooded as the raw bytes, so nothing is lost); `None` for
+/// anything else or a malformed or incomplete body.
+pub fn decode_te(lsa: &Lsa) -> Option<TeBody> {
+    if lsa.header.lsa_type != LSA_TYPE_OPAQUE_AREA
+        || opaque_type(lsa.header.link_state_id) != OPAQUE_TYPE_TE
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    for (t, v) in tlvs(body)? {
+        match t {
+            TLV_TE_ROUTER_ADDRESS => return addr4(v).map(TeBody::RouterAddress),
+            TLV_TE_LINK => {
+                let (mut ty, mut id, mut local, mut remote) = (None, None, None, None);
+                let (mut metric, mut max, mut resv, mut unres, mut admin) =
+                    (None, None, None, None, None);
+                for (st, sv) in tlvs(v)? {
+                    match st {
+                        TE_LINK_TYPE => ty = sv.first().copied(),
+                        TE_LINK_ID => id = addr4(sv),
+                        TE_LOCAL_ADDR => local = addr4(sv),
+                        TE_REMOTE_ADDR => remote = addr4(sv),
+                        TE_METRIC => metric = u32_at(sv),
+                        TE_MAX_BW => max = f32_at(sv),
+                        TE_MAX_RESERVABLE_BW => resv = f32_at(sv),
+                        TE_UNRESERVED_BW if sv.len() == 32 => {
+                            unres = Some(std::array::from_fn(|i| {
+                                f32_at(&sv[4 * i..4 * i + 4]).unwrap_or(0.0)
+                            }));
+                        }
+                        TE_ADMIN_GROUP => admin = u32_at(sv),
+                        _ => {}
+                    }
+                }
+                // RFC 3630 §2.5: only the type and the link id are mandatory;
+                // the rest default to zero / absent.
+                return Some(TeBody::Link(TeLink {
+                    link_type: ty?,
+                    link_id: id?,
+                    local_addr: local.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    remote_addr: remote,
+                    metric: metric.unwrap_or(0),
+                    max_bandwidth: max.unwrap_or(0.0),
+                    max_reservable: resv.unwrap_or(0.0),
+                    unreserved: unres.unwrap_or([0.0; 8]),
+                    admin_group: admin.unwrap_or(0),
+                }));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// An RI LSA body carrying only the Informational Capabilities TLV. Held as
 /// `LsaBody::Opaque`, like any other opaque body.
 pub fn encode_router_info(capabilities: u32) -> Vec<u8> {
@@ -1336,5 +1512,94 @@ mod tests {
         let mut wire = unhex(hex);
         wire.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(decode_lsa(&wire).unwrap().header.checksum, checksum);
+    }
+
+    fn te_lsa(id: Ipv4Addr, body: Vec<u8>) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0x20,
+                lsa_type: LSA_TYPE_OPAQUE_AREA,
+                link_state_id: id,
+                advertising_router: Ipv4Addr::new(1, 1, 1, 1),
+                sequence_number: i32::MIN + 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Opaque(body),
+        }
+    }
+
+    fn te_link() -> TeLink {
+        TeLink {
+            link_type: TE_LINK_POINT_TO_POINT,
+            link_id: Ipv4Addr::new(2, 2, 2, 2),
+            local_addr: Ipv4Addr::new(10, 0, 0, 1),
+            remote_addr: Some(Ipv4Addr::new(10, 0, 0, 2)),
+            metric: 10,
+            max_bandwidth: 125_000_000.0,
+            max_reservable: 100_000_000.0,
+            unreserved: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            admin_group: 0xa5,
+        }
+    }
+
+    #[test]
+    fn te_router_address_and_link_round_trip() {
+        let a = Ipv4Addr::new(192, 0, 2, 1);
+        let lsa = te_lsa(TE_ROUTER_ADDRESS_LINK_STATE_ID, encode_te_router_address(a));
+        assert_eq!(decode_te(&lsa), Some(TeBody::RouterAddress(a)));
+        assert_eq!(opaque_type(te_link_state_id(0x0102_0304)), OPAQUE_TYPE_TE);
+        assert_eq!(te_link_state_id(0x0002_0304), Ipv4Addr::new(1, 2, 3, 4));
+        for remote in [Some(Ipv4Addr::new(10, 0, 0, 2)), None] {
+            let l = TeLink {
+                remote_addr: remote,
+                ..te_link()
+            };
+            let lsa = te_lsa(te_link_state_id(1), encode_te_link(&l));
+            assert_eq!(decode_te(&lsa), Some(TeBody::Link(l)));
+        }
+    }
+
+    /// A sub-TLV this router doesn't know is skipped, the known ones still
+    /// decode; a truncated body, a missing mandatory sub-TLV, another opaque
+    /// type or scope decode to nothing.
+    #[test]
+    fn te_decode_skips_unknown_and_rejects_malformed() {
+        let mut sub = Vec::new();
+        put_tlv(&mut sub, 0x7000, &[1, 2, 3]);
+        put_tlv(&mut sub, TE_LINK_TYPE, &[TE_LINK_MULTI_ACCESS]);
+        put_tlv(&mut sub, TE_LINK_ID, &[9, 9, 9, 9]);
+        let mut body = Vec::new();
+        put_tlv(&mut body, 0x7001, &[0; 4]);
+        put_tlv(&mut body, TLV_TE_LINK, &sub);
+        let lsa = te_lsa(te_link_state_id(1), body);
+        let Some(TeBody::Link(l)) = decode_te(&lsa) else {
+            panic!("link expected")
+        };
+        assert_eq!(
+            (l.link_type, l.link_id, l.metric),
+            (2, Ipv4Addr::new(9, 9, 9, 9), 0)
+        );
+        assert_eq!(l.remote_addr, None);
+
+        let good = encode_te_router_address(Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            decode_te(&te_lsa(te_link_state_id(1), good[..6].to_vec())),
+            None
+        );
+        let mut no_id = Vec::new();
+        let mut s2 = Vec::new();
+        put_tlv(&mut s2, TE_LINK_TYPE, &[1]);
+        put_tlv(&mut no_id, TLV_TE_LINK, &s2);
+        assert_eq!(decode_te(&te_lsa(te_link_state_id(1), no_id)), None);
+        let mut other = te_lsa(Ipv4Addr::new(4, 0, 0, 0), good);
+        assert_eq!(decode_te(&other), None);
+        other.header.link_state_id = TE_ROUTER_ADDRESS_LINK_STATE_ID;
+        other.header.lsa_type = LSA_TYPE_OPAQUE_LINK;
+        assert_eq!(decode_te(&other), None);
+        other.header.lsa_type = LSA_TYPE_OPAQUE_AREA;
+        other.body = LsaBody::Opaque(Vec::new());
+        assert_eq!(decode_te(&other), None);
     }
 }

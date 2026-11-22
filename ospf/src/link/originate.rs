@@ -341,6 +341,86 @@ pub(super) fn assign_link_state_ids(
         .collect()
 }
 
+/// RFC 3630 LSAs for one area's `links`: the Router Address LSA, then one Link
+/// LSA per fully adjacent point-to-point or broadcast link, numbered by
+/// `local_addr` order. Pure, like `router_lsa_links`.
+// ponytail: bandwidths are advertised as 0 because the link speed is not in
+// `InterfaceStatus`; the router id stands in for a loopback Router Address.
+pub(super) fn te_lsas(
+    local_router_id: Ipv4Addr,
+    links: &[(LinkConfig, LinkStatus)],
+) -> Vec<(Ipv4Addr, Vec<u8>)> {
+    let mut out = vec![(
+        lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID,
+        lsa::encode_te_router_address(local_router_id),
+    )];
+    let mut sorted: Vec<&(LinkConfig, LinkStatus)> = links.iter().collect();
+    sorted.sort_by_key(|(cfg, _)| cfg.local_addr);
+    let mut n = 0;
+    for (cfg, status) in sorted {
+        if cfg.virtual_link.is_some() {
+            continue;
+        }
+        let full = status
+            .neighbors
+            .iter()
+            .filter(|(_, nb)| nb.state == NeighborState::Full);
+        let (link_type, link_id, remote_addr) = match cfg.network_type {
+            NetworkType::PointToPoint => {
+                let Some((id, nb)) = full.min_by_key(|(id, _)| **id) else {
+                    continue;
+                };
+                (lsa::TE_LINK_POINT_TO_POINT, *id, Some(nb.address))
+            }
+            NetworkType::Broadcast => match status.dr {
+                Some(dr) if full.count() > 0 => (lsa::TE_LINK_MULTI_ACCESS, dr, None),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        n += 1;
+        out.push((
+            lsa::te_link_state_id(n),
+            lsa::encode_te_link(&lsa::TeLink {
+                link_type,
+                link_id,
+                local_addr: cfg.local_addr,
+                remote_addr,
+                metric: u32::from(cfg.cost),
+                max_bandwidth: 0.0,
+                max_reservable: 0.0,
+                unreserved: [0.0; 8],
+                admin_group: 0,
+            }),
+        ));
+    }
+    out
+}
+
+/// Installs `te_lsas` when `te` and withdraws every other self-originated
+/// area opaque LSA but the RI LSA, which is always wanted.
+fn install_te_lsas(
+    lsdb: &mut Lsdb,
+    local_router_id: Ipv4Addr,
+    te: bool,
+    links: &[(LinkConfig, LinkStatus)],
+) {
+    let mut wanted = HashSet::from([lsa::ROUTER_INFO_LINK_STATE_ID]);
+    if te {
+        for (id, body) in te_lsas(local_router_id, links) {
+            wanted.insert(id);
+            install_self_originated(
+                lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_OPAQUE_AREA,
+                id,
+                LsaBody::Opaque(body),
+            );
+        }
+    }
+    withdraw_undesired(lsdb, local_router_id, lsa::LSA_TYPE_OPAQUE_AREA, &wanted);
+}
+
 /// The inverse of an origination pass's `install_self_originated` loop:
 /// withdraws every live self-originated LSA of `lsa_type` whose link-state
 /// id isn't in `desired` — i.e. something this router advertised earlier
@@ -548,6 +628,7 @@ impl LinkManager {
         max_metric: bool,
     ) -> bool {
         let host_router = self.host_router.load(Ordering::Relaxed);
+        let te = self.traffic_engineering.load(Ordering::Relaxed);
         let max_metric = max_metric || host_router;
         let mut router_lsa_installed = false;
         let snapshot: Vec<(LinkConfig, LinkStatus)> = self
@@ -668,6 +749,10 @@ impl LinkManager {
                 lsa::ROUTER_INFO_LINK_STATE_ID,
                 LsaBody::Opaque(lsa::encode_router_info(router_info_caps)),
             );
+
+            // RFC 3630 TE LSAs; `withdraw_undesired` also flushes them when the
+            // knob goes off or a link goes away (the RI LSA is always desired).
+            install_te_lsas(&mut lsdb, local_router_id, te, &links);
 
             let mut network_ids = HashSet::new();
             for (cfg, status) in &links {

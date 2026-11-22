@@ -281,6 +281,8 @@ topics! {
     OspfInstanceMaxMetricAdministrative,
     /// `OspfInstance.host_router`
     OspfInstanceHostRouter,
+    /// `OspfInstance.traffic_engineering`
+    OspfInstanceTrafficEngineering,
     /// `OspfInstance.remote_lfa`
     OspfInstanceRemoteLfa,
     /// `OspfInstance.spf_throttle`

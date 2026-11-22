@@ -1491,6 +1491,10 @@ pub struct Args {
     /// `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_host_router: Option<bool>,
+    /// RFC 3630 `traffic-engineering` for that instance (requires
+    /// `--ospf-instance`): `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospf_traffic_engineering: Option<bool>,
     /// RFC 7490 `remote-lfa` for that instance (requires `--ospf-instance`):
     /// `true` turns it on, `false` off.
     #[arg(long)]
@@ -4258,6 +4262,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: name.clone(),
                 enabled,
             }));
+        }
+        if let Some(enabled) = args.ospf_traffic_engineering {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetTrafficEngineering {
+                    name: name.clone(),
+                    enabled,
+                },
+            ));
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
             name: args.routing_table.clone(),
@@ -7409,6 +7421,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn ospf_profile_guards_and_extras() {
         let inst = [
             "--ospf-instance",
@@ -7456,6 +7469,8 @@ mod tests {
             "true",
             "--ospf-host-router",
             "false",
+            "--ospf-traffic-engineering",
+            "true",
             "--ospf-area",
             "0.0.0.1",
             "--ospf-area-range",
@@ -7506,6 +7521,7 @@ mod tests {
             "SetMaxMetricOnShutdown { name: \"o\", seconds: None }",
             "SetMaxMetricAdministrative",
             "SetHostRouter",
+            "SetTrafficEngineering",
             "not_advertise: false",
             "SetMtuIgnore",
             "SetPassive",

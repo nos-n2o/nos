@@ -2,7 +2,7 @@ use super::{
     grace::{exit_grace_on_topology_change, in_grace, on_grace_lsa},
     originate::{
         assign_link_state_ids, flush_stale_network_lsas, install_self_originated, local_netmask,
-        network_lsa_mask, router_lsa_links, withdraw_self_originated,
+        network_lsa_mask, router_lsa_links, te_lsas, withdraw_self_originated,
     },
     rx::{finish_neighbor_event, hello_options, next_crypto_seq},
     *,

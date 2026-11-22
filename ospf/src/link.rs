@@ -22,7 +22,7 @@ use self::rx::{
     send_hello_eof, sync_all_drouters,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -889,6 +889,12 @@ pub struct LinkManager {
     /// H-bit, with max-metric transit links. An atomic like
     /// `prefix_suppression`.
     host_router: AtomicBool,
+    /// RFC 3630 TE LSAs (`OspfInstance.traffic_engineering`): an atomic like
+    /// `host_router`, so a toggle re-originates without restarting a link.
+    traffic_engineering: AtomicBool,
+    /// Per area, the Router Address of every other router's TE LSA, to log a
+    /// change once (`log_te_routers`).
+    te_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, Ipv4Addr>>>,
     /// `max-lsa`, shared with every store (`set_max_lsa`).
     max_lsa: Arc<AtomicU32>,
     /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
@@ -1030,6 +1036,8 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
+            traffic_engineering: AtomicBool::new(false),
+            te_state: Mutex::new(HashMap::new()),
             max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             remote_lfa: AtomicBool::new(false),
             spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
@@ -1103,6 +1111,31 @@ impl LinkManager {
 
     pub fn set_host_router(&self, on: bool) {
         self.host_router.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_traffic_engineering(&self, on: bool) {
+        self.traffic_engineering.store(on, Ordering::Relaxed);
+    }
+
+    /// Logs each other router's RFC 3630 Router Address LSA once, and again
+    /// when its address changes (the `nos-e2e ospf-te` anchor).
+    async fn log_te_routers(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let seen: BTreeMap<Ipv4Addr, Ipv4Addr> = lsas
+            .iter()
+            .filter(|l| l.header.advertising_router != root)
+            .filter_map(|l| match lsa::decode_te(l)? {
+                lsa::TeBody::RouterAddress(a) => Some((l.header.advertising_router, a)),
+                lsa::TeBody::Link(_) => None,
+            })
+            .collect();
+        let mut state = self.te_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (router, address) in &seen {
+            if old.get(router) != Some(address) {
+                info!(area = %area_id, router = %router, address = %address, "ospf te router address received");
+            }
+        }
+        *old = seen;
     }
 
     pub fn set_spf_timers(&self, timers: nos_ospf_common::throttle::Timers) {
@@ -1589,6 +1622,7 @@ impl LinkManager {
                 spf::host_bit_honoured(&lsas),
                 spf::h_bit_routers(&lsas).len(),
             );
+            self.log_te_routers(area_id, &lsas, router_id).await;
             if self.host_bit_state.lock().await.insert(area_id, state) != Some(state) {
                 info!(area = %area_id, honoured = state.0, host_routers = state.1, "ospf host-bit state changed");
             }
