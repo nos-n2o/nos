@@ -271,6 +271,7 @@ pub struct BgpRouteSummary {
 
 /// One retained unrecognized path attribute of a route, for `show bgp routes`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnknownAttributeSummary {
     /// The attribute type code.
