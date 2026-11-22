@@ -1088,6 +1088,7 @@ bgp instance r1:
 
 - The list is printed page by page as it arrives, so a large table starts printing at once.
 - One line per path (every ADD-PATH path), IPv4 and IPv6 unicast; EVPN stays in `show bgp evpn`. `>` marks the best path; `from local` is a redistributed route.
+- A path with retained unrecognized optional transitive attributes (see "Unrecognized path attributes") is followed by one line per attribute: `      attr 153 flags=0xc0 len=2 0102` (type, flags as stored, value length in bytes, value in lowercase hex). REST lists them as `unknown_attributes: [{attr_type, flags, value}]`, `[]` when none.
 - The state is `valid`, `invalid` or `not-found`. A route your import policy rejects (for example with `rpki.invalid`) is never held, so it is not listed; a route learned through RFC 8097 keeps the state its peer sent.
 
 #### Authenticating the cache session (RFC 8210 §9)

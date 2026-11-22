@@ -1671,6 +1671,7 @@ impl BgpRib {
     /// The summary for one `route_keys` key; `None` when the path is gone.
     pub fn route_at(&self, key: &nos_proto::BgpRouteCursor) -> Option<nos_proto::BgpRouteSummary> {
         use nos_proto::RpkiValidationState as S;
+        use std::fmt::Write;
         let r = match key.peer {
             None => self.redistributed.get(&key.prefix)?,
             Some(peer) => adj_in::get_path(self.adj_rib_in.get(&peer)?, key.prefix, key.path_id)?,
@@ -1689,6 +1690,18 @@ impl BgpRib {
                 nos_rpl::ValidationState::Invalid => S::Invalid,
                 nos_rpl::ValidationState::NotFound => S::NotFound,
             },
+            unknown_attributes: r
+                .unknown
+                .iter()
+                .map(|a| nos_proto::UnknownAttributeSummary {
+                    attr_type: a.attr_type,
+                    flags: a.flags,
+                    value: a.value.iter().fold(String::new(), |mut hex, b| {
+                        let _ = write!(hex, "{b:02x}");
+                        hex
+                    }),
+                })
+                .collect(),
         })
     }
 

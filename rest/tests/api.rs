@@ -2404,6 +2404,11 @@ async fn bgp_routes_are_paged_per_instance_with_an_opaque_cursor() {
                         local_pref: limit,
                         best: true,
                         validation_state: RpkiValidationState::NotFound,
+                        unknown_attributes: vec![nos_proto::UnknownAttributeSummary {
+                            attr_type: 0xfe,
+                            flags: 0xe0,
+                            value: "deadbeef".into(),
+                        }],
                     })
                     .collect(),
                 next: (take.len() < rest.len()).then(|| key(*take.last().unwrap())),
@@ -2429,6 +2434,10 @@ async fn bgp_routes_are_paged_per_instance_with_an_opaque_cursor() {
     let r = &v[0]["result"];
     assert_eq!(r["items"].as_array().unwrap().len(), 3);
     assert_eq!(r["pagination"], json!({"limit": 1000, "next": null}));
+    assert_eq!(
+        r["items"][0]["unknown_attributes"],
+        json!([{"attr_type": 254, "flags": 224, "value": "deadbeef"}])
+    );
 
     // Two pages by following the opaque cursor.
     let (_, v) = send(app, Method::GET, "/v1/bgp/routes?instance=r1&limit=2", None).await;
