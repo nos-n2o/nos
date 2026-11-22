@@ -4060,6 +4060,7 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: 1500,
+            speed_mbps: None,
             subinterfaces: Vec::new(),
             err_disabled: false,
         };
