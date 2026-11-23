@@ -1083,6 +1083,86 @@ fn use_radius(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBa
     };
 }
 
+/// A TACACS+ stub on a loopback port: `alice` is an operator, `eve` has no role AV pair.
+async fn tacacs_stub() -> std::net::SocketAddr {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let user = |n: &str, role: &str| nos_tacacs::StubUser {
+        name: n.into(),
+        password: "pw".into(),
+        role: role.into(),
+    };
+    tokio::spawn(nos_tacacs::serve_listener(
+        l,
+        b"t4cacs",
+        vec![user("alice", "operator"), user("eve", "")],
+    ));
+    addr
+}
+
+fn use_tacacs(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBackend>) {
+    let mut g = e.aaa.lock().unwrap();
+    g.1.keys = vec![nos_proto::AdminKey {
+        label: "tac".into(),
+        secret: "t4cacs".into(),
+    }];
+    g.0 = Aaa {
+        tacacs_servers: vec![nos_proto::TacacsServer {
+            name: "t1".into(),
+            address: addr.ip(),
+            port: Some(addr.port()),
+            routing_table: None,
+            key_ref: "tac".into(),
+            timeout_secs: Some(1),
+        }],
+        login_order: order,
+        ..Aaa::default()
+    };
+}
+
+#[tokio::test]
+async fn tacacs_accept_puts_the_role_in_the_certificate_and_a_reject_is_final() {
+    use nos_proto::LoginBackend::{Local, Tacacs};
+    let e = env(vec![user("bob", "localpw")]).await;
+    use_tacacs(&e, tacacs_stub().await, vec![Tacacs, Local]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(&mut conn, login("alice", "pw", csr)).await
+    else {
+        panic!("tacacs login refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+    // No `role` AV pair: read-only.
+    let (csr, _) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(&mut conn, login("eve", "pw", csr)).await
+    else {
+        panic!("tacacs login refused");
+    };
+    assert_eq!(claim_of(&cert_der).as_deref(), Some("read-only"));
+    // A FAIL never falls through to the local user of that name.
+    let (csr, _) = generate_csr().unwrap();
+    assert!(matches!(
+        ask(&mut conn, login("bob", "localpw", csr)).await,
+        WatchdogEvent::Denied(_)
+    ));
+}
+
+#[tokio::test]
+async fn silent_tacacs_falls_through_to_local() {
+    use nos_proto::LoginBackend::{Local, Tacacs};
+    let e = env(vec![user("bob", "localpw")]).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = l.local_addr().unwrap();
+    drop(l);
+    use_tacacs(&e, dead, vec![Tacacs, Local]);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    assert!(matches!(
+        ask(&mut conn, login("bob", "localpw", csr)).await,
+        WatchdogEvent::Issued { .. }
+    ));
+}
+
 fn claim_of(cert: &[u8]) -> Option<String> {
     let (_, c) = x509_parser::parse_x509_certificate(cert).unwrap();
     let san = c.subject_alternative_name().unwrap().unwrap();

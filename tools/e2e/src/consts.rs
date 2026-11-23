@@ -143,6 +143,11 @@ pub const RTR_STUB_KEY: &str = "rtr-s3cr3t";
 pub const RADIUS_STUB: &str = "radius-stub";
 pub const IP_RADIUS_STUB: Addr = Addr("10.50.0.16");
 pub const RADIUS_SECRET: &str = "radius-sh4red";
+/// `aaa`, #1155: `nos-tacacs-stub`, the scripted TACACS+ server, its port and key.
+pub const TACACS_STUB: &str = "tacacs-stub";
+pub const IP_TACACS_STUB: Addr = Addr("10.50.0.17");
+pub const TACACS_PORT: u16 = 4949;
+pub const TACACS_KEY: &str = "tacacs-sh4red";
 /// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
 /// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
 /// RFC 8097 "invalid", which router-a must ignore from eBGP.

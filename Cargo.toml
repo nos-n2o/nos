@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "sandbox", "tc", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "pam", "nss", "ssh", "radius"]
+members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "sandbox", "tc", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "pam", "nss", "ssh", "radius", "tacacs"]
 resolver = "3"
 
 [workspace.package]
@@ -42,6 +42,7 @@ nos-daemon         = { path = "daemon", version = "0.1.0" }
 nos-ssh            = { path = "ssh", version = "0.1.0" }
 nos-ospf-common    = { path = "ospf-common", version = "0.1.0" }
 nos-radius         = { path = "radius", version = "0.1.0" }
+nos-tacacs         = { path = "tacacs", version = "0.1.0" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

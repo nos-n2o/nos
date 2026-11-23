@@ -185,6 +185,7 @@ impl Config {
         }
         if v.aaa {
             keep.extend(self.aaa.servers.iter().map(|s| s.secret_ref.clone()));
+            keep.extend(self.aaa.tacacs_servers.iter().map(|s| s.key_ref.clone()));
         }
         if v.ssh_host_key {
             keep.insert(super::SSH_HOST_KEY_LABEL.to_string());

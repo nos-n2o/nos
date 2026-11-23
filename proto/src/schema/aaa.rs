@@ -1,5 +1,5 @@
-//! Login backends (`Config.aaa`, #1153): RADIUS servers `nos-watchdogd`'s
-//! login broker asks, and the order it tries backends in.
+//! Login backends (`Config.aaa`, #1153, #1155): RADIUS and TACACS+ servers
+//! `nos-watchdogd`'s login broker asks, and the order it tries backends in.
 
 use std::net::IpAddr;
 
@@ -19,6 +19,10 @@ pub const RADIUS_TIMEOUT_DEFAULT_SECS: u8 = 3;
 pub const RADIUS_ACCT_PORT_DEFAULT: u16 = 1813;
 /// Extra attempts per server, unless configured.
 pub const RADIUS_RETRIES_DEFAULT: u8 = 2;
+/// TACACS+ port (RFC 8907), unless configured.
+pub const TACACS_PORT_DEFAULT: u16 = 49;
+/// Seconds to wait for one TACACS+ exchange, unless configured.
+pub const TACACS_TIMEOUT_DEFAULT_SECS: u8 = 5;
 
 /// Where a password login is checked.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -30,6 +34,8 @@ pub enum LoginBackend {
     Local,
     /// The configured RADIUS servers.
     Radius,
+    /// The configured TACACS+ servers.
+    Tacacs,
 }
 
 /// The Access-Accept attribute whose text names the user's role
@@ -59,17 +65,23 @@ pub struct Aaa {
     #[cli(topic = AaaRadiusServer, words = "radius-server")]
     pub servers: Vec<RadiusServer>,
 
-    /// Backends tried in order; empty means `local` only. A RADIUS reject
-    /// ends the login; the next backend is tried only when no server
+    /// TACACS+ servers, tried in list order.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = AaaTacacsServer, words = "tacacs-server")]
+    pub tacacs_servers: Vec<TacacsServer>,
+
+    /// Backends tried in order; empty means `local` only. A RADIUS or TACACS+
+    /// reject ends the login; the next backend is tried only when no server
     /// answered (or, after `local`, when no such local user exists).
     #[serde(default)]
     #[garde(custom(|v: &Vec<LoginBackend>, ctx: &Config| valid_order(v, ctx)))]
     #[cli(topic = AaaLoginOrder, words = "login-order")]
     pub login_order: Vec<LoginBackend>,
 
-    /// Send RADIUS accounting (RFC 2866) to every server: a Start at each
-    /// login, a Stop when its session ends, and an Interim-Update per config
-    /// commit. Best effort through a bounded queue; never delays a login or a
+    /// Send RADIUS accounting (RFC 2866) and TACACS+ accounting (RFC 8907) to
+    /// every server: a Start at each login, a Stop when its session ends, and
+    /// a record per config commit. Best effort through a bounded queue; never delays a login or a
     /// commit. Default off.
     #[serde(default)]
     #[garde(skip)]
@@ -139,6 +151,65 @@ pub struct RadiusServer {
     #[garde(custom(|t: &Option<u8>, _ctx: &Config| zero_to(*t, 10, "retries")))]
     #[cli(topic = RadiusRetries)]
     pub retries: Option<u8>,
+}
+
+/// One TACACS+ server.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli)]
+#[garde(context(Config as ctx))]
+pub struct TacacsServer {
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, _ctx: &Config| crate::validators::name_charset(n)),
+        custom(|n: &String, ctx: &Config| unique_key_in(n, &ctx.aaa.tacacs_servers, |s| &s.name))
+    )]
+    #[cli(key)]
+    /// Server name, unique among TACACS+ servers.
+    pub name: String,
+
+    /// The server's address (an IP: there is no resolver).
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[garde(custom(|a: &IpAddr, _ctx: &Config| valid_address(a)))]
+    #[cli(topic = TacacsAddress)]
+    pub address: IpAddr,
+
+    /// TCP port. Default 49.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<u16>, _ctx: &Config| valid_port(*p)))]
+    #[cli(topic = TacacsPort)]
+    pub port: Option<u16>,
+
+    /// Connect through this routing table's VRF. Default: the default netns.
+    #[serde(default)]
+    #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    #[cli(topic = TacacsRoutingTable)]
+    pub routing_table: Option<String>,
+
+    /// Label of the admin-keystore entry holding the shared key (never
+    /// inline: the keystore is masked for REST and the CLI).
+    #[garde(custom(|l: &String, ctx: &Config| valid_secret(l, ctx)))]
+    #[cli(topic = TacacsKeyRef)]
+    pub key_ref: String,
+
+    /// Seconds to wait per exchange, 1 to 30. Default 5.
+    #[serde(default)]
+    #[garde(custom(|t: &Option<u8>, _ctx: &Config| in_range(*t, 30, "timeout")))]
+    #[cli(topic = TacacsTimeout)]
+    pub timeout_secs: Option<u8>,
+}
+
+impl Default for TacacsServer {
+    fn default() -> Self {
+        TacacsServer {
+            name: String::new(),
+            address: IpAddr::from([0, 0, 0, 0]),
+            port: None,
+            routing_table: None,
+            key_ref: String::new(),
+            timeout_secs: None,
+        }
+    }
 }
 
 impl Default for RadiusServer {
@@ -212,6 +283,11 @@ fn valid_order(order: &[LoginBackend], cfg: &Config) -> garde::Result {
             "login-order names radius but no radius-server is configured",
         ));
     }
+    if order.contains(&LoginBackend::Tacacs) && cfg.aaa.tacacs_servers.is_empty() {
+        return Err(garde::Error::new(
+            "login-order names tacacs but no tacacs-server is configured",
+        ));
+    }
     Ok(())
 }
 
@@ -251,6 +327,12 @@ mod tests {
                     timeout_secs: None,
                     retries: None,
                 }],
+                tacacs_servers: vec![TacacsServer {
+                    name: "t1".into(),
+                    address: "192.0.2.2".parse().unwrap(),
+                    key_ref: label.into(),
+                    ..Default::default()
+                }],
                 login_order: order,
                 role_attribute: RoleAttribute::default(),
                 accounting: false,
@@ -265,7 +347,7 @@ mod tests {
 
     #[test]
     fn validation() {
-        use LoginBackend::{Local, Radius};
+        use LoginBackend::{Local, Radius, Tacacs};
         assert!(ok(&cfg(vec![Radius, Local], "s", "radius")));
         assert!(!ok(&cfg(vec![Radius, Radius], "s", "radius")), "duplicate");
         assert!(!ok(&cfg(vec![], "s", "nope")), "unknown key");
@@ -273,6 +355,15 @@ mod tests {
         let mut c = cfg(vec![Radius], "s", "radius");
         c.aaa.servers.clear();
         assert!(!ok(&c), "radius without servers");
+        let mut c = cfg(vec![Tacacs, Local], "s", "radius");
+        assert!(ok(&c));
+        c.aaa.tacacs_servers[0].timeout_secs = Some(31);
+        assert!(!ok(&c), "timeout cap");
+        c.aaa.tacacs_servers.clear();
+        assert!(!ok(&c), "tacacs without servers");
+        let mut c = cfg(vec![], "s", "radius");
+        c.aaa.tacacs_servers[0].key_ref = "nope".into();
+        assert!(!ok(&c), "unknown tacacs key");
         let mut c = cfg(vec![], "s", "radius");
         c.aaa.servers[0].timeout_secs = Some(31);
         assert!(!ok(&c));

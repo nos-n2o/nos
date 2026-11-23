@@ -22,7 +22,7 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos-sandbox-exec --bin nos --bin nos-provision --bin nos-rtr-stub --bin nos-radius-stub \
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos-sandbox-exec --bin nos --bin nos-provision --bin nos-rtr-stub --bin nos-radius-stub --bin nos-tacacs-stub \
     && cargo build --release -p nos-pam -p nos-nss
 
 # trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
@@ -196,6 +196,7 @@ FROM runtime AS lab
 USER root
 COPY --from=builder /app/target/release/nos-rtr-stub   /usr/local/bin/nos-rtr-stub
 COPY --from=builder /app/target/release/nos-radius-stub /usr/local/bin/nos-radius-stub
+COPY --from=builder /app/target/release/nos-tacacs-stub /usr/local/bin/nos-tacacs-stub
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pamtester libcap2-bin \

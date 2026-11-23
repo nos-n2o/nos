@@ -64,8 +64,9 @@ pub mod switching_profile;
 pub mod user;
 
 pub use aaa::{
-    Aaa, LoginBackend, RadiusServer, RoleAttribute, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT,
-    RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS,
+    Aaa, LoginBackend, RadiusServer, RoleAttribute, TacacsServer, RADIUS_ACCT_PORT_DEFAULT,
+    RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS, TACACS_PORT_DEFAULT,
+    TACACS_TIMEOUT_DEFAULT_SECS,
 };
 pub use acl::{flowspec_points, Acl, AclAction, AclProtocol, AclRule, FlowspecPoint, PortRange};
 pub use admin::{redact_at, Admin, AdminKey, SECRET_MAX_LEN, SSH_HOST_KEY_LABEL};

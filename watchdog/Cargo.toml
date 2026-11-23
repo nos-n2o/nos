@@ -26,6 +26,7 @@ tokio-util         = { workspace = true }
 nos-pki            = { workspace = true }
 nos-password       = { workspace = true }
 nos-radius         = { workspace = true }
+nos-tacacs         = { workspace = true }
 getrandom          = { workspace = true }
 sha2               = { workspace = true }
 libc               = { workspace = true }

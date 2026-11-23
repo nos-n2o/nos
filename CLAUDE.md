@@ -24,18 +24,19 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `proto-derive/` | `nos-proto-derive` | `#[derive(Cli)]` for `nos-proto`'s schema: every field's mandatory `#[cli(...)]` (help `Topic`, CLI words, aliases, sugar) becomes the CLI's config tree (`nos_proto::cli`) (#109) |
 | `tcp-auth/` | `nos-tcp-auth` | Raw Linux `setsockopt` bindings for TCP session authentication (`TCP_MD5SIG`, TCP-AO) — no NOS dependencies, like `nos-proto` |
 | `rpl/` | `nos-rpl` | Routing Policy Language — compiler and VM for BGP import/export policy scripts, no NOS dependencies, like `nos-proto` |
-| `l2-socket/` | `nos-l2-socket` | Raw `AF_PACKET` L2 socket for `nos-lacp`/`nos-lldp`, plus `L2Unicast` for `nos-bfd` Echo — `unsafe` `sockaddr_ll`/BPF FFI, no NOS dependencies |
+| `l2-socket/` | `nos-l2-socket` | Raw `AF_PACKET` L2 socket for `nos-lacp`/`nos-lldp`, `L2Unicast` for `nos-bfd` Echo — `unsafe` `sockaddr_ll`/BPF FFI, no NOS dependencies |
 | `bfd-socket/` | `nos-bfd-socket` | `nos-bfd`'s raw-libc UDP FFI (cmsg, `setsockopt`); no NOS dependencies |
 | `sandbox/` | `nos-sandbox` | `nos-sandbox-exec`, the exec trampoline the watchdog runs daemons through: `NO_NEW_PRIVS`, file capabilities kept; libc only — see `sandbox/CLAUDE.md` |
-| `tc/` | `nos-tc` | Hand-encoded tc netlink (clsact, flower/fw, gact/skbedit, chains, per-action stats) shared by `nos-fdbd`, `nos-interfaced`, `nos-acld`; no NOS dependencies — see `tc/CLAUDE.md` |
+| `tc/` | `nos-tc` | Hand-encoded tc netlink (clsact, flower/fw, gact/skbedit, chains, stats) shared by `nos-fdbd`, `nos-interfaced`, `nos-acld`; no NOS dependencies — see `tc/CLAUDE.md` |
 | `password/` | `nos-password` | argon2id password hashing/verification for local users — no NOS dependencies; used by `nos-config` (hashing) and `nos-watchdog` (login verification) |
 | `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, with `nos-watchdogd` as the certificate authority — identities are `nos://<role>/<name>` URI SANs, hot-rotated; also `nos-restd`'s TLS (`nos_pki::rest`, a second CA); no NOS dependencies, like `nos-password` — see `pki/CLAUDE.md` |
-| `radius/` | `nos-radius` | RADIUS client (RFC 2865/2866/3579) for the watchdog's login broker, plus the e2e `nos-radius-stub`; no NOS dependencies — `radius/CLAUDE.md` |
+| `radius/` | `nos-radius` | RADIUS client (RFC 2865/2866/3579) for the login broker, plus e2e `nos-radius-stub`; no NOS dependencies — `radius/CLAUDE.md` |
+| `tacacs/` | `nos-tacacs` | TACACS+ client for the login broker - `tacacs/CLAUDE.md` |
 | `pam/` | `nos-pam` | PAM module (`pam_nos.so`): checks a password against `nos-watchdogd`'s login broker, exports a login ticket (`LoginTicket`, #996, #992) — `pam/CLAUDE.md` |
 | `nss/` | `nos-nss` | NSS `passwd` module (`libnss_nos.so.2`): sshd resolves NOS users (#999) — `nss/CLAUDE.md` |
 | `log-client/` | `nos-log-client` | The `tracing` → `nos-logd` forwarding layer every daemon installs — depends only on `nos-proto`, like `nos-tcp-auth`/`nos-rpl` |
 | `daemon/` | `nos-daemon` | Boilerplate every daemon shares: watchdog endpoint resolution, `nos-configd` fetch/subscribe, generic one-shot IPC query, `main()` identity + tracing bootstrap — see `daemon/CLAUDE.md` |
-| `config/` | `nos-config` | Configuration store and IPC server |
+| `config/` | `nos-config` | Config store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
 | `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table, applied to the kernel via a Linux driver (VRF device + routes) |
 | `interface/` | `nos-interface` | Interface reconciliation daemon — one process manages every configured interface, applying addresses and VRF enslavement to the kernel via a Linux driver |
@@ -51,8 +52,8 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one per `BroadcastDomain` with a `vni`, owning its VXLAN device and bridge FDB; installs remote MACs from `nos-bgpd`'s EVPN routes, originates local Type-2/3; `show fdb <domain>` — see `fdb/CLAUDE.md` |
 | `rest/` | `nos-rest` | REST API daemon (`nos-restd`) — one per `RoutingTable` with `rest-api` pinned: mutual TLS + HTTP/2 inside the VRF, every `show` query and the config tree as HTTP+JSON, OpenAPI + Swagger UI — see `rest/CLAUDE.md` |
 | `ssh/` | `nos-ssh` | SSH daemon (`nos-sshd`) — VRF-bound listener handing each connection to `sshd -i`, PAM login — see `ssh/CLAUDE.md` |
-| `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
-| `watchdog/` | `nos-watchdog` | Process supervisor — starts and restarts the other component processes |
+| `cli/` | `nos-cli` | Interactive shell (binary `nos`), the user-facing entry point |
+| `watchdog/` | `nos-watchdog` | Process supervisor: starts and restarts the other components |
 
 ## Architecture
 
