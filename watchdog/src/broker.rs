@@ -10,7 +10,7 @@ use nos_proto::{
     safe_name, IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent,
     WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL,
     MAX_FAILURES_DEFAULT, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
-    RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED,
+    RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED, TACACS_PORT_DEFAULT, TACACS_TIMEOUT_DEFAULT_SECS,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -35,7 +35,7 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_VERIFIES: usize = 2;
 const LOGIN_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
-/// RADIUS exchanges in flight at once (#1360): each can hold a broker task for
+/// RADIUS and TACACS+ exchanges in flight at once, together (#1360, #1155): each can hold a broker task for
 /// `timeout*(retries+1)` per server, so a few slow REST logins must not take
 /// every task. Beyond it a login waits `LOGIN_QUEUE_WAIT`, then `LOGIN_BUSY`.
 /// The total RADIUS time must stay under `nos-restd`'s 20s IPC call limit.
@@ -537,13 +537,21 @@ async fn account_worker(ctx: Arc<Ctx>, mut rx: tokio::sync::mpsc::Receiver<Recor
             continue;
         }
         let servers = radius_servers(&ctx, &cfg, true).await;
-        if servers.is_empty() {
-            continue;
+        if !servers.is_empty() {
+            if nos_radius::account(&servers, accounting::attrs(&record)).await {
+                debug!(?record, "radius accounting acknowledged");
+            } else {
+                warn!(?record, "radius accounting not acknowledged by any server");
+            }
         }
-        if nos_radius::account(&servers, accounting::attrs(&record)).await {
-            debug!(?record, "radius accounting acknowledged");
-        } else {
-            warn!(?record, "radius accounting not acknowledged by any server");
+        let servers = tacacs_servers(&ctx, &cfg).await;
+        if !servers.is_empty() {
+            let (flags, user, args) = accounting::tacacs(&record);
+            if nos_tacacs::account(&servers, flags, user, &args).await {
+                debug!(?record, "tacacs accounting acknowledged");
+            } else {
+                warn!(?record, "tacacs accounting not acknowledged by any server");
+            }
         }
     }
 }
@@ -581,6 +589,25 @@ async fn authenticate(
                 return verify_password(ctx, user, password).await.map(|()| None);
             }
             LoginBackend::Local => {}
+            LoginBackend::Tacacs => {
+                match tacacs_slot_login(ctx, &cfg, user, &password, ticket).await {
+                    Err(None) => return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string())),
+                    Ok(role) => {
+                        info!(user = ?user, role = role.claim(), "login accepted by tacacs");
+                        if should_allocate(&cfg.users, user) {
+                            allocate(ctx, user).await;
+                        }
+                        return Ok(Some(role.claim().to_string()));
+                    }
+                    Err(Some(nos_tacacs::AuthError::Unreachable)) => {
+                        warn!(user = ?user, "no tacacs server answered");
+                    }
+                    Err(Some(e)) => {
+                        info!(user = ?user, reason = %e, "tacacs login rejected");
+                        return Err(invalid());
+                    }
+                }
+            }
             LoginBackend::Radius => {
                 match radius_slot_login(ctx, &cfg, user, &password, ticket).await {
                     Err(None) => return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string())),
@@ -713,22 +740,88 @@ async fn radius_slot_login(
     password: &str,
     ticket: bool,
 ) -> Result<UserRole, Option<nos_radius::AuthError>> {
-    let _ticket_slot = if ticket {
+    let _slots = external_slots(ctx, user, ticket).await.ok_or(None)?;
+    radius_login(ctx, cfg, user, password).await.map_err(Some)
+}
+
+/// `tacacs_login` holding the same exchange slots as RADIUS.
+async fn tacacs_slot_login(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    user: &str,
+    password: &str,
+    ticket: bool,
+) -> Result<UserRole, Option<nos_tacacs::AuthError>> {
+    let _slots = external_slots(ctx, user, ticket).await.ok_or(None)?;
+    tacacs_login(ctx, cfg, user, password).await.map_err(Some)
+}
+
+type Slots<'a> = (
+    Option<tokio::sync::SemaphorePermit<'a>>,
+    tokio::sync::SemaphorePermit<'a>,
+);
+
+/// The exchange slots of an external login; `None` when they do not free in time.
+async fn external_slots<'a>(ctx: &'a Ctx, user: &str, ticket: bool) -> Option<Slots<'a>> {
+    let ticket_slot = if ticket {
         let got = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.ticket_radius_slots.acquire()).await;
         let Ok(Ok(slot)) = got else {
             warn!(user = ?user, "ticket login refused: too many radius exchanges from sshd");
-            return Err(None);
+            return None;
         };
         Some(slot)
     } else {
         None
     };
-    let Ok(Ok(_slot)) = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.radius_slots.acquire()).await
+    let Ok(Ok(slot)) = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.radius_slots.acquire()).await
     else {
         warn!(user = ?user, "login refused: too many radius exchanges in flight");
-        return Err(None);
+        return None;
     };
-    radius_login(ctx, cfg, user, password).await.map_err(Some)
+    Some((ticket_slot, slot))
+}
+
+/// The configured TACACS+ servers with their key, port and VRF device; one
+/// whose key or VRF is missing is skipped.
+async fn tacacs_servers(ctx: &Ctx, cfg: &nos_proto::Config) -> Vec<nos_tacacs::Server> {
+    let mut servers = Vec::new();
+    for s in &cfg.aaa.tacacs_servers {
+        let Some(key) = cfg.key(&s.key_ref) else {
+            continue;
+        };
+        let mut vrf = None;
+        if let Some(t) = &s.routing_table {
+            vrf = vrf_name(ctx, t).await;
+            if vrf.is_none() {
+                warn!(server = %s.name, table = %t, "tacacs server skipped: the VRF of its routing table is not available");
+                continue;
+            }
+        }
+        servers.push(nos_tacacs::Server {
+            addr: std::net::SocketAddr::new(s.address, s.port.unwrap_or(TACACS_PORT_DEFAULT)),
+            key: key.as_bytes().to_vec(),
+            timeout: Duration::from_secs(u64::from(
+                s.timeout_secs.unwrap_or(TACACS_TIMEOUT_DEFAULT_SECS),
+            )),
+            vrf,
+        });
+    }
+    servers
+}
+
+/// PAP login plus `service=nos` authorization; the role is the `role` AV pair
+/// (read-only when absent or unknown).
+async fn tacacs_login(
+    ctx: &Ctx,
+    cfg: &nos_proto::Config,
+    user: &str,
+    password: &str,
+) -> Result<UserRole, nos_tacacs::AuthError> {
+    let servers = tacacs_servers(ctx, cfg).await;
+    let args = nos_tacacs::login(&servers, user, password, "").await?;
+    Ok(nos_tacacs::av(&args, "role")
+        .and_then(UserRole::from_claim)
+        .unwrap_or(UserRole::ReadOnly))
 }
 
 /// One Access-Request across the configured servers; the role comes from the

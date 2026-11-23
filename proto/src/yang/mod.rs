@@ -36,7 +36,7 @@ use crate::Topic;
 /// Revision date of the generated module. Bump it whenever the schema (or a
 /// help text) changes: `nos-config`'s `yang_snapshot` test pins a hash of the
 /// output and fails until the bump is recorded.
-pub const YANG_REVISION: &str = "2026-12-03";
+pub const YANG_REVISION: &str = "2026-12-04";
 
 /// Maximum nesting rendered; the schema is a finite tree, so hitting it is a bug.
 const MAX_DEPTH: usize = 32;

@@ -222,10 +222,15 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     }
     a.wait_new("no radius server answered", silent, 15).await?;
 
+    log("#1155: TACACS+ login, authorization and accounting");
+    tacacs(w).await?;
+
     log("back to local-only login");
     a.edit(|c| {
         c.aaa = nos_proto::Aaa::default();
-        c.admin.keys.retain(|k| k.label != "radius");
+        c.admin
+            .keys
+            .retain(|k| k.label != "radius" && k.label != "tacacs");
         Ok(())
     })
     .await?;
@@ -233,6 +238,109 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     if code != 0 {
         bail!("local login after removing aaa failed: {code}: {out}");
     }
+    Ok(())
+}
+
+/// #1155: `login-order tacacs local` against `nos-tacacs-stub` (through the
+/// VRF of `rt1`): PAP login, `role` AV pair in the certificate, START/STOP
+/// accounting, and a reject that never falls back to the local user.
+async fn tacacs(w: &World) -> anyhow::Result<()> {
+    w.dock
+        .start_nos_tool(
+            TACACS_STUB,
+            NET,
+            IP_TACACS_STUB.s(),
+            &[
+                "nos-tacacs-stub",
+                "--listen",
+                &format!("0.0.0.0:{TACACS_PORT}"),
+                "--key",
+                TACACS_KEY,
+                "--user",
+                "tac-admin:pw-admin:admin",
+                "--user",
+                "tac-ro:pw-ro:read-only",
+            ],
+            &[],
+        )
+        .await?;
+    let a = w.a()?;
+    a.edit(|c| {
+        c.aaa = nos_proto::Aaa::default();
+        c.admin.keys.push(nos_proto::AdminKey {
+            label: "tacacs".into(),
+            secret: TACACS_KEY.into(),
+        });
+        c.aaa.tacacs_servers = vec![nos_proto::TacacsServer {
+            name: "stub".into(),
+            address: IP_TACACS_STUB.s().parse()?,
+            port: Some(TACACS_PORT),
+            routing_table: Some("rt1".into()),
+            key_ref: "tacacs".into(),
+            timeout_secs: Some(2),
+        }];
+        c.aaa.accounting = true;
+        c.aaa.login_order = vec![
+            nos_proto::LoginBackend::Tacacs,
+            nos_proto::LoginBackend::Local,
+        ];
+        Ok(())
+    })
+    .await?;
+
+    log("a TACACS+ admin (no local entry) provisions the router");
+    let needle = "login accepted by tacacs user=\"tac-admin\" role=\"admin\"";
+    let accepted = a.count(needle);
+    let (code, out) = run_provision(
+        w,
+        &["--login-user", "tac-admin", "--login-password", "pw-admin"],
+    )
+    .await?;
+    if code != 0 || !out.contains("provisioning complete") {
+        bail!("a TACACS+ admin should provision, got exit {code}: {out}");
+    }
+    a.wait_new(needle, accepted, 15).await?;
+
+    log("the server saw the authorization and the START and commit records");
+    for needle in [
+        "authen pass user=tac-admin",
+        "author pass user=tac-admin role=admin",
+        "accounting flags=2 user=tac-admin",
+        "accounting flags=4 user=tac-admin service=nos task_id=commit:",
+    ] {
+        let mut seen = false;
+        for _ in 0..15 {
+            if w.dock.logs(TACACS_STUB).await?.contains(needle) {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !seen {
+            bail!("the TACACS+ stub never saw '{needle}'");
+        }
+    }
+
+    log("a TACACS+ read-only user logs in but its role refuses the edits");
+    let refused = a.count("the user's role does not allow it");
+    let (code, _) =
+        run_provision(w, &["--login-user", "tac-ro", "--login-password", "pw-ro"]).await?;
+    if code == 0 {
+        bail!("a read-only TACACS+ user must not be able to provision");
+    }
+    a.wait_new("the user's role does not allow it", refused, 15)
+        .await?;
+
+    log("a TACACS+ reject never falls back to a local user with that password");
+    let rejected = format!("tacacs login rejected user=\"{E2E_USER}\"");
+    let before = a.count(&rejected);
+    let (code, out) = provision_as(w, E2E_PASSWORD).await?;
+    if code == 0 || !out.contains("login refused") {
+        bail!("a TACACS+ reject must end the login, got exit {code}: {out}");
+    }
+    a.wait_new(&rejected, before, 15).await?;
+
+    w.dock.container_remove(TACACS_STUB).await;
     Ok(())
 }
 

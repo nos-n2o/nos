@@ -16,6 +16,7 @@ ospfv3/CLAUDE.md 8192
 nss/CLAUDE.md 8192
 pam/CLAUDE.md 8192
 radius/CLAUDE.md 8192
+tacacs/CLAUDE.md 8192
 pki/CLAUDE.md 8192
 proto/CLAUDE.md 8192
 rest/CLAUDE.md 8192

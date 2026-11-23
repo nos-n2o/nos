@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-03 {
+  revision 2026-12-04 {
     description "Generated.";
   }
 
@@ -1951,13 +1951,40 @@ module nos-config {
         description "Set the extra attempts before the next server.";
       }
     }
+    list tacacs_servers {
+      key "name";
+      description "Add a TACACS+ server.";
+      leaf name {
+        type string;
+      }
+      leaf address {
+        type inet:ip-address;
+        description "Set a TACACS+ server's address.";
+      }
+      leaf port {
+        type uint16;
+        description "Set a TACACS+ server's TCP port.";
+      }
+      leaf routing_table {
+        type string;
+        description "Connect to a TACACS+ server through a routing table's VRF.";
+      }
+      leaf key_ref {
+        type string;
+        description "Name the admin key holding the shared key.";
+      }
+      leaf timeout_secs {
+        type uint8;
+        description "Set the seconds to wait for one exchange.";
+      }
+    }
     leaf-list login_order {
       type string;
       description "Set the order login backends are tried in.";
     }
     leaf accounting {
       type boolean;
-      description "Send RADIUS accounting.";
+      description "Send RADIUS and TACACS+ accounting.";
     }
     leaf role_attribute {
       type enumeration {

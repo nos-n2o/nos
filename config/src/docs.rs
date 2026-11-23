@@ -1927,13 +1927,37 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Add a RADIUS server.",
             "Servers are tried in the order they are listed; a server that does not answer within `timeout-secs` (after `retries` more attempts) is skipped. An Access-Reject from any server ends the login.",
         ),
+        Topic::AaaTacacsServer => (
+            "Add a TACACS+ server.",
+            "Servers are tried in the order they are listed; one that does not answer within `timeout-secs` is skipped. A user logs in with PAP authentication, then `service=nos` authorization: the `role` AV pair (`admin`, `operator`, `read-only`; missing means read-only) is the role, and an authorization FAIL refuses the login. Reject from any server ends the login. The shared key obfuscates the body with MD5 (the protocol's own scheme, RFC 8907 section 4.5): use TACACS+ only over networks you trust.",
+        ),
+        Topic::TacacsAddress => (
+            "Set a TACACS+ server's address.",
+            "An IP address (there is no resolver).",
+        ),
+        Topic::TacacsPort => (
+            "Set a TACACS+ server's TCP port.",
+            "1-65535. `delete` restores 49.",
+        ),
+        Topic::TacacsRoutingTable => (
+            "Connect to a TACACS+ server through a routing table's VRF.",
+            "Names an existing routing table: the socket is scoped into its VRF. `delete` uses the default network namespace.",
+        ),
+        Topic::TacacsKeyRef => (
+            "Name the admin key holding the shared key.",
+            "The label of an `admin key` entry; the key itself is never shown. The server needs the same value (a mismatch looks like an unreachable server).",
+        ),
+        Topic::TacacsTimeout => (
+            "Set the seconds to wait for one exchange.",
+            "1 to 30. `delete` restores 5.",
+        ),
         Topic::AaaLoginOrder => (
             "Set the order login backends are tried in.",
-            "`local` and `radius`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",
+            "`local`, `radius` and `tacacs`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",
         ),
         Topic::AaaAccounting => (
-            "Send RADIUS accounting.",
-            "RFC 2866 records to every server: a Start at each login, a Stop when its session ends (within a few seconds of the certificate being revoked or expiring) and an Interim-Update per config commit (`Acct-Session-Id commit:<transaction>`, `User-Name` the committer). Sent through a bounded queue: a slow or dead server drops records, it never delays a login or a commit. Default off.",
+            "Send RADIUS and TACACS+ accounting.",
+            "RFC 2866 records to every RADIUS server, and the same events as RFC 8907 accounting (START, STOP, and a STOP-flagged record per commit with `task_id=commit:<transaction>`) to every TACACS+ server: a Start at each login, a Stop when its session ends (within a few seconds of the certificate being revoked or expiring) and an Interim-Update per config commit (`Acct-Session-Id commit:<transaction>`, `User-Name` the committer). Sent through a bounded queue: a slow or dead server drops records, it never delays a login or a commit. Default off.",
         ),
         Topic::RadiusAccountingPort => (
             "Set a RADIUS server's accounting UDP port.",

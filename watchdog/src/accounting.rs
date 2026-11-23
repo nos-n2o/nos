@@ -85,6 +85,30 @@ pub fn attrs(record: &Record) -> Vec<(u8, Vec<u8>)> {
     out
 }
 
+/// The TACACS+ flags, user and AV pairs of `record`. A commit is a lone STOP
+/// (RFC 8907 §7: one-shot events carry no matching START).
+pub fn tacacs(record: &Record) -> (nos_tacacs::AcctFlags, &str, Vec<String>) {
+    use nos_tacacs::AcctFlags;
+    let base = |task: &str| vec!["service=nos".to_string(), format!("task_id={task}")];
+    match record {
+        Record::Start { user, session } => (AcctFlags::Start, user, base(session)),
+        Record::Stop {
+            user,
+            session,
+            secs,
+        } => {
+            let mut a = base(session);
+            a.push(format!("elapsed_time={secs}"));
+            (AcctFlags::Stop, user, a)
+        }
+        Record::Commit { actor, transaction } => {
+            let mut a = base(&format!("commit:{transaction}"));
+            a.push("cmd=commit".to_string());
+            (AcctFlags::Stop, actor, a)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +141,33 @@ mod tests {
             Some(&[0, 0, 0, 3][..])
         );
         assert_eq!(get(&commit, attr::ACCT_SESSION_ID), Some(&b"commit:t"[..]));
+    }
+
+    #[test]
+    fn tacacs_records_carry_flags_and_task() {
+        use nos_tacacs::AcctFlags;
+        let rec = Record::Start {
+            user: "u".into(),
+            session: "s1".into(),
+        };
+        let (f, u, a) = tacacs(&rec);
+        assert_eq!((f, u), (AcctFlags::Start, "u"));
+        assert!(a.contains(&"task_id=s1".to_string()));
+        let rec = Record::Stop {
+            user: "u".into(),
+            session: "s1".into(),
+            secs: 7,
+        };
+        let (f, _, a) = tacacs(&rec);
+        assert_eq!(f, AcctFlags::Stop);
+        assert!(a.contains(&"elapsed_time=7".to_string()));
+        let rec = Record::Commit {
+            actor: "a".into(),
+            transaction: "t".into(),
+        };
+        let (f, u, a) = tacacs(&rec);
+        assert_eq!((f, u), (AcctFlags::Stop, "a"));
+        assert!(a.contains(&"task_id=commit:t".to_string()));
     }
 
     #[test]

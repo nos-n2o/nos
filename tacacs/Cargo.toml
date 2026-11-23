@@ -1,0 +1,19 @@
+[package]
+name    = "nos-tacacs"
+publish = false
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio     = { workspace = true }
+md-5      = { workspace = true }
+getrandom = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "nos-tacacs-stub"
+path = "src/bin/nos-tacacs-stub.rs"

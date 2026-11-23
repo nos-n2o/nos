@@ -539,6 +539,18 @@ topics! {
     Aaa,
     /// `Aaa.servers`
     AaaRadiusServer,
+    /// `Aaa.tacacs_servers`
+    AaaTacacsServer,
+    /// `TacacsServer.address`
+    TacacsAddress,
+    /// `TacacsServer.port`
+    TacacsPort,
+    /// `TacacsServer.routing_table`
+    TacacsRoutingTable,
+    /// `TacacsServer.key_ref`
+    TacacsKeyRef,
+    /// `TacacsServer.timeout_secs`
+    TacacsTimeout,
     /// `Aaa.login_order`
     AaaLoginOrder,
     /// `Aaa.accounting`

@@ -2404,6 +2404,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-tacacs"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "md-5",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "nos-tc"
 version = "0.1.0"
 dependencies = [
@@ -2449,6 +2459,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "nos-radius",
+ "nos-tacacs",
  "proptest",
  "sha2",
  "tempfile",

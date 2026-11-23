@@ -15,7 +15,8 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 - Singleton `Aaa { servers: Vec<RadiusServer>, login_order: Vec<LoginBackend>, role_attribute: RoleAttribute }`, `serde(default)`, no op (generic path edit: `set aaa radius-server <name> address ...`), diffed field-level (`ConfigDiff.aaa`, `DiffScope::Aaa`).
 - `RadiusServer.secret_ref` is a keystore label validated like BGP's `key_ref` (must exist and be non-empty); `Aaa.order()` is the effective order (`local` when empty).
-- `accounting` (default off) and `RadiusServer.accounting_port` (1813) drive RADIUS accounting.
+- `accounting` (default off) and `RadiusServer.accounting_port` (1813) drive RADIUS accounting, and TACACS+ accounting too (#1155).
+- `Aaa.tacacs_servers: Vec<TacacsServer>` (`set aaa tacacs-server <name> address ...`): `TacacsServer.key_ref` is validated like `secret_ref`; `LoginBackend::Tacacs` needs at least one server.
 - Read by `nos-watchdogd`'s login broker; see `docs/architecture/auth.md`.
 
 ## Nesting one level under a parent

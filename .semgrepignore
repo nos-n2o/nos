@@ -22,3 +22,4 @@ tcp-auth/src/lib.rs
 # The e2e lab's scripted RADIUS server (src/bin only, `lab` image stage, never
 # production): its flags come from the harness (rust.lang.security.args.args).
 radius/src/bin/nos-radius-stub.rs
+tacacs/src/bin/nos-tacacs-stub.rs
