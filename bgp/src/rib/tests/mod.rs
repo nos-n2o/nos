@@ -39,6 +39,7 @@ mod rpl_path;
 mod rtc;
 mod stats;
 mod unknown_attr;
+mod unnegotiated;
 mod vpn;
 
 fn prefix(s: &str) -> IpNet {

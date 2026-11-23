@@ -172,6 +172,11 @@ pub const PY_SPEAKER_IMAGE: &str = "nos-e2e-pyspeaker:local";
 /// its unterminated refresh, and the one it doesn't.
 pub const RR_STALE_KEPT: &str = "203.0.130.0/24";
 pub const RR_STALE_PURGED: &str = "203.0.131.0/24";
+/// `unnegotiated-family`: what the scripted speaker announces for a family it
+/// never negotiated (SAFI 2, AFI 2) and the IPv4 unicast control after them.
+pub const UNNEG_MCAST: &str = "203.0.132.0/24";
+pub const UNNEG_V6: &str = "2001:db8:622::/48";
+pub const UNNEG_CONTROL: &str = "203.0.133.0/24";
 /// `evpn-fdb`: router-a's broadcast domain and its EVPN identity. The import
 /// Route Target is the one GoBGP tags its routes with (`65010:10000`); the
 /// export one is router-a's own. `EVPN_LOCAL_MAC` is what the helper pins on
