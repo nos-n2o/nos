@@ -8022,6 +8022,34 @@ pub async fn ospf_sr_sid(w: &mut World) -> anyhow::Result<()> {
     both_full_p2p(ra, rb).await
 }
 
+/// #1386 (self-contained): the default link cost is
+/// `reference-bandwidth / link speed`. A docker veth reports 10 Gbit/s, so the
+/// default (10000 Mbit/s) costs 1; raising the reference bandwidth to 100000
+/// makes it 10 in place (no restart), and clearing it restores 1.
+pub async fn ospf_cost(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    both_full_p2p(a, b).await?;
+    let changed =
+        |old: u32, new: u32| format!("ospf link cost changed link=eth0.0 old={old} cost={new}");
+    let up0 = a.count_fresh(&changed(1, 10)).await;
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(strings(&["--ospf-reference-bandwidth", "100000"]));
+    a.provision_flags(&with_base(A, fa)).await?;
+    a.wait_new(&changed(1, 10), up0, 60).await?;
+    let down0 = a.count_fresh(&changed(10, 1)).await;
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(strings(&["--ospf-reference-bandwidth", "0"]));
+    a.provision_flags(&with_base(A, fa)).await?;
+    a.wait_new(&changed(10, 1), down0, 60).await?;
+    both_full_p2p(a, b).await?;
+    a.established().await
+}
+
 #[cfg(test)]
 mod timeline_tests {
     use super::format_timeline;

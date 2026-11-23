@@ -149,6 +149,15 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceMaxLsa, words = "max-lsa")]
     pub max_lsa: Option<u32>,
 
+    /// Reference bandwidth for the default link cost (RFC 2328 Appendix B.1),
+    /// Mbit/s, 1 to 4294967: a link with no explicit profile `cost` costs
+    /// `reference-bandwidth / link speed`, at least 1 and at most 65535. A
+    /// link of unknown speed costs 1. `None` means 10000 (10 Gbit/s).
+    #[serde(default)]
+    #[garde(range(min = 1, max = 4_294_967))]
+    #[cli(topic = OspfInstanceReferenceBandwidth, words = "reference-bandwidth")]
+    pub reference_bandwidth: Option<u32>,
+
     /// RFC 8770 host router: sets the H-bit in this router's Router-LSA so
     /// the rest of the area never routes transit traffic through it, and
     /// advertises its transit links at 65535 for routers that don't honour
@@ -367,6 +376,7 @@ impl Default for OspfInstance {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             host_router: false,
             traffic_engineering: false,
             segment_routing: SegmentRouting::default(),
@@ -424,6 +434,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             host_router: false,
             traffic_engineering: false,
             segment_routing: SegmentRouting::default(),

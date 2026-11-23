@@ -181,6 +181,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-router-lsa-split" => ospf::ospfv3_router_lsa_split(w).await,
         "ospf-forged-lsa" => ospf::ospf_forged_lsa(w).await,
         "ospf-max-lsa" => ospf::ospf_max_lsa(w).await,
+        "ospf-cost" => ospf::ospf_cost(w).await,
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pam" => pam::pam(w).await,
         "ssh" => ssh::ssh(w).await,
@@ -330,6 +331,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3-router-lsa-split",
             "ospf-forged-lsa",
             "ospf-max-lsa",
+            "ospf-cost",
             "ospf-remote-lfa",
         ],
         "multi" => &[
@@ -552,6 +554,7 @@ pub const ALL: &[&str] = &[
     "ospfv3-router-lsa-split",
     "ospf-forged-lsa",
     "ospf-max-lsa",
+    "ospf-cost",
     "ospf-remote-lfa",
     "pki",
     "aaa",

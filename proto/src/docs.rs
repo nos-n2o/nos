@@ -271,6 +271,8 @@ topics! {
     OspfInstanceGracefulRestart,
     /// `OspfInstance.max_lsa`
     OspfInstanceMaxLsa,
+    /// `OspfInstance.reference_bandwidth`
+    OspfInstanceReferenceBandwidth,
     /// `OspfInstance.graceful_restart_helper_max_grace_period`
     OspfInstanceGracefulRestartHelperMaxGracePeriod,
     /// `OspfInstance.prefix_suppression`
