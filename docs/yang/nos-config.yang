@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-01 {
+  revision 2026-12-02 {
     description "Generated.";
   }
 
@@ -985,6 +985,10 @@ module nos-config {
     leaf max_lsa {
       type uint32;
       description "Cap the LSAs another router can make this router hold (LSDB overload limit).";
+    }
+    leaf reference_bandwidth {
+      type uint32;
+      description "Set the reference bandwidth the default link cost is derived from.";
     }
     leaf host_router {
       type boolean;

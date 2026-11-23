@@ -167,6 +167,28 @@ fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
         .unwrap_or(DEFAULT_HELPER_MAX_GRACE_PERIOD)
 }
 
+/// Default reference bandwidth, Mbit/s (10 Gbit/s).
+const DEFAULT_REFERENCE_BANDWIDTH: u32 = 10_000;
+
+/// Interface cost (RFC 2328 Appendix B.1): the profile's explicit `cost`, else
+/// `reference_bandwidth / speed` clamped to 1..=65535, else 1 when the speed
+/// is unknown.
+fn effective_cost(explicit: Option<u16>, speed_mbps: Option<u32>, ref_bw: u32) -> u16 {
+    explicit.unwrap_or_else(|| match speed_mbps {
+        Some(s) if s > 0 => (ref_bw / s).clamp(1, 65535) as u16,
+        _ => 1,
+    })
+}
+
+/// The instance's reference bandwidth, Mbit/s.
+fn reference_bandwidth(cfg: &nos_proto::Config, instance: &str) -> u32 {
+    cfg.ospf_instances
+        .iter()
+        .find(|i| i.name == instance)
+        .and_then(|i| i.reference_bandwidth)
+        .unwrap_or(DEFAULT_REFERENCE_BANDWIDTH)
+}
+
 /// What one resync pass reads (shared, immutable).
 #[derive(Clone, Copy)]
 struct Env<'a> {
@@ -233,6 +255,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
     let hello_interval = *hello_interval;
     let dead_interval = *dead_interval;
     let priority = *priority;
+    let ref_bw = reference_bandwidth(cfg, instance);
     for attach in subinterface_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -279,7 +302,11 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
                 desired_stubs,
                 &link_name,
                 area.area_id,
-                (m.local_addr, m.local_prefix_len, profile.cost.unwrap_or(1)),
+                (
+                    m.local_addr,
+                    m.local_prefix_len,
+                    effective_cost(profile.cost, m.speed_mbps, ref_bw),
+                ),
             );
             continue;
         }
@@ -294,7 +321,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             vrf: m.vrf,
             local_addr: m.local_addr,
             local_prefix_len: m.local_prefix_len,
-            cost: profile.cost.unwrap_or(1),
+            cost: effective_cost(profile.cost, m.speed_mbps, ref_bw),
             kernel_interface: m.kernel_interface,
             network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
             priority,
@@ -376,6 +403,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
     let hello_interval = *hello_interval;
     let dead_interval = *dead_interval;
     let priority = *priority;
+    let ref_bw = reference_bandwidth(cfg, instance);
     for attach in broadcast_domain_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -421,7 +449,11 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
                 desired_stubs,
                 &link_name,
                 area.area_id,
-                (m.local_addr, m.local_prefix_len, profile.cost.unwrap_or(1)),
+                (
+                    m.local_addr,
+                    m.local_prefix_len,
+                    effective_cost(profile.cost, m.speed_mbps, ref_bw),
+                ),
             );
             continue;
         }
@@ -436,7 +468,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             vrf: m.vrf,
             local_addr: m.local_addr,
             local_prefix_len: m.local_prefix_len,
-            cost: profile.cost.unwrap_or(1),
+            cost: effective_cost(profile.cost, m.speed_mbps, ref_bw),
             kernel_interface: m.kernel_interface,
             network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
             priority,
@@ -1726,5 +1758,22 @@ mod spf_timer_tests {
         assert_eq!(t.initial, Duration::from_millis(200));
         assert_eq!(t.short, Duration::from_millis(200));
         assert_eq!(t.long, Duration::from_millis(5000));
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::{effective_cost, DEFAULT_REFERENCE_BANDWIDTH as R};
+
+    #[test]
+    fn cost_from_speed_and_reference() {
+        assert_eq!(effective_cost(None, Some(1000), R), 10);
+        assert_eq!(effective_cost(None, Some(10_000), R), 1);
+        assert_eq!(effective_cost(None, Some(100_000), R), 1);
+        assert_eq!(effective_cost(None, Some(1), 4_294_967), 65535);
+        assert_eq!(effective_cost(None, Some(1000), 100_000), 100);
+        assert_eq!(effective_cost(None, None, R), 1);
+        assert_eq!(effective_cost(None, Some(0), R), 1);
+        assert_eq!(effective_cost(Some(7), Some(1000), R), 7);
     }
 }
