@@ -135,6 +135,7 @@ mod tests {
             interface_mtu: 0,
             options: DBD_OPTIONS,
             init: true,
+            resync: false,
             more: true,
             master: true,
             dd_sequence_number: seq,
@@ -168,6 +169,7 @@ mod tests {
             mtu: 1500,
             dbd_options: dbd_options(adj.stub),
             peer_opaque_capable: peer_opaque_capable(dbd),
+            peer_oob_capable: false,
         };
         on_dbd_received(adj, state, &p, dbd, local)
     }

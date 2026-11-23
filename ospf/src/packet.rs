@@ -59,6 +59,8 @@ const DBD_BODY_FIXED_LEN: usize = 8;
 const DBD_FLAG_MASTER: u8 = 0x01;
 const DBD_FLAG_MORE: u8 = 0x02;
 const DBD_FLAG_INIT: u8 = 0x04;
+/// RFC 4811 §2.4: the R-bit, set on every DBD of an out-of-band resynchronization.
+const DBD_FLAG_RESYNC: u8 = 0x08;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PacketError {
@@ -355,6 +357,9 @@ pub fn encode_dbd(pkt: &DbdPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     if pkt.init {
         flags |= DBD_FLAG_INIT;
     }
+    if pkt.resync {
+        flags |= DBD_FLAG_RESYNC;
+    }
     if pkt.more {
         flags |= DBD_FLAG_MORE;
     }
@@ -402,6 +407,7 @@ pub fn decode_dbd(data: &[u8], auth: &AuthPolicy<'_>) -> Result<DbdPacket, Packe
         interface_mtu,
         options,
         init: flags & DBD_FLAG_INIT != 0,
+        resync: flags & DBD_FLAG_RESYNC != 0,
         more: flags & DBD_FLAG_MORE != 0,
         master: flags & DBD_FLAG_MASTER != 0,
         dd_sequence_number,
@@ -997,6 +1003,7 @@ mod tests {
             interface_mtu: 1500,
             options: 0,
             init: true,
+            resync: false,
             more: true,
             master: true,
             dd_sequence_number: 42,

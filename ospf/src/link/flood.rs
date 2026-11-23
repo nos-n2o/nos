@@ -145,10 +145,9 @@ pub(super) fn retransmit_pending(
             let auth = cfg
                 .auth
                 .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-            if let Err(e) = socket.send_unicast(
-                info.address,
-                &super::rx::encode_dbd_for(cfg, dbd, &auth, info.grace_deadline.is_some()),
-            ) {
+            if let Err(e) =
+                socket.send_unicast(info.address, &super::rx::encode_dbd_for(cfg, dbd, &auth))
+            {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
             }
         }

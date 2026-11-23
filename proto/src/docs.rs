@@ -335,6 +335,10 @@ topics! {
     OspfProfileMtuIgnore,
     /// `OspfProfile.lls`
     OspfProfileLls,
+    /// `OspfProfile.oob_resync`
+    OspfProfileOobResync,
+    /// `OspfProfile.restart_signal_only`
+    OspfProfileRestartSignalOnly,
     /// `OspfProfile.passive`
     OspfProfilePassive,
     /// `OspfProfile.network_type` (also `OSPFv3`'s)

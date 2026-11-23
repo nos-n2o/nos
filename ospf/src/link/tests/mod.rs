@@ -36,6 +36,7 @@ fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
         speed_mbps: None,
         mtu_ignore: false,
         lls: false,
+        restart_signal_only: false,
         ifindex: 0,
         auth: LinkAuthConfig::None,
         stub: false,
@@ -58,6 +59,7 @@ fn neighbor_info(state: NeighborState, address: Ipv4Addr) -> NeighborInfo {
         adjacency: None,
         last_crypto_seq: HashMap::new(),
         grace_deadline: None,
+        oob_deadline: None,
     }
 }
 

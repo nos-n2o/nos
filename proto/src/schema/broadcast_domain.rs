@@ -487,6 +487,8 @@ mod tests {
                         mtu: None,
                         mtu_ignore: false,
                         lls: false,
+                        oob_resync: false,
+                        restart_signal_only: false,
                         passive: false,
                         network_type: None,
                         auth: None,

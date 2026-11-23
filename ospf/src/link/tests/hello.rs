@@ -125,6 +125,7 @@ fn extended_replay_check_is_per_packet_type() {
             interface_mtu: 1500,
             options: 0,
             init: true,
+            resync: false,
             more: false,
             master: false,
             dd_sequence_number: 1,

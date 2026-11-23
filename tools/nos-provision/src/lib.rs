@@ -1615,6 +1615,16 @@ pub struct Args {
     #[arg(long)]
     pub ospf_lls: Option<bool>,
 
+    /// If set (requires `--ospf-profile`), toggles `oob-resync` on it
+    /// (`OspfProfileOp::SetOobResync`): the change to true starts an RFC 4811 resync.
+    #[arg(long)]
+    pub ospf_oob_resync: Option<bool>,
+
+    /// If set (requires `--ospf-profile`), toggles `restart-signal-only` on it
+    /// (`OspfProfileOp::SetRestartSignalOnly`): RS Hello without a Grace-LSA.
+    #[arg(long)]
+    pub ospf_restart_signal_only: Option<bool>,
+
     /// If set (requires `--ospf-profile`), toggles `passive` on it
     /// (`OspfProfileOp::SetPassive`): the subnet is advertised as a stub, no Hello.
     #[arg(long)]
@@ -4490,6 +4500,22 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled,
                 }));
             }
+            if let Some(enabled) = args.ospf_oob_resync {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetOobResync {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
+            if let Some(enabled) = args.ospf_restart_signal_only {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetRestartSignalOnly {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(kind) = args.ospf_profile_network_type.as_deref() {
                 let (instance, name) = (instance.clone(), name.clone());
                 ops.push(ConfigOp::OspfProfile(match kind {
@@ -4570,6 +4596,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_lls.is_some() {
                 bail!("--ospf-lls requires --ospf-profile to also be set");
             }
+            if args.ospf_oob_resync.is_some() || args.ospf_restart_signal_only.is_some() {
+                bail!("--ospf-oob-resync/--ospf-restart-signal-only require --ospf-profile to also be set");
+            }
             if args.ospf_passive.is_some() {
                 bail!("--ospf-passive requires --ospf-profile to also be set");
             }
@@ -4590,6 +4619,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     } else if args.ospf_profile_mtu.is_some()
         || args.ospf_mtu_ignore.is_some()
         || args.ospf_lls.is_some()
+        || args.ospf_oob_resync.is_some()
+        || args.ospf_restart_signal_only.is_some()
         || args.ospf_passive.is_some()
         || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
@@ -7526,6 +7557,28 @@ mod tests {
         shows(&build_ops(&args).unwrap(), "SetLls");
         let orphan = parse(&["--ospf-lls", "true"]);
         assert!(build_ops(&orphan).is_err());
+    }
+
+    #[test]
+    fn ospf_oob_resync_flags_push_their_ops() {
+        let args = parse(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--ospf-oob-resync",
+            "true",
+            "--ospf-restart-signal-only",
+            "true",
+        ]);
+        let ops = build_ops(&args).unwrap();
+        shows(&ops, "SetOobResync");
+        shows(&ops, "SetRestartSignalOnly");
+        assert!(build_ops(&parse(&["--ospf-oob-resync", "true"])).is_err());
     }
 
     #[test]

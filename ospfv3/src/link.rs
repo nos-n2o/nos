@@ -464,6 +464,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         options: link_options(cfg),
         interface_mtu: cfg.mtu,
         init: true,
+        resync: false,
         more: true,
         master: true,
         dd_sequence_number: seed,
@@ -1055,6 +1056,7 @@ async fn handle_dbd(
         mtu: cfg.mtu,
         dbd_options: link_options(cfg),
         peer_opaque_capable: false,
+        peer_oob_capable: false,
     };
     let actions = exchange::on_dbd_received(
         &mut adj,
@@ -1464,7 +1466,7 @@ fn execute_actions(
             exchange::Action::SendLsAck(lsa_headers) => {
                 ("lsack", lsack_packets(cfg, local_router_id, &lsa_headers))
             }
-            exchange::Action::NeighborEvent(_) => continue,
+            exchange::Action::NeighborEvent(_) | exchange::Action::OobResyncStart => continue,
         };
         for payload in payloads {
             if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, &payload) {
@@ -4957,6 +4959,7 @@ pub(crate) mod tests {
             options: 0,
             interface_mtu: 1500,
             init: false,
+            resync: false,
             more: false,
             master: false,
             dd_sequence_number: 1,

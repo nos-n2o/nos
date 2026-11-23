@@ -264,6 +264,23 @@ pub struct OspfProfile {
     #[cli(topic = OspfProfileLls, words = "lls enable", alias = "lls")]
     pub lls: bool,
 
+    /// RFC 4811 out-of-band LSDB resynchronization: setting it (false to true
+    /// on a commit) starts a resync with every `Full` neighbor that announced
+    /// the LR bit on this profile's links, keeping the adjacency advertised.
+    /// Needs `lls`. Doubles as an operator "resync now" action: set it again
+    /// after turning it off.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfileOobResync, words = "oob-resync enable", alias = "oob-resync")]
+    pub oob_resync: bool,
+
+    /// Test fixture: on a planned restart send only the RFC 4812 RS Hello, no
+    /// Grace-LSA, so a helper's hold provably comes from RS. Needs `lls`.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfileRestartSignalOnly, words = "restart-signal-only enable", alias = "restart-signal-only")]
+    pub restart_signal_only: bool,
+
     /// `None` resolves per attach point: a `Subinterface`/loopback
     /// `Interface` attach point defaults to `PointToPoint`, a
     /// `BroadcastDomain` one defaults to `Broadcast` — resolved by
@@ -401,6 +418,8 @@ mod tests {
             mtu: None,
             mtu_ignore: false,
             lls: false,
+            oob_resync: false,
+            restart_signal_only: false,
             passive: false,
             network_type: None,
             auth: None,
@@ -597,6 +616,8 @@ mod tests {
             mtu: None,
             mtu_ignore: false,
             lls: false,
+            oob_resync: false,
+            restart_signal_only: false,
             passive: false,
             network_type: None,
             auth: None,

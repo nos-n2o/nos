@@ -136,6 +136,7 @@ mod tests {
             mtu: 1500,
             dbd_options: 0x0413,
             peer_opaque_capable: false,
+            peer_oob_capable: false,
         };
         let poll = DbdPacket {
             lls: None,
@@ -144,6 +145,7 @@ mod tests {
             options: 0x13,
             interface_mtu: 1500,
             init: false,
+            resync: false,
             more: false,
             master: true,
             dd_sequence_number: 7,
@@ -388,6 +390,7 @@ mod tests {
             mtu: 1500,
             dbd_options: 0x13,
             peer_opaque_capable: false,
+            peer_oob_capable: false,
         };
         let dbd = DbdPacket {
             lls: None,
@@ -396,6 +399,7 @@ mod tests {
             options: 0x13,
             interface_mtu: 1500,
             init: false,
+            resync: false,
             more: false,
             master: true,
             dd_sequence_number: 7,
