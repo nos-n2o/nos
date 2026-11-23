@@ -19,10 +19,12 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         Request::UpgradePasswordHash { .. } | Request::AllocateExternalUser { .. } => {
             role == Role::Watchdog
         }
+        // The broker also reads the list, to refuse a ticket of a cleared name (#1376).
+        Request::ListExternalUsers => matches!(role, Role::User | Role::Restd | Role::Watchdog),
         Request::SetSshHostKey { .. } => role == Role::Sshd,
-        Request::AdminAllocateExternalUser { .. }
-        | Request::ClearExternalUser { .. }
-        | Request::ListExternalUsers => matches!(role, Role::User | Role::Restd),
+        Request::AdminAllocateExternalUser { .. } | Request::ClearExternalUser { .. } => {
+            matches!(role, Role::User | Role::Restd)
+        }
         Request::UserExists { .. }
         | Request::ListBgpInstances
         | Request::ListOspfInstances
@@ -248,16 +250,18 @@ mod tests {
         let people = [
             Request::AdminAllocateExternalUser { name: name() },
             Request::ClearExternalUser { name: name() },
-            Request::ListExternalUsers,
         ];
+        let list = Request::ListExternalUsers;
         for role in Role::ALL {
+            let may = matches!(role, Role::User | Role::Restd | Role::Watchdog);
+            assert_eq!(allowed(role, &list), may, "{role:?}");
             assert_eq!(allowed(role, &accept), role == Role::Watchdog, "{role:?}");
             for r in &people {
                 let may = matches!(role, Role::User | Role::Restd);
                 assert_eq!(allowed(role, r), may, "{role:?} {r:?}");
             }
         }
-        for r in &people {
+        for r in people.iter().chain([&list]) {
             assert!(permitted(UserRole::Admin, "a", r));
             for ur in [UserRole::Operator, UserRole::ReadOnly] {
                 assert!(!permitted(ur, "a", r), "{ur:?} {r:?}");

@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
-    IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent, WatchdogRequest,
-    INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT,
-    RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
+    safe_name, IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent,
+    WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL,
+    MAX_FAILURES_DEFAULT, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
     RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED,
 };
 use tokio::io::split;
@@ -40,6 +40,8 @@ const LOGIN_QUEUE_WAIT: Duration = Duration::from_secs(5);
 /// every task. Beyond it a login waits `LOGIN_QUEUE_WAIT`, then `LOGIN_BUSY`.
 /// The total RADIUS time must stay under `nos-restd`'s 20s IPC call limit.
 const MAX_CONCURRENT_RADIUS: usize = 4;
+/// Of those, the PAM ticket path (`sshd`, reachable by anyone) may hold this many (#1376).
+const MAX_TICKET_RADIUS: usize = 2;
 
 /// Anonymous (no client certificate) connections may only `Login`, so they are
 /// capped and dropped when idle; authenticated peers are neither (#950).
@@ -83,6 +85,7 @@ struct Ctx {
     pki: Arc<Pki>,
     login_slots: Semaphore,
     radius_slots: Semaphore,
+    ticket_radius_slots: Semaphore,
     anon_slots: Arc<Semaphore>,
     anonymous_idle: Duration,
     /// `LoginPolicy.max_failures`, live (#1148).
@@ -133,6 +136,7 @@ pub fn start_with_limits(
         pki,
         login_slots: Semaphore::new(MAX_CONCURRENT_VERIFIES),
         radius_slots: Semaphore::new(MAX_CONCURRENT_RADIUS),
+        ticket_radius_slots: Semaphore::new(MAX_TICKET_RADIUS),
         anon_slots: Arc::new(Semaphore::new(limits.max_anonymous)),
         anonymous_idle: limits.anonymous_idle,
         max_failures,
@@ -289,13 +293,18 @@ async fn dispatch(
             csr_der,
         } => login(ctx, &user, password, &csr_der, Realm::Ipc).await,
         WatchdogRequest::LoginTicket { user, password } => {
-            if let Err(denied) = verify_password(ctx, &user, password).await {
-                if matches!(&denied, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS) {
-                    info!(reason = "bad-password", "login ticket refused");
+            // Same `login-order` walk as IPC/REST (#1376), so a RADIUS user gets a
+            // ticket carrying its claim; a RADIUS accept has allocated the ssh entry.
+            let claim = match authenticate(ctx, &user, password, true).await {
+                Ok(claim) => claim,
+                Err(denied) => {
+                    if matches!(&denied, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS) {
+                        info!(reason = "bad-password", "login ticket refused");
+                    }
+                    return denied;
                 }
-                return denied;
-            }
-            let ticket = ctx.pki.tickets.issue(&user, Instant::now());
+            };
+            let ticket = ctx.pki.tickets.issue(&user, claim, Instant::now());
             info!(user = ?user, "login ticket issued");
             WatchdogEvent::Ticket {
                 ticket,
@@ -303,27 +312,11 @@ async fn dispatch(
             }
         }
         WatchdogRequest::RedeemTicket { ticket, csr_der } => {
-            let Some(user) = ctx.pki.tickets.redeem(&ticket, Instant::now()) else {
+            let Some((user, claim)) = ctx.pki.tickets.redeem(&ticket, Instant::now()) else {
                 info!(reason = "unknown-ticket", "login ticket refused");
                 return WatchdogEvent::Denied(INVALID_TICKET.to_string());
             };
-            match users_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
-                Ok(users) if users.iter().any(|u| u.name == user) => {
-                    let event = issue(ctx, &user, &csr_der, Realm::Ipc, Instant::now(), None);
-                    if matches!(event, WatchdogEvent::Issued { .. }) {
-                        info!(user = ?user, "login ticket redeemed");
-                    }
-                    event
-                }
-                Ok(_) => {
-                    info!(reason = "user-gone", "login ticket refused");
-                    WatchdogEvent::Denied(INVALID_TICKET.to_string())
-                }
-                Err(e) => {
-                    warn!(error = %e, "cannot read users from nos-configd, refusing ticket");
-                    WatchdogEvent::Denied("login unavailable".to_string())
-                }
-            }
+            redeem(ctx, &user, claim, &csr_der).await
         }
         WatchdogRequest::AccountCommit { actor, transaction } => {
             accounting::offer(&ctx.acct, Record::Commit { actor, transaction });
@@ -413,6 +406,41 @@ async fn dispatch(
     }
 }
 
+/// Turns a redeemed ticket into a certificate. A local user keeps its configured
+/// role (the claim is dropped); a RADIUS user needs its claim and a still-allocated
+/// name (`clear aaa user` ends its tickets). A Start is accounted per redeem (#1376).
+async fn redeem(ctx: &Ctx, user: &str, claim: Option<String>, csr_der: &[u8]) -> WatchdogEvent {
+    let (cfg, ident) = (&ctx.sockets.config, &ctx.pki.identity);
+    let users = match users_client::fetch_users(ident, cfg).await {
+        Ok(users) => users,
+        Err(e) => {
+            warn!(error = %e, "cannot read users from nos-configd, refusing ticket");
+            return WatchdogEvent::Denied("login unavailable".to_string());
+        }
+    };
+    let claim = if users.iter().any(|u| u.name == user) {
+        None
+    } else {
+        let allocated = users_client::external_users(ident, cfg)
+            .await
+            .is_ok_and(|l| l.iter().any(|n| n == user));
+        match claim {
+            Some(c) if allocated => Some(c),
+            _ => {
+                info!(reason = "user-gone", "login ticket refused");
+                return WatchdogEvent::Denied(INVALID_TICKET.to_string());
+            }
+        }
+    };
+    let started = Instant::now();
+    let event = issue(ctx, user, csr_der, Realm::Ipc, started, claim.as_deref());
+    if matches!(event, WatchdogEvent::Issued { .. }) {
+        info!(user = ?user, "login ticket redeemed");
+        account_session(ctx, user, started, Realm::Ipc);
+    }
+    event
+}
+
 /// Which CA a login/renewal is certified by.
 #[derive(Clone, Copy)]
 enum Realm {
@@ -446,7 +474,7 @@ async fn login(
     realm: Realm,
 ) -> WatchdogEvent {
     // One path for IPC and REST (#1360): `aaa login-order`, local fallthrough.
-    let claim = match authenticate(ctx, user, password).await {
+    let claim = match authenticate(ctx, user, password, false).await {
         Ok(claim) => claim,
         Err(denied) => return denied,
     };
@@ -523,11 +551,14 @@ async fn account_worker(ctx: Arc<Ctx>, mut rx: tokio::sync::mpsc::Receiver<Recor
 /// Walks `aaa login-order` (#1153). `Ok(Some(role))` is a RADIUS accept (the
 /// role goes into the certificate), `Ok(None)` a local one. A reject ends the
 /// walk; the next backend runs only when no RADIUS server answered, or, after
-/// `local`, when the name is no local user.
+/// `local`, when the name is no local user. After a RADIUS accept for a name with
+/// no local entry the ssh account is allocated (#1376). `ticket` marks the
+/// PAM path, which may hold only `MAX_TICKET_RADIUS` of the RADIUS slots.
 async fn authenticate(
     ctx: &Ctx,
     user: &str,
     password: String,
+    ticket: bool,
 ) -> Result<Option<String>, WatchdogEvent> {
     let cfg = match users_client::fetch_config(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(cfg) => cfg,
@@ -550,20 +581,25 @@ async fn authenticate(
                 return verify_password(ctx, user, password).await.map(|()| None);
             }
             LoginBackend::Local => {}
-            LoginBackend::Radius => match radius_slot_login(ctx, &cfg, user, &password).await {
-                Err(None) => return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string())),
-                Ok(role) => {
-                    info!(user = ?user, role = role.claim(), "login accepted by radius");
-                    return Ok(Some(role.claim().to_string()));
+            LoginBackend::Radius => {
+                match radius_slot_login(ctx, &cfg, user, &password, ticket).await {
+                    Err(None) => return Err(WatchdogEvent::Denied(LOGIN_BUSY.to_string())),
+                    Ok(role) => {
+                        info!(user = ?user, role = role.claim(), "login accepted by radius");
+                        if should_allocate(&cfg.users, user) {
+                            allocate(ctx, user).await;
+                        }
+                        return Ok(Some(role.claim().to_string()));
+                    }
+                    Err(Some(nos_radius::AuthError::Unreachable)) => {
+                        warn!(user = ?user, "no radius server answered");
+                    }
+                    Err(Some(e)) => {
+                        info!(user = ?user, reason = %e, "radius login rejected");
+                        return Err(invalid());
+                    }
                 }
-                Err(Some(nos_radius::AuthError::Unreachable)) => {
-                    warn!(user = ?user, "no radius server answered");
-                }
-                Err(Some(e)) => {
-                    info!(user = ?user, reason = %e, "radius login rejected");
-                    return Err(invalid());
-                }
-            },
+            }
         }
     }
     if order.contains(&LoginBackend::Local) {
@@ -571,6 +607,21 @@ async fn authenticate(
         verify_password(ctx, user, password).await.map(|()| None)
     } else {
         Err(WatchdogEvent::Denied("login unavailable".to_string()))
+    }
+}
+
+/// Only a RADIUS-accepted, passwd-safe name with no local entry gets an ssh
+/// account: a local name keeps its configured role and uid.
+fn should_allocate(local: &[nos_proto::User], user: &str) -> bool {
+    safe_name(user) && local.iter().all(|u| u.name != user)
+}
+
+/// Best effort: a refusal (cap, clash) or a configd failure is logged and never
+/// fails the login; it only means no ssh entry.
+async fn allocate(ctx: &Ctx, user: &str) {
+    match users_client::allocate_external_user(&ctx.pki.identity, &ctx.sockets.config, user).await {
+        Ok(uid) => info!(user = ?user, uid, "external user allocated"),
+        Err(e) => warn!(user = ?user, error = %e, "external user not allocated"),
     }
 }
 
@@ -660,7 +711,18 @@ async fn radius_slot_login(
     cfg: &nos_proto::Config,
     user: &str,
     password: &str,
+    ticket: bool,
 ) -> Result<UserRole, Option<nos_radius::AuthError>> {
+    let _ticket_slot = if ticket {
+        let got = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.ticket_radius_slots.acquire()).await;
+        let Ok(Ok(slot)) = got else {
+            warn!(user = ?user, "ticket login refused: too many radius exchanges from sshd");
+            return Err(None);
+        };
+        Some(slot)
+    } else {
+        None
+    };
     let Ok(Ok(_slot)) = tokio::time::timeout(LOGIN_QUEUE_WAIT, ctx.radius_slots.acquire()).await
     else {
         warn!(user = ?user, "login refused: too many radius exchanges in flight");
@@ -805,6 +867,23 @@ fn issue(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn local(name: &str) -> nos_proto::User {
+        nos_proto::User {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn allocation_only_for_safe_names_without_a_local_entry() {
+        let users = [local("alice")];
+        assert!(should_allocate(&users, "rad-bob"));
+        assert!(!should_allocate(&users, "alice"));
+        for bad in ["", "Bob", "a:b", "a b", "9x", "x\n", &"a".repeat(33)] {
+            assert!(!should_allocate(&users, bad), "{bad:?}");
+        }
+    }
 
     #[tokio::test]
     async fn run_bounded_never_exceeds_its_slots() {
