@@ -4062,6 +4062,7 @@ mod tests {
             mtu: 1500,
             speed_mbps: None,
             subinterfaces: Vec::new(),
+            speed_mbps: None,
             err_disabled: false,
             speed_mbps: None,
         };
