@@ -8050,6 +8050,32 @@ pub async fn ospf_cost(w: &mut World) -> anyhow::Result<()> {
     a.established().await
 }
 
+/// #1387 (self-contained): OSPFv3's default link cost is
+/// `reference-bandwidth / link speed`, like `ospf-cost`: the 10 Gbit/s docker
+/// veth costs 1; reference bandwidth 100000 makes it 10 in place, clearing it
+/// restores 1.
+pub async fn ospfv3_cost(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let full = |peer: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={peer}");
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    a.wait(&full(OSPFV3_ROUTER_ID_B)).await?;
+    b.wait(&full(OSPFV3_ROUTER_ID)).await?;
+    let changed =
+        |old: u32, new: u32| format!("ospfv3 link cost changed link=eth0.0 old={old} cost={new}");
+    for (bw, old, new) in [("100000", 1, 10), ("0", 10, 1)] {
+        let base = a.count_fresh(&changed(old, new)).await;
+        let mut fa = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        fa.extend(strings(&["--ospfv3-reference-bandwidth", bw]));
+        a.provision_flags(&with_base(A, fa)).await?;
+        a.wait_new(&changed(old, new), base, 60).await?;
+    }
+    a.established().await
+}
+
 #[cfg(test)]
 mod timeline_tests {
     use super::format_timeline;

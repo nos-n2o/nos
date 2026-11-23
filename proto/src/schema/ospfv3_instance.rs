@@ -131,6 +131,15 @@ pub struct Ospfv3Instance {
     #[cli(topic = Ospfv3InstanceMaxLsa, words = "max-lsa")]
     pub max_lsa: Option<u32>,
 
+    /// Reference bandwidth for the default link cost, Mbit/s, 1 to 4294967
+    /// (as `OspfInstance.reference_bandwidth`): a link with no explicit
+    /// profile `cost` costs `reference-bandwidth / link speed`, at least 1 and
+    /// at most 65535; unknown speed costs 1. `None` means 10000 (10 Gbit/s).
+    #[serde(default)]
+    #[garde(range(min = 1, max = 4_294_967))]
+    #[cli(topic = Ospfv3InstanceReferenceBandwidth, words = "reference-bandwidth")]
+    pub reference_bandwidth: Option<u32>,
+
     /// RFC 5838 address family this instance routes: `ipv6-unicast`
     /// (default, instance IDs 0-31) or `ipv4-unicast` (instance IDs 64-95;
     /// every profile of the instance must then set one, and the AF-bit is
@@ -206,6 +215,7 @@ impl Default for Ospfv3Instance {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             address_family: Ospfv3AddressFamily::Ipv6Unicast,
         }
     }
@@ -257,6 +267,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }

@@ -1194,6 +1194,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the reference bandwidth the default link cost is derived from.",
             "Mbit/s (1-4294967, default 10000). A link whose profile sets no `cost` costs reference-bandwidth / link speed, at least 1 and at most 65535 (RFC 2328 Appendix B.1); a link of unknown speed and a loopback cost 1. The speed is re-read every 10 seconds, so a bond gaining a member changes the cost without restarting the link. `delete` restores 10000. Mind the default: a 1 Gbit/s link costs 10 and anything from 10 Gbit/s up costs 1.",
         ),
+        Topic::Ospfv3InstanceReferenceBandwidth => (
+            "Set the reference bandwidth the default OSPFv3 link cost is derived from.",
+            "Mbit/s (1-4294967, default 10000). A link whose profile sets no `cost` costs reference-bandwidth / link speed, at least 1 and at most 65535 (RFC 2328 Appendix B.1); a link of unknown speed and a loopback cost 1. The speed is re-read every 10 seconds, so a bond gaining a member changes the cost without restarting the link. `delete` restores 10000. Mind the default: a 1 Gbit/s link costs 10 and anything from 10 Gbit/s up costs 1.",
+        ),
         Topic::Ospfv3InstanceAddressFamily => (
             "Choose the RFC 5838 address family this OSPFv3 instance routes.",
             "ipv6-unicast (default) uses instance IDs 0-31; ipv4-unicast uses 64-95, so every profile of the instance must set an `instance-id` in that range (checked at commit). An ipv4-unicast instance sets the AF-bit in its Hellos, DBDs and LSAs and discards Hellos without it. `delete` restores ipv6-unicast. IPv4 route computation is not built yet.",

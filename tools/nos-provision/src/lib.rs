@@ -1674,6 +1674,10 @@ pub struct Args {
     /// LSDB overload limit `max-lsa` for that instance (#1146); `0` clears it.
     #[arg(long)]
     pub ospfv3_max_lsa: Option<u32>,
+    /// Default-cost reference bandwidth (Mbit/s) for that instance (#1387);
+    /// `0` clears it.
+    #[arg(long)]
+    pub ospfv3_reference_bandwidth: Option<u32>,
     /// RFC 5838 address family of that instance, `ipv6-unicast` or
     /// `ipv4-unicast` (requires `--ospfv3-instance`; the profiles'
     /// `--ospfv3-instance-id` must then be 64-95).
@@ -4629,6 +4633,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 Ospfv3InstanceOp::SetAddressFamily {
                     name: name.clone(),
                     address_family,
+                },
+            ));
+        }
+        if let Some(mbps) = args.ospfv3_reference_bandwidth {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetReferenceBandwidth {
+                    name: name.clone(),
+                    mbps: (mbps != 0).then_some(mbps),
                 },
             ));
         }

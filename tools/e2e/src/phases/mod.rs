@@ -182,6 +182,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospf-forged-lsa" => ospf::ospf_forged_lsa(w).await,
         "ospf-max-lsa" => ospf::ospf_max_lsa(w).await,
         "ospf-cost" => ospf::ospf_cost(w).await,
+        "ospfv3-cost" => ospf::ospfv3_cost(w).await,
         "ospf-remote-lfa" => ospf::ospf_remote_lfa(w).await,
         "pam" => pam::pam(w).await,
         "ssh" => ssh::ssh(w).await,
@@ -332,6 +333,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospf-forged-lsa",
             "ospf-max-lsa",
             "ospf-cost",
+            "ospfv3-cost",
             "ospf-remote-lfa",
         ],
         "multi" => &[
@@ -555,6 +557,7 @@ pub const ALL: &[&str] = &[
     "ospf-forged-lsa",
     "ospf-max-lsa",
     "ospf-cost",
+    "ospfv3-cost",
     "ospf-remote-lfa",
     "pki",
     "aaa",
