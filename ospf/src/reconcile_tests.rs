@@ -140,6 +140,7 @@ fn status(name: &str, mtu: u32, subs: Vec<SubinterfaceStatus>) -> InterfaceStatu
         subinterfaces: subs,
         link_local_address: None,
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn bd_status(name: &str, bridge: Option<&str>, addrs: &[&str]) -> BroadcastDomai
         link_local_address: None,
         bridge_name: bridge.map(Into::into),
         mtu: Some(1400),
+        speed_mbps: None,
     }
 }
 
@@ -1070,7 +1072,7 @@ async fn resolve_local_address_cases() {
 
     assert_eq!(
         resolve_local_address(&wd, "eth0", 0).await,
-        Some((Ipv4Addr::new(10, 0, 0, 1), 30, 1500)),
+        Some((Ipv4Addr::new(10, 0, 0, 1), 30, 1500, None)),
         "first address wins"
     );
     assert_eq!(
@@ -1137,7 +1139,8 @@ async fn resolve_broadcast_domain_cases() {
             Ipv4Addr::new(10, 1, 0, 1),
             24,
             "br1".to_string(),
-            Some(1400)
+            Some(1400),
+            None
         ))
     );
     assert_eq!(resolve_broadcast_domain(&wd, "nobridge").await, None);

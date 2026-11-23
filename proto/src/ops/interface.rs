@@ -72,6 +72,13 @@ pub enum InterfaceOp {
         /// `true` enables the LLDP receive direction, `false` disables it.
         enabled: bool,
     },
+    /// `set`/`delete interface <name> mpls input`.
+    SetMplsInput {
+        /// Name of the interface this op targets.
+        name: String,
+        /// `true` accepts labelled packets on the link.
+        enabled: bool,
+    },
     /// Sets the LLDP receive of the interface to `enabled`.
     SetLldpReceive {
         /// Name of the interface this op targets.
@@ -243,6 +250,10 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.lldp_transmit = *enabled;
                 Ok(())
             }
+            InterfaceOp::SetMplsInput { name, enabled } => {
+                find_interface_mut(config, name)?.mpls_input = *enabled;
+                Ok(())
+            }
             InterfaceOp::SetLldpReceive { name, enabled } => {
                 find_interface_mut(config, name)?.lldp_receive = *enabled;
                 Ok(())
@@ -371,6 +382,7 @@ mod tests {
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
@@ -421,6 +433,7 @@ mod tests {
                 lacp_mode: crate::schema::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
+                mpls_input: false,
                 lldp_receive: false,
                 lldp_destination: crate::schema::LldpDestination::default(),
                 subinterfaces: Vec::new(),
@@ -560,6 +573,23 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_mpls_input_toggles() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        for enabled in [true, false] {
+            InterfaceOp::SetMplsInput {
+                name: "eth0".to_string(),
+                enabled,
+            }
+            .apply(&mut cfg)
+            .unwrap();
+            assert_eq!(cfg.interfaces[0].mpls_input, enabled);
+        }
     }
 
     #[test]

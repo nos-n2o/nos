@@ -18,6 +18,7 @@ fn sample_status() -> InterfaceStatus {
         mtu: 1500,
         subinterfaces: vec![],
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 

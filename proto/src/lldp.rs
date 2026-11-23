@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// else as hex) — this type is deliberately not a faithful copy of the
 /// 802.1AB subtype/value pair, since nothing downstream needs to interpret it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpNeighbor {
     /// Local port the neighbor was heard on.
@@ -46,6 +47,7 @@ pub struct LldpNeighbor {
 
 /// One VLAN a neighbor's port carries, with its name.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpVlanName {
     /// VLAN ID.
@@ -56,6 +58,7 @@ pub struct LldpVlanName {
 
 /// A neighbor port's link aggregation state.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpLinkAggregation {
     /// The port can be aggregated.
@@ -69,6 +72,7 @@ pub struct LldpLinkAggregation {
 
 /// A neighbor port's IEEE 802.3 auto-negotiation and MAU type.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpMacPhy {
     /// Auto-negotiation is supported (IEEE 802.3 MAC/PHY TLV).
@@ -87,6 +91,7 @@ pub struct LldpMacPhy {
 /// `show lldp statistics`. Every counter resets only when `nos-lldpd`
 /// restarts or LLDP is turned off on that interface.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpLinkStats {
     /// Local interface name.

@@ -205,6 +205,13 @@ pub enum Resolved {
         interface: String,
     },
     SaveRunningConfig,
+    ShowAaaUsers,
+    AllocateAaaUser {
+        name: String,
+    },
+    ClearAaaUser {
+        name: String,
+    },
     ShowHistory,
     Rollback {
         n: u32,
@@ -260,6 +267,9 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
         Command::ShowHistory => Resolved::ShowHistory,
+        Command::ShowAaaUsers => Resolved::ShowAaaUsers,
+        Command::AllocateAaaUser { name } => Resolved::AllocateAaaUser { name },
+        Command::ClearAaaUser { name } => Resolved::ClearAaaUser { name },
         Command::ConfirmCommit => Resolved::ConfirmCommit,
         Command::CancelCommit => Resolved::CancelCommit,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
@@ -381,6 +391,9 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowConfig
         | Command::ShowConfigAdmin
         | Command::ShowHistory
+        | Command::ShowAaaUsers
+        | Command::AllocateAaaUser { .. }
+        | Command::ClearAaaUser { .. }
         | Command::ConfirmCommit
         | Command::CancelCommit
         | Command::ShowRoute { .. }

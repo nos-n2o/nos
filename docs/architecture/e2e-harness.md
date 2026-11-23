@@ -16,9 +16,9 @@ Contributor-facing; moved from the root `CLAUDE.md` (#260). Phase list: [e2e-pha
 
 ## Parallel labs (#1049)
 
-Two labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..1); lab 0 is the historical lab, byte for byte, and is what CI uses.
+Three labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..2); lab 0 is the historical lab, byte for byte, and is what CI uses.
 
-- **Slots.** `tools/ci/e2e-lab.sh acquire` takes the first free slot (`/tmp/nos-e2e.lock.<k>`, `NOS_E2E_LABS`, default 2), records worktree/pid/start time and prints `k`; `release <k>` frees it; `status` lists the slots and flags one whose pid is gone as STALE. Run every `nos-e2e` command of one session with `NOS_E2E_LAB=$k`. The lock spans several `cargo run -p nos-e2e` invocations (`up`, phases, `down`), so it is a script convention, not harness code. A caller whose shell exits between commands (an agent) is flagged STALE too: check `docker ps` for `l<k>-` containers before releasing.
+- **Slots.** `tools/ci/e2e-lab.sh acquire` takes the first free slot (`/tmp/nos-e2e.lock.<k>`, `NOS_E2E_LABS`, default 3), records worktree/pid/start time and prints `k`; `release <k>` frees it; `status` lists the slots and flags one whose pid is gone as STALE. Run every `nos-e2e` command of one session with `NOS_E2E_LAB=$k`. The lock spans several `cargo run -p nos-e2e` invocations (`up`, phases, `down`), so it is a script convention, not harness code. A caller whose shell exits between commands (an agent) is flagged STALE too: check `docker ps` for `l<k>-` containers before releasing.
 - **Failure dump.** A failed group dumps `docker logs` of the one container the error names, from the start of the failing phase (10x the tail); with no culprit in the message, every container's tail.
 - **Keep going (`NOS_E2E_KEEP_GOING=1`).** Set by the nightly only (`schedule`; PRs, dispatch and local runs stay fail-fast). A failing phase is recorded, its docker logs are dumped right then (from that phase's start) and the next phase runs; `up`/`established` stay fatal.
   - After the group a summary lists every phase `OK`/`FAILED`; exit is non-zero with `N phase(s) failed, first <phase>: <err>`. `all` then runs every group.
@@ -26,7 +26,7 @@ Two labs run side by side on one docker host (`NOS_E2E_LAB=<k>`, `k` in 0..1); l
   - `tools/ci/e2e-result-line.sh` reports the first failed phase.
 - **Names.** At the `Dock` boundary (`tools/e2e/src/docker.rs`) every container, network and volume name gets the prefix `l<k>-` for `k>0` (`l1-router-a`, `l1-nos-verify-net`); phases keep writing `"router-a"`. `router-r`'s `docker logs` and the `nos` uid rule see the unprefixed name.
 - **Labels.** Every container, network and volume carries `nos-e2e.lab=<k>`, and `down` / group teardown remove everything with that label, so one lab's `down` never touches the other's. A container from before #1049 has no label: remove it by hand once.
-- **Subnets.** Docker rejects overlapping pools, so each network with explicit IPAM moves with `k` (`tools/e2e/src/lab.rs`, the `Addr` constants in `consts.rs`; use `.s()` for a `&'static str`, `{ADDR}` in `format!`): `10.50/51/52.x` becomes `10.60/61/62.x`, `fd00:10:50::` `fd00:10:60::`, the CE/L3 networks `198.18.x` `198.19.x`, `fd18:`/`fd19:` `fd28:`/`fd29:`. A new explicit subnet must be an `Addr`, never a literal. Auto-allocated networks and addresses inside containers need nothing.
+- **Subnets.** Docker rejects overlapping pools, so each network with explicit IPAM moves with `k` (`tools/e2e/src/lab.rs`, the `Addr` constants in `consts.rs`; use `.s()` for a `&'static str`, `{ADDR}` in `format!`): `10.50/51/52.x` becomes `10.60/61/62.x`, `fd00:10:50::` `fd00:10:60::`, the CE/L3 networks `198.18.x` `198.19.x`, `fd18:`/`fd19:` `fd28:`/`fd29:`; lab 2 is `10.70`, `198.20`, `fd38:`/`fd39:`. A new explicit subnet must be an `Addr`, never a literal. Auto-allocated networks and addresses inside containers need nothing.
 - **Ports, netns, images.** No port is published (REST goes to the container IP) and veths are created into each container's netns by pid, so nothing collides on the host. The NOS image is per lab (`NOS_E2E_IMAGE`). The shared helper images (`nos-e2e-gobgp:local`, FRR, the netns helper...) are built or pulled under an `flock` on `/tmp/nos-e2e-helper-build.lock`, so two labs never race on a tag.
 - **Memory** (peak summed `docker stats` of one lab's containers, sampled every ~3 s):
 
@@ -60,8 +60,9 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 - **Quiet checks** (`assert_quiet`): take the baseline with `Router::count_fresh` (waits for the log store to go quiet first), never baseline 0 (take `count` at phase start), scope the pattern (neighbor id, link, prefix), anchor the window to a real convergence event, after a reset the test caused, wait for the re-establishment on BOTH routers before baselining, and widen a window at most 2x with a comment saying why.
 - **Failure output**: `assert_quiet` lists each offending line as `+<ms>ms <line>` (offset from the baseline-th match, or the last stored line when the baseline is 0; max 10 lines, then "and N more") plus the window. `wait_new` and `assert_quiet` log `baseline=<n>` when they start; `wait_new`'s timeout error shows the last 3 matching lines, so a stale-line false pass is visible.
 - **`Logs::barrier`**: returns when the store length is unchanged for 2 consecutive 250ms polls (capped at 10s, then it warns and returns). It is quiescence, not a guarantee that every line was delivered.
+- **`ip link set down` stimuli (#1338)**: `nos-interfaced` re-ups every configured link on its 10 s reapply tick, undoing the cut inside a 5 s wait. Sync the cut to a fresh `reconciled interfaces` line on that router (`ospf.rs::sync_to_reapply`) before the `down`.
 - **Soak**: `make e2e-soak GROUP=<g> N=<n>` (`tools/ci/e2e-soak.sh`) runs one group n times serially (groups create and tear down their own containers, so runs are independent). Groups: `base`, `drivers`, `rpl`, `ospf-suite`, `pki-suite`; `multi` is refused until the `evpn-l3-chunked` hang is fixed, and `all` is not accepted (it is the groups in sequence, one soak per group).
-  - It acquires a lab slot (`tools/ci/e2e-lab.sh acquire`, [Parallel labs](#parallel-labs-1049)) for the whole loop, runs on it (`NOS_E2E_LAB`) and fails fast when both slots are held.
+  - It acquires a lab slot (`tools/ci/e2e-lab.sh acquire`, [Parallel labs](#parallel-labs-1049)) for the whole loop, runs on it (`NOS_E2E_LAB`) and fails fast when every slot is held.
   - Output goes to `$TMPDIR/e2e-soak/<group>-<ts>/`: `results.txt` (`<i> PASS|FAIL <secs>s`, plus the failing phase and error on FAIL) and the logs of the last 3 failed runs (passing runs' logs are deleted).
   - The closing table counts failures per phase and error; paste it in the PR. Use N=10 to rank flaky checks; N=1 only proves the script.
 - **Soak on GitHub runners (#1050)**: dispatch `verify-e2e` instead of holding the local lab (a 10-run soak is ~10 h locally, ~1 h on runners).
@@ -69,6 +70,13 @@ A container cannot `modprobe`, so the docker host must have every module the lab
   - Result: the `Results summary` job writes, per group, the soak format (`<i> PASS|FAIL <secs>s <phase> | <error>`, from `tools/ci/e2e-result-line.sh`, which `e2e-soak.sh` shares) and the per-check failure counts to the run's summary page. Cells use `fail-fast: false`, so one red run never cancels the rest.
   - Cost: every cell is a full runner-job (image build from the gha cache, then the group), so `runs=10` of `ospf-suite` is 10 runner-jobs; use `base` x 3 to check a change to the workflow itself.
   - Versus the local lab: a runner is a stock Ubuntu VM, so its kernel may lack modules the host loads by hand; the `tools/ci/e2e-preflight.sh` step (the `make e2e-preflight` script) fails the cell naming them before the group runs, so a preflight failure is not a flake. Timings differ from the local host (2 vCPU), so a check that is flaky only on runners is a real timing finding, not a runner bug. `multi` is allowed here (the local soak refuses it, #839); a hang runs to the 6 h job default.
+
+## LACP failure dumps and state barriers (#1337)
+
+- A failed `assert_quiet`, `wait_lacp_ports` timeout or the looped-LACPDU check appends every `nos_lacp::`/`nos_interface`/`bond` line of the window with `+<ms>ms` offsets (`Router::lacp_dump`), because the pattern's own matches never show the dip behind them.
+- Steps that follow a convergence use `lacp_settled` (all ports Distributing, in sync, no churn, held across one coalescing window), never a count of log lines that stopped growing.
+- The `lacp` timers (3s fast `Current_While`, 8s churn) assume the routers get real CPU: do not run the phase below 2 full vCPUs per router container.
+- A helper that takes over a veth (the kernel 802.3ad bond in `lacp_linux_peer`) must first delete the port's `Interface` (`nos-provision --delete-interface <name>`, repeatable): `nos-interfaced` re-applies every configured interface's master each 10 s and would release the helper's enslavement (#1332).
 
 ## Host tools
 

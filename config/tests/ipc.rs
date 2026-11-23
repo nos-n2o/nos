@@ -1475,6 +1475,76 @@ async fn restd_and_users_can_edit() {
     }
 }
 
+/// #1360: what `Restd` may assert. A claim applies only to a name with no
+/// local entry, and only from a `Restd` connection.
+#[tokio::test]
+async fn restd_claim_applies_to_unknown_names_only() {
+    use nos_proto::{Actor, User, UserRole};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let cfg = Config {
+        users: vec![User {
+            name: "local-ro".into(),
+            password: String::new(),
+            role: UserRole::ReadOnly,
+        }],
+        ..Config::default()
+    };
+    let store = ConfigStore::new(cfg, None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    let claim = |name: &str, c| Actor {
+        name: name.into(),
+        claim: Some(c),
+    };
+    // An unknown name takes the claimed role: admin edits, read-only may not.
+    let (mut reader, mut writer) = connect_as(&path, "restd", "rt1").await;
+    writer
+        .send(Request::OpenTransaction {
+            name: "t".into(),
+            base: TransactionBase::Blank,
+            actor: Some(claim("rad", UserRole::ReadOnly)),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Transaction(_)
+    ));
+    let send_apply = |who: Actor| Request::ApplyOp {
+        name: "t".into(),
+        op: ensure_op("x"),
+        actor: Some(who),
+    };
+    writer
+        .send(send_apply(claim("rad", UserRole::Admin)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next_event(&mut reader).await,
+        Event::Transaction(_)
+    ));
+    for who in [
+        claim("rad", UserRole::ReadOnly),
+        // a local name: the forged admin claim is ignored
+        claim("local-ro", UserRole::Admin),
+        Actor::local("rad"),
+    ] {
+        writer.send(send_apply(who.clone())).await.unwrap();
+        assert!(
+            matches!(next_event(&mut reader).await, Event::Error(m) if m.starts_with("forbidden")),
+            "{who:?}"
+        );
+    }
+    // A person's own connection ignores a body claim.
+    let (mut ur, mut uw) = connect_as(&path, "user", "stranger").await;
+    uw.send(send_apply(claim("stranger", UserRole::Admin)))
+        .await
+        .unwrap();
+    assert!(matches!(next_event(&mut ur).await, Event::Error(m) if m.starts_with("forbidden")));
+}
+
 /// A certificate from some other CA never gets as far as a request.
 #[tokio::test]
 async fn a_peer_from_another_ca_is_rejected() {
@@ -2178,4 +2248,100 @@ async fn roles_gate_what_a_person_may_do_over_ipc() {
         next_event(&mut ar).await,
         Event::SaveStatus { .. }
     ));
+}
+
+/// #1374: external-user allocation over real mutual TLS: the watchdog allocates, people
+/// manage (admin only), every other daemon is refused, and the passwd file follows.
+#[tokio::test]
+async fn external_users_round_trip_over_mutual_tls() {
+    use nos_proto::{User, UserRole};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let passwd = tmp.path().join("passwd");
+    let db = nos_config::nss_users::UserDb::open(passwd.clone(), &tmp.path().join("ids")).unwrap();
+    let user = |name: &str, role| User {
+        name: name.into(),
+        password: "pw".into(),
+        role,
+    };
+    let cfg = Config {
+        users: vec![
+            user("boss", UserRole::Admin),
+            user("viewer", UserRole::ReadOnly),
+        ],
+        ..Config::default()
+    };
+    let store = ConfigStore::new_with_user_db(cfg, None, db);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
+        .unwrap();
+    let alloc = |n: &str| Request::AllocateExternalUser { name: n.into() };
+
+    let (mut r, mut w) = connect_as(&path, "watchdog", "wd").await;
+    w.send(alloc("alice")).await.unwrap();
+    let Event::ExternalUser { uid } = next_event(&mut r).await else {
+        panic!("expected a uid")
+    };
+    assert!((20_000..=59_999).contains(&uid));
+    // idempotent; refusals are errors on the same connection
+    w.send(alloc("alice")).await.unwrap();
+    assert!(matches!(next_event(&mut r).await, Event::ExternalUser { uid: u } if u == uid));
+    for bad in ["boss", "nos-wd", "Bad:Name", ""] {
+        w.send(alloc(bad)).await.unwrap();
+        assert!(
+            matches!(next_event(&mut r).await, Event::Error(m) if m.starts_with("external user refused")),
+            "{bad}"
+        );
+    }
+    let text = std::fs::read_to_string(&passwd).unwrap();
+    assert!(text.contains(&format!("alice:{uid}:{uid}:/nonexistent:/usr/bin/nos\n")));
+
+    // any other daemon: refused, and the connection is closed
+    for role in ["bgpd", "restd", "sshd"] {
+        let (mut r, mut w) = connect_as(&path, role, "boss").await;
+        w.send(alloc("mallory")).await.unwrap();
+        assert!(
+            matches!(next_event(&mut r).await, Event::Error(m) if m == "permission denied"),
+            "{role}"
+        );
+    }
+
+    // an admin lists, pre-allocates and clears; a read-only user may do none of it
+    let (mut r, mut w) = connect_as(&path, "user", "boss").await;
+    w.send(alloc("mallory")).await.unwrap();
+    assert!(matches!(next_event(&mut r).await, Event::Error(m) if m == "permission denied"));
+    let (mut r, mut w) = connect_as(&path, "user", "boss").await;
+    w.send(Request::AdminAllocateExternalUser { name: "bob".into() })
+        .await
+        .unwrap();
+    let Event::ExternalUser { uid: bob } = next_event(&mut r).await else {
+        panic!("expected a uid")
+    };
+    assert_ne!(bob, uid);
+    w.send(Request::ListExternalUsers).await.unwrap();
+    assert!(matches!(
+        next_event(&mut r).await,
+        Event::ExternalUsers(l) if l == vec![("alice".to_string(), uid), ("bob".to_string(), bob)]
+    ));
+    w.send(Request::ClearExternalUser { name: "bob".into() })
+        .await
+        .unwrap();
+    assert!(matches!(next_event(&mut r).await, Event::ExternalUser { uid: u } if u == bob));
+    assert!(!std::fs::read_to_string(&passwd).unwrap().contains("bob:"));
+    w.send(Request::ClearExternalUser { name: "bob".into() })
+        .await
+        .unwrap();
+    assert!(matches!(next_event(&mut r).await, Event::Error(_)));
+
+    let (mut r, mut w) = connect_as(&path, "user", "viewer").await;
+    for req in [
+        Request::ListExternalUsers,
+        Request::AdminAllocateExternalUser { name: "eve".into() },
+        Request::ClearExternalUser {
+            name: "alice".into(),
+        },
+    ] {
+        w.send(req).await.unwrap();
+        assert!(matches!(next_event(&mut r).await, Event::Error(m) if m.starts_with("forbidden")));
+    }
 }

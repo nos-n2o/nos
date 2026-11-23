@@ -21,13 +21,13 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
-use axum::{Extension, Router};
+use axum::Router;
 use nos_proto::config_path::{self, PathError};
 use nos_proto::{Event, Request, TransactionBase};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::{json, Value};
 
-use crate::auth::PeerUser;
+use crate::auth::PeerActor;
 use crate::error::{ApiError, ApiResult, PROBLEM_JSON};
 use crate::ipc::{unexpected, Daemons};
 use crate::merge_patch;
@@ -249,6 +249,18 @@ fn target_body(t: &Target, body: &[u8]) -> ApiResult<Value> {
         )));
     }
     one_entry(t.is_entry, v)
+}
+
+/// RFC 7951 `{"X":[null]}` back to serde's `"X"` (#1300): the value is
+/// placed at `path` in a copy of the document so the schema walk of
+/// [`nos_proto::yang::from_instance`] sees it at its real position.
+fn from_instance(root: &Value, path: &[String], v: Value) -> Value {
+    let mut doc = root.clone();
+    if config_path::set(&mut doc, path, v.clone()).is_err() {
+        return v; // the edit reports the path error
+    }
+    nos_proto::yang::from_instance(&mut doc);
+    config_path::get(&doc, path).cloned().unwrap_or(v)
 }
 
 fn one_entry(is_entry: bool, v: Value) -> ApiResult<Value> {
@@ -501,7 +513,7 @@ static NEXT_TX: AtomicU64 = AtomicU64::new(0);
 /// Open, edit, commit; the transaction is discarded on any failure.
 async fn write(
     d: &Daemons,
-    actor: Option<String>,
+    actor: Option<nos_proto::Actor>,
     headers: &HeaderMap,
     uri: &Uri,
     t: &Target,
@@ -539,7 +551,7 @@ async fn write(
 #[allow(clippy::too_many_arguments)]
 async fn edit_and_commit(
     d: &Daemons,
-    actor: Option<String>,
+    actor: Option<nos_proto::Actor>,
     uri: &Uri,
     t: &Target,
     op: Op,
@@ -618,6 +630,7 @@ async fn edit_and_commit(
             (path, Some(val), true, Some(loc))
         }
     };
+    let value = value.map(|v| from_instance(&root, &path, v));
     match d
         .config(Request::EditTransactionPath {
             name: name.to_string(),
@@ -662,7 +675,7 @@ fn scalar(v: &Value) -> Option<String> {
 
 async fn modify(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
     method: axum::http::Method,
@@ -850,6 +863,21 @@ mod tests {
 
     fn segs(p: &str) -> Vec<String> {
         parse_path(p).unwrap().segs
+    }
+
+    #[test]
+    fn empty_unit_variant_body_becomes_serde_string() {
+        let root = json!({"switching_profiles": [{"name": "sp", "members": [
+            {"broadcast_domain": "bd", "tag": {"Dot1q": 5}}]}]});
+        let p = segs("/restconf/data/nos-config:switching_profiles=sp/members=bd/tag");
+        assert_eq!(
+            from_instance(&root, &p, json!({"Untagged": [null]})),
+            json!("Untagged")
+        );
+        assert_eq!(
+            from_instance(&root, &p, json!({"Dot1q": 7})),
+            json!({"Dot1q": 7})
+        );
     }
 
     #[test]

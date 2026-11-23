@@ -25,6 +25,7 @@ fn page(n: u8, next: Option<u8>) -> BgpEvent {
             local_pref: 100,
             best: true,
             validation_state: RpkiValidationState::NotFound,
+            unknown_attributes: vec![],
         }],
         next: next.map(cursor),
     }

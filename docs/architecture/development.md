@@ -109,7 +109,8 @@ cargo fmt --all
 
 ## Fuzzing
 
-- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`, `cli_parser` (`nos` command parsing, resolution and completion over text; first byte picks the mode). Property: no panic, abort or OOM.
+- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`, `cli_parser` (`nos` command parsing, resolution and completion over text; first byte picks the mode), `cli_format` (every `nos-cli` `format::render_*` on `Arbitrary` daemon replies and a full `Config`). Property: no panic, abort or OOM.
+- Fuzz-only feature: `nos-proto`'s `arbitrary` feature (`Arbitrary` derives, `arbitrary_support` for `ipnet`) is enabled only by `fuzz/Cargo.toml`; `make no-arbitrary` (part of `make check`) fails if the `arbitrary` crate enters the workspace build graph. A new type a renderer takes needs `#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]` (`IpNet` fields: `arbitrary(with = crate::arbitrary_support::ip_net)`).
 - Install: `make tools` (adds `cargo-fuzz`); needs a nightly toolchain.
 - Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target passes `--target <rustc host>` (the CI cargo-fuzz binary is musl and otherwise builds for musl, which fails) and sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.
 - Longer run of one target: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=600`.
@@ -129,6 +130,13 @@ cargo fmt --all
 - On push to master the job uploads `coverage-total.txt` as artifact `coverage-total`. On a PR it runs `gh run download` on the newest successful master `ci.yml` push run (job permission `actions: read`).
 - No baseline (first run, artifact expired after 90 days, token without actions access) prints a notice and passes.
 - Locally: `make coverage`, then `tools/ci/coverage-compare.sh lcov.info <file holding master's number>`. `make ci-scripts-test` (part of `make check`) tests the script.
+
+## YANG validation (#1175)
+
+- `make yang-check` (part of `make check`) runs `yanglint` on `docs/yang/nos-config.yang`, then on `target/yang/*.json` instance data written by `cargo test -p nos-config --test yang_instances` (`Config::default()`, nulls dropped like the RESTCONF facade). The live provisioned config is checked by the `restconf-conformance` e2e phase.
+- Tool: `yanglint` from the distro package `libyang3-tools` (`libyang2-tools` on older Debian/Ubuntu), unpinned like the other apt packages; tested with 3.12.2. Never installed in the runtime image.
+- Absent locally: the target prints a skip notice and passes. CI's `YANG validation` job sets `REQUIRE_YANG=1`, so absence fails there.
+- Bump: when the package major changes, run `make yang-check` and fix any new complaint in `proto/src/yang/`.
 
 ## Disk cleanup
 

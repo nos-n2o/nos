@@ -14,10 +14,11 @@
 - `garde` rules (length, range, pattern, cross-field and cross-collection checks) are not expressed; the daemon's commit validation stays authoritative.
 - References (peer-group, policy, routing-table) are plain `string`: the schema does not name their targets, so there is no `leafref`.
 - Enums with payloads are a `container` with a `choice` (serde's externally tagged shape); a unit variant inside such an enum is a `leaf` of type `empty`.
+- On RESTCONF that unit variant is `{"X":[null]}` (RFC 7951 `empty`), in reads and writes; on `/v1` and in the store it stays serde's bare string `"X"` (#1300).
 
 ## Changing the schema
 
 - Run `make docs-fix` to regenerate `nos-config.yang`.
 - Bump `YANG_REVISION` in `proto/src/yang/mod.rs`, then set `RECORDED_HASH` in `config/tests/yang_snapshot.rs` to the hash the test prints.
 - `cargo test -p nos-config --test yang_snapshot` fails on a stale file or a missing bump.
-- Validation by a real YANG compiler is a separate step (#1173, sub-issue 3).
+- `make yang-check` compiles the module and validates the default instance with `yanglint` (#1175, see `docs/architecture/development.md`).

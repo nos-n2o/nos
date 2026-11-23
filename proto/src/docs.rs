@@ -213,6 +213,8 @@ topics! {
     SubinterfaceMtu,
     /// `Interface.lldp_transmit`
     InterfaceLldpTransmit,
+    /// `Interface.mpls_input`
+    InterfaceMplsInput,
     /// `Interface.lldp_receive`
     InterfaceLldpReceive,
     /// `Interface.lldp_destination`
@@ -281,6 +283,24 @@ topics! {
     OspfInstanceMaxMetricAdministrative,
     /// `OspfInstance.host_router`
     OspfInstanceHostRouter,
+    /// `OspfInstance.traffic_engineering`
+    OspfInstanceTrafficEngineering,
+    /// `OspfInstance.segment_routing`
+    OspfInstanceSegmentRouting,
+    /// `SegmentRouting.enabled`
+    OspfInstanceSegmentRoutingEnabled,
+    /// `SegmentRouting.srgb_start`
+    OspfInstanceSegmentRoutingSrgbStart,
+    /// `SegmentRouting.srgb_range`
+    OspfInstanceSegmentRoutingSrgbRange,
+    /// `SegmentRouting.prefix_sids`
+    OspfInstanceSegmentRoutingPrefixSid,
+    /// `OspfPrefixSid.index`
+    OspfPrefixSidIndex,
+    /// `OspfPrefixSid.no_php`
+    OspfPrefixSidNoPhp,
+    /// `OspfPrefixSid.explicit_null`
+    OspfPrefixSidExplicitNull,
     /// `OspfInstance.remote_lfa`
     OspfInstanceRemoteLfa,
     /// `OspfInstance.spf_throttle`

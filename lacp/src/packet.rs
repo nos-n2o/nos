@@ -6,7 +6,7 @@
 //! TLVs after those, so `decode` takes anything at least that long and reads
 //! only the fixed v1 offsets — nothing a parsing crate would buy.
 
-use crate::conversation::{PortAlgorithm, MASK_BYTES};
+use crate::conversation::PortAlgorithm;
 
 const SUBTYPE_LACP: u8 = 0x01;
 const VERSION_NUMBER: u8 = 0x01;
@@ -123,21 +123,19 @@ pub struct Lacpdu {
     /// switch sees a plausible, non-zero value.
     pub collector_max_delay: u16,
     /// Version-2 TLVs (`Some` = send/received as version 2). `None` encodes
-    /// the unchanged 110-byte version-1 PDU. UNVERIFIED layout, see
-    /// [`V2Tlvs`]; nothing sends v2 yet (#894 is parked).
+    /// the unchanged 110-byte version-1 PDU (6.4.2.3-4, p.54-58).
     pub v2: Option<V2Tlvs>,
 }
 
-// ponytail: UNVERIFIED (#890): every number below is recollection of
-// 802.1AX-2014, not read from the standard nor seen on the wire. The Length
-// byte includes type+length, like v1.
+// 802.1AX-2020 Table 6-4 / Fig 6-10..6-12 (p.57-58). Length includes type+length.
+// Types 6..9 (the Port Conversation Mask TLVs) are deprecated: never sent,
+// skipped on receipt like any other unknown type.
 const TLV_PORT_ALGORITHM: u8 = 4; // OUI(3) + id(1), length 6
 const TLV_CONV_DIGEST: u8 = 5; // Link_Number(2) + MD5(16), length 20
-const TLV_MASK_FIRST: u8 = 6; // masks 1..4 = types 6..9, 128 B each, length 130 (assumed)
-const TLV_SERVICE_DIGEST: u8 = 10; // MD5(16), length 18 (assumed)
-const V2_OFFSET: usize = 58; // right after the Collector TLV (assumed)
+const TLV_SERVICE_DIGEST: u8 = 10; // MD5(16), length 18
+const V2_OFFSET: usize = 58; // right after the Collector TLV (Fig 6-8)
 
-/// Port Conversation ID Digest TLV: `Link_Number` then MD5 (UNVERIFIED order).
+/// Port Conversation Link Digest TLV: `Link_Number` then MD5 (Fig 6-11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConvDigest {
     pub link_number: u16,
@@ -150,7 +148,6 @@ pub struct ConvDigest {
 pub struct V2Tlvs {
     pub algorithm: Option<PortAlgorithm>,
     pub conv_digest: Option<ConvDigest>,
-    pub masks: [Option<[u8; MASK_BYTES]>; 4],
     pub service_digest: Option<[u8; 16]>,
 }
 
@@ -195,7 +192,6 @@ pub fn encode(pdu: &Lacpdu) -> Vec<u8> {
     buf
 }
 
-#[allow(clippy::cast_possible_truncation, reason = "i < 4")]
 fn encode_v2(buf: &mut Vec<u8>, v2: &V2Tlvs) {
     if let Some(a) = v2.algorithm {
         buf.extend_from_slice(&[TLV_PORT_ALGORITHM, 6]);
@@ -206,12 +202,6 @@ fn encode_v2(buf: &mut Vec<u8>, v2: &V2Tlvs) {
         buf.extend_from_slice(&d.link_number.to_be_bytes());
         buf.extend_from_slice(&d.digest);
     }
-    for (i, m) in v2.masks.iter().enumerate() {
-        if let Some(m) = m {
-            buf.extend_from_slice(&[TLV_MASK_FIRST + i as u8, 130]);
-            buf.extend_from_slice(m);
-        }
-    }
     if let Some(d) = &v2.service_digest {
         buf.extend_from_slice(&[TLV_SERVICE_DIGEST, 18]);
         buf.extend_from_slice(d);
@@ -219,9 +209,10 @@ fn encode_v2(buf: &mut Vec<u8>, v2: &V2Tlvs) {
 }
 
 /// Walks the TLVs after the Collector block. Unknown types, and known types
-/// with an unexpected length, are skipped by their length byte; a length that
-/// overruns the frame (or is < 2) makes the whole block absent. Never panics.
-fn decode_v2(data: &[u8]) -> Option<V2Tlvs> {
+/// with an unexpected length, are skipped by their length byte (recordPDU,
+/// p.69); a length that overruns the frame (or is < 2) ends the walk and keeps
+/// the TLVs already parsed. Never panics.
+fn decode_v2(data: &[u8]) -> V2Tlvs {
     let mut v2 = V2Tlvs::default();
     let mut off = V2_OFFSET;
     while off + 2 <= data.len() {
@@ -230,7 +221,7 @@ fn decode_v2(data: &[u8]) -> Option<V2Tlvs> {
             break;
         }
         if len < 2 || off + len > data.len() {
-            return None;
+            break;
         }
         let body = &data[off + 2..off + len];
         match (ty, body.len()) {
@@ -243,15 +234,12 @@ fn decode_v2(data: &[u8]) -> Option<V2Tlvs> {
                     digest: body[2..].try_into().unwrap(),
                 });
             }
-            (TLV_MASK_FIRST..=9, MASK_BYTES) => {
-                v2.masks[(ty - TLV_MASK_FIRST) as usize] = Some(body.try_into().unwrap());
-            }
             (TLV_SERVICE_DIGEST, 16) => v2.service_digest = Some(body.try_into().unwrap()),
             _ => {}
         }
         off += len;
     }
-    Some(v2)
+    v2
 }
 
 fn decode_port_info(buf: &[u8]) -> PortInfo {
@@ -298,7 +286,11 @@ pub fn decode(data: &[u8]) -> Result<Lacpdu, PacketError> {
         actor,
         partner,
         collector_max_delay,
-        v2: if data[1] == 2 { decode_v2(data) } else { None },
+        v2: if data[1] == 2 {
+            Some(decode_v2(data))
+        } else {
+            None
+        },
     })
 }
 
@@ -347,20 +339,12 @@ mod tests {
     }
 
     fn full_v2() -> V2Tlvs {
-        let mut mask = [0u8; MASK_BYTES];
-        mask[0] = 0xa5;
         V2Tlvs {
             algorithm: Some(PortAlgorithm::CVid),
             conv_digest: Some(ConvDigest {
                 link_number: 3,
                 digest: [7; 16],
             }),
-            masks: [
-                Some(mask),
-                Some([1; MASK_BYTES]),
-                None,
-                Some([2; MASK_BYTES]),
-            ],
             service_digest: Some([9; 16]),
         }
     }
@@ -404,27 +388,53 @@ mod tests {
         assert_eq!(decode(&encode(&pdu)).unwrap(), pdu);
     }
 
-    /// Documents the ASSUMED, UNVERIFIED v2 layout (#890 has no source). If a
-    /// real capture contradicts this, this test is what must change.
+    /// Hand-assembled from Fig 6-10/6-11 (p.57-58), independent of the encoder.
     #[test]
-    fn assumed_v2_layout() {
-        let b = encode(&Lacpdu {
-            v2: Some(V2Tlvs {
-                algorithm: Some(PortAlgorithm::SVid),
-                conv_digest: Some(ConvDigest {
-                    link_number: 0x0102,
-                    digest: [0xee; 16],
-                }),
-                ..V2Tlvs::default()
+    fn v2_layout_matches_the_figures() {
+        let info = [
+            0x80, 0x00, 2, 0, 0, 0, 0, 1, 0, 7, 0x80, 0x00, 0, 1, 0x0d, 0, 0, 0,
+        ]; // sample_info(): state Activity|Aggregation|Synchronization
+        let mut want = vec![0x01, 0x02, 0x01, 20]; // subtype, version 2, Actor TLV
+        want.extend_from_slice(&info);
+        want.extend_from_slice(&[0x02, 20]);
+        want.extend_from_slice(&info);
+        want.extend_from_slice(&[0x03, 16, 0, 0]);
+        want.extend_from_slice(&[0; 12]);
+        assert_eq!(want.len(), 58);
+        want.extend_from_slice(&[0x04, 0x06, 0x00, 0x80, 0xc2, 0x01]);
+        want.extend_from_slice(&[0x05, 0x14, 0x01, 0x02]);
+        want.extend_from_slice(&[0xee; 16]);
+        want.extend_from_slice(&[0, 0]); // terminator
+        want.resize(LACPDU_LEN, 0);
+        let mut pdu = sample_pdu();
+        pdu.v2 = Some(V2Tlvs {
+            algorithm: Some(PortAlgorithm::CVid),
+            conv_digest: Some(ConvDigest {
+                link_number: 0x0102,
+                digest: [0xee; 16],
             }),
-            ..sample_pdu()
+            service_digest: None,
         });
-        assert_eq!(b[1], 2);
-        assert_eq!(&b[58..64], &[4, 6, 0x00, 0x80, 0xc2, 2]);
-        assert_eq!(&b[64..68], &[5, 20, 0x01, 0x02]);
-        assert_eq!(&b[68..84], &[0xee; 16]);
-        assert_eq!(&b[84..86], &[0, 0]); // terminator
-        assert_eq!(b.len(), LACPDU_LEN);
+        assert_eq!(encode(&pdu), want);
+        assert_eq!(decode(&want).unwrap(), pdu);
+    }
+
+    #[test]
+    fn deprecated_mask_tlvs_are_skipped() {
+        let mut b = encode(&v2_pdu());
+        for ty in 6..=9u8 {
+            let mut tlv = vec![ty, 130];
+            tlv.extend_from_slice(&[0xff; 128]);
+            b.splice(58..58, tlv);
+        }
+        assert_eq!(decode(&b).unwrap(), v2_pdu());
+    }
+
+    #[test]
+    fn v1_pdu_ignores_tlvs() {
+        let mut b = encode(&v2_pdu());
+        b[1] = 1;
+        assert_eq!(decode(&b).unwrap().v2, None);
     }
 
     #[test]
@@ -441,15 +451,23 @@ mod tests {
     }
 
     #[test]
-    fn overrunning_or_degenerate_length_drops_the_v2_block_only() {
+    fn overrunning_or_degenerate_length_keeps_earlier_tlvs() {
         let base = sample_pdu();
         for tlv in [[4u8, 200], [4, 1], [4, 0]] {
             let mut b = encode(&v2_pdu());
             b.truncate(58);
+            // a valid Alg TLV first, then the bad length
+            b.extend_from_slice(&[TLV_PORT_ALGORITHM, 6, 0x00, 0x80, 0xc2, 1]);
             b.extend_from_slice(&tlv);
             b.resize(LACPDU_LEN, 0);
             let pdu = decode(&b).unwrap();
-            assert_eq!(pdu.v2, None);
+            assert_eq!(
+                pdu.v2,
+                Some(V2Tlvs {
+                    algorithm: Some(PortAlgorithm::CVid),
+                    ..V2Tlvs::default()
+                })
+            );
             assert_eq!(pdu.actor, base.actor);
             assert_eq!(pdu.partner, base.partner);
         }

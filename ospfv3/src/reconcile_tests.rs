@@ -158,6 +158,7 @@ fn status(name: &str, mtu: u32, subs: Vec<SubinterfaceStatus>) -> InterfaceStatu
         subinterfaces: subs,
         link_local_address: None,
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 
@@ -191,6 +192,7 @@ fn bd_status(
         link_local_address: ll.map(|l| l.parse().unwrap()),
         bridge_name: bridge.map(Into::into),
         mtu: Some(1400),
+        speed_mbps: None,
     }
 }
 

@@ -16,10 +16,23 @@ use crate::lab::Addr;
 use crate::logs::Logs;
 use crate::rest::Rest;
 
+/// While set, `--ospfv3-*-profile` keeps its additive meaning: `ospfv3-instance-id`
+/// (#1280) runs two profiles on one attach point and re-sends the base flags.
+// ponytail: process-wide (one phase runs at a time); a per-call flag if phases ever run in parallel.
+static KEEP_OSPFV3_PROFILES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn keep_ospfv3_profiles(keep: bool) {
+    KEEP_OSPFV3_PROFILES.store(keep, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// An `--ospfv3-*-profile` flag used to replace the attach point's profile;
 /// since #1278 the op only adds. Every phase before the second-instance one
 /// (#1280) wants the old meaning, so empty the list before the add.
 fn replace_ospfv3_profiles(config: &mut Config, op: &ConfigOp) {
+    if KEEP_OSPFV3_PROFILES.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let list = match op {
         ConfigOp::Interface(InterfaceOp::AddOspfv3Profile { name, .. }) => config
             .interfaces
@@ -597,6 +610,11 @@ impl Router {
         self.logs.count(pattern)
     }
 
+    /// The last `n` lines matching `pattern`, oldest first.
+    pub fn tail(&self, pattern: &str, n: usize) -> Vec<String> {
+        self.logs.tail(pattern, n)
+    }
+
     /// `count` after the log store has gone quiet (#884): use for baselines so
     /// lines still in flight from a previous step are not counted as new.
     pub async fn count_fresh(&self, pattern: &str) -> usize {
@@ -657,6 +675,24 @@ impl Router {
                 )
             })
             .collect()
+    }
+
+    /// Every lacp/interface line stamped at or after `from` (`+<ms>ms` from
+    /// it, capped at 120): the context a failed LACP wait needs, since a
+    /// pattern's own matches never show the dip that caused them (#1337).
+    pub async fn lacp_dump(&self, from: u64) -> String {
+        self.logs.barrier().await;
+        let all = self
+            .logs
+            .matches_from("nos_lacp::\\|nos_interface\\|lacp \\|bond", from);
+        let mut s = format!("\n{}: lacp/interface lines from +0ms:", self.name());
+        for (t, l) in all.iter().take(120) {
+            let _ = write!(s, "\n  +{}ms {l}", t.saturating_sub(from));
+        }
+        if all.len() > 120 {
+            let _ = write!(s, "\n  and {} more", all.len() - 120);
+        }
+        s
     }
 
     /// Waits (up to 60s) for the pattern to appear at all.
@@ -732,9 +768,15 @@ impl Router {
         // The matches before the baseline show the transitions that preceded.
         let mut before = self.logs.tail(pattern, new.len() + 3);
         before.truncate(before.len().saturating_sub(new.len()));
+        let from = if origin > 0 {
+            origin
+        } else {
+            self.log_mark().saturating_sub(secs * 1000)
+        };
         bail!(
-            "{}",
-            quiet_failure(self.name(), pattern, secs, origin, &new, &before)
+            "{}{}",
+            quiet_failure(self.name(), pattern, secs, origin, &new, &before),
+            self.lacp_dump(from).await
         )
     }
 }

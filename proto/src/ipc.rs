@@ -5,6 +5,30 @@ use crate::docs::{CommandDoc, Topic};
 use crate::ops::ConfigOp;
 use crate::schema::Config;
 
+/// The person `nos-restd` calls on behalf of (#1360): the REST user's name
+/// and, for a user with no local entry, the role RADIUS granted at login.
+/// `nos-configd` trusts it only from a `Restd` connection and ignores `claim`
+/// for any name the config has a local entry for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Actor {
+    /// The authenticated REST user.
+    pub name: String,
+    /// The role an external login backend granted (never client supplied:
+    /// `nos-restd` takes it from the watchdog's `RestSessionLive`).
+    pub claim: Option<crate::UserRole>,
+}
+
+impl Actor {
+    /// An actor with no claim (a local user).
+    #[must_use]
+    pub fn local(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            claim: None,
+        }
+    }
+}
+
 /// Messages sent from a component client to the config daemon.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -22,7 +46,7 @@ pub enum Request {
     /// config-file path.
     Save {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Opens a named transaction, creating it from `base` if it doesn't
     /// already exist, or resuming its current in-progress config unchanged
@@ -36,7 +60,7 @@ pub enum Request {
         /// REST user), for the audit log. `None` from every other client;
         /// `nos-configd` ignores it unless the caller is `Restd` and uses
         /// the certificate name for a `User`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Applies one edit to a named transaction's in-progress config.
     ApplyOp {
@@ -45,7 +69,7 @@ pub enum Request {
         /// The edit to apply.
         op: ConfigOp,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// One-shot fetch of a named transaction's current in-progress config.
     GetTransaction {
@@ -64,7 +88,7 @@ pub enum Request {
         /// Only act if the transaction is at this revision.
         if_match: Option<Vec<u64>>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
         /// Confirmed commit (RFC 6241 8.4, #1144): `Some(secs)` (30..=86400)
         /// rolls the commit back unless confirmed within `secs`.
         confirm_timeout: Option<u32>,
@@ -72,12 +96,12 @@ pub enum Request {
     /// Confirms a pending confirmed commit (#1144): disarms its rollback timer.
     ConfirmCommit {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Rolls a pending confirmed commit back now (#1144).
     CancelCommit {
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Deletes a named transaction without touching the running config.
     /// `if_match` as on `CommitTransaction`.
@@ -144,7 +168,7 @@ pub enum Request {
         /// consumer must pass it.
         position: Option<crate::config_path::ListPosition>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// Cheap auth probe (#755): is there a user called `name` in the running
     /// config? Replies `Event::UserExists`, carrying no config data.
@@ -182,7 +206,7 @@ pub enum Request {
         /// As on `SetTransactionPath`.
         position: Option<crate::config_path::ListPosition>,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
     /// `nos-sshd`-only set-if-absent (#1104): stores `seed` (base64 of a
     /// 32-byte ed25519 seed) as the admin key `ssh-host-key` in the running
@@ -205,8 +229,33 @@ pub enum Request {
         /// How many commits to go back.
         index: u32,
         /// As on `OpenTransaction`.
-        actor: Option<String>,
+        actor: Option<Actor>,
     },
+    /// Watchdog-only (#1374): gives the externally authenticated user `name`
+    /// (a RADIUS or, later, TACACS+ accept; no stored secret) a persistent
+    /// uid and an `/run/nos-users/passwd` entry. Idempotent. Replies
+    /// `Event::ExternalUser`; refused with `Event::Error` for an unsafe name,
+    /// a local user, a `nos-` name, a name or id already in `/etc/passwd` or
+    /// `/etc/group`, a full table or an exhausted uid range.
+    AllocateExternalUser {
+        /// The user name, as the AAA server accepted it.
+        name: String,
+    },
+    /// Admin-only `allocate aaa user <name>` (#1374): `AllocateExternalUser`
+    /// for a person, so an ssh-only user need not log in elsewhere first.
+    AdminAllocateExternalUser {
+        /// The user name.
+        name: String,
+    },
+    /// Admin-only `clear aaa user <name>` (#1374): drops the passwd entry; the
+    /// uid stays reserved for that name forever. Replies `Event::ExternalUser`
+    /// with the reserved uid; an unknown name is an `Event::Error`.
+    ClearExternalUser {
+        /// The user name.
+        name: String,
+    },
+    /// Admin-only `show aaa users` (#1374). Replies `Event::ExternalUsers`.
+    ListExternalUsers,
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -267,11 +316,29 @@ pub enum Event {
     },
     /// Reply to `ListHistory`: newest first.
     History(Vec<HistoryEntry>),
+    /// Reply to `AllocateExternalUser`, `AdminAllocateExternalUser` and
+    /// `ClearExternalUser` (#1374): the user's uid (= gid).
+    ExternalUser {
+        /// The allocated, or reserved, uid.
+        uid: u32,
+    },
+    /// Reply to `ListExternalUsers` (#1374): `(name, uid)`, by name.
+    ExternalUsers(Vec<(String, u32)>),
+}
+
+/// `^[a-z_][a-z0-9_-]{0,31}$`: what a passwd name may be (no `:`, newline,
+/// empty, >32). Only such names are ever ticketed or given an ssh account.
+pub fn safe_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32
+        && c.next().is_some_and(|f| f.is_ascii_lowercase() || f == '_')
+        && c.all(|f| f.is_ascii_lowercase() || f.is_ascii_digit() || f == '_' || f == '-')
 }
 
 /// One kept running config (#1141). `index` is what `Rollback` takes: `1` is
 /// the config replaced by the latest commit.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     /// Argument to `Rollback`.
@@ -297,6 +364,7 @@ pub enum TransactionBase {
 /// A named transaction's current state, returned after `OpenTransaction`,
 /// `ApplyOp`, and `GetTransaction`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionSnapshot {
     /// Name of the config.

@@ -11,9 +11,11 @@
 pub mod bridge_registry;
 pub mod links;
 pub mod linux;
+pub mod mpls_input;
 pub mod noop;
 pub mod port_aggregate_registry;
 pub mod rib_client;
+pub mod steering;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -21,6 +23,7 @@ use thiserror::Error;
 pub use links::LinkWatch;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
+pub use steering::SteeringState;
 
 use nos_proto::{StpPortState, VlanTag};
 
@@ -154,10 +157,22 @@ pub trait InterfaceDriver: Send + Sync {
     /// RFC 5340 Hello/Link-LSA traffic from it).
     async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
 
+    /// Makes the kernel accept (`enabled`) or drop MPLS-labelled packets
+    /// arriving on `name` (`net.mpls.conf.<name>.input`, #1380). Read first,
+    /// written only when different. Called on every resync for every
+    /// configured interface: `false` reverts only a knob this process set
+    /// (an unconfigured value the operator wrote is left alone). A device
+    /// without an MPLS conf directory is skipped (warned when `enabled`).
+    async fn set_mpls_input(&self, name: &str, enabled: bool) -> Result<(), DriverError>;
+
     /// Observed kernel `IFLA_MTU` of `kernel_interface` (a bridge): a pure
     /// read; the kernel derives it from the bridge's ports. `None` = not
     /// resolvable now (retried on the next resync).
     async fn bridge_mtu(&self, kernel_interface: &str) -> Option<u32>;
+
+    /// Observed kernel link speed of `kernel_interface` in Mbit/s, a pure
+    /// read sampled per query. `None` = unknown (`-1`, `0`, unreadable).
+    async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32>;
 
     /// Puts one bridge port in `state` right now (`InterfaceRequest::
     /// SetStpPortStates`). The port must exist and be a bridge port. A
@@ -171,6 +186,16 @@ pub trait InterfaceDriver: Send + Sync {
     /// Flushes the dynamic FDB entries learned on one bridge port
     /// (`InterfaceRequest::FlushFdb`).
     async fn flush_bridge_port(&self, port: &BridgePortRef) -> Result<(), DriverError>;
+
+    /// Makes the tc steering of `desired.aggregate` exactly `desired`
+    /// (#895): the whole set, empty `links` removes everything this driver
+    /// installed for it. Idempotent; installs and removals are ordered so a
+    /// conversation is never collectable on two links (`steering::plan`).
+    async fn apply_conversation_steering(&self, desired: &SteeringState)
+        -> Result<(), DriverError>;
+
+    /// Installed steering of `aggregate` with its tc counters, per member.
+    async fn steering_stats(&self, aggregate: &str) -> Vec<nos_proto::LacpLinkSteering>;
 
     /// Snapshot of the kernel's link table plus a receiver for later changes,
     /// for `InterfaceRequest::SubscribeLinks`. The noop driver reports

@@ -150,6 +150,8 @@ pub fn base_running() -> Config {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
+            segment_routing: nos_proto::SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,

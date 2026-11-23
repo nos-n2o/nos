@@ -9,10 +9,10 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use netlink_packet_core::{Emitable as _, NlaBuffer, ParseableParametrized as _};
-use nos_proto::NextHop;
+use nos_proto::{IlmRoute, NextHop};
 use rtnetlink::packet_route::route::{
     MplsLabel, RouteAddress, RouteAttribute, RouteLwEnCapType, RouteLwTunnelEncap, RouteMessage,
-    RouteMplsIpTunnel,
+    RouteMplsIpTunnel, RouteNextHop, RouteNextHopFlags, RouteProtocol,
 };
 use rtnetlink::RouteMessageBuilder;
 
@@ -66,6 +66,114 @@ pub fn pop_route_msg(label: u32, vrf: u32) -> RouteMessage {
         .label(stack(&[label])[0])
         .output_interface(vrf)
         .build()
+}
+
+/// Most labels the kernel takes in one pushed or swapped-to stack
+/// (`MAX_NEW_LABELS`).
+const MAX_STACK: usize = 30;
+
+/// An ILM entry the kernel would take: the incoming label is unreserved
+/// (`check_label`), each outgoing one is unreserved or an explicit null (0, 2;
+/// PHP is an empty stack, never label 3), the stack is at most 30 deep.
+pub fn check_ilm(r: &IlmRoute) -> Result<(), DriverError> {
+    check_label(r.label)?;
+    for hop in &r.hops {
+        if hop.labels.len() > MAX_STACK {
+            return Err(DriverError::Other(format!(
+                "ilm {}: more than {MAX_STACK} out labels",
+                r.label
+            )));
+        }
+        for &l in &hop.labels {
+            if l != 0 && l != 2 {
+                check_label(l)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `LABEL[=GATEWAY[,OUT[/OUT..]]]`, the test-only `--test-ilm` syntax.
+pub fn parse_ilm(s: &str) -> Result<IlmRoute, String> {
+    let bad = |what: &str| format!("--test-ilm {s:?}: {what}");
+    let (label, rest) = s.split_once('=').map_or((s, None), |(l, r)| (l, Some(r)));
+    let label = label.parse().map_err(|_| bad("bad label"))?;
+    let hops = match rest {
+        None => Vec::new(),
+        Some(r) => {
+            let (gw, out) = r.split_once(',').map_or((r, ""), |(g, o)| (g, o));
+            let labels = out
+                .split('/')
+                .filter(|l| !l.is_empty())
+                .map(|l| l.parse().map_err(|_| bad("bad out label")))
+                .collect::<Result<_, _>>()?;
+            vec![NextHop {
+                gateway: gw.parse().map_err(|_| bad("bad gateway"))?,
+                interface_id: None,
+                labels,
+            }]
+        }
+    };
+    Ok(IlmRoute { label, hops })
+}
+
+/// The protocol of every ILM route installed for the segment routing source:
+/// how a crashed predecessor's routes are found again.
+pub const ILM_PROTOCOL: RouteProtocol = RouteProtocol::Ospf;
+
+/// An ILM entry: `<label> [as <out>/..] via inet <gw> dev <if>` for one hop
+/// (a pop when its stack is empty: PHP), `RTA_MULTIPATH` for several, and no
+/// hop is a pop followed by a lookup in `vrf`. Every hop needs its ifindex.
+pub fn ilm_route_msg(r: &IlmRoute, vrf: u32) -> RouteMessage {
+    let mut m = RouteMessageBuilder::<MplsLabel>::new()
+        .label(stack(&[r.label])[0])
+        .protocol(ILM_PROTOCOL)
+        .build();
+    let hop_attrs = |h: &NextHop| {
+        let mut a = vec![RouteAttribute::Via(h.gateway.into())];
+        if !h.labels.is_empty() {
+            a.push(RouteAttribute::NewDestination(stack(&h.labels)));
+        }
+        a
+    };
+    match r.hops.as_slice() {
+        [] => m.attributes.push(RouteAttribute::Oif(vrf)),
+        [h] => {
+            m.attributes.extend(hop_attrs(h));
+            m.attributes
+                .push(RouteAttribute::Oif(h.interface_id.unwrap_or(0)));
+        }
+        hops => {
+            let nhs = hops
+                .iter()
+                .map(|h| {
+                    let mut nh = RouteNextHop::default();
+                    nh.interface_index = h.interface_id.unwrap_or(0);
+                    nh.flags = RouteNextHopFlags::empty();
+                    nh.attributes = hop_attrs(h);
+                    nh
+                })
+                .collect();
+            m.attributes.push(RouteAttribute::MultiPath(nhs));
+        }
+    }
+    m
+}
+
+/// `(label, every oif)` of a dumped `AF_MPLS` route installed by
+/// [`ilm_route_msg`] (our protocol), `None` for any other.
+pub fn ilm_of(route: &RouteMessage) -> Option<(u32, Vec<u32>)> {
+    if route.header.protocol != ILM_PROTOCOL {
+        return None;
+    }
+    let (label, oif) = pop_route_of(route)?;
+    let mut oifs: Vec<u32> = oif.into_iter().collect();
+    for a in &route.attributes {
+        if let RouteAttribute::MultiPath(nhs) = a {
+            oifs.extend(nhs.iter().map(|n| n.interface_index));
+        }
+    }
+    Some((label, oifs))
 }
 
 /// `(label, oif)` of a dumped `AF_MPLS` route.
@@ -192,18 +300,6 @@ impl Sysctl {
         let want = (label + 1).next_multiple_of(1024).min(MAX_LABEL);
         write(&path, "net.mpls.platform_labels", want)
     }
-
-    /// `net.mpls.conf.<ifname>.input = 1`. A device without an MPLS conf
-    /// directory is skipped.
-    pub fn ensure_input(&self, ifname: &str) -> Result<(), DriverError> {
-        let path = self.mpls()?.join("conf").join(ifname).join("input");
-        match std::fs::read_to_string(&path) {
-            Ok(v) if v.trim() == "1" => Ok(()),
-            Ok(_) => write(&path, &format!("net.mpls.conf.{ifname}.input"), 1),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DriverError::Registry(e)),
-        }
-    }
 }
 
 fn read(path: &Path) -> Result<String, DriverError> {
@@ -322,6 +418,81 @@ mod tests {
         assert_eq!(unresolved.len(), 2);
     }
 
+    fn hop(gw: &str, ifx: u32, labels: Vec<u32>) -> NextHop {
+        NextHop {
+            gateway: gw.parse().unwrap(),
+            interface_id: Some(ifx),
+            labels,
+        }
+    }
+
+    #[test]
+    fn ilm_messages_round_trip_and_are_checked() {
+        let swap = IlmRoute {
+            label: 16001,
+            hops: vec![hop("10.0.0.2", 4, vec![16002])],
+        };
+        let m = ilm_route_msg(&swap, 9);
+        assert_eq!(m.header.destination_prefix_length, 20);
+        assert_eq!(ilm_of(&m), Some((16001, vec![4])));
+        assert!(m
+            .attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::NewDestination(l) if l[0].label == 16002)));
+        // PHP: a hop with no stack has no `as`.
+        let php = IlmRoute {
+            label: 16001,
+            hops: vec![hop("10.0.0.2", 4, vec![])],
+        };
+        assert!(!ilm_route_msg(&php, 9)
+            .attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::NewDestination(_))));
+        // Local pop: the VRF.
+        let local = IlmRoute {
+            label: 16001,
+            hops: vec![],
+        };
+        assert_eq!(ilm_of(&ilm_route_msg(&local, 9)), Some((16001, vec![9])));
+        // ECMP: one multipath attribute, every ifindex found.
+        let ecmp = IlmRoute {
+            label: 16001,
+            hops: vec![hop("10.0.0.2", 4, vec![1000]), hop("10.0.1.2", 5, vec![])],
+        };
+        assert_eq!(ilm_of(&ilm_route_msg(&ecmp, 9)), Some((16001, vec![4, 5])));
+        // Not ours: the L3VPN pop route has the default protocol.
+        assert_eq!(ilm_of(&pop_route_msg(1000, 7)), None);
+
+        for ok in [&swap, &php, &local, &ecmp] {
+            check_ilm(ok).unwrap();
+        }
+        let bad = |label, out: Vec<u32>| IlmRoute {
+            label,
+            hops: vec![hop("10.0.0.2", 4, out)],
+        };
+        assert!(check_ilm(&bad(3, vec![])).is_err());
+        assert!(check_ilm(&bad(16001, vec![3])).is_err());
+        assert!(check_ilm(&bad(16001, vec![2, 0])).is_ok());
+        assert!(check_ilm(&bad(16001, vec![16; 31])).is_err());
+    }
+
+    #[test]
+    fn test_ilm_syntax() {
+        let r = parse_ilm("16001=10.0.0.2,16002/16003").unwrap();
+        assert_eq!(
+            (r.label, r.hops[0].labels.clone()),
+            (16001, vec![16002, 16003])
+        );
+        assert_eq!(
+            parse_ilm("16001=10.0.0.2").unwrap().hops[0].labels,
+            Vec::<u32>::new()
+        );
+        assert_eq!(parse_ilm("16001").unwrap().hops.len(), 0);
+        for bad in ["x", "1=nope", "1=10.0.0.2,x"] {
+            assert!(parse_ilm(bad).is_err(), "{bad}");
+        }
+    }
+
     fn tree(platform: &str, inputs: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let mpls = dir.path().join("net/mpls");
@@ -345,7 +516,6 @@ mod tests {
             .ensure_platform_labels(1000)
             .unwrap_err();
         assert!(e.to_string().contains("mpls_router"), "{e}");
-        assert!(Sysctl::new(dir.path()).ensure_input("eth0").is_err());
         assert_eq!(Sysctl::default().root, PathBuf::from("/proc/sys"));
     }
 
@@ -365,17 +535,6 @@ mod tests {
         let t = tree("1048575\n", &[]);
         Sysctl::new(t.path()).ensure_platform_labels(5000).unwrap();
         assert_eq!(get(&t, "platform_labels"), "1048575\n");
-    }
-
-    #[test]
-    fn input_is_set_once_and_unknown_devices_skipped() {
-        let t = tree("0", &[("eth0", "0\n"), ("eth1", "1\n")]);
-        let s = Sysctl::new(t.path());
-        s.ensure_input("eth0").unwrap();
-        s.ensure_input("eth1").unwrap();
-        s.ensure_input("nope").unwrap();
-        assert_eq!(get(&t, "conf/eth0/input"), "1");
-        assert_eq!(get(&t, "conf/eth1/input"), "1\n", "not rewritten");
     }
 
     #[test]
@@ -402,7 +561,5 @@ mod tests {
             e.contains("net.mpls.platform_labels=1024") && e.contains("--sysctl"),
             "{e}"
         );
-        let e = s.ensure_input("eth0").unwrap_err().to_string();
-        assert!(e.contains("net.mpls.conf.eth0.input=1"), "{e}");
     }
 }

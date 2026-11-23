@@ -82,6 +82,7 @@ fn interface_status() -> InterfaceStatus {
         mtu: 1500,
         subinterfaces: Vec::new(),
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 
@@ -311,6 +312,8 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 link_local_address: None,
                                 bond_name: None,
                                 err_disabled: false,
+                                steering: Vec::new(),
+                                speed_mbps: None,
                             })
                         }
                         _ => InterfaceEvent::NotFound,
@@ -418,6 +421,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 local_pref: 100,
                                 best: true,
                                 validation_state: nos_proto::RpkiValidationState::NotFound,
+                                unknown_attributes: vec![],
                             }],
                             next: None,
                         },

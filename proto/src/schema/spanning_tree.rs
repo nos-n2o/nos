@@ -26,6 +26,7 @@ pub const MST_INSTANCES_MAX: usize = 64;
 /// `Mstp` maps VLANs to `mst-instances`; `RapidPvst` runs one RSTP tree per
 /// VLAN of a `BroadcastDomain`; `Disabled` turns spanning tree off.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum StpMode {
     #[default]
@@ -41,6 +42,7 @@ pub enum StpMode {
 
 /// Compatibility mode forced on every port (802.1Q 13.7 `ForceProtocolVersion`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum StpForceVersion {
     #[default]
@@ -53,6 +55,7 @@ pub enum StpForceVersion {
 /// The MST region identity (802.1Q 13.8): bridges only share an MSTI tree
 /// when name and revision match.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct StpRegion {
     #[serde(default)]
@@ -67,6 +70,7 @@ pub struct StpRegion {
 
 /// One MST instance and this bridge's priority in it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct MstInstance {
     #[cli(key)]
@@ -88,6 +92,7 @@ impl Default for MstInstance {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 /// Bridge-wide spanning-tree parameters; there is exactly one per device.
 pub struct SpanningTree {

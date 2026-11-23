@@ -3,7 +3,7 @@
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
 # versions in the slim images breaks on every security update.
-FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS builder
 WORKDIR /app
 
 # hadolint ignore=DL3008
@@ -109,7 +109,8 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
 # inside its routing table's VRF (see rest/CLAUDE.md).
 # nos-sshd has no file capabilities: it runs as root (uid 0) and drops its own
-# bounding set at startup (see ssh/CLAUDE.md).
+# bounding set at startup (see ssh/CLAUDE.md). Root is inherent: OpenSSH only switches
+# to the login user when uid 0, even with CAP_SETUID/SETGID (#1187).
 # nos-sandbox-exec (#1211) is the trampoline every daemon but nos-sshd is exec'd
 # through (NO_NEW_PRIVS): it must hold, in permitted, every capability any daemon
 # gets, so it carries the union of the lines above (keep them equal). It trims itself

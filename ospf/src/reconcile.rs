@@ -264,6 +264,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             local_addr: addr.as_ref().map(|a| a.0),
             local_prefix_len: addr.as_ref().map(|a| a.1),
             mtu: addr.as_ref().map(|a| a.2),
+            speed_mbps: addr.as_ref().and_then(|a| a.3),
             kernel_interface: Some(kernel_interface),
         };
         let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
@@ -298,6 +299,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
             priority,
             mtu: resolve_effective_mtu(profile, m.mtu),
+            speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
             ifindex,
@@ -399,6 +401,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             local_addr: bridge.as_ref().map(|b| b.0),
             local_prefix_len: bridge.as_ref().map(|b| b.1),
             mtu: bridge.as_ref().and_then(|b| b.3),
+            speed_mbps: bridge.as_ref().and_then(|b| b.4),
             kernel_interface: bridge.map(|b| b.2),
         };
         let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
@@ -438,6 +441,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
             priority,
             mtu: resolve_effective_mtu(profile, m.mtu),
+            speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
             ifindex,
@@ -491,12 +495,17 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         max_metric_on_shutdown = ?own.max_metric_on_shutdown,
         max_metric_administrative = own.max_metric_administrative,
         host_router = own.host_router,
+        traffic_engineering = own.traffic_engineering,
         remote_lfa = own.remote_lfa,
         "ospf instance config resolved"
     );
     links.set_graceful_restart(own.graceful_restart_grace_period);
     links.set_prefix_suppression(own.prefix_suppression);
     links.set_host_router(own.host_router);
+    links.set_traffic_engineering(own.traffic_engineering);
+    let (srgb, sids) = segment_routing(&own.segment_routing);
+    links.set_srgb(srgb);
+    links.set_extended_prefixes(sids);
     links.set_remote_lfa(own.remote_lfa);
     links.set_max_lsa(own.max_lsa);
     links.set_spf_timers(spf_timers(&own.spf_throttle));
@@ -622,6 +631,8 @@ struct Resolved {
     local_prefix_len: Option<u8>,
     /// The parent interface's real MTU (point-to-point only).
     mtu: Option<u32>,
+    /// Kernel link speed (`InterfaceStatus.speed_mbps`), Mbit/s.
+    speed_mbps: Option<u32>,
     kernel_interface: Option<String>,
 }
 
@@ -630,6 +641,7 @@ struct Merged {
     local_addr: Ipv4Addr,
     local_prefix_len: u8,
     mtu: Option<u32>,
+    speed_mbps: Option<u32>,
     kernel_interface: String,
 }
 
@@ -662,12 +674,20 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
     // The running effective MTU stands in for an unresolved parent MTU
     // (a profile override still wins in `resolve_effective_mtu`).
     let mtu = r.mtu.or_else(|| running.map(|c| u32::from(c.mtu)));
+    // `None` from a lookup that succeeded means "speed unknown"; only a failed
+    // lookup (address fell back) keeps the running value.
+    let speed_mbps = if fell_back.contains(&"address") {
+        running.and_then(|c| c.speed_mbps)
+    } else {
+        r.speed_mbps
+    };
     Some((
         Merged {
             vrf,
             local_addr,
             local_prefix_len,
             mtu,
+            speed_mbps,
             kernel_interface,
         },
         fell_back,
@@ -1072,14 +1092,14 @@ async fn resolve_local_address(
     watchdog_socket: &Path,
     interface: &str,
     tag: u16,
-) -> Option<(Ipv4Addr, u8, u32)> {
+) -> Option<(Ipv4Addr, u8, u32, Option<u32>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
-    let mtu = status.mtu;
+    let (mtu, speed) = (status.mtu, status.speed_mbps);
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let net = sub.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), mtu)),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), mtu, speed)),
         std::net::IpAddr::V6(_) => None,
     }
 }
@@ -1133,14 +1153,14 @@ async fn resolve_loopback_prefix(
 async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
-) -> Option<(Ipv4Addr, u8, String, Option<u32>)> {
+) -> Option<(Ipv4Addr, u8, String, Option<u32>, Option<u32>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
-    let mtu = status.mtu;
+    let (mtu, speed) = (status.mtu, status.speed_mbps);
     let net = status.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name, mtu)),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name, mtu, speed)),
         std::net::IpAddr::V6(_) => None,
     }
 }
@@ -1246,6 +1266,7 @@ mod tests {
             lacp_mode: nos_proto::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
@@ -1487,6 +1508,7 @@ mod tests {
             network_type: nos_proto::NetworkType::Broadcast,
             priority: 1,
             mtu: 9000,
+            speed_mbps: None,
             mtu_ignore: false,
             lls: false,
             ifindex: 3,
@@ -1504,6 +1526,7 @@ mod tests {
             local_addr: Some(Ipv4Addr::new(10, 0, 0, 2)),
             local_prefix_len: Some(30),
             mtu: Some(1500),
+            speed_mbps: None,
             kernel_interface: Some("br-new".into()),
         }
     }
@@ -1522,6 +1545,7 @@ mod tests {
             local_addr: None,
             local_prefix_len: None,
             mtu: None,
+            speed_mbps: None,
             kernel_interface: None,
         };
         let (m, fb) = merge_running(none, Some(&run)).unwrap();
@@ -1626,6 +1650,29 @@ mod tests {
     }
 }
 
+/// The SRGB to advertise and one RFC 7684 Extended Prefix entry (intra-area,
+/// N-flag, with its RFC 8665 Prefix-SID) per configured SID; nothing when
+/// segment routing is off.
+fn segment_routing(
+    sr: &nos_proto::SegmentRouting,
+) -> (Option<(u32, u32)>, Vec<crate::lsa::ExtendedPrefix>) {
+    if !sr.enabled {
+        return (None, Vec::new());
+    }
+    let sids = sr
+        .prefix_sids
+        .iter()
+        .map(|p| crate::lsa::ExtendedPrefix {
+            route_type: crate::lsa::EXT_ROUTE_INTRA_AREA,
+            prefix: p.prefix.addr(),
+            prefix_len: 32,
+            flags: crate::lsa::EXT_PREFIX_FLAG_N,
+            sub_tlvs: crate::lsa::encode_prefix_sid(p.index, p.no_php, p.explicit_null),
+        })
+        .collect();
+    (Some(sr.srgb()), sids)
+}
+
 /// The configured RFC 8405 timers; unset fields keep `Timers::default()`.
 fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
     use std::time::Duration;
@@ -1637,6 +1684,31 @@ fn spf_timers(t: &nos_proto::SpfThrottle) -> nos_ospf_common::throttle::Timers {
         long: ms(t.long_ms, d.long),
         holddown: ms(t.holddown_ms, d.holddown),
         time_to_learn: ms(t.time_to_learn_ms, d.time_to_learn),
+    }
+}
+
+#[cfg(test)]
+mod segment_routing_tests {
+    use super::segment_routing;
+
+    #[test]
+    fn off_advertises_nothing_on_gives_srgb_and_one_entry_per_sid() {
+        let mut sr = nos_proto::SegmentRouting::default();
+        sr.prefix_sids.push(nos_proto::OspfPrefixSid {
+            prefix: "1.1.1.1/32".parse().unwrap(),
+            index: 5,
+            ..Default::default()
+        });
+        assert_eq!(segment_routing(&sr), (None, Vec::new()));
+        sr.enabled = true;
+        let (srgb, sids) = segment_routing(&sr);
+        assert_eq!(srgb, Some((16000, 8000)));
+        assert_eq!(sids.len(), 1);
+        assert_eq!(sids[0].prefix.to_string(), "1.1.1.1");
+        assert_eq!(
+            crate::lsa::decode_prefix_sid(&sids[0].sub_tlvs).map(|s| s.value),
+            Some(5)
+        );
     }
 }
 

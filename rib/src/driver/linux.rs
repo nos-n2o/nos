@@ -11,7 +11,7 @@ use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
 };
 use nos_proto::evpn_id::{format_mac, vxlan_name};
-use nos_proto::{IpNet, NextHop};
+use nos_proto::{IlmRoute, IpNet, NextHop};
 use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo, LinkMessage};
 use rtnetlink::packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
@@ -316,10 +316,9 @@ pub struct LinuxRibDriver {
     tunnels: Mutex<HashMap<u32, u32>>,
     /// Per table id: the MPLS pop route `sync_mpls` installed.
     mpls: Mutex<HashMap<u32, MplsState>>,
+    /// Per table id: the ILM entries `sync_ilm` last installed, by label.
+    ilm: Mutex<HashMap<u32, BTreeMap<u32, Hops>>>,
     sysctl: Sysctl,
-    /// Underlay interfaces whose `net.mpls.conf.<if>.input` could not be
-    /// set, warned about once each.
-    input_warned: Mutex<HashSet<String>>,
     /// Startup hold (#654): `apply` leaves kernel routes it has no desired
     /// slot for alone (see `RibDriver::keep_stale`).
     keep_stale: AtomicBool,
@@ -338,8 +337,8 @@ impl LinuxRibDriver {
             l3: Mutex::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
             mpls: Mutex::new(HashMap::new()),
+            ilm: Mutex::new(HashMap::new()),
             sysctl: Sysctl::default(),
-            input_warned: Mutex::new(HashSet::new()),
             keep_stale: AtomicBool::new(false),
         })
     }
@@ -731,6 +730,11 @@ impl LinuxRibDriver {
     // VPN tables grow to many thousands of routes.
     async fn egress_of(&self, table_id: u32, gateway: IpAddr) -> Option<u32> {
         let underlay = self.mpls.lock().unwrap().get(&table_id)?.underlay_vrf?;
+        self.egress_in(underlay, gateway).await
+    }
+
+    /// `egress_of` in an explicit VRF.
+    async fn egress_in(&self, underlay: u32, gateway: IpAddr) -> Option<u32> {
         let mut m = RouteMessage::default();
         let (family, len, dst) = match gateway {
             IpAddr::V4(a) => (AddressFamily::Inet, 32, RouteAddress::from(a)),
@@ -1091,6 +1095,7 @@ impl RibDriver for LinuxRibDriver {
             return Ok(());
         };
         self.remove_pop_route(table_name, table_id).await?;
+        self.sync_ilm(table_name, &[]).await?;
         self.reconcile_routes(table_id, &HashMap::new(), false)
             .await?;
         let l3 = self.l3.lock().unwrap().remove(&table_id);
@@ -1207,9 +1212,6 @@ impl RibDriver for LinuxRibDriver {
             Some(u) => self.underlay_vrf(u).await?,
             None => None,
         };
-        if let Some(u) = underlay_vrf {
-            self.enable_input(u).await?;
-        }
 
         // Converge the AF_MPLS routes into our VRF: a stale label (a changed
         // `vpn.label`, or one left by a previous run) goes first, then ours.
@@ -1250,6 +1252,117 @@ impl RibDriver for LinuxRibDriver {
         );
         Ok(())
     }
+
+    async fn sync_ilm(&self, table_name: &str, routes: &[IlmRoute]) -> Result<(), DriverError> {
+        routes.iter().try_for_each(mpls::check_ilm)?;
+        let table_id = if routes.is_empty() {
+            match table_registry::lookup_table_id(&self.registry_path, table_name) {
+                Some(id) => id,
+                None => return Ok(()),
+            }
+        } else {
+            table_registry::ensure_table_id(&self.registry_path, table_name)?
+        };
+        let vrf_name = table_registry::vrf_ifname(table_id);
+        let vrf = if routes.is_empty() {
+            match self.find_link(&vrf_name).await? {
+                Some(l) => l.header.index,
+                None => return Ok(()),
+            }
+        } else {
+            self.ensure_vrf(&vrf_name, table_id).await?
+        };
+        if let Some(max) = routes.iter().map(|r| r.label).max() {
+            self.sysctl.ensure_platform_labels(max)?;
+        }
+
+        // Resolve every hop's egress; an entry with none resolvable waits.
+        let mut want: BTreeMap<u32, Hops> = BTreeMap::new();
+        for r in routes {
+            let mut hops = Vec::new();
+            for h in &r.hops {
+                let dev = match h.interface_id {
+                    Some(d) => Some(d),
+                    None => self.egress_in(vrf, h.gateway).await,
+                };
+                match dev {
+                    Some(d) => hops.push(NextHop {
+                        interface_id: Some(d),
+                        ..h.clone()
+                    }),
+                    None => {
+                        warn!(label = r.label, gateway = %h.gateway, table = %table_name, "mpls ilm next hop skipped: unresolved");
+                    }
+                }
+            }
+            if hops.is_empty() && !r.hops.is_empty() {
+                continue;
+            }
+            want.insert(r.label, hops);
+        }
+
+        // What of ours is in the kernel: our protocol, leaving over this
+        // VRF's interfaces (AF_MPLS is per netns, shared by every table).
+        let mut owned = HashSet::from([vrf]);
+        let mut links = self.handle.link().get().execute();
+        while let Some(link) = links.try_next().await? {
+            if master_of(&link) == Some(vrf) {
+                owned.insert(link.header.index);
+            }
+        }
+        let mut present = BTreeSet::new();
+        let mut dump = self
+            .handle
+            .route()
+            .get(RouteMessageBuilder::<MplsLabel>::new().build())
+            .execute();
+        while let Some(route) = dump.try_next().await? {
+            if let Some((label, oifs)) = mpls::ilm_of(&route)
+                && oifs.iter().any(|o| owned.contains(o))
+            {
+                present.insert(label);
+            }
+        }
+        let shadow = self
+            .ilm
+            .lock()
+            .unwrap()
+            .remove(&table_id)
+            .unwrap_or_default();
+        let mut done = BTreeMap::new();
+        for label in present.iter().filter(|l| !want.contains_key(l)) {
+            self.del_pop_route(*label, vrf).await?;
+            info!(table = %table_name, label, "removed mpls ilm route");
+        }
+        let mut first_err = None;
+        for (label, hops) in want {
+            if present.contains(&label) && shadow.get(&label) == Some(&hops) {
+                done.insert(label, hops);
+                continue;
+            }
+            let msg = mpls::ilm_route_msg(
+                &IlmRoute {
+                    label,
+                    hops: hops.clone(),
+                },
+                vrf,
+            );
+            match self.handle.route().add(msg).replace().execute().await {
+                Ok(()) => {
+                    let out: Vec<_> = hops.iter().map(|h| &h.labels).collect();
+                    let gateway = show_gateways(hops.iter().map(|h| &h.gateway));
+                    info!(table = %table_name, label, out = ?out, %gateway, "installed mpls ilm route");
+                    done.insert(label, hops);
+                }
+                Err(e) => {
+                    warn!(table = %table_name, label, error = %e, "failed to install mpls ilm route");
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        self.ilm.lock().unwrap().insert(table_id, done);
+        first_err.map_or(Ok(()), |e| Err(e.into()))
+    }
 }
 
 impl LinuxRibDriver {
@@ -1263,37 +1376,6 @@ impl LinuxRibDriver {
             .find_link(&table_registry::vrf_ifname(id))
             .await?
             .map(|l| l.header.index))
-    }
-
-    /// `net.mpls.conf.<if>.input = 1` on every interface of the underlay
-    /// VRF, so labelled packets from the other PEs are accepted. One that
-    /// cannot be set is warned about once, not fatal: it may face no PE.
-    // ponytail: every underlay interface, never a CE-facing one (those are in
-    // the customer VRF); an explicit per-interface `mpls` knob is the clean model.
-    async fn enable_input(&self, underlay_vrf: u32) -> Result<(), DriverError> {
-        let mut links = self.handle.link().get().execute();
-        while let Some(link) = links.try_next().await? {
-            if master_of(&link) != Some(underlay_vrf) {
-                continue;
-            }
-            let Some(name) = link.attributes.iter().find_map(|a| match a {
-                LinkAttribute::IfName(n) => Some(n.clone()),
-                _ => None,
-            }) else {
-                continue;
-            };
-            match self.sysctl.ensure_input(&name) {
-                Ok(()) => {
-                    self.input_warned.lock().unwrap().remove(&name);
-                }
-                Err(e) => {
-                    if self.input_warned.lock().unwrap().insert(name.clone()) {
-                        warn!(interface = %name, error = %e, "mpls input not enabled on an underlay interface");
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Deletes one `AF_MPLS` route; one already gone counts as done.

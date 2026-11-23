@@ -15,6 +15,7 @@ use nos_proto_derive::Cli;
 /// literal, never another group's name (not requested, see root
 /// `CLAUDE.md`'s RPL section).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct CommunityGroup {

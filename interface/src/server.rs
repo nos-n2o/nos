@@ -146,39 +146,48 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
     trace!(request = ?req, "serving interface query");
     match req {
         InterfaceRequest::GetInterfaces => {
-            let guard = ctx.interfaces.read().await;
-            Some(InterfaceEvent::Interfaces(
-                guard.all().into_iter().map(to_status).collect(),
-            ))
+            let all = ctx.interfaces.read().await.all();
+            let mut out = Vec::with_capacity(all.len());
+            for i in all {
+                out.push(status_with_speed(ctx, i).await);
+            }
+            Some(InterfaceEvent::Interfaces(out))
         }
         InterfaceRequest::GetInterface { name } => {
-            let guard = ctx.interfaces.read().await;
-            Some(match guard.get(&name) {
-                Some(iface) => InterfaceEvent::Interface(to_status(iface.clone())),
+            let iface = ctx.interfaces.read().await.get(&name).cloned();
+            Some(match iface {
+                Some(iface) => InterfaceEvent::Interface(status_with_speed(ctx, iface).await),
                 None => InterfaceEvent::NotFound,
             })
         }
         InterfaceRequest::GetBroadcastDomain { name } => {
-            let guard = ctx.interfaces.read().await;
-            Some(match guard.get_domain(&name) {
-                Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
+            let domain = ctx.interfaces.read().await.get_domain(&name).cloned();
+            Some(match domain {
+                Some(d) => {
+                    let mut s = to_domain_status(d);
+                    s.speed_mbps = sample_speed(ctx, s.bridge_name.as_deref()).await;
+                    InterfaceEvent::BroadcastDomain(s)
+                }
                 None => InterfaceEvent::NotFound,
             })
         }
         InterfaceRequest::GetPortAggregates => {
-            let guard = ctx.interfaces.read().await;
-            Some(InterfaceEvent::PortAggregates(
-                guard
-                    .all_port_aggregates()
-                    .into_iter()
-                    .map(to_port_aggregate_status)
-                    .collect(),
-            ))
+            let aggregates = ctx.interfaces.read().await.all_port_aggregates();
+            let mut out = Vec::with_capacity(aggregates.len());
+            for a in aggregates {
+                out.push(status_with_steering(ctx, a).await);
+            }
+            Some(InterfaceEvent::PortAggregates(out))
         }
         InterfaceRequest::GetPortAggregate { name } => {
-            let guard = ctx.interfaces.read().await;
-            Some(match guard.get_port_aggregate(&name) {
-                Some(agg) => InterfaceEvent::PortAggregate(to_port_aggregate_status(agg.clone())),
+            let agg = ctx
+                .interfaces
+                .read()
+                .await
+                .get_port_aggregate(&name)
+                .cloned();
+            Some(match agg {
+                Some(agg) => InterfaceEvent::PortAggregate(status_with_steering(ctx, agg).await),
                 None => InterfaceEvent::NotFound,
             })
         }
@@ -187,7 +196,6 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             None
         }
         InterfaceRequest::PushLacpConversations(msg) => {
-            // #892: accepted and dropped; the steering lands with #895.
             if msg
                 .links
                 .iter()
@@ -195,7 +203,9 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
             {
                 warn!(aggregate = %msg.aggregate, "lacp conversations push has a malformed mask, dropped");
             } else {
-                debug!(aggregate = %msg.aggregate, links = msg.links.len(), "lacp conversations push ignored");
+                let aggregate = msg.aggregate.clone();
+                ctx.interfaces.write().await.set_lacp_conversations(msg);
+                steer(ctx, &aggregate).await;
             }
             None
         }
@@ -206,6 +216,7 @@ async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent
                 .await
                 .set_bfd_up_members(&msg.aggregate, msg.up_members);
             apply_pushed(ctx, updated).await;
+            steer(ctx, &msg.aggregate).await;
             None
         }
         InterfaceRequest::SetStpPortStates(assignments) => {
@@ -320,6 +331,25 @@ async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
         .await
         .set_lacp_active_members(&msg.aggregate, msg.active_members);
     apply_pushed(ctx, updated).await;
+    steer(ctx, &msg.aggregate).await;
+}
+
+async fn status_with_steering(ctx: &Context, agg: PortAggregateState) -> PortAggregateStatus {
+    let steering = ctx.driver.steering_stats(&agg.name).await;
+    let speed_mbps = sample_speed(ctx, agg.bond_name.as_deref()).await;
+    PortAggregateStatus {
+        steering,
+        speed_mbps,
+        ..to_port_aggregate_status(agg)
+    }
+}
+
+/// Brings the tc steering of `aggregate` in line with the current state (#895).
+async fn steer(ctx: &Context, aggregate: &str) {
+    let desired = ctx.interfaces.read().await.steering_state(aggregate);
+    if let Err(e) = ctx.driver.apply_conversation_steering(&desired).await {
+        warn!(port_aggregate = %aggregate, error = %e, "failed to apply conversation steering");
+    }
 }
 
 async fn apply_pushed(ctx: &Context, updated: Vec<InterfaceState>) {
@@ -338,6 +368,20 @@ fn sub_status(s: crate::state::SubinterfaceState, parent_mtu: u32) -> Subinterfa
         routing_table: s.routing_table,
         mtu: s.mtu.unwrap_or(parent_mtu),
         link_local_address: s.link_local_address,
+    }
+}
+
+/// Kernel link speed sampled now (it changes at runtime: renegotiation, bond
+/// slaves up/down), so never cached in the state.
+async fn sample_speed(ctx: &Context, kernel_name: Option<&str>) -> Option<u32> {
+    ctx.driver.link_speed_mbps(kernel_name?).await
+}
+
+async fn status_with_speed(ctx: &Context, iface: InterfaceState) -> InterfaceStatus {
+    let speed_mbps = sample_speed(ctx, Some(&iface.name)).await;
+    InterfaceStatus {
+        speed_mbps,
+        ..to_status(iface)
     }
 }
 
@@ -360,6 +404,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         // never populated for this attach-point kind.
         link_local_address: None,
         err_disabled: iface.stp.err_disabled,
+        speed_mbps: None,
     }
 }
 
@@ -371,6 +416,7 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         bridge_name: domain.bridge_name,
         link_local_address: domain.link_local_address,
         mtu: domain.mtu,
+        speed_mbps: None,
     }
 }
 
@@ -389,6 +435,8 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
         link_local_address: agg.link_local_address,
         bond_name: agg.bond_name,
         err_disabled: agg.stp.err_disabled,
+        steering: Vec::new(),
+        speed_mbps: None,
     }
 }
 
@@ -420,6 +468,7 @@ mod authz_tests {
         let push = InterfaceRequest::PushLacpConversations(nos_proto::LacpAggregateConversations {
             aggregate: String::new(),
             links: Vec::new(),
+            discard_wrong: false,
         });
         for role in Role::ALL {
             assert_eq!(allowed(role, &push), role == Role::Lacpd, "{role:?}");

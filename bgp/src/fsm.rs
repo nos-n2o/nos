@@ -90,6 +90,13 @@ pub(crate) fn is_vpn(family: AddressFamily) -> bool {
     )
 }
 
+pub(crate) fn is_vpn_flow(family: AddressFamily) -> bool {
+    matches!(
+        family,
+        AddressFamily::Vpnv4Flowspec | AddressFamily::Vpnv6Flowspec
+    )
+}
+
 /// Unicast (SAFI 1) families: the only ones RFC 8950 Extended Next Hop and
 /// RFC 7911 ADD-PATH apply to here.
 fn is_unicast(family: AddressFamily) -> bool {
@@ -1484,8 +1491,8 @@ async fn report_established(
         }
         if dir.tx {
             tx_afis.insert(key);
-            // The RIB sends ids for unicast and VPN (#1134) only.
-            if is_unicast(family) || is_vpn(family) {
+            // The RIB sends ids for unicast, VPN (#1134) and VPN Flowspec (#1127).
+            if is_unicast(family) || is_vpn(family) || is_vpn_flow(family) {
                 add_path_tx.insert(family);
             }
         }

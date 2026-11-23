@@ -11,6 +11,7 @@
 //! long-lived daemons connectable after their first certificate has expired.
 
 use anyhow::{bail, Context};
+use base64::Engine as _;
 use reqwest::Method;
 
 use super::bgp;
@@ -202,6 +203,9 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
+    log("#1360: REST logins honour login-order: rad-admin over REST, same RADIUS role");
+    rest_radius(w).await?;
+
     log("with the server gone the local user logs in");
     w.dock.container_remove(RADIUS_STUB).await;
     let silent = a.count("no radius server answered");
@@ -221,6 +225,114 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     let (code, out) = provision_as(w, E2E_PASSWORD).await?;
     if code != 0 {
         bail!("local login after removing aaa failed: {code}: {out}");
+    }
+    Ok(())
+}
+
+/// #1360: the REST half of `aaa`. An admin with no local entry logs in over
+/// REST (`POST /v1/login` through the watchdog's `login-order`), edits and
+/// commits as that user; a read-only one is refused by its role; a renewal
+/// keeps the role (taken from the session, not the client); a RADIUS reject of
+/// a local user's name never falls back. Accounting (#1361): the REST login
+/// puts its own Start and its commit an Interim-Update in the stub's log, and
+/// a reject sends nothing.
+async fn rest_radius(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let starts = |logs: &str| logs.matches("accounting status=1 user=rad-admin").count();
+    let starts_before = starts(&w.dock.logs(RADIUS_STUB).await?);
+    let accepted = a.count("login accepted by radius user=\"rad-admin\" role=\"admin\"");
+    let Ok(admin) = a.rest.login("rad-admin", "pw-admin").await? else {
+        bail!("rad-admin could not log in over REST");
+    };
+    a.wait_new(
+        "login accepted by radius user=\"rad-admin\" role=\"admin\"",
+        accepted,
+        15,
+    )
+    .await?;
+    let client = a.rest.with_identity(&admin)?;
+    let tx = "/v1/transactions/rad-rest";
+    let open = format!("{tx}?base=current");
+    let host = format!("{tx}/hostname");
+    let (s, _) = a.rest_with(&client, Method::POST, &open, None).await?;
+    let (put, _) = a
+        .rest_with(&client, Method::PUT, &host, Some("\"rad-e2e\""))
+        .await?;
+    let (commit, _) = a
+        .rest_with(&client, Method::POST, &format!("{tx}/commit"), None)
+        .await?;
+    if (s, put, commit) != (201, 200, 200) {
+        bail!("rad-admin over REST: open {s}, edit {put}, commit {commit}, want 201/200/200");
+    }
+    log("accounting: the REST login has its own Start, its commit an Interim-Update");
+    let interim = "accounting status=3 user=rad-admin session=commit:rad-rest";
+    for _ in 0..15 {
+        let logs = w.dock.logs(RADIUS_STUB).await?;
+        if starts(&logs) > starts_before && logs.contains(interim) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    let logs = w.dock.logs(RADIUS_STUB).await?;
+    if starts(&logs) <= starts_before || !logs.contains(interim) {
+        bail!("the stub saw no REST Start/Interim-Update for rad-admin");
+    }
+    a.wait("rest request user=\"rad-admin\"").await?;
+    a.wait("config commit audit transaction=\"rad-rest\" actor=\"rad-admin\" claim=Some(Admin)")
+        .await?;
+
+    log("a renewal keeps the claimed role");
+    let (csr, key) = nos_pki::generate_csr_for(nos_pki::KeyAlg::EcdsaP256)?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let resp = client
+        .post(format!("{}/v1/renew", a.rest.base()))
+        .json(&serde_json::json!({ "csr": b64.encode(csr) }))
+        .send()
+        .await?;
+    if resp.status() != 200 {
+        bail!("renewal of a RADIUS REST session -> {}", resp.status());
+    }
+    let body: serde_json::Value = resp.json().await?;
+    let cert = b64.decode(body["certificate"].as_str().context("no certificate")?)?;
+    let renewed = a
+        .rest
+        .with_identity(&crate::rest::Identity::new(cert, key))?;
+    let (s, _) = a.rest_with(&renewed, Method::POST, &open, None).await?;
+    let (put, _) = a
+        .rest_with(&renewed, Method::PUT, &host, Some("\"rad-e2e2\""))
+        .await?;
+    let _ = a.rest(Method::DELETE, tx, None).await;
+    if (s, put) != (201, 200) {
+        bail!("renewed rad-admin: open {s}, edit {put}, want 201/200");
+    }
+
+    log("a RADIUS read-only user over REST reads but its role refuses the edit");
+    let refused = a.count("the user's role does not allow it");
+    let Ok(ro) = a.rest.login("rad-ro", "pw-ro").await? else {
+        bail!("rad-ro could not log in over REST");
+    };
+    let client = a.rest.with_identity(&ro)?;
+    let (get, _) = a
+        .rest_with(&client, Method::GET, "/v1/config", None)
+        .await?;
+    let (opened, _) = a.rest_with(&client, Method::POST, &open, None).await?;
+    let (put, _) = a
+        .rest_with(&client, Method::PUT, &host, Some("\"x\""))
+        .await?;
+    let _ = a.rest(Method::DELETE, tx, None).await;
+    if get != 200 || put != 403 {
+        bail!("rad-ro over REST: read {get} (want 200), open {opened}, edit {put} (want 403)");
+    }
+    a.wait_new("the user's role does not allow it", refused, 15)
+        .await?;
+
+    log("a RADIUS reject of the local user's name over REST never falls back");
+    if a.rest.login(E2E_USER, E2E_PASSWORD).await?.err() != Some(401) {
+        bail!("a RADIUS reject over REST must end the login with 401");
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    if (w.dock.logs(RADIUS_STUB).await?).contains(&format!("accounting status=1 user={E2E_USER}")) {
+        bail!("a rejected REST login must not be accounted");
     }
     Ok(())
 }

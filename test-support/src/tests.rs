@@ -71,6 +71,7 @@ fn iface(name: &str) -> InterfaceStatus {
         subinterfaces: vec![],
         link_local_address: None,
         err_disabled: false,
+        speed_mbps: None,
     }
 }
 
@@ -277,6 +278,7 @@ async fn interfaced_lookups_links_and_pushed() {
             link_local_address: None,
             bridge_name: Some("br1".into()),
             mtu: None,
+            speed_mbps: None,
         },
     );
     assert!(matches!(q(bd()).await, InterfaceEvent::BroadcastDomain(d) if d.bridge_name.is_some()));
@@ -297,6 +299,8 @@ async fn interfaced_lookups_links_and_pushed() {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
+            speed_mbps: None,
         },
     );
     assert!(matches!(q(pa()).await, InterfaceEvent::PortAggregate(_)));

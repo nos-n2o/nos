@@ -12,6 +12,7 @@ use nos_proto_derive::Cli;
 /// `.contains(..)`/`.add(..)`/`.remove(..)` — see root `CLAUDE.md`'s RPL
 /// section.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct CommunityAlias {

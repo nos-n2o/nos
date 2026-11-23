@@ -2193,3 +2193,197 @@ async fn up_virtual_link_attaches_the_backbone() {
     manager.resolved_virtual.lock().await.push(link("vl", 10));
     assert!(manager.is_area_border_router().await);
 }
+
+/// RFC 3630: a Router Address LSA always, a Link LSA per fully adjacent
+/// point-to-point or broadcast link (numbered by local address), none for a
+/// link without a Full neighbor or a broadcast link without a DR.
+#[test]
+fn te_lsas_advertise_router_address_and_full_links() {
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    let mut p2p = link("eth0.0", 10);
+    p2p.cost = 7;
+    p2p.speed_mbps = Some(10_000);
+    let mut p2p_status = LinkStatus::new(NetworkType::PointToPoint);
+    p2p_status.neighbors.insert(
+        Ipv4Addr::new(9, 9, 9, 10),
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let mut bcast = link("broadcast-domain:d", 10);
+    bcast.network_type = NetworkType::Broadcast;
+    bcast.local_addr = Ipv4Addr::new(10, 1, 0, 1);
+    let mut bcast_status = LinkStatus::new(NetworkType::Broadcast);
+    bcast_status.neighbors.insert(
+        Ipv4Addr::new(9, 9, 9, 11),
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 1, 0, 2)),
+    );
+    // No DR yet: skipped.
+    let none = te_lsas(rid, &[(bcast.clone(), bcast_status.clone())]);
+    assert_eq!(none.len(), 1);
+    bcast_status.dr = Some(Ipv4Addr::new(10, 1, 0, 2));
+    let mut idle = link("eth1.0", 10);
+    idle.local_addr = Ipv4Addr::new(10, 2, 0, 1);
+    let idle_status = LinkStatus::new(NetworkType::PointToPoint);
+
+    let out = te_lsas(
+        rid,
+        &[
+            (bcast, bcast_status),
+            (idle, idle_status),
+            (p2p.clone(), p2p_status),
+        ],
+    );
+    let ids: Vec<_> = out.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids,
+        [
+            lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID,
+            lsa::te_link_state_id(1),
+            lsa::te_link_state_id(2)
+        ]
+    );
+    let decode = |id, body: &Vec<u8>| {
+        lsa::decode_te(&Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_OPAQUE_AREA,
+                link_state_id: id,
+                advertising_router: rid,
+                sequence_number: i32::MIN + 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Opaque(body.clone()),
+        })
+        .unwrap()
+    };
+    assert_eq!(decode(out[0].0, &out[0].1), lsa::TeBody::RouterAddress(rid));
+    // 10.0.0.x sorts before 10.1.0.1: the point-to-point link is number 1.
+    let lsa::TeBody::Link(l1) = decode(out[1].0, &out[1].1) else {
+        panic!("link")
+    };
+    assert_eq!(
+        (l1.link_type, l1.link_id, l1.remote_addr, l1.metric),
+        (
+            lsa::TE_LINK_POINT_TO_POINT,
+            Ipv4Addr::new(9, 9, 9, 10),
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            7
+        )
+    );
+    // 10 Gbit/s = 1.25e9 bytes/s, nothing reserved.
+    assert_eq!(l1.max_bandwidth, 1.25e9);
+    assert_eq!(l1.max_reservable, 1.25e9);
+    assert_eq!(l1.unreserved, [1.25e9; 8]);
+    let lsa::TeBody::Link(l2) = decode(out[2].0, &out[2].1) else {
+        panic!("link")
+    };
+    assert_eq!(
+        (l2.link_type, l2.link_id, l2.remote_addr),
+        (lsa::TE_LINK_MULTI_ACCESS, Ipv4Addr::new(10, 1, 0, 2), None)
+    );
+    // Unknown speed stays 0.
+    assert_eq!((l2.max_bandwidth, l2.unreserved), (0.0, [0.0; 8]));
+}
+
+/// The TE Router Address LSA appears with `traffic-engineering` and is
+/// flushed (not the RI LSA) when it goes off.
+#[tokio::test(start_paused = true)]
+async fn traffic_engineering_toggle_originates_and_flushes() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let key = |id| LsaKey {
+        lsa_type: lsa::LSA_TYPE_OPAQUE_AREA,
+        link_state_id: id,
+        advertising_router: router_id,
+    };
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(
+                Ipv4Addr::UNSPECIFIED,
+                vec![("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1)],
+            )]),
+            router_id,
+        )
+        .await;
+    let live = |id| {
+        let manager = &manager;
+        async move {
+            manager
+                .lsdb_for(Ipv4Addr::UNSPECIFIED)
+                .await
+                .lock()
+                .await
+                .get(&key(id))
+                .is_some_and(|l| l.header.age < lsa::MAX_AGE)
+        }
+    };
+    let pass = || async {
+        for lsdb in manager.lsdbs.lock().await.values() {
+            lsdb.lock()
+                .await
+                .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+        }
+        manager.originate_router_lsas(router_id).await;
+    };
+    pass().await;
+    assert!(!live(lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID).await);
+    manager.set_traffic_engineering(true);
+    pass().await;
+    assert!(live(lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID).await);
+    manager.set_traffic_engineering(false);
+    pass().await;
+    assert!(!live(lsa::TE_ROUTER_ADDRESS_LINK_STATE_ID).await);
+    assert!(live(lsa::ROUTER_INFO_LINK_STATE_ID).await);
+}
+
+/// RFC 7684: one Extended Prefix / Link LSA per entry (opaque ID = position),
+/// held as type 10, and withdrawn (premature aging) when the entry goes.
+#[test]
+fn extended_lsas_originate_and_withdraw_with_their_entry() {
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    let prefixes = [lsa::ExtendedPrefix {
+        route_type: lsa::EXT_ROUTE_INTRA_AREA,
+        prefix: rid,
+        prefix_len: 32,
+        flags: lsa::EXT_PREFIX_FLAG_N,
+        sub_tlvs: vec![0x77, 0x77, 0, 0],
+    }];
+    let links = [lsa::ExtendedLink {
+        link_type: lsa::LINK_TYPE_POINT_TO_POINT,
+        link_id: Ipv4Addr::new(2, 2, 2, 2),
+        link_data: Ipv4Addr::new(10, 0, 0, 1),
+        sub_tlvs: Vec::new(),
+    }];
+    let live = |lsdb: &Lsdb| -> Vec<Ipv4Addr> {
+        let mut ids: Vec<_> = lsdb
+            .headers()
+            .into_iter()
+            .filter(|h| h.lsa_type == lsa::LSA_TYPE_OPAQUE_AREA && h.age < lsa::MAX_AGE)
+            .map(|h| h.link_state_id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let mut lsdb = Lsdb::new();
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &prefixes, &links);
+    assert_eq!(
+        live(&lsdb),
+        [
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_PREFIX, 1),
+            lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_LINK, 1)
+        ]
+    );
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &links);
+    assert_eq!(
+        live(&lsdb),
+        [lsa::ext_state_id(lsa::OPAQUE_TYPE_EXT_LINK, 1)]
+    );
+    install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &[]);
+    assert_eq!(live(&lsdb), Vec::<Ipv4Addr>::new());
+}

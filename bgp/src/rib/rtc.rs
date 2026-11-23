@@ -447,15 +447,10 @@ impl BgpRib {
 
     /// Re-syncs `peer` for every selected SAFI 134 rule one of `keys` covers.
     fn resync_vpn_flow(&mut self, peer: IpAddr, keys: &[RtcKey]) {
-        let touched: Vec<_> = self
-            .vpn_flow_loc
-            .iter()
-            .filter(|(_, (_, _, r))| {
-                keys.iter()
-                    .any(|n| n.covers_any(&r.attributes.extended_communities))
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
+        let touched = self.vpn_flow_keys_where(|r| {
+            keys.iter()
+                .any(|n| n.covers_any(&r.attributes.extended_communities))
+        });
         for k in touched {
             self.sync_vpn_flow_to(peer, &k, false);
         }

@@ -81,6 +81,20 @@ pub enum OspfInstanceOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Turns RFC 3630 traffic engineering LSA origination on or off.
+    SetTrafficEngineering {
+        /// Name of the OSPF instance this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
+    /// Replaces the RFC 8665 segment routing section.
+    SetSegmentRouting {
+        /// Name of the OSPF instance this op targets.
+        name: String,
+        /// The new section (SRGB and Prefix-SIDs).
+        segment_routing: crate::schema::SegmentRouting,
+    },
     /// Turns RFC 7490 remote LFA on or off.
     SetRemoteLfa {
         /// Name of the OSPF instance this op targets.
@@ -122,6 +136,8 @@ impl OspfInstanceOp {
                         max_metric_administrative: false,
                         max_lsa: None,
                         host_router: false,
+                        traffic_engineering: false,
+                        segment_routing: crate::schema::SegmentRouting::default(),
                         remote_lfa: false,
                         redistribute_metric: None,
                         redistribute_metric_type: None,
@@ -165,6 +181,17 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetHostRouter { name, enabled } => {
                 find_instance_mut(config, name)?.host_router = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetTrafficEngineering { name, enabled } => {
+                find_instance_mut(config, name)?.traffic_engineering = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetSegmentRouting {
+                name,
+                segment_routing,
+            } => {
+                find_instance_mut(config, name)?.segment_routing = segment_routing.clone();
                 Ok(())
             }
             OspfInstanceOp::SetRemoteLfa { name, enabled } => {
@@ -217,11 +244,31 @@ mod tests {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
+            segment_routing: crate::schema::SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
             spf_throttle: crate::schema::SpfThrottle::default(),
         }
+    }
+
+    #[test]
+    fn set_segment_routing_replaces_the_section() {
+        let mut cfg = Config::default();
+        cfg.ospf_instances.push(instance("o1"));
+        let sr = crate::schema::SegmentRouting {
+            enabled: true,
+            srgb_start: Some(17000),
+            ..Default::default()
+        };
+        OspfInstanceOp::SetSegmentRouting {
+            name: "o1".into(),
+            segment_routing: sr.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].segment_routing, sr);
     }
 
     #[test]
@@ -287,6 +334,10 @@ mod tests {
                 name: name(),
                 enabled: true,
             },
+            OspfInstanceOp::SetTrafficEngineering {
+                name: name(),
+                enabled: true,
+            },
         ] {
             op.apply(&mut cfg).unwrap();
         }
@@ -300,6 +351,7 @@ mod tests {
             (Some(30), Some(3), true)
         );
         assert!(i.host_router);
+        assert!(i.traffic_engineering);
         OspfInstanceOp::SetMaxMetricOnStartup {
             name: name(),
             seconds: None,

@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::ConfigError;
 use crate::history::History;
-use crate::nss_users::{names_differ, UserDb};
+use crate::nss_users::{names_differ, ExternalUserError, UserDb};
 use crate::path_edit::{self, Planned};
 use crate::secrets::unmask_op;
 use crate::users::{hash_clear_passwords, is_clear, normalize_names};
@@ -1118,6 +1118,34 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// `Request::AllocateExternalUser` (#1374): the uid of external user `name`.
+    /// Under the `running` write guard, like a commit, so no commit rewrites the passwd
+    /// file from a stale user list in between.
+    pub async fn allocate_external_user(&self, name: &str) -> Result<u32, ConfigError> {
+        let running = self.0.running.write().await;
+        let db = self.external_db()?;
+        Ok(db.allocate_external(name, &running.users)?)
+    }
+
+    /// `Request::ClearExternalUser`: drops the entry, the uid stays reserved.
+    pub async fn clear_external_user(&self, name: &str) -> Result<u32, ConfigError> {
+        let running = self.0.running.write().await;
+        let db = self.external_db()?;
+        Ok(db.clear_external(name, &running.users)?)
+    }
+
+    /// `Request::ListExternalUsers`: `(name, uid)` by name.
+    pub fn list_external_users(&self) -> Result<Vec<(String, u32)>, ConfigError> {
+        Ok(self.external_db()?.list_external())
+    }
+
+    fn external_db(&self) -> Result<&UserDb, ConfigError> {
+        self.0
+            .user_db
+            .as_ref()
+            .ok_or(ExternalUserError::Unavailable.into())
+    }
+
     /// Computes the structural difference between the running config and a
     /// named transaction's in-progress config. Runs no validation — matches
     /// `get_transaction`'s behavior, so an invalid in-progress config can
@@ -1833,7 +1861,7 @@ mod tests {
                     ssh_server: None,
                     evpn: nos_proto::RoutingTableEvpn::default(),
                     vpn: nos_proto::RoutingTableVpn::default(),
-                    ospfv3_instance: None,
+                    ospfv3_instances: Vec::new(),
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
                     ospf_instance: None,

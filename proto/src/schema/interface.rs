@@ -35,11 +35,13 @@ pub fn loopback_table_name(name: &str) -> Option<&str> {
 /// stored from commit time onward but not yet applied to the kernel by any
 /// driver (no `ip addr ... label` call) — schema/plumbing only for now.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Cli, Default)]
 pub struct InterfaceAddress {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(key)]
     /// Address with prefix length, e.g. `192.0.2.1/24`; the key.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub address: IpNet,
     #[cli(topic = InterfaceAddress)]
     /// Optional label to pick this address by, e.g. from a BGP source address; not yet applied to the kernel.
@@ -58,6 +60,7 @@ pub struct InterfaceAddress {
 /// `valid_subinterface_and_switching_profile_tags`. Loopback interfaces
 /// never have any `Subinterface`s — see `valid_addressing_split`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Subinterface {
@@ -250,8 +253,10 @@ pub(crate) fn valid_subinterface_mtus(
 /// fields — the same reason `RoutingTable`'s redistribute rule is wired on
 /// `Config.routing_tables`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
 pub struct Interface {
     #[garde(
         length(min = 1, max = 64),
@@ -391,6 +396,14 @@ pub struct Interface {
     #[garde(skip)]
     #[cli(topic = InterfaceLldpDestination, words = "lldp destination")]
     pub lldp_destination: LldpDestination,
+
+    /// Accepts MPLS-labelled packets on this link: `nos-interfaced` writes
+    /// `net.mpls.conf.<name>.input` (1 when set, 0 when not). Needed on every
+    /// link a labelled packet arrives on (segment routing, the L3VPN underlay).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceMplsInput, words = "mpls input")]
+    pub mpls_input: bool,
 
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     #[cli(
@@ -636,6 +649,7 @@ mod tests {
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
@@ -674,7 +688,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -1128,6 +1142,8 @@ mod tests {
                 max_metric_administrative: false,
                 max_lsa: None,
                 host_router: false,
+                traffic_engineering: false,
+                segment_routing: crate::schema::SegmentRouting::default(),
                 remote_lfa: false,
                 redistribute_metric: None,
                 redistribute_metric_type: None,

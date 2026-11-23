@@ -42,16 +42,16 @@ vxlan evpn-fdb,evpn-esi,evpn-dataplane,evpn-single-active,evpn-v6,evpn-l3,evpn-l
 8021q mtu,switching,svi,routed-subinterface,stp
 bridge evpn-fdb,evpn-esi,evpn-dataplane,evpn-single-active,evpn-v6,evpn-l3,evpn-l3-chunked,switching,svi,stp
 ipip ospf-remote-lfa
-cls_flower acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
+cls_flower acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp,lacp
 cls_fw evpn-esi,evpn-dataplane,evpn-single-active
 act_skbedit evpn-esi,evpn-dataplane,evpn-single-active
 act_mirred lacp
-act_gact acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
-sch_ingress acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp
+act_gact acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp,lacp
+sch_ingress acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,stp,lacp
 cls_u32 bfd,bgp-bfd,bfd-unsolicited,bfd-echo,bfd-echo-unaffiliated,micro-bfd,ospf-bfd,ospfv3-bfd
 act_sample acl
 psample acl
-mpls_router vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath
+mpls_router vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath,mpls-ilm
 mpls_iptunnel vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath
 '
 # NOS_E2E_PREFLIGHT_ASSUME_MISSING="m1 m2" pretends those are absent (tests).

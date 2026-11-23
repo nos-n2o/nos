@@ -22,7 +22,7 @@ use self::rx::{
     send_hello_eof, sync_all_drouters,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -219,6 +219,10 @@ pub struct LinkConfig {
     /// `LinkManager.dbd_max_headers` has no explicit test override. See
     /// `docs/protocols/ospf-internals.md`'s "LSA exchange and the LSDB".
     pub mtu: u16,
+    /// Kernel link speed in Mbit/s (`InterfaceStatus.speed_mbps`), `None` =
+    /// unknown. Feeds the RFC 3630 TE Link LSA bandwidth only; like `cost` it
+    /// is updated in place (`same_but_cost`), never restarting the link.
+    pub speed_mbps: Option<u32>,
     /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
     pub mtu_ignore: bool,
     /// `lls`: RFC 5613 Link-Local Signaling. Read through `lls_active`.
@@ -306,6 +310,7 @@ fn resolve_virtual_link(
         // ponytail: RFC 2328 A.3.3 wants Interface MTU 0 in a virtual link's
         // DBDs; we send the transit link's and skip the check instead.
         mtu: transit.mtu,
+        speed_mbps: None,
         mtu_ignore: true,
         // Virtual links take no profile; LLS is always off there.
         lls: false,
@@ -809,6 +814,9 @@ struct LinkEntry {
     link_local_lsdb: Arc<Mutex<Lsdb>>,
 }
 
+/// (advertising router, link state id) to a decoded Extended Prefix LSA.
+type ExtPrefixSeen = BTreeMap<(Ipv4Addr, Ipv4Addr), lsa::ExtendedPrefix>;
+
 /// Owns every OSPF link's driver task for one `nos-ospfd` process, plus its
 /// per-area LSDBs. `reconcile` is the sole entry point, called by
 /// `crate::reconcile::run` on every resync; it's idempotent and safe to
@@ -889,6 +897,23 @@ pub struct LinkManager {
     /// H-bit, with max-metric transit links. An atomic like
     /// `prefix_suppression`.
     host_router: AtomicBool,
+    /// RFC 3630 TE LSAs (`OspfInstance.traffic_engineering`): an atomic like
+    /// `host_router`, so a toggle re-originates without restarting a link.
+    traffic_engineering: AtomicBool,
+    /// RFC 7684 Extended Prefix entries to originate (one LSA each, every
+    /// area): the list #1168's SR config fills, today the test-only
+    /// `OspfInstance.extended_prefix_lsa`.
+    extended_prefixes: std::sync::Mutex<Vec<lsa::ExtendedPrefix>>,
+    /// The SRGB `(start, range)` advertised in the RI LSA (RFC 8665), if any.
+    srgb: std::sync::Mutex<Option<(u32, u32)>>,
+    /// Per area, each other router's advertised SRGB, to log a change once.
+    sr_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, lsa::RouterInfoSr>>>,
+    /// Per area, the other routers' Extended Prefix LSAs, to log a change once.
+    ext_prefix_state: Mutex<HashMap<Ipv4Addr, ExtPrefixSeen>>,
+    /// Per area, the Router Address of every other router's TE LSA, to log a
+    /// change once (`log_te_routers`).
+    te_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, Ipv4Addr>>>,
+    te_link_state: Mutex<HashMap<Ipv4Addr, TeLinks>>,
     /// `max-lsa`, shared with every store (`set_max_lsa`).
     max_lsa: Arc<AtomicU32>,
     /// RFC 7490 remote LFA (`OspfInstance.remote_lfa`): `compute_routes`
@@ -1030,6 +1055,13 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             host_router: AtomicBool::new(false),
+            traffic_engineering: AtomicBool::new(false),
+            extended_prefixes: std::sync::Mutex::new(Vec::new()),
+            srgb: std::sync::Mutex::new(None),
+            sr_state: Mutex::new(HashMap::new()),
+            ext_prefix_state: Mutex::new(HashMap::new()),
+            te_state: Mutex::new(HashMap::new()),
+            te_link_state: Mutex::new(HashMap::new()),
             max_lsa: Arc::new(AtomicU32::new(nos_ospf_common::lsdb::DEFAULT_MAX_LSA)),
             remote_lfa: AtomicBool::new(false),
             spf_timers: std::sync::Mutex::new(nos_ospf_common::throttle::Timers::default()),
@@ -1103,6 +1135,127 @@ impl LinkManager {
 
     pub fn set_host_router(&self, on: bool) {
         self.host_router.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_traffic_engineering(&self, on: bool) {
+        self.traffic_engineering.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_srgb(&self, srgb: Option<(u32, u32)>) {
+        *self.srgb.lock().unwrap() = srgb;
+    }
+
+    /// Logs each other router's RFC 8665 SRGB once, and again when it changes
+    /// (the `nos-e2e ospf-sr-sid` anchor).
+    async fn log_sr_capabilities(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let seen: BTreeMap<Ipv4Addr, lsa::RouterInfoSr> = lsas
+            .iter()
+            .filter(|l| l.header.advertising_router != root)
+            .filter_map(|l| Some((l.header.advertising_router, lsa::decode_router_info_sr(l)?)))
+            .collect();
+        let mut state = self.sr_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (router, sr) in &seen {
+            if old.get(router) != Some(sr) {
+                info!(
+                    area = %area_id, router = %router, algorithms = ?sr.algorithms,
+                    srgb = ?sr.srgb, "ospf sr capabilities received"
+                );
+            }
+        }
+        *old = seen;
+    }
+
+    pub fn set_extended_prefixes(&self, prefixes: Vec<lsa::ExtendedPrefix>) {
+        *self.extended_prefixes.lock().unwrap() = prefixes;
+    }
+
+    /// The ILM (#1165) for `routes`, the output of `compute_routes`: swap and
+    /// PHP entries toward each Prefix-SID route, an egress entry per SID this
+    /// router advertises. Empty without an SRGB.
+    pub fn ilm_routes(&self, routes: &[spf::RouteEntry]) -> Vec<nos_proto::IlmRoute> {
+        let srgb = *self.srgb.lock().unwrap();
+        if srgb.is_none() {
+            return Vec::new();
+        }
+        let own: Vec<lsa::PrefixSid> = self
+            .extended_prefixes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|p| lsa::decode_prefix_sid(&p.sub_tlvs))
+            .collect();
+        spf::ilm_routes(srgb, &own, routes)
+    }
+
+    /// Logs each other router's RFC 7684 Extended Prefix LSAs once, and again
+    /// when one changes (the `nos-e2e ospf-ext-lsa` anchor).
+    async fn log_extended_prefixes(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let seen: ExtPrefixSeen = lsas
+            .iter()
+            .filter(|l| l.header.advertising_router != root)
+            .filter_map(|l| {
+                let p = lsa::decode_extended_prefix(l)?;
+                Some(((l.header.advertising_router, l.header.link_state_id), p))
+            })
+            .collect();
+        let mut state = self.ext_prefix_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (key, p) in &seen {
+            let router = key.0;
+            if old.get(key) != Some(p) {
+                info!(
+                    area = %area_id, router = %router, prefix = %p.prefix, length = p.prefix_len,
+                    route_type = p.route_type, flags = p.flags,
+                    "ospf extended prefix received"
+                );
+                if let Some(sid) = lsa::decode_prefix_sid(&p.sub_tlvs) {
+                    info!(
+                        area = %area_id, router = %router, prefix = %p.prefix,
+                        index = sid.value, flags = sid.flags, "ospf prefix-sid received"
+                    );
+                }
+            }
+        }
+        *old = seen;
+    }
+
+    /// Logs each other router's RFC 3630 Router Address LSA and Link LSAs once,
+    /// and again when they change (the `nos-e2e ospf-te` anchors).
+    async fn log_te_routers(&self, area_id: Ipv4Addr, lsas: &[Arc<Lsa>], root: Ipv4Addr) {
+        let mut seen: BTreeMap<Ipv4Addr, Ipv4Addr> = BTreeMap::new();
+        let mut links: BTreeMap<(Ipv4Addr, Ipv4Addr), lsa::TeLink> = BTreeMap::new();
+        for l in lsas.iter().filter(|l| l.header.advertising_router != root) {
+            match lsa::decode_te(l) {
+                Some(lsa::TeBody::RouterAddress(a)) => {
+                    seen.insert(l.header.advertising_router, a);
+                }
+                Some(lsa::TeBody::Link(t)) => {
+                    links.insert((l.header.advertising_router, l.header.link_state_id), t);
+                }
+                None => {}
+            }
+        }
+        let mut state = self.te_state.lock().await;
+        let old = state.entry(area_id).or_default();
+        for (router, address) in &seen {
+            if old.get(router) != Some(address) {
+                info!(area = %area_id, router = %router, address = %address, "ospf te router address received");
+            }
+        }
+        *old = seen;
+        let mut link_state = self.te_link_state.lock().await;
+        let old = link_state.entry(area_id).or_default();
+        for (key, t) in &links {
+            if old.get(key) != Some(t) {
+                info!(
+                    area = %area_id, router = %key.0, local = %t.local_addr,
+                    max_bandwidth = t.max_bandwidth, max_reservable = t.max_reservable,
+                    "ospf te link received"
+                );
+            }
+        }
+        *old = links;
     }
 
     pub fn set_spf_timers(&self, timers: nos_ospf_common::throttle::Timers) {
@@ -1417,6 +1570,7 @@ impl LinkManager {
         for (key, entry) in links.iter_mut() {
             if let Some(wanted) = desired_map.get(key) {
                 entry.config.cost = wanted.cost;
+                entry.config.speed_mbps = wanted.speed_mbps;
             }
         }
         for cfg in to_spawn {
@@ -1589,6 +1743,9 @@ impl LinkManager {
                 spf::host_bit_honoured(&lsas),
                 spf::h_bit_routers(&lsas).len(),
             );
+            self.log_te_routers(area_id, &lsas, router_id).await;
+            self.log_sr_capabilities(area_id, &lsas, router_id).await;
+            self.log_extended_prefixes(area_id, &lsas, router_id).await;
             if self.host_bit_state.lock().await.insert(area_id, state) != Some(state) {
                 info!(area = %area_id, honoured = state.0, host_routers = state.1, "ospf host-bit state changed");
             }
@@ -1772,10 +1929,15 @@ impl LinkConfig {
     }
 }
 
-/// Equal in every field but `cost`, which `apply_links` updates in place.
+/// One area's received TE Link LSAs, by (advertiser, link state id).
+type TeLinks = BTreeMap<(Ipv4Addr, Ipv4Addr), lsa::TeLink>;
+
+/// Equal in every field but `cost` and `speed_mbps`, which `apply_links`
+/// updates in place.
 fn same_but_cost(a: &LinkConfig, b: &LinkConfig) -> bool {
     *a == LinkConfig {
         cost: a.cost,
+        speed_mbps: a.speed_mbps,
         ..b.clone()
     }
 }

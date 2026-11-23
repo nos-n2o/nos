@@ -13,6 +13,7 @@ use crate::schema::InterfaceAddress;
 /// (flat L3 config, unchanged); every other interface's L3 config lives in
 /// `subinterfaces` instead — see `schema::Subinterface`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterfaceStatus {
     /// Interface name.
@@ -47,11 +48,17 @@ pub struct InterfaceStatus {
     /// Observed: held administratively down by `nos-stpd`'s BPDU guard
     /// (err-disabled). Read back by a restarting `nos-stpd`.
     pub err_disabled: bool,
+    /// Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),
+    /// sampled when the status is served; `None` = unknown (no carrier,
+    /// down, loopback, a kernel that does not say). The kernel's number is
+    /// reported untouched for bond/bridge/veth.
+    pub speed_mbps: Option<u32>,
 }
 
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
 /// point on a physical interface, `tag == 0` for the untagged/native case.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubinterfaceStatus {
     /// 802.1Q VLAN ID.
@@ -73,6 +80,7 @@ pub struct SubinterfaceStatus {
 /// device's flat L3 config (same shape as a loopback interface's, see
 /// `schema::BroadcastDomain`'s doc comment).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastDomainStatus {
     /// Name of the interface.
@@ -97,6 +105,11 @@ pub struct BroadcastDomainStatus {
     /// while nothing sets it explicitly). `None` until the bridge exists, or
     /// under the `noop` driver; consumers fall back to 1500 and retry.
     pub mtu: Option<u32>,
+    /// Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),
+    /// sampled when the status is served; `None` = unknown (no carrier,
+    /// down, loopback, a kernel that does not say). The kernel's number is
+    /// reported untouched for bond/bridge/veth.
+    pub speed_mbps: Option<u32>,
 }
 
 /// The wire twin of `schema::PortAggregate` — a static Linux bonding
@@ -104,6 +117,7 @@ pub struct BroadcastDomainStatus {
 /// loopback-only flat `addresses`/`routing_table` fields (a bond is never a
 /// loopback — all its L3 config lives in `subinterfaces`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateStatus {
     /// Name of the aggregate.
@@ -127,6 +141,27 @@ pub struct PortAggregateStatus {
     /// Observed: held administratively down by `nos-stpd`'s BPDU guard
     /// (err-disabled). Read back by a restarting `nos-stpd`.
     pub err_disabled: bool,
+    /// Observed: the conversation steering `nos-interfaced` has installed
+    /// (#895), one row per member link; empty when none. Appended last.
+    pub steering: Vec<LacpLinkSteering>,
+    /// See `InterfaceStatus.speed_mbps`; the bond's own device (the kernel
+    /// sums its up slaves).
+    pub speed_mbps: Option<u32>,
+}
+
+/// One member link's installed conversation steering and its tc counters.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LacpLinkSteering {
+    /// Member interface name.
+    pub member: String,
+    /// Conversations redirected to this link on the bond's egress.
+    pub conversations: u32,
+    /// Packets the bond-egress redirects sent to this link.
+    pub redirected_packets: u64,
+    /// Packets this link's ingress filters dropped (conversations mapped elsewhere).
+    pub dropped_packets: u64,
 }
 
 /// One `PortAggregate`'s current 802.1AX-negotiated active-member set,
@@ -141,6 +176,7 @@ pub struct PortAggregateStatus {
 /// `PortAggregateMode::Lacp` aggregate — `nos-lacpd` never pushes for a
 /// `Xor` one, whose members are enslaved unconditionally regardless.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LacpAggregateMembers {
     /// Name of the port aggregate.
@@ -149,11 +185,14 @@ pub struct LacpAggregateMembers {
     pub active_members: Vec<String>,
 }
 
-/// Bytes of one link's conversation mask: 4096 conversation ids, one bit each.
+/// Bytes of one link's conversation mask: 4096 conversation ids, one bit each
+/// (conversation `c` is bit `0x80 >> (c % 8)` of byte `c / 8`; a NOS-internal
+/// order, nothing on the wire depends on it).
 pub const LACP_CONVERSATION_MASK_LEN: usize = 512;
 
 /// One member link's share of an aggregate's conversations (#865).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LacpLinkConversations {
     /// Member interface name.
@@ -169,12 +208,18 @@ pub struct LacpLinkConversations {
 /// PushLacpConversations`): per-link conversation masks of one aggregate.
 /// Always the whole set (full resend); an empty `links` means plain hashing.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LacpAggregateConversations {
     /// Name of the port aggregate.
     pub aggregate: String,
-    /// One entry per link carrying mapped conversations.
+    /// One entry per `Distributing` link carrying mapped conversations.
     pub links: Vec<LacpLinkConversations>,
+    /// `Discard_Wrong_Conversation` (802.1AX 6.6.3, p.99): `true` only when
+    /// the partner agreed on algorithm, digest and `Link_Numbers`, so the
+    /// collection filter may drop frames on the wrong link. Steering (`links`)
+    /// applies either way. Appended last: postcard is positional.
+    pub discard_wrong: bool,
 }
 
 /// What `nos-bfdd` pushes to `nos-interfaced` (`InterfaceRequest::
@@ -183,6 +228,7 @@ pub struct LacpAggregateConversations {
 /// like `LacpAggregateMembers`); a member absent from it is not enslaved.
 /// Only meaningful for an aggregate with `bfd` set.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BfdAggregateMembers {
     /// Name of the port aggregate.
@@ -365,6 +411,31 @@ mod tests {
     }
 
     #[test]
+    fn interface_status_wire_ends_with_speed() {
+        let st = |speed_mbps| InterfaceStatus {
+            name: "e".into(),
+            addresses: vec![],
+            routing_table: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: vec![],
+            link_local_address: None,
+            err_disabled: false,
+            speed_mbps,
+        };
+        // name, 0 addrs, 3 None, mtu 1500 (2-byte varint), 0 subs, None, false, speed.
+        let none = postcard::to_allocvec(&st(None)).unwrap();
+        assert_eq!(none.last(), Some(&0));
+        let some = postcard::to_allocvec(&st(Some(1000))).unwrap();
+        assert_eq!(&some[some.len() - 3..], &[1, 0xE8, 0x07]);
+        assert_eq!(
+            postcard::from_bytes::<InterfaceStatus>(&some).unwrap(),
+            st(Some(1000))
+        );
+    }
+
+    #[test]
     fn down_reason_table() {
         assert_eq!(ls(true, true).down_reason(), None);
         assert!(ls(true, true).is_up());
@@ -417,6 +488,7 @@ mod tests {
                 link_number: 1,
                 mask: vec![0xff; LACP_CONVERSATION_MASK_LEN],
             }],
+            discard_wrong: true,
         });
         let bytes = postcard::to_allocvec(&req).unwrap();
         let InterfaceRequest::PushLacpConversations(back) = postcard::from_bytes(&bytes).unwrap()
@@ -425,5 +497,6 @@ mod tests {
         };
         assert_eq!(back.links[0].mask.len(), 512);
         assert_eq!(back.aggregate, "bond1");
+        assert!(back.discard_wrong);
     }
 }

@@ -7,12 +7,11 @@
 //! contains an encoded `/` (a static route's subnet, `10.1.0.0%2F16`) stays one
 //! segment — decoding only happens per segment, after the split.
 
-use crate::auth::PeerUser;
+use crate::auth::PeerActor;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::Extension;
 use axum::Json;
 use nos_proto::config_path::{self, ListPosition};
 use nos_proto::{
@@ -58,7 +57,7 @@ fn confirm_timeout(uri: &Uri) -> Result<Option<u32>, ApiError> {
 #[utoipa::path(post, path = "/v1/commit/confirm", tag = "transactions", summary = "Confirm a pending confirmed commit", responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "no confirmed commit is pending")))]
 pub async fn commit_confirm(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
 ) -> ApiResult<impl IntoResponse> {
     committed(d.config(Request::ConfirmCommit { actor }).await?, "confirm")
 }
@@ -67,7 +66,7 @@ pub async fn commit_confirm(
 #[utoipa::path(post, path = "/v1/commit/cancel", tag = "transactions", summary = "Cancel a pending confirmed commit", responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "no confirmed commit is pending")))]
 pub async fn commit_cancel(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
 ) -> ApiResult<impl IntoResponse> {
     committed(d.config(Request::CancelCommit { actor }).await?, "cancel")
 }
@@ -310,7 +309,7 @@ fn missing_tx<T>(r: ApiResult<T>, if_match_sent: bool) -> ApiResult<T> {
 #[utoipa::path(post, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Open (or resume) a transaction", params(("tx" = String, Path, description = "transaction name"), ("base" = Option<String>, Query, description = "blank | current (default current)")), responses((status = 201, body = TransactionSnapshot, description = "created; `ETag` is the transaction's generation"), (status = 200, body = TransactionSnapshot, description = "resumed; `ETag` is the transaction's generation"), (status = 400, body = ErrorBody)))]
 pub async fn open(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     Query(q): Query<OpenQuery>,
 ) -> ApiResult<Response> {
@@ -385,7 +384,7 @@ pub async fn get(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiR
 #[utoipa::path(put, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Set the whole config (or one subsection)", description = "Also the way to push many items in few requests: `PUT /v1/transactions/{tx}/{path}` takes a whole subsection or list. A list PUT REPLACES the list, so one PUT must carry every element of that list; the body is limited to 2 MiB (about 25-30k IPv4 static routes), larger gets 413. Split a bigger set across several lists (e.g. several static routing instances).", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), request_body = Config, responses((status = 200, body = TransactionSnapshot, description = "`ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 422, body = ErrorBody, description = "semantic refusal: a `<hidden>` secret with no earlier value, or too many clear-text passwords in one edit"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation"), (status = 413, body = ErrorBody, description = "body over 2 MiB: split the list across several lists")))]
 pub async fn put(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -417,7 +416,7 @@ async fn edit(
     if_match: Option<Vec<u64>>,
     sent: bool,
     position: Option<ListPosition>,
-    actor: Option<String>,
+    actor: Option<nos_proto::Actor>,
 ) -> ApiResult<Response> {
     let (generation, dirty, value) = path_edit(missing_tx(
         d.config(Request::EditTransactionPath {
@@ -454,7 +453,7 @@ async fn edit(
 #[utoipa::path(patch, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Merge-patch the whole config (or one subsection)", description = "RFC 7396 JSON Merge Patch with `Content-Type: application/merge-patch+json` (415 otherwise): an object member sets or merges that key, `null` deletes it, anything else (arrays included) replaces. A list PATCH therefore equals a PUT; patch one element through its keyed URL (`.../peer/10.0.0.1`). Everything else (If-Match, validation, `<hidden>` secrets, 2 MiB limit) is as for PUT.", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), request_body(content = Value, content_type = "application/merge-patch+json"), responses((status = 200, body = TransactionSnapshot, description = "the stored value; `ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation"), (status = 413, body = ErrorBody, description = "body over 2 MiB"), (status = 415, body = ErrorBody, description = "Content-Type is not application/merge-patch+json"), (status = 422, body = ErrorBody, description = "semantic refusal, as for PUT")))]
 pub async fn patch(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -522,7 +521,7 @@ fn path_edit(ev: Event) -> ApiResult<(u64, bool, Option<String>)> {
 #[utoipa::path(delete, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Discard the transaction", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist")), responses((status = 204), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation")))]
 pub async fn delete(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
@@ -569,7 +568,7 @@ pub async fn diff(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<ConfigDi
 #[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or a list of `ETag`s (strong comparison); refused (412) unless one still matches, or if the transaction does not exist"), ("confirm-timeout" = Option<u32>, Query, description = "confirmed commit (RFC 6241 8.4): roll back after this many seconds (30 to 86400) unless confirmed with `POST /v1/commit/confirm` or a plain commit by an admin")), responses((status = 200, body = CommitResult), (status = 409, body = ErrorBody, description = "a confirmed commit is already pending"), (status = 422, body = ErrorBody, description = "validation failed, or the commit would remove every user or carry an invalid syslog trust-anchor; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
 pub async fn commit(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     uri: Uri,
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
@@ -613,10 +612,7 @@ pub async fn status(State(d): State<Daemons>) -> ApiResult<Json<ConfigStatus>> {
 /// `POST /v1/config/save` — persist the running config to disk, like the
 /// CLI's `save`. A commit is live but not persisted until this is called.
 #[utoipa::path(post, path = "/v1/config/save", tag = "transactions", summary = "Save the running config to disk", responses((status = 204, description = "the running config was written to disk"), (status = 502, body = ErrorBody, description = "nos-configd has no config file, or could not write it")))]
-pub async fn save(
-    State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
-) -> ApiResult<StatusCode> {
+pub async fn save(State(d): State<Daemons>, PeerActor(actor): PeerActor) -> ApiResult<StatusCode> {
     match d.config(Request::Save { actor }).await {
         Ok(Event::Saved) => Ok(StatusCode::NO_CONTENT),
         Ok(other) => Err(unexpected("nos-configd", &other)),
@@ -643,7 +639,7 @@ pub async fn history(State(d): State<Daemons>) -> ApiResult<Json<Vec<HistoryEntr
 #[utoipa::path(post, path = "/v1/rollback/{n}", tag = "transactions", summary = "Roll back the last n commits", params(("n" = u32, Path, description = "how many commits to go back; 0 does nothing")), responses((status = 200, body = CommitResult), (status = 404, body = ErrorBody, description = "n is beyond the kept history"), (status = 422, body = ErrorBody, description = "the old config no longer validates, or would remove every user")))]
 pub async fn rollback(
     State(d): State<Daemons>,
-    Extension(PeerUser(actor, _)): Extension<PeerUser>,
+    PeerActor(actor): PeerActor,
     axum::extract::Path(n): axum::extract::Path<u32>,
 ) -> ApiResult<impl IntoResponse> {
     match d.config(Request::Rollback { index: n, actor }).await? {

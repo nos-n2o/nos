@@ -9,6 +9,7 @@ pub const REVISION: &str = env!("NOS_BUILD_REV");
 
 /// What `show version` / `GET /v1/version` report.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInfo {
     /// `CARGO_PKG_VERSION`.

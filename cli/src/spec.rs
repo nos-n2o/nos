@@ -288,6 +288,36 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Operational,
         Command::Save
     ),
+    cmd!(["show" "aaa" "users"],
+        Doc::Local {
+            summary: "Show the externally authenticated users that have an ssh account entry.",
+            detail: "Lists the names (RADIUS or TACACS+ users) nos-configd gave a persistent \
+                     uid after an accepted login, or an administrator allocated. Admin only.",
+        },
+        Always,
+        Command::ShowAaaUsers),
+    cmd!(["allocate" "aaa" "user" (name: Plain)],
+        Doc::Local {
+            summary: "Give an external user a persistent uid and ssh account entry.",
+            detail: "Allocates the name an account entry ahead of its first login, so an \
+                     ssh-only user need not log in through the shell first. The name must be a \
+                     valid unix user name, not a local user, not in /etc/passwd. The uid is never \
+                     reused. Admin only.",
+        },
+        Always,
+        |name| Command::AllocateAaaUser {
+            name: name.to_string(),
+        }),
+    cmd!(["clear" "aaa" "user" (name: Plain)],
+        Doc::Local {
+            summary: "Remove an external user's ssh account entry.",
+            detail: "Drops the entry from the passwd file; the uid stays reserved for that \
+                     name and is never given to another. Admin only.",
+        },
+        Always,
+        |name| Command::ClearAaaUser {
+            name: name.to_string(),
+        }),
     cmd!(
         ["show" "configuration" "history"],
         Doc::FromConfig(Topic::ShowHistory),

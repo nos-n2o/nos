@@ -13,6 +13,7 @@ use crate::schema::Config;
 /// Whether a diffed section is wholly new, wholly gone, or has some fields
 /// changed within it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffStatus {
     /// Present only in the new config.
@@ -27,6 +28,7 @@ pub enum DiffStatus {
 /// field within a `SectionDiff`. Values are pre-formatted strings; the
 /// client only needs to display them, never interpret them.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDiff {
     /// Human-readable name of the object.
@@ -40,6 +42,7 @@ pub struct FieldDiff {
 /// A single named/keyed section (e.g. one BGP instance) that changed between
 /// two configs, and the specific fields within it that did.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SectionDiff {
     /// Context line identifying the section, e.g. "bgp instance foo" —
@@ -66,6 +69,7 @@ pub struct SectionDiff {
 /// is included — no unchanged section or field is ever present, so a client
 /// can render this directly as a minimal, context-aware diff.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigDiff {
     /// Hostname change, if any.
@@ -296,6 +300,7 @@ impl ConfigDiff {
 /// Which top-level `ConfigDiff` sections a diff subscriber cares about — see
 /// `Request::SubscribeDiff`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffScope {
     /// The hostname.

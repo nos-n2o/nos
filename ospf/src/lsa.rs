@@ -73,6 +73,307 @@ pub const RI_CAP_GR_HELPER: u32 = 1 << 30;
 pub const RI_CAP_STUB_ROUTER: u32 = 1 << 29;
 pub const RI_CAP_HOST_ROUTER: u32 = 1 << 24;
 
+/// RFC 3630 §2.1: the Traffic Engineering LSA's opaque type (1), so its Link
+/// State IDs are `1.x.y.z`. Area scope (type 10). One top-level TLV per LSA
+/// (§2.3.1): opaque ID 0 holds the Router Address TLV, ID `n >= 1` one Link
+/// TLV (`te_link_state_id`).
+pub const OPAQUE_TYPE_TE: u8 = 1;
+const TLV_TE_ROUTER_ADDRESS: u16 = 1;
+const TLV_TE_LINK: u16 = 2;
+/// RFC 3630 §2.5 Link TLV sub-TLVs.
+const TE_LINK_TYPE: u16 = 1;
+const TE_LINK_ID: u16 = 2;
+const TE_LOCAL_ADDR: u16 = 3;
+const TE_REMOTE_ADDR: u16 = 4;
+const TE_METRIC: u16 = 5;
+const TE_MAX_BW: u16 = 6;
+const TE_MAX_RESERVABLE_BW: u16 = 7;
+const TE_UNRESERVED_BW: u16 = 8;
+const TE_ADMIN_GROUP: u16 = 9;
+/// RFC 3630 §2.5.1 link types.
+pub const TE_LINK_POINT_TO_POINT: u8 = 1;
+pub const TE_LINK_MULTI_ACCESS: u8 = 2;
+
+/// The Router Address LSA's Link State ID (opaque type 1, ID 0).
+pub const TE_ROUTER_ADDRESS_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_TE, 0, 0, 0);
+
+/// The Link State ID of the `n`th (`n >= 1`) Link TLV LSA.
+pub fn te_link_state_id(n: u32) -> Ipv4Addr {
+    let b = n.to_be_bytes();
+    Ipv4Addr::new(OPAQUE_TYPE_TE, b[1], b[2], b[3])
+}
+
+/// One RFC 3630 Link TLV. Bandwidths are IEEE 754 single precision, bytes per
+/// second (§2.5.6-8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeLink {
+    /// `TE_LINK_POINT_TO_POINT` or `TE_LINK_MULTI_ACCESS`.
+    pub link_type: u8,
+    /// The neighbor's router id (point-to-point) or the DR's interface address.
+    pub link_id: Ipv4Addr,
+    /// This router's interface address.
+    pub local_addr: Ipv4Addr,
+    /// The neighbor's interface address (point-to-point only).
+    pub remote_addr: Option<Ipv4Addr>,
+    /// TE metric, here the OSPF cost.
+    pub metric: u32,
+    /// Maximum bandwidth.
+    pub max_bandwidth: f32,
+    /// Maximum reservable bandwidth.
+    pub max_reservable: f32,
+    /// Unreserved bandwidth per priority 0-7.
+    pub unreserved: [f32; 8],
+    /// Administrative group bit mask.
+    pub admin_group: u32,
+}
+
+/// A decoded TE LSA body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TeBody {
+    /// The Router Address TLV: a stable, always-reachable address.
+    RouterAddress(Ipv4Addr),
+    /// A Link TLV.
+    Link(TeLink),
+}
+
+/// A Router Address LSA body (RFC 3630 §2.4.1).
+pub fn encode_te_router_address(addr: Ipv4Addr) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    put_tlv(&mut buf, TLV_TE_ROUTER_ADDRESS, &addr.octets());
+    buf
+}
+
+/// A Link LSA body (RFC 3630 §2.4.2).
+pub fn encode_te_link(l: &TeLink) -> Vec<u8> {
+    let mut sub = Vec::new();
+    put_tlv(&mut sub, TE_LINK_TYPE, &[l.link_type]);
+    put_tlv(&mut sub, TE_LINK_ID, &l.link_id.octets());
+    put_tlv(&mut sub, TE_LOCAL_ADDR, &l.local_addr.octets());
+    if let Some(r) = l.remote_addr {
+        put_tlv(&mut sub, TE_REMOTE_ADDR, &r.octets());
+    }
+    put_tlv(&mut sub, TE_METRIC, &l.metric.to_be_bytes());
+    put_tlv(&mut sub, TE_MAX_BW, &l.max_bandwidth.to_be_bytes());
+    put_tlv(
+        &mut sub,
+        TE_MAX_RESERVABLE_BW,
+        &l.max_reservable.to_be_bytes(),
+    );
+    let unreserved: Vec<u8> = l.unreserved.iter().flat_map(|f| f.to_be_bytes()).collect();
+    put_tlv(&mut sub, TE_UNRESERVED_BW, &unreserved);
+    put_tlv(&mut sub, TE_ADMIN_GROUP, &l.admin_group.to_be_bytes());
+    let mut buf = Vec::with_capacity(sub.len() + 4);
+    put_tlv(&mut buf, TLV_TE_LINK, &sub);
+    buf
+}
+
+/// Splits a TLV run into `(type, value)`; `None` when a TLV overruns it.
+fn tlvs(mut data: &[u8]) -> Option<Vec<(u16, &[u8])>> {
+    let mut out = Vec::new();
+    while data.len() >= 4 {
+        let t = u16::from_be_bytes([data[0], data[1]]);
+        let len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+        out.push((t, data.get(4..4 + len)?));
+        data = data.get(4 + len.next_multiple_of(4)..).unwrap_or_default();
+    }
+    Some(out)
+}
+
+fn addr4(v: &[u8]) -> Option<Ipv4Addr> {
+    <[u8; 4]>::try_from(v).ok().map(Ipv4Addr::from)
+}
+
+fn f32_at(v: &[u8]) -> Option<f32> {
+    <[u8; 4]>::try_from(v).ok().map(f32::from_be_bytes)
+}
+
+fn u32_at(v: &[u8]) -> Option<u32> {
+    <[u8; 4]>::try_from(v).ok().map(u32::from_be_bytes)
+}
+
+/// A received type 10 opaque type 1 LSA's first known top-level TLV. Unknown
+/// top-level TLVs and Link sub-TLVs are skipped on decode (the LSA itself is
+/// held and re-flooded as the raw bytes, so nothing is lost); `None` for
+/// anything else or a malformed or incomplete body.
+pub fn decode_te(lsa: &Lsa) -> Option<TeBody> {
+    if lsa.header.lsa_type != LSA_TYPE_OPAQUE_AREA
+        || opaque_type(lsa.header.link_state_id) != OPAQUE_TYPE_TE
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    for (t, v) in tlvs(body)? {
+        match t {
+            TLV_TE_ROUTER_ADDRESS => return addr4(v).map(TeBody::RouterAddress),
+            TLV_TE_LINK => {
+                let (mut ty, mut id, mut local, mut remote) = (None, None, None, None);
+                let (mut metric, mut max, mut resv, mut unres, mut admin) =
+                    (None, None, None, None, None);
+                for (st, sv) in tlvs(v)? {
+                    match st {
+                        TE_LINK_TYPE => ty = sv.first().copied(),
+                        TE_LINK_ID => id = addr4(sv),
+                        TE_LOCAL_ADDR => local = addr4(sv),
+                        TE_REMOTE_ADDR => remote = addr4(sv),
+                        TE_METRIC => metric = u32_at(sv),
+                        TE_MAX_BW => max = f32_at(sv),
+                        TE_MAX_RESERVABLE_BW => resv = f32_at(sv),
+                        TE_UNRESERVED_BW if sv.len() == 32 => {
+                            unres = Some(std::array::from_fn(|i| {
+                                f32_at(&sv[4 * i..4 * i + 4]).unwrap_or(0.0)
+                            }));
+                        }
+                        TE_ADMIN_GROUP => admin = u32_at(sv),
+                        _ => {}
+                    }
+                }
+                // RFC 3630 §2.5: only the type and the link id are mandatory;
+                // the rest default to zero / absent.
+                return Some(TeBody::Link(TeLink {
+                    link_type: ty?,
+                    link_id: id?,
+                    local_addr: local.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    remote_addr: remote,
+                    metric: metric.unwrap_or(0),
+                    max_bandwidth: max.unwrap_or(0.0),
+                    max_reservable: resv.unwrap_or(0.0),
+                    unreserved: unres.unwrap_or([0.0; 8]),
+                    admin_group: admin.unwrap_or(0),
+                }));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// RFC 7684 §2: Extended Prefix (opaque type 7) and Extended Link (8) LSAs,
+/// area scope (type 10). The opaque ID is the TLV's instance: each LSA holds
+/// exactly one top-level TLV (type 1 in both), so a router allocates one ID
+/// per prefix or link (`ext_state_id`).
+pub const OPAQUE_TYPE_EXT_PREFIX: u8 = 7;
+pub const OPAQUE_TYPE_EXT_LINK: u8 = 8;
+const TLV_EXT_PREFIX: u16 = 1;
+const TLV_EXT_LINK: u16 = 1;
+/// RFC 7684 §2.1 Route Type: 0 unspecified, 1 intra-area, 3 inter-area, 5
+/// external, 7 NSSA external.
+pub const EXT_ROUTE_INTRA_AREA: u8 = 1;
+/// RFC 7684 §2.1 flags: A (attach, prefix from another area) and N (node: a
+/// host prefix naming the advertising router).
+pub const EXT_PREFIX_FLAG_A: u8 = 0x80;
+pub const EXT_PREFIX_FLAG_N: u8 = 0x40;
+
+/// The Link State ID of the Extended Prefix (`opaque_type` 7) or Extended Link
+/// (8) LSA with opaque ID `n`.
+pub fn ext_state_id(opaque_type: u8, n: u32) -> Ipv4Addr {
+    let b = n.to_be_bytes();
+    Ipv4Addr::new(opaque_type, b[1], b[2], b[3])
+}
+
+/// One RFC 7684 §2.1 Extended Prefix TLV. IPv4 only (address family 0).
+/// `sub_tlvs` is the verbatim, 4-byte-aligned sub-TLV run: unknown ones are
+/// kept and re-flooded, the SR sub-TLVs (#1168) are built into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedPrefix {
+    pub route_type: u8,
+    pub prefix: Ipv4Addr,
+    pub prefix_len: u8,
+    pub flags: u8,
+    pub sub_tlvs: Vec<u8>,
+}
+
+/// One RFC 7684 §3.1 Extended Link TLV: the Router-LSA link it extends is
+/// identified by type, Link ID and Link Data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedLink {
+    pub link_type: u8,
+    pub link_id: Ipv4Addr,
+    pub link_data: Ipv4Addr,
+    pub sub_tlvs: Vec<u8>,
+}
+
+/// An Extended Prefix LSA body.
+pub fn encode_extended_prefix(p: &ExtendedPrefix) -> Vec<u8> {
+    let mut v = vec![p.route_type, p.prefix_len, 0, p.flags];
+    // §2.1: the prefix in whole 32-bit words, so 0 octets for /0, else 4.
+    if p.prefix_len > 0 {
+        v.extend_from_slice(&p.prefix.octets());
+    }
+    v.extend_from_slice(&p.sub_tlvs);
+    let mut buf = Vec::with_capacity(v.len() + 4);
+    put_tlv(&mut buf, TLV_EXT_PREFIX, &v);
+    buf
+}
+
+/// An Extended Link LSA body.
+pub fn encode_extended_link(l: &ExtendedLink) -> Vec<u8> {
+    let mut v = vec![l.link_type, 0, 0, 0];
+    v.extend_from_slice(&l.link_id.octets());
+    v.extend_from_slice(&l.link_data.octets());
+    v.extend_from_slice(&l.sub_tlvs);
+    let mut buf = Vec::with_capacity(v.len() + 4);
+    put_tlv(&mut buf, TLV_EXT_LINK, &v);
+    buf
+}
+
+/// The first top-level TLV of `tlv` type in a type 10 opaque LSA of `opaque`
+/// type; `None` for anything else or a malformed run.
+fn ext_tlv(lsa: &Lsa, opaque: u8, tlv: u16) -> Option<&[u8]> {
+    if lsa.header.lsa_type != LSA_TYPE_OPAQUE_AREA
+        || opaque_type(lsa.header.link_state_id) != opaque
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    tlvs(body)?
+        .into_iter()
+        .find(|(t, _)| *t == tlv)
+        .map(|(_, v)| v)
+}
+
+/// A received Extended Prefix LSA's TLV (RFC 7684 §2.1). `None` for a
+/// non-IPv4 address family, a prefix length over 32, or a short or malformed
+/// TLV or sub-TLV run.
+pub fn decode_extended_prefix(lsa: &Lsa) -> Option<ExtendedPrefix> {
+    let v = ext_tlv(lsa, OPAQUE_TYPE_EXT_PREFIX, TLV_EXT_PREFIX)?;
+    let [route_type, prefix_len, af, flags, rest @ ..] = v else {
+        return None;
+    };
+    if *af != 0 || *prefix_len > 32 {
+        return None;
+    }
+    let (prefix, sub_tlvs) = if *prefix_len == 0 {
+        (Ipv4Addr::UNSPECIFIED, rest)
+    } else {
+        (addr4(rest.get(..4)?)?, &rest[4..])
+    };
+    tlvs(sub_tlvs)?;
+    Some(ExtendedPrefix {
+        route_type: *route_type,
+        prefix,
+        prefix_len: *prefix_len,
+        flags: *flags,
+        sub_tlvs: sub_tlvs.to_vec(),
+    })
+}
+
+/// A received Extended Link LSA's TLV (RFC 7684 §3.1); `None` when malformed.
+pub fn decode_extended_link(lsa: &Lsa) -> Option<ExtendedLink> {
+    let v = ext_tlv(lsa, OPAQUE_TYPE_EXT_LINK, TLV_EXT_LINK)?;
+    let sub_tlvs = v.get(12..)?;
+    tlvs(sub_tlvs)?;
+    Some(ExtendedLink {
+        link_type: v[0],
+        link_id: addr4(&v[4..8])?,
+        link_data: addr4(&v[8..12])?,
+        sub_tlvs: sub_tlvs.to_vec(),
+    })
+}
+
 /// An RI LSA body carrying only the Informational Capabilities TLV. Held as
 /// `LsaBody::Opaque`, like any other opaque body.
 pub fn encode_router_info(capabilities: u32) -> Vec<u8> {
@@ -106,6 +407,194 @@ pub fn router_info_capabilities(lsa: &Lsa) -> Option<u32> {
         data = data.get(4 + len.next_multiple_of(4)..).unwrap_or_default();
     }
     None
+}
+
+/// RFC 8665 §3.1/§3.2: the SR-Algorithm and SID/Label Range TLVs of the RI LSA.
+const TLV_RI_SR_ALGORITHM: u16 = 8;
+const TLV_RI_SID_LABEL_RANGE: u16 = 9;
+/// RFC 8665 §2.3 sub-TLV of the SID/Label Range TLV: a label (length 3) or SID.
+const SUB_SID_LABEL: u16 = 1;
+/// RFC 8665 §5/§6/§7 sub-TLV types (Extended Prefix, Extended Link).
+const SUB_PREFIX_SID: u16 = 2;
+const SUB_ADJ_SID: u16 = 2;
+const SUB_LAN_ADJ_SID: u16 = 3;
+/// The only algorithm built: SPF.
+pub const SR_ALGO_SPF: u8 = 0;
+/// RFC 8665 §5 Prefix-SID flags: NP (no PHP), E (explicit null), V (value is
+/// a label), L (local).
+pub const PREFIX_SID_FLAG_NP: u8 = 0x40;
+pub const PREFIX_SID_FLAG_E: u8 = 0x10;
+const PREFIX_FLAG_V: u8 = 0x08;
+const PREFIX_FLAG_L: u8 = 0x04;
+/// RFC 8665 §6 Adj-SID flags: B (backup), V, L.
+pub const ADJ_SID_FLAG_B: u8 = 0x80;
+const ADJ_FLAG_V: u8 = 0x40;
+const ADJ_FLAG_L: u8 = 0x20;
+
+/// A router's RFC 8665 SR capability from its RI LSA: the algorithms and the
+/// SRGB ranges `(first label, size)`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RouterInfoSr {
+    pub algorithms: Vec<u8>,
+    pub srgb: Vec<(u32, u32)>,
+}
+
+/// An RI LSA body: the capabilities TLV, and when `srgb` is set the
+/// SR-Algorithm (SPF only) and SID/Label Range TLVs.
+pub fn encode_router_info_sr(capabilities: u32, srgb: Option<(u32, u32)>) -> Vec<u8> {
+    let mut buf = encode_router_info(capabilities);
+    if let Some((start, range)) = srgb {
+        put_tlv(&mut buf, TLV_RI_SR_ALGORITHM, &[SR_ALGO_SPF]);
+        let r = range.to_be_bytes();
+        let mut v = vec![r[1], r[2], r[3], 0];
+        put_tlv(&mut v, SUB_SID_LABEL, &start.to_be_bytes()[1..]);
+        put_tlv(&mut buf, TLV_RI_SID_LABEL_RANGE, &v);
+    }
+    buf
+}
+
+/// A received RI LSA's SR TLVs; `None` for anything but a well-formed RI LSA
+/// carrying an SR-Algorithm TLV. Ranges with a SID (not label) base, and a
+/// malformed one, are skipped.
+pub fn decode_router_info_sr(lsa: &Lsa) -> Option<RouterInfoSr> {
+    if !matches!(
+        lsa.header.lsa_type,
+        LSA_TYPE_OPAQUE_AREA | LSA_TYPE_OPAQUE_AS
+    ) || opaque_type(lsa.header.link_state_id) != OPAQUE_TYPE_ROUTER_INFO
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    let mut sr = RouterInfoSr::default();
+    let mut seen = false;
+    for (t, v) in tlvs(body)? {
+        if t == TLV_RI_SR_ALGORITHM {
+            seen = true;
+            sr.algorithms.extend_from_slice(v);
+        } else if t == TLV_RI_SID_LABEL_RANGE && v.len() >= 4 {
+            let size = u32::from_be_bytes([0, v[0], v[1], v[2]]);
+            for (st, sv) in tlvs(&v[4..]).unwrap_or_default() {
+                if st == SUB_SID_LABEL && sv.len() == 3 {
+                    let first = u32::from_be_bytes([0, sv[0], sv[1], sv[2]]) & 0xF_FFFF;
+                    sr.srgb.push((first, size));
+                }
+            }
+        }
+    }
+    seen.then_some(sr)
+}
+
+/// One RFC 8665 §5 Prefix-SID: `value` is an index into the SRGB, or a label
+/// when `absolute` (V and L flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixSid {
+    pub flags: u8,
+    pub algorithm: u8,
+    pub value: u32,
+    pub absolute: bool,
+}
+
+/// The Prefix-SID sub-TLV for `index` (V and L clear, algorithm SPF), NP set
+/// by `no_php` and E by `explicit_null`.
+pub fn encode_prefix_sid(index: u32, no_php: bool, explicit_null: bool) -> Vec<u8> {
+    let mut flags = 0;
+    if no_php {
+        flags |= PREFIX_SID_FLAG_NP;
+    }
+    if explicit_null {
+        flags |= PREFIX_SID_FLAG_E;
+    }
+    let mut v = vec![flags, 0, SR_ALGO_SPF, 0];
+    v.extend_from_slice(&index.to_be_bytes());
+    let mut buf = Vec::new();
+    put_tlv(&mut buf, SUB_PREFIX_SID, &v);
+    buf
+}
+
+/// The first well-formed Prefix-SID in an Extended Prefix TLV's sub-TLV run.
+pub fn decode_prefix_sid(sub_tlvs: &[u8]) -> Option<PrefixSid> {
+    tlvs(sub_tlvs)?.into_iter().find_map(|(t, v)| {
+        if t != SUB_PREFIX_SID || v.len() < 7 {
+            return None;
+        }
+        let absolute = v[0] & PREFIX_FLAG_V != 0 && v[0] & PREFIX_FLAG_L != 0;
+        let value = if absolute {
+            u32::from_be_bytes([0, v[4], v[5], v[6]]) & 0xF_FFFF
+        } else {
+            u32_at(v.get(4..8)?)?
+        };
+        Some(PrefixSid {
+            flags: v[0],
+            algorithm: v[2],
+            value,
+            absolute,
+        })
+    })
+}
+
+/// One RFC 8665 §6/§7 Adj-SID or LAN Adj-SID; `neighbor` is the LAN form's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdjSid {
+    pub flags: u8,
+    pub weight: u8,
+    pub neighbor: Option<Ipv4Addr>,
+    pub value: u32,
+    pub absolute: bool,
+}
+
+/// An Adj-SID (`neighbor` None) or LAN Adj-SID sub-TLV carrying `label` (V and
+/// L set, 3 octets).
+pub fn encode_adj_sid(label: u32, weight: u8, backup: bool, neighbor: Option<Ipv4Addr>) -> Vec<u8> {
+    let flags = ADJ_FLAG_V | ADJ_FLAG_L | if backup { ADJ_SID_FLAG_B } else { 0 };
+    let mut v = vec![flags, 0, weight, 0];
+    if let Some(n) = neighbor {
+        v.extend_from_slice(&n.octets());
+    }
+    v.extend_from_slice(&label.to_be_bytes()[1..]);
+    let mut buf = Vec::new();
+    let t = if neighbor.is_some() {
+        SUB_LAN_ADJ_SID
+    } else {
+        SUB_ADJ_SID
+    };
+    put_tlv(&mut buf, t, &v);
+    buf
+}
+
+/// Every well-formed Adj-SID and LAN Adj-SID in an Extended Link TLV's
+/// sub-TLV run; a malformed one is skipped.
+pub fn decode_adj_sids(sub_tlvs: &[u8]) -> Vec<AdjSid> {
+    let mut out = Vec::new();
+    for (t, v) in tlvs(sub_tlvs).unwrap_or_default() {
+        let lan = t == SUB_LAN_ADJ_SID;
+        if (t != SUB_ADJ_SID && !lan) || v.len() < 4 {
+            continue;
+        }
+        let (neighbor, rest) = if lan {
+            match v.get(4..8).and_then(addr4) {
+                Some(n) => (Some(n), &v[8..]),
+                None => continue,
+            }
+        } else {
+            (None, &v[4..])
+        };
+        let absolute = v[0] & ADJ_FLAG_V != 0 && v[0] & ADJ_FLAG_L != 0;
+        let value = match (absolute, rest.len()) {
+            (true, 3) => u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) & 0xF_FFFF,
+            (false, 4) => u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]),
+            _ => continue,
+        };
+        out.push(AdjSid {
+            flags: v[0],
+            weight: v[2],
+            neighbor,
+            value,
+            absolute,
+        });
+    }
+    out
 }
 
 /// RFC 5250 §3: types 9-11. Only sent to a neighbor whose DBD set the O-bit.
@@ -1336,5 +1825,258 @@ mod tests {
         let mut wire = unhex(hex);
         wire.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(decode_lsa(&wire).unwrap().header.checksum, checksum);
+    }
+
+    fn te_lsa(id: Ipv4Addr, body: Vec<u8>) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0x20,
+                lsa_type: LSA_TYPE_OPAQUE_AREA,
+                link_state_id: id,
+                advertising_router: Ipv4Addr::new(1, 1, 1, 1),
+                sequence_number: i32::MIN + 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Opaque(body),
+        }
+    }
+
+    fn te_link() -> TeLink {
+        TeLink {
+            link_type: TE_LINK_POINT_TO_POINT,
+            link_id: Ipv4Addr::new(2, 2, 2, 2),
+            local_addr: Ipv4Addr::new(10, 0, 0, 1),
+            remote_addr: Some(Ipv4Addr::new(10, 0, 0, 2)),
+            metric: 10,
+            max_bandwidth: 125_000_000.0,
+            max_reservable: 100_000_000.0,
+            unreserved: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            admin_group: 0xa5,
+        }
+    }
+
+    #[test]
+    fn te_router_address_and_link_round_trip() {
+        let a = Ipv4Addr::new(192, 0, 2, 1);
+        let lsa = te_lsa(TE_ROUTER_ADDRESS_LINK_STATE_ID, encode_te_router_address(a));
+        assert_eq!(decode_te(&lsa), Some(TeBody::RouterAddress(a)));
+        assert_eq!(opaque_type(te_link_state_id(0x0102_0304)), OPAQUE_TYPE_TE);
+        assert_eq!(te_link_state_id(0x0002_0304), Ipv4Addr::new(1, 2, 3, 4));
+        for remote in [Some(Ipv4Addr::new(10, 0, 0, 2)), None] {
+            let l = TeLink {
+                remote_addr: remote,
+                ..te_link()
+            };
+            let lsa = te_lsa(te_link_state_id(1), encode_te_link(&l));
+            assert_eq!(decode_te(&lsa), Some(TeBody::Link(l)));
+        }
+    }
+
+    /// A sub-TLV this router doesn't know is skipped, the known ones still
+    /// decode; a truncated body, a missing mandatory sub-TLV, another opaque
+    /// type or scope decode to nothing.
+    #[test]
+    fn te_decode_skips_unknown_and_rejects_malformed() {
+        let mut sub = Vec::new();
+        put_tlv(&mut sub, 0x7000, &[1, 2, 3]);
+        put_tlv(&mut sub, TE_LINK_TYPE, &[TE_LINK_MULTI_ACCESS]);
+        put_tlv(&mut sub, TE_LINK_ID, &[9, 9, 9, 9]);
+        let mut body = Vec::new();
+        put_tlv(&mut body, 0x7001, &[0; 4]);
+        put_tlv(&mut body, TLV_TE_LINK, &sub);
+        let lsa = te_lsa(te_link_state_id(1), body);
+        let Some(TeBody::Link(l)) = decode_te(&lsa) else {
+            panic!("link expected")
+        };
+        assert_eq!(
+            (l.link_type, l.link_id, l.metric),
+            (2, Ipv4Addr::new(9, 9, 9, 9), 0)
+        );
+        assert_eq!(l.remote_addr, None);
+
+        let good = encode_te_router_address(Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            decode_te(&te_lsa(te_link_state_id(1), good[..6].to_vec())),
+            None
+        );
+        let mut no_id = Vec::new();
+        let mut s2 = Vec::new();
+        put_tlv(&mut s2, TE_LINK_TYPE, &[1]);
+        put_tlv(&mut no_id, TLV_TE_LINK, &s2);
+        assert_eq!(decode_te(&te_lsa(te_link_state_id(1), no_id)), None);
+        let mut other = te_lsa(Ipv4Addr::new(4, 0, 0, 0), good);
+        assert_eq!(decode_te(&other), None);
+        other.header.link_state_id = TE_ROUTER_ADDRESS_LINK_STATE_ID;
+        other.header.lsa_type = LSA_TYPE_OPAQUE_LINK;
+        assert_eq!(decode_te(&other), None);
+        other.header.lsa_type = LSA_TYPE_OPAQUE_AREA;
+        other.body = LsaBody::Opaque(Vec::new());
+        assert_eq!(decode_te(&other), None);
+    }
+
+    fn ext_prefix() -> ExtendedPrefix {
+        let mut sub = Vec::new();
+        put_tlv(&mut sub, 0x7777, &[1, 2, 3]);
+        ExtendedPrefix {
+            route_type: EXT_ROUTE_INTRA_AREA,
+            prefix: Ipv4Addr::new(192, 0, 2, 1),
+            prefix_len: 32,
+            flags: EXT_PREFIX_FLAG_N,
+            sub_tlvs: sub,
+        }
+    }
+
+    /// RFC 7684 §2.1/§3.1: both TLVs round-trip, unknown sub-TLV bytes kept
+    /// verbatim; a /0 carries no address octets.
+    #[test]
+    fn extended_prefix_and_link_round_trip_keeping_unknown_sub_tlvs() {
+        let p = ext_prefix();
+        let id = ext_state_id(OPAQUE_TYPE_EXT_PREFIX, 3);
+        assert_eq!(id, Ipv4Addr::new(7, 0, 0, 3));
+        let lsa = te_lsa(id, encode_extended_prefix(&p));
+        assert_eq!(decode_extended_prefix(&lsa), Some(p.clone()));
+        let default = ExtendedPrefix {
+            prefix: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 0,
+            sub_tlvs: Vec::new(),
+            ..p
+        };
+        let body = encode_extended_prefix(&default);
+        assert_eq!(body.len(), 8);
+        assert_eq!(decode_extended_prefix(&te_lsa(id, body)), Some(default));
+
+        let l = ExtendedLink {
+            link_type: LINK_TYPE_POINT_TO_POINT,
+            link_id: Ipv4Addr::new(2, 2, 2, 2),
+            link_data: Ipv4Addr::new(10, 0, 0, 1),
+            sub_tlvs: ext_prefix().sub_tlvs,
+        };
+        let id = ext_state_id(OPAQUE_TYPE_EXT_LINK, 1);
+        let lsa = te_lsa(id, encode_extended_link(&l));
+        assert_eq!(decode_extended_link(&lsa), Some(l));
+        // The wrong decoder never reads the other type.
+        assert_eq!(decode_extended_prefix(&lsa), None);
+    }
+
+    #[test]
+    fn extended_decode_rejects_malformed() {
+        let id = ext_state_id(OPAQUE_TYPE_EXT_PREFIX, 1);
+        let good = encode_extended_prefix(&ext_prefix());
+        let tlv = |v: &[u8]| {
+            let mut b = Vec::new();
+            put_tlv(&mut b, TLV_EXT_PREFIX, v);
+            te_lsa(id, b)
+        };
+        // Truncations at every length never panic.
+        for n in 0..good.len() {
+            let _ = decode_extended_prefix(&te_lsa(id, good[..n].to_vec()));
+        }
+        assert_eq!(decode_extended_prefix(&tlv(&[1, 32, 0])), None);
+        assert_eq!(decode_extended_prefix(&tlv(&[1, 32, 0, 0, 1, 2])), None);
+        assert_eq!(
+            decode_extended_prefix(&tlv(&[1, 33, 0, 0, 1, 2, 3, 4])),
+            None
+        );
+        assert_eq!(
+            decode_extended_prefix(&tlv(&[1, 32, 1, 0, 1, 2, 3, 4])),
+            None
+        );
+        // A sub-TLV that overruns the value.
+        assert_eq!(
+            decode_extended_prefix(&tlv(&[1, 32, 0, 0, 1, 2, 3, 4, 0, 1, 0, 9])),
+            None
+        );
+        let lid = ext_state_id(OPAQUE_TYPE_EXT_LINK, 1);
+        let mut b = Vec::new();
+        put_tlv(&mut b, TLV_EXT_LINK, &[1, 0, 0, 0, 1, 1, 1, 1]);
+        assert_eq!(decode_extended_link(&te_lsa(lid, b)), None);
+        assert_eq!(decode_extended_link(&te_lsa(lid, Vec::new())), None);
+        let mut area = te_lsa(id, good);
+        area.header.lsa_type = LSA_TYPE_OPAQUE_AS;
+        assert_eq!(decode_extended_prefix(&area), None);
+    }
+
+    #[test]
+    fn sr_tlvs_round_trip() {
+        let body = encode_router_info_sr(RI_CAP_GR_HELPER, Some((16000, 8000)));
+        let lsa = te_lsa(ROUTER_INFO_LINK_STATE_ID, body);
+        assert_eq!(router_info_capabilities(&lsa), Some(RI_CAP_GR_HELPER));
+        assert_eq!(
+            decode_router_info_sr(&lsa),
+            Some(RouterInfoSr {
+                algorithms: vec![0],
+                srgb: vec![(16000, 8000)]
+            })
+        );
+        let plain = te_lsa(ROUTER_INFO_LINK_STATE_ID, encode_router_info_sr(1, None));
+        assert_eq!(decode_router_info_sr(&plain), None);
+        let other = te_lsa(ext_state_id(OPAQUE_TYPE_TE, 1), Vec::new());
+        assert_eq!(decode_router_info_sr(&other), None);
+        // Truncations never panic.
+        let full = encode_router_info_sr(1, Some((16000, 8000)));
+        for n in 0..full.len() {
+            let _ = decode_router_info_sr(&te_lsa(ROUTER_INFO_LINK_STATE_ID, full[..n].to_vec()));
+        }
+    }
+
+    #[test]
+    fn prefix_sid_round_trips_inside_an_extended_prefix() {
+        let sub = encode_prefix_sid(7, true, true);
+        assert_eq!(sub.len(), 12);
+        let sid = decode_prefix_sid(&sub).unwrap();
+        assert_eq!(sid.value, 7);
+        assert!(!sid.absolute);
+        assert_eq!(sid.flags, PREFIX_SID_FLAG_NP | PREFIX_SID_FLAG_E);
+        assert_eq!(sid.algorithm, SR_ALGO_SPF);
+        let p = ExtendedPrefix {
+            sub_tlvs: sub,
+            ..ext_prefix()
+        };
+        let lsa = te_lsa(
+            ext_state_id(OPAQUE_TYPE_EXT_PREFIX, 1),
+            encode_extended_prefix(&p),
+        );
+        let got = decode_extended_prefix(&lsa).unwrap();
+        assert_eq!(decode_prefix_sid(&got.sub_tlvs), Some(sid));
+        assert_eq!(decode_prefix_sid(&ext_prefix().sub_tlvs), None);
+        // An absolute (label) SID, and a short one.
+        let mut abs = Vec::new();
+        put_tlv(&mut abs, SUB_PREFIX_SID, &[0x0c, 0, 0, 0, 0x03, 0xe8, 0x80]);
+        let s = decode_prefix_sid(&abs).unwrap();
+        assert_eq!((s.absolute, s.value), (true, 0x3_e880 & 0xF_FFFF));
+        let mut short = Vec::new();
+        put_tlv(&mut short, SUB_PREFIX_SID, &[0, 0, 0, 0, 1]);
+        assert_eq!(decode_prefix_sid(&short), None);
+    }
+
+    #[test]
+    fn adj_sids_round_trip() {
+        let mut run = encode_adj_sid(24001, 0, false, None);
+        run.extend(encode_adj_sid(
+            24002,
+            3,
+            true,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+        ));
+        let got = decode_adj_sids(&run);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].value, got[0].absolute, got[0].neighbor),
+            (24001, true, None)
+        );
+        assert_eq!(got[1].neighbor, Some(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(
+            (got[1].weight, got[1].flags & ADJ_SID_FLAG_B),
+            (3, ADJ_SID_FLAG_B)
+        );
+        // Wrong lengths are skipped, never panic.
+        let mut bad = Vec::new();
+        put_tlv(&mut bad, SUB_ADJ_SID, &[0x60, 0, 0, 0, 1]);
+        put_tlv(&mut bad, SUB_LAN_ADJ_SID, &[0x60, 0, 0, 0, 1]);
+        put_tlv(&mut bad, SUB_ADJ_SID, &[0x00, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(decode_adj_sids(&bad).len(), 0);
+        assert_eq!(decode_adj_sids(&[0, 2, 0, 9]).len(), 0);
     }
 }

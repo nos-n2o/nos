@@ -237,6 +237,37 @@ async fn expect_sub_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #1368: `speed_mbps` on the interface status is the kernel's
+/// `/sys/class/net/<dev>/speed` read at query time (null when it reads -1/0),
+/// and never set for `lo`. What a veth really reports is logged, not assumed.
+pub async fn interface_speed(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let (_, raw) = w
+        .dock
+        .exec("router-a", &["cat", "/sys/class/net/eth0/speed"])
+        .await?;
+    let want = raw.trim().parse::<u32>().ok().filter(|&v| v > 0);
+    log(format!("router-a: kernel eth0 speed reads {raw:?}"));
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let status: serde_json::Value = serde_json::from_str(&body)?;
+    let got = status["speed_mbps"].as_u64();
+    if got != want.map(u64::from) {
+        bail!("router-a: GET /v1/interfaces/eth0 reports speed_mbps {got:?}, sysfs says {want:?}");
+    }
+    log(format!("router-a: rest reports eth0 speed_mbps {got:?}"));
+    // `lo` is not a configured interface (404), or if listed has no speed.
+    let (code, text) = a.rest(Method::GET, "/v1/interfaces/lo", None).await?;
+    if code == 200 {
+        let lo: serde_json::Value = serde_json::from_str(&text)?;
+        if !lo["speed_mbps"].is_null() {
+            bail!("router-a: lo reports speed_mbps {}", lo["speed_mbps"]);
+        }
+    }
+    Ok(())
+}
+
 async fn expect_eth0_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
     let body = a
         .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
@@ -508,6 +539,11 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // #658: a LACPDU carrying router-a's own system id (a looped link) is
     // dropped with a warning and never becomes a partner.
     log("router-a ignores an injected LACPDU carrying its own system id");
+    // The injector sends from router-b's eth1: it must be settled too, or the
+    // send fails ENETDOWN while the bond re-enslavement still cycles the link
+    // (#1332, run 4). The script also retries ENETDOWN.
+    lacp_settled(a, 0).await?;
+    lacp_settled(b, 0).await?;
     let loop_pattern = "lacp loopback detected, ignoring own LACPDUs interface=eth1";
     let loop_base = a.count(loop_pattern);
     let released = "removed interface from master enslavement interface=eth1";
@@ -523,11 +559,12 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // No partner recorded from the injected id: eth1 still shows router-b's
     // configured system id and keeps Distributing (and so its enslavement).
     let eth1 = lacp_port(a, "eth1").await?;
-    anyhow::ensure!(
-        eth1["partner_system_id"] == serde_json::json!([2, 0, 0, 0, 0x0b, 1])
-            && eth1["mux_state"] == "Distributing",
-        "the looped LACPDU disturbed eth1: {eth1}"
-    );
+    if eth1["partner_system_id"] != serde_json::json!([2, 0, 0, 0, 0x0b, 1])
+        || eth1["mux_state"] != "Distributing"
+    {
+        let dump = a.lacp_dump(a.log_mark().saturating_sub(20_000)).await;
+        bail!("the looped LACPDU disturbed eth1: {eth1}{dump}");
+    }
     a.assert_quiet(released, released_base, 5).await?;
 
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
@@ -649,18 +686,90 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
+    lacp_v2(w, &both).await?;
+    lacp_steering(w, &both).await?;
+    lacp_recreated_member(w, a).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
     off.push("--delete-port-aggregate".into());
+    // router-b's aggregate is deleted inside `lacp_linux_peer`, which then
+    // plays a kernel 802.3ad bond on its veth against router-a's v2 config.
+    lacp_linux_peer(w, a, b, &off).await?;
     a.provision(&off).await?;
-    b.provision(&off).await?;
     let deleted = format!("deleted port aggregate bond port_aggregate={LACP_AGGREGATE} bond=");
     a.wait(&deleted).await?;
     b.wait(&deleted).await?;
 
     w.unlink_veths().await;
     Ok(())
+}
+
+/// #1333: a member netdev deleted and recreated under the same name (new
+/// ifindex) must be picked up again: the old `AF_PACKET` socket is bound to
+/// the dead ifindex and never sees a frame. An in-container veth pair
+/// `lpx0`/`lpx1` on router-a, `lpx0` in a throwaway Lacp aggregate, `lpx1`
+/// played by `lacp_partner.py`. `nos-lacpd` notices within its 5 s stale poll,
+/// the task exits and `reconcile`'s 10 s tick respawns it.
+async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
+    log("a recreated member netdev is reopened by nos-lacpd");
+    let netns = async |script: &str| {
+        w.dock
+            .in_netns(NETNS_HELPER_IMAGE, "router-a", &["sh", "-c", script])
+            .await
+    };
+    let mkpair =
+        "ip link add lpx0 type veth peer name lpx1 && ip link set lpx0 up && ip link set lpx1 up";
+    let heard = "lacp lacpdu received interface=lpx0";
+    let partner = async |secs: &str| {
+        w.dock
+            .in_netns(
+                PYTHON_HELPER_IMAGE,
+                "router-a",
+                &["python3", "-c", include_str!("lacp_partner.py"), secs],
+            )
+            .await
+    };
+    netns(mkpair).await?;
+    let flags = strings(&[
+        "--port-aggregate",
+        "lpxagg",
+        "--port-aggregate-mode",
+        "lacp",
+        "--lacp-rate",
+        "fast",
+        "--enslave-interface-into-port-aggregate",
+        "lpx0",
+    ]);
+    let base = a.count(heard);
+    a.provision(&flags).await?;
+    let result = async {
+        partner("8").await?;
+        a.wait_new(heard, base, 20).await?;
+
+        let (heard_base, exit_base) = (
+            a.count(heard),
+            a.count("lacp interface recreated, link task exiting interface=lpx0"),
+        );
+        netns("ip link del lpx0").await?;
+        netns(mkpair).await?;
+        // Up to 5 s (stale poll) + 10 s (reconcile tick) of silence; keep sending.
+        partner("25").await?;
+        a.wait_new(heard, heard_base, 5).await?;
+        a.wait_new(
+            "lacp interface recreated, link task exiting interface=lpx0",
+            exit_base,
+            5,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    let mut del = flags;
+    del.push("--delete-port-aggregate".into());
+    let _ = a.provision(&del).await;
+    let _ = netns("ip link del lpx0").await;
+    result
 }
 
 /// #657: three live `lacp-system-id` changes on router-a against the real
@@ -733,7 +842,24 @@ async fn wait_lacp_ports(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    bail!("{}: {what} never held: {body}", r.name())
+    let dump = r.lacp_dump(r.log_mark().saturating_sub(40_000)).await;
+    bail!("{}: {what} never held: {body}{dump}", r.name())
+}
+
+/// State barrier (#1337): every port Distributing, in sync with its partner
+/// and not churned, held for `hold_ms` (re-checked after it, so a dip inside
+/// the window is not missed). Replaces counting log lines until they stop.
+async fn lacp_settled(r: &Router, hold_ms: u64) -> anyhow::Result<()> {
+    let settled = |p: &serde_json::Value| {
+        p["mux_state"] == "Distributing"
+            && p["synchronized"] == true
+            && p["actor_churn"] == false
+            && p["partner_churn"] == false
+            && p["individual"] == false
+    };
+    wait_lacp_ports(r, "all ports Distributing, in sync, no churn", settled).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
+    wait_lacp_ports(r, "all ports still settled after the hold", settled).await
 }
 
 /// One member port of `LACP_AGGREGATE` in `r`'s `GET /v1/lacp`.
@@ -765,18 +891,13 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     };
     let reconciled = format!("lacp reconciled aggregate members aggregate={LACP_AGGREGATE}");
     // The previous step ends as soon as REST shows Distributing, but the push
-    // that follows is coalesced (PUSH_COALESCE, 1s): wait until the push count
-    // has been stable for 3 polls (1.5s > the coalescing window), so a late
-    // push is not mistaken for a min-links effect.
-    let mut stable = 0;
-    let mut last = a.count(&reconciled);
-    while stable < 3 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let now = a.count(&reconciled);
-        stable = if now == last { stable + 1 } else { 0 };
-        last = now;
-    }
-    let base = a.count(&reconciled);
+    // that follows is coalesced (PUSH_COALESCE, 1s): hold a settled state
+    // across one full window (+margin) on both routers, then let the log
+    // store drain, so a late push is not mistaken for a min-links effect.
+    lacp_settled(b, 0).await?;
+    lacp_settled(a, 2500).await?;
+    a.count_fresh(&reconciled).await;
+    let base = a.count_fresh(&reconciled).await;
     log("min-links 2 with both members Distributing changes nothing");
     a.provision(&min_links("2")).await?;
     a.assert_quiet(&reconciled, base, 5).await?;
@@ -874,6 +995,485 @@ async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
     a.provision(&min_links("1")).await
 }
 
+/// `show lacp` of `LACP_AGGREGATE` on `r`.
+async fn lacp_aggregate(r: &Router) -> anyhow::Result<serde_json::Value> {
+    let body = r
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    let summary: serde_json::Value = serde_json::from_str(&body)?;
+    summary
+        .as_array()
+        .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+        .cloned()
+        .with_context(|| format!("no {LACP_AGGREGATE} in show lacp: {body}"))
+}
+
+/// Polls the aggregate summary on `r` until `want` holds (40s).
+async fn wait_lacp_aggregate(
+    r: &Router,
+    what: &str,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..40 {
+        last = lacp_aggregate(r).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("{}: {what} never held: {last}", r.name())
+}
+
+/// #894 (LACP v2, 802.1AX-2020 6.6): `lacp-version 2` is an explicit opt-in
+/// (the default is 1, so a v1-only partner never sees a v2 PDU). Two NOS
+/// routers agree on a map (flap invariance of the digest is unit-tested: interfaced re-ups a downed veth and a recreated veth leaves the link task on a stale socket); a
+/// swapped `lacp-link-number` is reconciled by Link_Number adoption;
+/// `unspecified` advertises only the algorithm; a v1 partner makes a v2 router
+/// downgrade; and a different map digest is a mismatch. Conversations are
+/// steered whenever a map exists, the collection filter needs agreement.
+async fn lacp_v2(w: &World, both: &[&str]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flags = |version: &str, algorithm: &str, map: Option<&str>| {
+        let mut f = lacp_flags(&[
+            "--lacp-rate",
+            "fast",
+            "--lacp-version",
+            version,
+            "--lacp-port-algorithm",
+            algorithm,
+            "--lacp-link-number",
+            "1",
+        ]);
+        f.extend(strings(both));
+        if let Some(m) = map {
+            f.extend(strings(&["--lacp-conversation-map", m]));
+        }
+        f
+    };
+    let state = |r: &Router, s: &str| {
+        let p = format!("lacp conversation agreement aggregate={LACP_AGGREGATE} state={s}");
+        let base = r.count(&p);
+        (p, base)
+    };
+    let agreement_is = |want: &'static str| {
+        move |s: &serde_json::Value| {
+            s["agreement"] == want
+                && s["ports"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().all(|p| p["mux_state"] == "Distributing"))
+        }
+    };
+
+    log("lacp-version 2 + c-vlan on both routers: the maps agree and are split 2048/2048");
+    let (pa, ba) = state(a, "Agreed");
+    let (pb, bb) = state(b, "Agreed");
+    a.provision(&flags("2", "c-vlan", None)).await?;
+    b.provision(&flags("2", "c-vlan", None)).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    b.wait_new(&pb, bb, 90).await?;
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "agreement Agreed", agreement_is("Agreed")).await?;
+        let s = lacp_aggregate(r).await?;
+        if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]])
+            || s["ports"].as_array().is_none_or(|p| {
+                p.iter()
+                    .any(|p| p["partner_version"] != 2 || p["partner_port_algorithm"] != "CVlan")
+            })
+        {
+            bail!("{}: unexpected v2 summary: {s}", r.name());
+        }
+    }
+    a.wait(&format!(
+        "lacp conversations pushed aggregate={LACP_AGGREGATE} links=2"
+    ))
+    .await?;
+
+    log("router-b numbers its members the other way round: still Agreed, one end adopts the other's Link_Numbers");
+    let adopted = "lacp link number adopted";
+    let (adopted_a, adopted_b) = (a.count(adopted), b.count(adopted));
+    let mut swapped = flags("2", "c-vlan", None);
+    swapped.push("--lacp-link-number-descending".into());
+    b.provision(&swapped).await?;
+    let mut seen = false;
+    for _ in 0..90 {
+        if a.count(adopted) > adopted_a || b.count(adopted) > adopted_b {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !seen {
+        bail!("neither router adopted its partner's Link_Numbers after the swap");
+    }
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "Agreed with split conversations after the swap", |s| {
+            agreement_is("Agreed")(s)
+                && s["conversations_per_link"]
+                    == serde_json::json!([["eth1", 2048], ["eth2", 2048]])
+        })
+        .await?;
+    }
+
+    log(
+        "unspecified algorithm: v2 stays on the wire, agreement is not requested, no conversations",
+    );
+    let (pa, ba) = state(a, "NotRequested");
+    let empty = format!("lacp conversations pushed aggregate={LACP_AGGREGATE} links=0");
+    let push_base = a.count(&empty);
+    a.provision(&flags("2", "unspecified", None)).await?;
+    b.provision(&flags("2", "unspecified", None)).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    a.wait_new(&empty, push_base, 30).await?;
+    wait_lacp_aggregate(a, "v2 partner, no agreement", |s| {
+        s["agreement"] == "NotApplicable"
+            && s["ports"].as_array().is_some_and(|p| {
+                p.iter().all(|p| {
+                    p["partner_version"] == 2 && p["partner_port_algorithm"] == "Unspecified"
+                })
+            })
+    })
+    .await?;
+
+    log("router-b stays on version 1: router-a downgrades to v1 and the ports still bundle");
+    let down = "lacp sent version changed interface=eth1 version=1";
+    let down_base = a.count(down);
+    let (pa, ba) = state(a, "PartnerV1");
+    let steer =
+        format!("lacp conversations pushed aggregate={LACP_AGGREGATE} links=2 discard_wrong=false");
+    let steer_base = a.count(&steer);
+    a.provision(&flags("2", "c-vlan", None)).await?;
+    b.provision(&flags("1", "unspecified", None)).await?;
+    a.wait_new(down, down_base, 90).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    wait_lacp_aggregate(a, "V1Partner and Distributing", agreement_is("V1Partner")).await?;
+    // Steering needs no agreement; the collection filter stays off.
+    a.wait_new(&steer, steer_base, 30).await?;
+    let s = lacp_aggregate(a).await?;
+    if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]]) {
+        bail!("no steering towards a v1 partner: {s}");
+    }
+
+    log("router-b back on v2 with a different explicit map: digest mismatch, plain hashing");
+    let up = "lacp sent version changed interface=eth1 version=2";
+    let up_base = a.count(up);
+    let (pa, ba) = state(a, "Mismatch reason=digest");
+    b.provision(&flags("2", "c-vlan", Some("0-99:eth1,100-4095:eth2")))
+        .await?;
+    a.wait_new(up, up_base, 90).await?;
+    a.wait_new(&pa, ba, 90).await?;
+    wait_lacp_aggregate(a, "Mismatch and Distributing", agreement_is("Mismatch")).await?;
+    let s = lacp_aggregate(a).await?;
+    if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]]) {
+        bail!("a digest mismatch must still steer (filter off): {s}");
+    }
+    Ok(())
+}
+
+/// One member's steering row of `GET /v1/port-aggregates` (#895).
+#[derive(Debug, Clone, PartialEq)]
+struct SteerRow {
+    member: String,
+    conversations: u64,
+    redirected: u64,
+    dropped: u64,
+}
+
+async fn steering_rows(r: &Router) -> anyhow::Result<Vec<SteerRow>> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/port-aggregates", None, 200)
+        .await?;
+    let all: serde_json::Value = serde_json::from_str(&body)?;
+    let agg = all
+        .as_array()
+        .and_then(|v| v.iter().find(|a| a["name"] == LACP_AGGREGATE))
+        .with_context(|| format!("no {LACP_AGGREGATE} in port aggregates: {body}"))?;
+    let n = |row: &serde_json::Value, k: &str| row[k].as_u64().unwrap_or(0);
+    Ok(agg["steering"]
+        .as_array()
+        .context("no steering field")?
+        .iter()
+        .map(|row| SteerRow {
+            member: row["member"].as_str().unwrap_or_default().to_string(),
+            conversations: n(row, "conversations"),
+            redirected: n(row, "redirected_packets"),
+            dropped: n(row, "dropped_packets"),
+        })
+        .collect())
+}
+
+fn row<'a>(rows: &'a [SteerRow], member: &str) -> anyhow::Result<&'a SteerRow> {
+    rows.iter()
+        .find(|r| r.member == member)
+        .with_context(|| format!("no steering row for {member}: {rows:?}"))
+}
+
+async fn lacp_vlan(w: &World, router: &str, args: &[&str]) -> anyhow::Result<()> {
+    let mut cmd = vec!["python3", "-c", include_str!("lacp_vlan.py")];
+    cmd.extend(args);
+    w.dock.in_netns(PYTHON_HELPER_IMAGE, router, &cmd).await?;
+    Ok(())
+}
+
+/// #895: conversation steering on the real kernel. Both routers run `c-vlan`
+/// with the same explicit map (VLAN 10 on eth1, VLAN 20 on eth2) and routed
+/// VLAN sub-interfaces on the aggregate: tc redirects on the bond egress pin
+/// each VLAN to its link, ingress drops on the members implement the
+/// collection filter, and the per-link counters on `show port-aggregate`
+/// (REST `steering`) prove both. Untagged traffic (conversation 0) cannot be
+/// matched by flower and stays on the bond hash, so the LACPDUs themselves
+/// (untagged) are the proof it is unaffected: both ports stay Distributing.
+async fn lacp_steering(w: &World, both: &[&str]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let flags = |me: u8, algorithm: &str, mapped: bool| {
+        let mut f = lacp_flags(&[
+            "--lacp-rate",
+            "fast",
+            "--lacp-version",
+            "2",
+            "--lacp-port-algorithm",
+            algorithm,
+            "--lacp-link-number",
+            "1",
+            "--lacp-conversation-map",
+            // a map needs an algorithm: unspecified clears it (empty value)
+            if algorithm == "unspecified" || !mapped {
+                ""
+            } else {
+                "0-15:eth1,16-4095:eth2"
+            },
+        ]);
+        f.extend(strings(both));
+        for vlan in [10, 20] {
+            f.extend(strings(&[
+                "--port-aggregate-vlan-address",
+                &format!("{vlan}=10.{vlan}.0.{me}/24"),
+            ]));
+        }
+        f
+    };
+    let installed = |links: u8| {
+        format!(
+            "lacp conversation steering installed aggregate={LACP_AGGREGATE} conversations=4094 links={links}"
+        )
+    };
+    let distributing = |s: &serde_json::Value| {
+        s["ports"]
+            .as_array()
+            .is_some_and(|p| p.iter().all(|p| p["mux_state"] == "Distributing"))
+    };
+
+    log("c-vlan + identical explicit maps: both routers install the steering with the collection filter");
+    let full = format!("{} discard_wrong=true", installed(2));
+    let bases = [a.count(&full), b.count(&full)];
+    a.provision(&flags(1, "c-vlan", true)).await?;
+    b.provision(&flags(2, "c-vlan", true)).await?;
+    a.wait_new(&full, bases[0], 90).await?;
+    b.wait_new(&full, bases[1], 90).await?;
+    for r in [a, b] {
+        let rows = steering_rows(r).await?;
+        if rows.iter().map(|x| x.conversations).sum::<u64>() != 4094 || rows.len() != 2 {
+            bail!(
+                "{}: expected 4094 conversations over 2 links: {rows:?}",
+                r.name()
+            );
+        }
+    }
+
+    log("VLAN 10 traffic leaves on eth1 only, VLAN 20 on eth2 only, and nothing is dropped");
+    // ARP/ND of the other VLAN's interface is background noise, hence the slack.
+    let (before_a, before_b) = (steering_rows(a).await?, steering_rows(b).await?);
+    lacp_vlan(w, "router-a", &["udp", "10", "200", "1"]).await?;
+    let mid = steering_rows(a).await?;
+    let d10 = |m: &str| -> anyhow::Result<u64> {
+        Ok(row(&mid, m)?.redirected - row(&before_a, m)?.redirected)
+    };
+    if d10("eth1")? < 150 || d10("eth2")? > 30 {
+        bail!(
+            "VLAN 10 was not pinned to eth1: eth1 +{} eth2 +{}",
+            d10("eth1")?,
+            d10("eth2")?
+        );
+    }
+    lacp_vlan(w, "router-a", &["udp", "20", "200", "1"]).await?;
+    let after = steering_rows(a).await?;
+    let d20 = |m: &str| -> anyhow::Result<u64> {
+        Ok(row(&after, m)?.redirected - row(&mid, m)?.redirected)
+    };
+    if d20("eth2")? < 150 || d20("eth1")? > 30 {
+        bail!(
+            "VLAN 20 was not pinned to eth2: eth1 +{} eth2 +{}",
+            d20("eth1")?,
+            d20("eth2")?
+        );
+    }
+    let after_b = steering_rows(b).await?;
+    for (rows, base, who) in [
+        (&after, &before_a, "router-a"),
+        (&after_b, &before_b, "router-b"),
+    ] {
+        for m in ["eth1", "eth2"] {
+            if row(rows, m)?.dropped != row(base, m)?.dropped {
+                bail!("{who}: {m} dropped steered traffic: {rows:?}");
+            }
+        }
+    }
+
+    log("a frame for VLAN 10 arriving on eth2 (mapped to eth1) is dropped by router-b's collection filter");
+    let dropped = row(&after_b, "eth2")?.dropped;
+    lacp_vlan(w, "router-a", &["raw", "10", "20"]).await?;
+    let now = steering_rows(b).await?;
+    if row(&now, "eth2")?.dropped < dropped + 20
+        || row(&now, "eth1")?.dropped != row(&after_b, "eth1")?.dropped
+    {
+        bail!("the wrong-link VLAN 10 frames were not dropped on eth2 only: {now:?}");
+    }
+
+    log("LACPDUs (untagged) keep flowing with the filters installed");
+    for r in [a, b] {
+        wait_lacp_aggregate(r, "Agreed and Distributing", |s| {
+            s["agreement"] == "Agreed" && distributing(s)
+        })
+        .await?;
+    }
+
+    log("router-b withdraws eth1: router-a steers everything over eth2, and again over both after the return");
+    let one = installed(1);
+    let one_base = a.count(&one);
+    let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
+    withdraw.extend(strings(&[
+        "--enslave-interface-into-port-aggregate",
+        "eth2",
+        "--clear-port-aggregate-member",
+        "eth1",
+        // the map may not name a non-member
+        "--lacp-conversation-map",
+        "0-4095:eth2",
+    ]));
+    b.provision(&withdraw).await?;
+    a.wait_new(&one, one_base, 60).await?;
+    let (e1, e2) = {
+        let rows = steering_rows(a).await?;
+        (
+            row(&rows, "eth1").map_or(0, |r| r.redirected),
+            row(&rows, "eth2")?.redirected,
+        )
+    };
+    lacp_vlan(w, "router-a", &["udp", "10", "100", "1"]).await?;
+    let rows = steering_rows(a).await?;
+    if row(&rows, "eth2")?.redirected < e2 + 80
+        || row(&rows, "eth1").map_or(0, |r| r.redirected) != e1
+    {
+        bail!("VLAN 10 did not move to eth2 when eth1 left: {rows:?}");
+    }
+    let back_base = a.count(&full);
+    b.provision(&flags(2, "c-vlan", true)).await?;
+    a.wait_new(&full, back_base, 90).await?;
+    wait_lacp_aggregate(a, "Agreed and Distributing again", |s| {
+        s["agreement"] == "Agreed" && distributing(s)
+    })
+    .await?;
+
+    log("lacp-port-algorithm unspecified removes the steering on both routers");
+    let removed = format!("lacp conversation steering removed aggregate={LACP_AGGREGATE}");
+    let bases = [a.count(&removed), b.count(&removed)];
+    a.provision(&flags(1, "unspecified", true)).await?;
+    b.provision(&flags(2, "unspecified", true)).await?;
+    a.wait_new(&removed, bases[0], 60).await?;
+    b.wait_new(&removed, bases[1], 60).await?;
+    for r in [a, b] {
+        let rows = steering_rows(r).await?;
+        if !rows.is_empty() {
+            bail!("{}: steering rows left after removal: {rows:?}", r.name());
+        }
+    }
+    // Leave router-a as `lacp_v2` did (c-vlan, no map) for the next step.
+    a.provision(&flags(1, "c-vlan", false)).await?;
+    wait_lacp_aggregate(a, "Distributing again", distributing).await?;
+    Ok(())
+}
+
+/// #894 / #865: a real kernel 802.3ad bond (v1 only) as the peer of a
+/// `lacp-version 2` router-a on eth1: router-a downgrades to v1, the port
+/// bundles and is steered every conversation (the collection filter is off). router-b's NOS aggregate is deleted
+/// first; the helper image creates `bond0` in its namespace.
+async fn lacp_linux_peer(w: &World, a: &Router, b: &Router, off: &[String]) -> anyhow::Result<()> {
+    log("a kernel 802.3ad bond as router-a's peer on eth1: v1 only, tolerated");
+    let down = "lacp sent version changed interface=eth1 version=1";
+    let down_base = a.count(down);
+    // Delete router-b's eth1/eth2 `Interface`s too: `nos-interfaced` re-applies
+    // every configured interface's master each 10 s and would release the
+    // kernel bond's slave (#1332).
+    let released = "removed interface from master enslavement interface=eth1";
+    let released_base = b.count(released);
+    let mut b_flags = off.to_vec();
+    b_flags.extend(strings(&[
+        "--delete-interface",
+        "eth1",
+        "--delete-interface",
+        "eth2",
+    ]));
+    b.provision(&b_flags).await?;
+    b.wait(&format!(
+        "deleted port aggregate bond port_aggregate={LACP_AGGREGATE} bond="
+    ))
+    .await?;
+    // The resync that drops the interfaces may still release eth1; let it
+    // finish before the script enslaves it (the line is absent if the
+    // aggregate delete already released it, so a miss is fine).
+    let _ = b.wait_new(released, released_base, 5).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // A bond slave must be down when enslaved; nothing brings eth1 up again.
+    let script = "ip link add bond0 type bond mode 802.3ad lacp_rate fast && \
+        ip link set eth1 down && ip link set eth1 master bond0 && \
+        ip link set bond0 up && ip link set eth1 up";
+    w.dock
+        .in_netns(NETNS_HELPER_IMAGE, "router-b", &["sh", "-c", script])
+        .await?;
+    let result = async {
+        wait_lacp_ports_named(a, "eth1", "Distributing against the kernel bond", |p| {
+            p["mux_state"] == "Distributing" && p["partner_version"] == 1
+        })
+        .await?;
+        a.wait_new(down, down_base, 60).await?;
+        let s = lacp_aggregate(a).await?;
+        if s["agreement"] != "V1Partner"
+            || s["conversations_per_link"] != serde_json::json!([["eth1", 4096]])
+        {
+            bail!("a kernel v1 bond: eth1 carries every conversation, filter off: {s}");
+        }
+        Ok(())
+    }
+    .await;
+    let _ = w
+        .dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-b",
+            &["ip", "link", "del", "bond0"],
+        )
+        .await;
+    result
+}
+
+/// Like `wait_lacp_ports` for the one port `name`.
+async fn wait_lacp_ports_named(
+    r: &Router,
+    name: &str,
+    what: &str,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..60 {
+        last = lacp_port(r, name).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("{}: {what} never held: {last}", r.name())
+}
+
 /// `lacp-mode` (802.1AX LACP_Activity, NO_PERIODIC): passive against active
 /// still converges, passive against passive never forms a bundle and stays
 /// silent, and back to active converges again.
@@ -917,6 +1517,16 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
     b.assert_quiet(rx, rx_b, 0).await?;
 
     log("router-a back to active: the pair converges again");
+    // The bond refills after the push (coalesced, and under CPU starvation
+    // `nos-interfaced` lags): enslaving cycles the link, which costs a fast
+    // LACPDU window. Wait for both enslavements so the next step starts after
+    // that flap, not during it (#1337, run8: eth1 enslaved at +2ms of the
+    // min-links window, Expired 2s later).
+    let enslaved = |i: &str| format!("enslaved interface to bond interface={i} bond=bond");
+    let enslave_bases: Vec<_> = [a, b]
+        .into_iter()
+        .flat_map(|r| ["eth1", "eth2"].map(|i| (r, i, r.count(&enslaved(i)))))
+        .collect();
     a.provision(&flags("active")).await?;
     for r in [a, b] {
         wait_lacp_ports(r, "Distributing again", distributing).await?;
@@ -928,6 +1538,12 @@ async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<(
             distributing(p) && p["mode"] == "Active"
         })
         .await?;
+    }
+    for (r, i, base) in enslave_bases {
+        r.wait_new(&enslaved(i), base, 30).await?;
+    }
+    for r in [a, b] {
+        lacp_settled(r, 1500).await?;
     }
     Ok(())
 }
@@ -1057,6 +1673,23 @@ pub async fn micro_bfd(w: &mut World) -> anyhow::Result<()> {
         // #839: the last enslave can still cost one detection-time expiry (a
         // `down` +87ms into the window); let both sides settle Up first, then
         // baseline, so the quiet window judges only the steady state.
+        // #1064: an `Up` read right after the enslave bounce can still be the
+        // stale state: the peer's bounce silences us for one detection time
+        // (3 x 100 ms) and the expiry lands later, under CPU starvation even
+        // inside the window. So wait until no `down` was logged on either side
+        // for 2 s (> 6 detection times) before the Up check and the baseline.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+        loop {
+            let (ca, cb) = (a.count_fresh(&down).await, b.count_fresh(&down).await);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if (a.count_fresh(&down).await, b.count_fresh(&down).await) == (ca, cb) {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "micro-bfd sessions keep flapping after the enslave"
+            );
+        }
         micro_sessions_are(a, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
         micro_sessions_are(b, &[("eth1", "Up"), ("eth2", "Up")], 30).await?;
         let down_base = a.count_fresh(&down).await;
@@ -2893,7 +3526,7 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
 
     // Cut router-b's pv-d1 root port: eth1 (blocked in pv-d1) takes over.
     log("cutting router-b eth2: pv-d1 must move to eth1");
-    w.set_link("router-b", "eth2", false).await?;
+    w.unlink_veth("eth2").await;
     pvst_wait(b, "pv-d1", 30, |i| {
         i.root_port.as_deref() == Some("eth1")
             && i.ports
@@ -2901,7 +3534,7 @@ pub async fn stp_pvst(w: &mut World) -> anyhow::Result<()> {
                 .any(|p| p.name == "eth1" && p.state == StpState::Forwarding)
     })
     .await?;
-    w.set_link("router-b", "eth2", true).await?;
+    w.ensure_veth("eth2").await?;
     pvst_wait(b, "pv-d1", 90, blocked("eth1")).await?;
     pvst_wait(a, "pv-d2", 90, blocked("eth2")).await?;
 
@@ -4911,8 +5544,17 @@ pub(super) async fn assert_sandbox(
 ) -> anyhow::Result<()> {
     let st = proc_status(w, comm).await?;
     let want_nnp = format!("NoNewPrivs:\t{nnp}");
-    // #1217: the sandboxed (NNP) daemons carry the seccomp deny-list (mode 2), `nos-sshd` none.
-    let want_seccomp = format!("Seccomp:\t{}", if nnp == 1 { 2 } else { 0 });
+    // #1217: the deny-list is one seccomp filter stacked on whatever the container already has
+    // (Docker's default profile). Baseline = the unsandboxed `nos-watchdogd` in the same
+    // container, so the check holds whatever the lab's profile; `nos-sshd` has no deny-list.
+    let filters = |st: &str| {
+        st.lines()
+            .find_map(|l| l.strip_prefix("Seccomp_filters:"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    };
+    let base = filters(&proc_status(w, "nos-watchdogd").await?)
+        .context("nos-watchdogd: no Seccomp_filters (host kernel < 5.9?)")?;
+    let want_seccomp = format!("Seccomp_filters:\t{}", base + u32::from(nnp));
     let want_cap = cap_eff.map_or(String::new(), |c| format!("CapEff:\t{c}"));
     if !st.contains(&want_nnp) || !st.contains(&want_cap) || !st.contains(&want_seccomp) {
         bail!("{comm}: wanted `{want_nnp}`, `{want_seccomp}` and `{want_cap}`, got:\n{st}");
@@ -4936,4 +5578,138 @@ pub async fn sandbox_nnp(w: &mut World) -> anyhow::Result<()> {
     // #1217: no daemon was killed by the seccomp deny-list (SIGSYS) since the run began.
     a.assert_quiet("exited.*signal: 31", 0, 1).await?;
     Ok(())
+}
+
+/// MPLS ILM entries (segment routing, #1165): `--ribd-arg=--test-ilm` stands
+/// in for the OSPF SR daemon, so the real `nos-ribd` programs real `AF_MPLS`
+/// routes, one of each kind: a swap, a PHP pop toward router-b, and a pop
+/// followed by a lookup in `rt1`. Self-contained. The proof is `nos-ribd`'s
+/// own log line, written only after the kernel accepted the route; removal
+/// is the daemon's clean shutdown (SIGINT, `teardown`; read from `docker logs`, the forwarder is already stopped), after which the
+/// watchdog's restart installs them again.
+pub async fn mpls_ilm(w: &mut World) -> anyhow::Result<()> {
+    let gw = IP_B.s();
+    w.up(&[
+        &format!("--ribd-arg=--test-ilm={ILM_SWAP}={gw},{ILM_SWAP_OUT}"),
+        &format!("--ribd-arg=--test-ilm={ILM_PHP}={gw}"),
+        &format!("--ribd-arg=--test-ilm={ILM_LOCAL}"),
+    ])
+    .await?;
+    // docker mounts /proc/sys read-only: the label space is the operator's.
+    super::bgp::mpls_ready(w, &["router-a"]).await?;
+    let a = w.a()?;
+    let installed = |label: u32, out: &str| {
+        format!("installed mpls ilm route table=rt1 label={label} out={out}")
+    };
+    a.wait_new(
+        &installed(ILM_SWAP, &format!("\\[\\[{ILM_SWAP_OUT}\\]\\]")),
+        0,
+        60,
+    )
+    .await?;
+    a.wait_new(&installed(ILM_PHP, "\\[\\[\\]\\]"), 0, 30)
+        .await?;
+    a.wait_new(&installed(ILM_LOCAL, "\\[\\]"), 0, 30).await?;
+    // A steady state rewrites nothing: the 10 s re-apply finds each entry in
+    // the kernel and in its shadow.
+    let steady = a.count_fresh("installed mpls ilm route").await;
+    a.assert_quiet("installed mpls ilm route", steady, 25)
+        .await?;
+
+    let labels = [ILM_SWAP, ILM_PHP, ILM_LOCAL];
+    let removed = |label: u32| format!("removed mpls ilm route table=rt1 label={label}");
+    let reinstalled = a.count("installed mpls ilm route");
+    let since = i32::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+    )?;
+    w.dock
+        .signal_process("router-a", "nos-ribd", "-INT")
+        .await?;
+    // `teardown` runs after the log forwarder is stopped, so the removal lines
+    // reach `docker logs` (colour codes stripped) but never `nos-logd`.
+    let mut plain = String::new();
+    for _ in 0..30 {
+        plain = strip_ansi(&w.dock.logs_since("router-a", since).await?);
+        if labels.iter().all(|&l| plain.contains(&removed(l))) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    for &l in &labels {
+        if !plain.contains(&removed(l)) {
+            bail!("router-a: no '{}' in docker logs after SIGINT", removed(l));
+        }
+    }
+    a.wait_new("installed mpls ilm route", reinstalled, 60)
+        .await?;
+    Ok(())
+}
+
+/// The operator's write of `net.mpls.conf.eth0.input` on router-a.
+async fn set_mpls_kernel(w: &World, v: &str) -> anyhow::Result<()> {
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-a",
+            &[
+                "sh",
+                "-c",
+                &format!("echo {v} > /proc/sys/net/mpls/conf/eth0/input"),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// `Interface.mpls_input` (#1380) against the real kernel file
+/// `net.mpls.conf.eth0.input`. Docker mounts `/proc/sys` read-only, so
+/// `nos-interfaced` can never write it here (the operator helper does, like
+/// `mpls_ready`); what is proven is that the driver reads the real value and
+/// decides to write exactly when it differs: a set knob over a 0 logs the
+/// failed write, over a 1 stays quiet, and an unset knob it had satisfied
+/// tries to write the 0 back. The write itself is unit-tested over a tempdir
+/// (`driver/mpls_input.rs`). Self-contained; needs the host module `mpls_router`.
+pub async fn mpls_input(w: &mut World) -> anyhow::Result<()> {
+    const FAILED: &str = "failed to set mpls input interface=eth0 error=net.mpls.conf.eth0.input";
+    w.up(&[]).await?;
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    // The kernel says 0, the knob wants 1: the driver tries to write.
+    set_mpls_kernel(w, "0").await?;
+    let base = w.a()?.count(FAILED);
+    w.a()?
+        .provision(&["--mpls-input-interface", "eth0"])
+        .await?;
+    w.a()?.wait_new(FAILED, base, 60).await?;
+    // The kernel says 1: nothing to write, over two re-apply ticks.
+    set_mpls_kernel(w, "1").await?;
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let base = w.a()?.count(FAILED);
+    w.a()?.assert_quiet(FAILED, base, 25).await?;
+    // Unset: the driver switched it on (it was already right), so it tries
+    // to put the 0 back.
+    w.a()?
+        .provision(&["--no-mpls-input-interface", "eth0"])
+        .await?;
+    w.a()?.wait_new(FAILED, base, 60).await?;
+    Ok(())
+}
+
+/// `s` without ANSI colour sequences (`docker logs` keeps the daemons' own).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

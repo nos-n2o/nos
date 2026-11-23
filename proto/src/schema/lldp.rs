@@ -26,6 +26,7 @@ pub const SYSTEM_DESCRIPTION_MAX_BYTES: usize = 255;
 
 /// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct LldpSettings {
     /// `msgTxInterval`: seconds between periodic LLDPDUs.
@@ -149,6 +150,7 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<IpAddr>, D:
 /// Which 802.1AB destination group an interface's LLDPDUs use. Both ends of a
 /// link must agree: a frame to a different group is never seen.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LldpDestination {
     /// `01:80:C2:00:00:0E` — link-local, never forwarded by any bridge.

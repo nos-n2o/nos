@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, PeerId};
-use nos_proto::{Event, IpcCodec, Request, Role, UserRole};
+use nos_proto::{Actor, Event, IpcCodec, Request, Role, UserRole};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -199,9 +199,10 @@ async fn dispatch_unmasked(
             .await
         {
             Ok(warnings) => {
+                let claim = effective_claim(caller, actor.as_ref());
                 let who = effective_actor(caller, actor);
                 crate::accounting::record(&who, &name);
-                info!(transaction = ?name, actor = ?who, confirm_timeout = ?confirm_timeout, "config commit audit");
+                info!(transaction = ?name, actor = ?who, claim = ?claim, confirm_timeout = ?confirm_timeout, "config commit audit");
                 for w in &warnings {
                     warn!(transaction = ?name, warning = %w, "commit warning");
                 }
@@ -323,8 +324,29 @@ async fn dispatch_unmasked(
                 Event::Error(e.to_string())
             }
         },
+        Request::AllocateExternalUser { name } | Request::AdminAllocateExternalUser { name } => {
+            external_reply(store.allocate_external_user(&name).await, &name)
+        }
+        Request::ClearExternalUser { name } => {
+            external_reply(store.clear_external_user(&name).await, &name)
+        }
+        Request::ListExternalUsers => match store.list_external_users() {
+            Ok(l) => Event::ExternalUsers(l),
+            Err(e) => Event::Error(e.to_string()),
+        },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
+}
+
+fn external_reply(r: Result<u32, crate::ConfigError>, name: &str) -> Event {
+    match r {
+        Ok(uid) => Event::ExternalUser { uid },
+        Err(e) => {
+            // The name came from a caller: Debug-escaped, never raw into the log.
+            warn!(user = ?name, error = %e, "external user refused");
+            Event::Error(e.to_string())
+        }
+    }
 }
 
 async fn history_reply(store: &ConfigStore) -> Event {
@@ -354,7 +376,7 @@ async fn rollback_reply(store: &ConfigStore, index: u32, who: String) -> Event {
 }
 
 /// The `actor` a request body names (what `Restd` vouches for).
-fn body_actor(req: &Request) -> Option<String> {
+fn body_actor(req: &Request) -> Option<Actor> {
     match req {
         Request::Save { actor }
         | Request::OpenTransaction { actor, .. }
@@ -373,10 +395,34 @@ fn body_actor(req: &Request) -> Option<String> {
 /// name, whatever the body says; `Restd` vouches for the REST user it names;
 /// anyone else has no attribution to give. Debug-printed by callers, so a
 /// hostile name can't forge a log line.
-fn effective_actor(caller: &Caller, body: Option<String>) -> String {
+fn effective_actor(caller: &Caller, body: Option<Actor>) -> String {
     match caller.role {
-        Role::Restd => body.unwrap_or_else(|| "unknown".to_string()),
+        Role::Restd => body
+            .map(|a| a.name)
+            .filter(|n| valid_actor_name(n))
+            .unwrap_or_else(|| "unknown".to_string()),
         _ => caller.name.clone(),
+    }
+}
+
+/// A name `Restd` may vouch for: the bounds of a user name, no control
+/// characters (it reaches logs and RADIUS accounting).
+fn valid_actor_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 64 && !n.chars().any(char::is_control)
+}
+
+/// The role claim for a request's person (#1360). A `User` connection's is the
+/// one its certificate carries (a body claim is ignored, like a body actor);
+/// `Restd` vouches for the claim of the actor it names, and only when that
+/// name is acceptable. `ConfigStore::user_role` still ignores it for any name
+/// with a local entry. Nobody else has one.
+fn effective_claim(caller: &Caller, body: Option<&Actor>) -> Option<UserRole> {
+    match caller.role {
+        Role::User => caller.claim,
+        Role::Restd => body
+            .filter(|a| valid_actor_name(&a.name))
+            .and_then(|a| a.claim),
+        _ => None,
     }
 }
 
@@ -486,15 +532,10 @@ where
         restrict: None,
     };
     if matches!(caller.role, Role::User | Role::Restd) {
-        let actor = effective_actor(caller, body_actor(&req));
-        let role = store
-            .user_role(
-                &actor,
-                (caller.role == Role::User)
-                    .then_some(caller.claim)
-                    .flatten(),
-            )
-            .await;
+        let body = body_actor(&req);
+        let claim = effective_claim(caller, body.as_ref());
+        let actor = effective_actor(caller, body);
+        let role = store.user_role(&actor, claim).await;
         if !authz::permitted(role, &actor, &req) {
             let shown = format!("{req:?}");
             warn!(

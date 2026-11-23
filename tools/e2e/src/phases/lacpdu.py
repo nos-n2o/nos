@@ -6,6 +6,20 @@ locally administered system ids: 02:00:00:00:0a:02 (v2) and ...:0a:03 (v3).
 """
 import socket
 import struct
+import time
+
+
+def send_retry(s, frame):
+    # ENETDOWN (errno 100): eth1 is still cycling after a bond (re-)enslavement (#1332).
+    for _ in range(50):
+        try:
+            return s.send(frame)
+        except OSError as e:
+            if e.errno != 100:
+                raise
+            time.sleep(0.2)
+    return s.send(frame)
+
 
 mac = bytes.fromhex(open("/sys/class/net/eth1/address").read().strip().replace(":", ""))
 dst = bytes.fromhex("0180c2000002")
@@ -30,5 +44,5 @@ def lacpdu(version, system):
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x8809))
 s.bind(("eth1", 0x8809))
 for version, last in ((2, 2), (3, 3)):
-    s.send(dst + mac + struct.pack(">H", 0x8809) + lacpdu(version, bytes([2, 0, 0, 0, 0x0A, last])))
+    send_retry(s, dst + mac + struct.pack(">H", 0x8809) + lacpdu(version, bytes([2, 0, 0, 0, 0x0A, last])))
 print("injected v2 and v3 LACPDUs")

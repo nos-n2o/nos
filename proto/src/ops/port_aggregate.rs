@@ -575,10 +575,10 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V2);
+        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V1);
         PortAggregateOp::SetLacpVersion {
             name: name.clone(),
-            version: LacpVersion::V1,
+            version: LacpVersion::V2,
         }
         .apply(&mut cfg)
         .unwrap();
@@ -588,7 +588,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V1);
+        assert_eq!(cfg.port_aggregates[0].lacp_version, LacpVersion::V2);
         assert_eq!(
             cfg.port_aggregates[0].lacp_port_algorithm,
             LacpPortAlgorithm::SVlan

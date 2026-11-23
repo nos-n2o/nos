@@ -1176,6 +1176,11 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
     for r in [b, c] {
         r.established().await?;
     }
+    // The first IGP poll can beat nos-ribd's connected-prefix resolve and
+    // return {}: every next hop is then unresolvable until the next poll
+    // (#1347). Settle it before the route exists.
+    a.wait(&format!("igp costs updated costs={{.*{SUBNET}: 0"))
+        .await?;
 
     // router-b first, so its path is the older one (decision step 8) and
     // stays best while router-c's comes and goes as the sibling.
@@ -4890,7 +4895,7 @@ pub async fn flowspec_vpn_add_path(w: &mut World) -> anyhow::Result<()> {
         .replace("@IP_G@", IP_G.s())
         .replace("@ASN@", &ASN_G.to_string())
         .replace("@RID@", RID_G)
-        .replace("@WITHDRAW_AFTER@", "40");
+        .replace("@WITHDRAW_AFTER@", "200");
     w.dock
         .start_plain(
             "router-g",
@@ -4936,10 +4941,17 @@ pub async fn flowspec_vpn_add_path(w: &mut World) -> anyhow::Result<()> {
         }
     }
 
+    flowspec_vpn_add_path_send(w).await?;
+    let a = w.a()?;
+
     log("withdrawing path 1 leaves path 2");
-    a.wait(&format!(
-        "flowspec route withdrawn peer={IP_G} family=vpnv4-flowspec rd=65001:5 .*path_id=1"
-    ))
+    a.wait_new(
+        &format!(
+            "flowspec route withdrawn peer={IP_G} family=vpnv4-flowspec rd=65001:5 .*path_id=1"
+        ),
+        0,
+        240,
+    )
     .await?;
     let body = a
         .rest_expect(
@@ -4952,6 +4964,117 @@ pub async fn flowspec_vpn_add_path(w: &mut World) -> anyhow::Result<()> {
     if body.contains("\"path_id\":1") || !body.contains("\"path_id\":2") {
         bail!("withdrawing path 1 must leave path 2 only: {body}");
     }
+    Ok(())
+}
+
+/// `flowspec-vpn-add-path`, send half (#1127): router-b (`vpn`,
+/// `vpn-flowspec`, `rtc`, `add-path receive`, `vrf-red` importing RT
+/// 65000:1 and `vrf-blue` RT 65000:2) peers router-a, which holds the scripted
+/// speaker's two copies. Router-a advertises both under two path ids, each of
+/// router-b's VRFs validates its own, and narrowing router-b's membership to
+/// RT 65000:2 withdraws only the RT 65000:1 copy.
+async fn flowspec_vpn_add_path_send(w: &mut World) -> anyhow::Result<()> {
+    log("router-b peers router-a over vpnv4-flowspec + rt-constraint with Add-Path (#1127)");
+    let b_flags = |red_rt: &str| {
+        let mut f = B.base_flags();
+        f.extend(strings(&[
+            "--vpn",
+            "--vpn-flowspec",
+            "--rtc",
+            "--add-path",
+            "receive",
+            "--vpn-table",
+            VPN_TABLE,
+            "--vpn-rd",
+            VPN_RD_B,
+            "--vpn-rt-export",
+            VPN_RD_B,
+            "--vpn-rt-import",
+            red_rt,
+        ]));
+        f
+    };
+    let a_to_b = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-b",
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B.s(),
+        "--vpn",
+        "--vpn-flowspec",
+        "--rtc",
+        "--add-path",
+        "both",
+    ]);
+    w.start(B, Some(b_flags(VPN_RT)), &[]).await?;
+    mpls_ready(w, &["router-b"]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&a_to_b).await?;
+    let mut blue = b_flags(VPN_RT);
+    for (flag, value) in [
+        ("--vpn-table", "vrf-blue"),
+        ("--vpn-rd", "65000:102"),
+        ("--vpn-rt-export", "65000:102"),
+        ("--vpn-rt-import", "65000:2"),
+    ] {
+        let i = blue.iter().position(|f| f == flag).expect("vpn flag");
+        blue[i + 1] = value.to_string();
+    }
+    b.provision_flags(&blue).await?;
+
+    a.wait(&format!(
+        "add-path negotiated peer={IP_B} .*vpnv4_flowspec=\"send\""
+    ))
+    .await?;
+    log("router-a advertises both copies under their own path ids");
+    for id in [1, 2] {
+        a.wait(&format!(
+            "flowspec route advertised peer={IP_B} family=vpnv4-flowspec rd=65001:5 .*path_id={id}"
+        ))
+        .await?;
+    }
+    let learned =
+        format!("flowspec route learned peer={IP_A} family=vpnv4-flowspec rd=65001:5 .*path_id=");
+    b.wait(&format!("{learned}1")).await?;
+    b.wait(&format!("{learned}2")).await?;
+    for table in [VPN_TABLE, "vrf-blue"] {
+        b.wait(&format!(
+            "flowspec validity changed peer={IP_A} family=vpnv4-flowspec rd=65001:5 table={table}.*validity=valid"
+        ))
+        .await?;
+    }
+
+    log("narrowing router-b's membership to RT 65000:2 withdraws only the RT 65000:1 copy");
+    let gone = format!(
+        "flowspec route advertisement withdrawn peer={IP_B} family=vpnv4-flowspec rd=65001:5"
+    );
+    let gone_base = a.count(&gone);
+    b.provision_flags(&b_flags("65000:7")).await?;
+    a.wait_new(&gone, gone_base, 60).await?;
+    a.assert_quiet(&gone, gone_base + 1, 5).await?;
+
+    log("restoring the membership and resetting the session replays both copies");
+    b.provision_flags(&b_flags(VPN_RT)).await?;
+    let adv = format!(
+        "flowspec route advertised peer={IP_B} family=vpnv4-flowspec rd=65001:5 .*path_id="
+    );
+    let (adv1, adv2) = (a.count(&format!("{adv}1")), a.count(&format!("{adv}2")));
+    a.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_B}/clear"),
+        None,
+        200,
+    )
+    .await?;
+    a.wait_new(&format!("{adv}1"), adv1, 90).await?;
+    a.wait_new(&format!("{adv}2"), adv2, 90).await?;
     Ok(())
 }
 
@@ -10897,6 +11020,10 @@ pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&retained(153, 0xc0, 2), baseline.0, 60).await?;
     b.wait_new(&retained(153, 0xe0, 2), baseline.1, 60).await?;
 
+    log("#1036: GET /v1/bgp/routes lists the attribute (router-a as received, router-b with Partial)");
+    expect_unknown_attribute(a, UNKNOWN_ATTR_PREFIX, 0xc0).await?;
+    expect_unknown_attribute(b, UNKNOWN_ATTR_PREFIX, 0xe0).await?;
+
     log("the 1024-byte cap: the second 600-byte attribute is dropped, the first kept");
     a.wait_new(
         "dropping unrecognized optional transitive attribute over the per-route cap attr_type=155 len=600 cap=1024",
@@ -10927,6 +11054,34 @@ pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("bgp session established peer=", sessions, 90)
         .await?;
     Ok(())
+}
+
+/// #1036: polls `GET /v1/bgp/routes` until `prefix` lists attribute type 153
+/// with `flags` and the 2-byte value `0102` (hex `"0102"`).
+async fn expect_unknown_attribute(r: &Router, prefix: &str, flags: u8) -> anyhow::Result<()> {
+    let want = serde_json::json!([{"attr_type": 153, "flags": flags, "value": "0102"}]);
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bgp/routes", None, 200)
+            .await?;
+        let json: serde_json::Value = serde_json::from_str(&last)?;
+        let hit = json.as_array().into_iter().flatten().any(|inst| {
+            inst["result"]["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|rt| rt["prefix"] == prefix && rt["unknown_attributes"] == want)
+        });
+        if hit {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: GET /v1/bgp/routes never listed {prefix} with attribute 153 flags {flags:#x}: {last}",
+        r.name()
+    )
 }
 
 /// Replaces router-g with an ExaBGP running `conf`.

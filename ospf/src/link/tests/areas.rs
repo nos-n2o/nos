@@ -315,6 +315,13 @@ fn diff_ignores_cost_but_not_the_virtual_neighbor() {
     };
     let (stop, spawn) = diff_links(&current, &HashMap::from([("vlink".to_string(), cheaper)]));
     assert_eq!((stop.len(), spawn.len()), (0, 0));
+    // A speed change (TE bandwidth) keeps the link running too.
+    let faster = LinkConfig {
+        speed_mbps: Some(1000),
+        ..running.clone()
+    };
+    let (stop, spawn) = diff_links(&current, &HashMap::from([("vlink".to_string(), faster)]));
+    assert_eq!((stop.len(), spawn.len()), (0, 0));
     let mut moved = running;
     moved.virtual_link.as_mut().unwrap().neighbor = Ipv4Addr::new(10, 0, 1, 9);
     let (stop, spawn) = diff_links(&current, &HashMap::from([("vlink".to_string(), moved)]));

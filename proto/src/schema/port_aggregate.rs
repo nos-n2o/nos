@@ -18,6 +18,7 @@ use nos_proto_derive::Cli;
 /// difference is only which control plane decides which members are
 /// actually enslaved into it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum PortAggregateMode {
     /// Static: every member named by an `Interface.port_aggregate`
@@ -40,6 +41,7 @@ pub enum PortAggregateMode {
 /// Linux bonding's `lacp_rate`, it's a request to the partner — each end
 /// transmits at the rate the *other* end asks for.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpRate {
     #[default]
@@ -53,6 +55,7 @@ pub enum LacpRate {
 /// whenever the link is up; `Passive` ones stay silent until they hear an
 /// `Active` partner (two `Passive` ends never form a bundle).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpMode {
     #[default]
@@ -69,6 +72,7 @@ pub enum LacpMode {
 /// blocked outright. Announced to the other PEs in the per-ES Ethernet A-D
 /// route's ESI Label community. Only meaningful with an `esi`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EsRedundancy {
     #[default]
@@ -83,6 +87,7 @@ pub enum EsRedundancy {
 /// community. `Hrw` only takes effect when every PE on the segment advertises
 /// it; otherwise every PE falls back to `Modulo` (RFC 8584 §2.2.3).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum DfAlgorithm {
     /// RFC 7432 §8.5 service carving: `VNI mod N` over the ordered PEs.
@@ -94,6 +99,7 @@ pub enum DfAlgorithm {
 
 /// The 802.1AX-2014 LACP version an aggregate advertises (`1` or `2` in the CLI).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LacpVersion {
     /// Version 1 LACPDUs (110 bytes, no conversation TLVs).
@@ -104,9 +110,9 @@ pub enum LacpVersion {
     V2,
 }
 
-/// The default `lacp-version`: one constant, so a no-go on the dataplane
-/// spike flips it back to `V1` in one line.
-pub const DEFAULT_LACP_VERSION: LacpVersion = LacpVersion::V2;
+/// The default `lacp-version`: `V1`, so a v1-only partner (SR Linux drops
+/// version-2 PDUs) never sees a v2 PDU unless the operator opts in (#890, #894).
+pub const DEFAULT_LACP_VERSION: LacpVersion = LacpVersion::V1;
 
 impl Default for LacpVersion {
     fn default() -> Self {
@@ -116,6 +122,7 @@ impl Default for LacpVersion {
 
 /// The Port Algorithm an aggregate maps frames to conversation ids with.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LacpPortAlgorithm {
     /// No algorithm: plain hashing, no conversation steering.
@@ -140,6 +147,7 @@ impl Default for LacpPortAlgorithm {
 /// One entry of an aggregate's explicit conversation map: conversation ids
 /// `first..=last` are carried by the `member` link.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct ConversationRange {
     /// First conversation id of the range (0-4095).
@@ -168,6 +176,7 @@ pub struct ConversationRange {
 /// `Interface.switching_profile` already uses for L2 trunk membership —
 /// rather than this type holding a member list itself.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct PortAggregate {
@@ -232,13 +241,13 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateLacpSystemPriority)]
     pub lacp_system_priority: Option<u16>,
 
-    /// See [`LacpVersion`]. Accepted and shown; nothing reads it yet.
+    /// See [`LacpVersion`]. `nos-lacpd` sends this version (V2 opt-in).
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = PortAggregateLacpVersion)]
     pub lacp_version: LacpVersion,
 
-    /// See [`LacpPortAlgorithm`]. Accepted and shown; nothing reads it yet.
+    /// See [`LacpPortAlgorithm`]. `nos-lacpd` advertises it and negotiates agreement.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = PortAggregateLacpPortAlgorithm)]
@@ -777,7 +786,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
-            ospfv3_instance: None,
+            ospfv3_instances: Vec::new(),
             name: "rt1".to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -846,6 +855,7 @@ mod tests {
     fn lacp_config(map: Vec<ConversationRange>) -> Config {
         let mut a = aggregate("bond1");
         a.mode = PortAggregateMode::Lacp;
+        a.lacp_version = LacpVersion::V2;
         a.lacp_port_algorithm = LacpPortAlgorithm::CVlan;
         a.lacp_conversation_map = map;
         let mut c = config_with(vec![a]);
@@ -878,7 +888,7 @@ mod tests {
         assert_eq!(LacpVersion::default(), DEFAULT_LACP_VERSION);
         assert_eq!(LacpPortAlgorithm::default(), DEFAULT_LACP_PORT_ALGORITHM);
         let a = PortAggregate::default();
-        assert_eq!(a.lacp_version, LacpVersion::V2);
+        assert_eq!(a.lacp_version, LacpVersion::V1);
         assert_eq!(a.lacp_port_algorithm, LacpPortAlgorithm::Unspecified);
         assert_eq!(a.lacp_conversation_map, Vec::new());
     }
@@ -895,7 +905,7 @@ mod tests {
             o.remove(k);
         }
         let a: PortAggregate = serde_json::from_value(v).unwrap();
-        assert_eq!(a.lacp_version, LacpVersion::V2);
+        assert_eq!(a.lacp_version, LacpVersion::V1);
         assert_eq!(a.lacp_port_algorithm, LacpPortAlgorithm::Unspecified);
         assert_eq!(a.lacp_conversation_map, Vec::new());
     }

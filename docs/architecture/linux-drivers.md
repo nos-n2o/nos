@@ -33,12 +33,14 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 
 ## MPLS (L3VPN, `nos-ribd`, #581)
 
+Segment routing (ILM entries, `RibDriver::sync_ilm`, #1165): [segment-routing.md](segment-routing.md).
+
 - `RibDriver::sync_mpls(table, Some(Mpls { label, underlay }))` installs the AF_MPLS route `<label> dev <vrf>` (pop, then an IP lookup in the VRF; one route serves IPv4 and IPv6). Each call dumps the AF_MPLS routes, deletes any other label pointing at this VRF first (a changed `vpn.label`, a previous run), then adds ours with `NLM_F_REPLACE` if missing. `None` and `teardown` delete it. Logs: `installed mpls pop route` / `removed mpls pop route` with `table`, `vrf`, `label`.
 - Labels below 16 are refused (RFC 3032 reserved), as defence in depth behind config validation.
 - Ingress: a `Vpn` route is `RTA_ENCAP_TYPE=MPLS` pushing its labels, `via <gw> dev <if> onlink` in the customer table. Several next hops are one `RTA_MULTIPATH` route with an encap and `RTNH_F_ONLINK` per next hop (`nexthop encap mpls <l1> via <gw1> dev <if> onlink nexthop encap mpls <l2> via <gw2> …`); the same gateway twice with different labels is accepted. The gateway and ifindex come from `nos-bgpd`'s resolution in the underlay table; without an ifindex the driver asks the kernel (`RTM_GETROUTE` with `RTA_OIF` = the underlay VRF, `ip route get <gw> vrf <underlay>`). Logs: `installed labelled route` / `removed labelled route` with `prefix`, `labels` (one stack per hop), `gateway`.
 - Sysctls are `/proc/sys` file reads and writes (`driver/mpls.rs`, no external command, #228), each read first and written only when not already enough:
   - `net.mpls.platform_labels`: grown to the next multiple of 1024 above the label, never shrunk (that would delete routes). A failure is an `Err`, so the export is withheld.
-  - `net.mpls.conf.<if>.input=1` on every interface enslaved to the underlay VRF. A failure is a one-time `warn!` per interface (a loopback faces no PE).
+  - `net.mpls.conf.<if>.input` is not `nos-ribd`'s: it is the `Interface.mpls_input` knob of `nos-interfaced` (`set interface <name> mpls input`, #1380); the L3VPN underlay's core links need it set.
 - `/proc/sys/net/mpls` missing means `mpls_router` is not loaded: the error says so. It only appears in network namespaces created after the module loads.
 - Docker mounts `/proc/sys` read-only: the driver can only read, so the operator (or the e2e helper, `vpn-dataplane`) sets the values.
 
@@ -58,7 +60,7 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
   - `ActionKind::Police { rate, burst, unit }`: exceed drops, conform `pipe`. `Bytes` is bytes/s and bytes (above 2^32 bytes/s the kernel gets `TCA_POLICE_RATE64`); `Packets` is packets/s and packets (`PKTRATE64`/`PKTBURST64`; the kernel meters it against the one TBF burst, so `nos-tc` writes the burst in both). Both are accepted by Linux 7.2. The packet bucket starts empty, so the first packet after install can be dropped.
   - `Pedit::Dscp` rewrites the DSCP only (ECN, and for IPv6 the version and flow label, are kept). Pair it with a filter of the same family (`Protocol::Ip`/`Ipv6`). The IPv4 form is encoded as two table entries, `pedit` then `csum` (IPv4 header): without it the rewritten header fails its checksum and is dropped (`InHdrErrors`), as checked in the kernel test.
   - `FlowerKeys.ip_tos` matches the DSCP and never the ECN bits. Flower has no IPv6 flow-label key on Linux 7.2 (no `TCA_FLOWER_KEY_*` for it in `pkt_cls.h`): that match is unsupported and must be refused by callers.
-- VLAN redirect (#955): `Protocol::Dot1Q` + `FlowerKeys.vlan_id` (host-order u16, proven against the kernel) match tagged frames only; `ActionKind::Mirred { ifindex }` is an egress redirect (`TC_ACT_STOLEN`). Behaviour of a redirect to a down device is for #895 to prove.
+- VLAN redirect (#955): `Protocol::Dot1Q` + `FlowerKeys.vlan_id` (host-order u16, proven against the kernel) match tagged frames only; `ActionKind::Mirred { ifindex }` is an egress redirect (`TC_ACT_STOLEN`). `Protocol::Dot1Ad` (0x88a8) does the same for S-tags (#895). A redirect to a down or silent member black-holes (spike #891), so `nos-interfaced` only redirects to enslaved members and removes redirects first when a member leaves; deleting the redirect is no cure while the bond hash still picks the dead member. The tc steering is described in `docs/internals/lacp.md`.
 - Check by hand in a throwaway namespace: `unshare -Urn`, then `tc filter show dev <dev> ingress` (add `chain <n>`, `-s` for counters).
 
 ## Access lists (`nos-acld`, #541)

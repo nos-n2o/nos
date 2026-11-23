@@ -54,6 +54,13 @@ struct DevArgs {
     /// config field.
     #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
     redistribute_chunk: Option<usize>,
+
+    /// A fixed ILM entry, `LABEL[=GATEWAY[,OUT[/OUT..]]]` (repeatable; no
+    /// gateway pops and looks up in the table's VRF, no out labels is PHP).
+    /// Stands in for the OSPF segment routing daemon in `nos-e2e`'s
+    /// `mpls-ilm` (#1165), via `--ribd-arg`; never a config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    test_ilm: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -142,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     let ospf_redistribute_tx = vec![
         (
             nos_proto::RedistributeTarget::Ospf,
-            ospf_client::spawn(
+            ospf_client::spawn_set(
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV2,
@@ -151,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         (
             nos_proto::RedistributeTarget::Ospfv3,
-            ospf_client::spawn(
+            ospf_client::spawn_set(
                 args.watchdog_socket.clone(),
                 shutdown_rx.clone(),
                 ospf_client::OSPFV3,
@@ -177,7 +184,15 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
-    let rib = Arc::new(RwLock::new(Rib::new()));
+    let mut initial = Rib::new();
+    initial.ilm_fixed = args
+        .dev
+        .test_ilm
+        .iter()
+        .map(|s| nos_rib::driver::mpls::parse_ilm(s))
+        .collect::<Result<_, String>>()
+        .map_err(anyhow::Error::msg)?;
+    let rib = Arc::new(RwLock::new(initial));
     let gate = Arc::new(reconcile::KernelGate::new(reconcile::STARTUP_HOLD));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,

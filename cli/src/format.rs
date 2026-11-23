@@ -15,9 +15,56 @@ use nos_proto::cli::render;
 
 use crate::session::Path;
 
+use std::borrow::Cow;
+
+/// Escape a daemon-supplied string for the terminal (#1365): every control
+/// char (C0 incl. ESC, DEL, C1) except `\n` and `\t`, and the bidi/zero-width
+/// format chars that reorder or hide text, becomes a visible `\xNN` /
+/// `\u{NNNN}`. Borrows when already clean. A literal `\x1b` sent by a peer is
+/// indistinguishable from an escaped ESC (accepted, display-only).
+pub fn sanitize(s: &str) -> Cow<'_, str> {
+    escape(s, false)
+}
+
+/// `sanitize` for a value inside a one-record-per-line renderer: `\n` is
+/// escaped too, so a multi-line value cannot forge a row.
+pub fn sanitize_line(s: &str) -> Cow<'_, str> {
+    escape(s, true)
+}
+
+fn needs_escape(c: char, line: bool) -> bool {
+    match c {
+        '\t' => false,
+        '\n' => line,
+        _ => {
+            c.is_control()
+                || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        }
+    }
+}
+
+fn escape(s: &str, line: bool) -> Cow<'_, str> {
+    if !s.chars().any(|c| needs_escape(c, line)) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if !needs_escape(c, line) {
+            out.push(c);
+        } else if c == '\n' {
+            out.push_str("\\n");
+        } else if (c as u32) <= 0xFF {
+            let _ = write!(out, "\\x{:02x}", c as u32);
+        } else {
+            let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        }
+    }
+    Cow::Owned(out)
+}
+
 fn format_address(addr: &InterfaceAddress) -> String {
     match &addr.label {
-        Some(label) => format!("{} (label {label})", addr.address),
+        Some(label) => format!("{} (label {})", addr.address, sanitize_line(label)),
         None => addr.address.to_string(),
     }
 }
@@ -25,6 +72,10 @@ fn format_address(addr: &InterfaceAddress) -> String {
 /// Render one subinterface's daemon-reported status — the wire twin of
 /// `render_subinterface`.
 pub fn render_subinterface_status(status: &SubinterfaceStatus) -> String {
+    sanitize(&render_subinterface_status_raw(status)).into_owned()
+}
+
+fn render_subinterface_status_raw(status: &SubinterfaceStatus) -> String {
     let addresses = if status.addresses.is_empty() {
         "none".to_string()
     } else {
@@ -35,7 +86,7 @@ pub fn render_subinterface_status(status: &SubinterfaceStatus) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let routing_table = status.routing_table.as_deref().unwrap_or("unset");
+    let routing_table = sanitize_line(status.routing_table.as_deref().unwrap_or("unset"));
     format!(
         "subinterface {}: address [{addresses}], routing-table {routing_table}, mtu {}",
         status.tag, status.mtu
@@ -47,6 +98,10 @@ pub fn render_subinterface_status(status: &SubinterfaceStatus) -> String {
 /// — for `show interface`, distinct from `render_interface`'s config-only
 /// view since it reflects what the daemon has reconciled.
 pub fn render_interface_status(status: &InterfaceStatus) -> String {
+    sanitize(&render_interface_status_raw(status)).into_owned()
+}
+
+fn render_interface_status_raw(status: &InterfaceStatus) -> String {
     let addresses = if status.addresses.is_empty() {
         "none".to_string()
     } else {
@@ -57,11 +112,11 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let routing_table = status.routing_table.as_deref().unwrap_or("unset");
-    let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
+    let routing_table = sanitize_line(status.routing_table.as_deref().unwrap_or("unset"));
+    let switching_profile = sanitize_line(status.switching_profile.as_deref().unwrap_or("unset"));
     let mut lines = vec![format!(
         "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}, mtu {}",
-        status.name, status.mtu
+        sanitize_line(&status.name), status.mtu
     )];
     if status.err_disabled {
         lines.push("  Err-disabled: yes".to_string());
@@ -75,6 +130,10 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
 /// Render every interface's daemon-reported status, one per line — used for
 /// both `show interface` (many entries) and `show interface <name>` (one).
 pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
+    sanitize(&render_interface_statuses_raw(statuses)).into_owned()
+}
+
+fn render_interface_statuses_raw(statuses: &[InterfaceStatus]) -> String {
     if statuses.is_empty() {
         return "no interfaces".to_string();
     }
@@ -88,6 +147,10 @@ pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
 /// Render one port aggregate's daemon-reported status — the `PortAggregate`
 /// counterpart of `render_interface_status`.
 pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
+    sanitize(&render_port_aggregate_status_raw(status)).into_owned()
+}
+
+fn render_port_aggregate_status_raw(status: &PortAggregateStatus) -> String {
     let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
     let mut lines = vec![format!(
         "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {}",
@@ -106,6 +169,10 @@ pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
 /// for both `show port-aggregate` (many entries) and `show port-aggregate
 /// <name>` (one).
 pub fn render_port_aggregate_statuses(statuses: &[PortAggregateStatus]) -> String {
+    sanitize(&render_port_aggregate_statuses_raw(statuses)).into_owned()
+}
+
+fn render_port_aggregate_statuses_raw(statuses: &[PortAggregateStatus]) -> String {
     if statuses.is_empty() {
         return "no port aggregates".to_string();
     }
@@ -181,6 +248,10 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
 
 /// Render `nos-lldpd`'s neighbor table, for `show lldp neighbors`.
 pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
+    sanitize(&render_lldp_neighbors_raw(neighbors)).into_owned()
+}
+
+fn render_lldp_neighbors_raw(neighbors: &[nos_proto::LldpNeighbor]) -> String {
     if neighbors.is_empty() {
         return "no lldp neighbors".to_string();
     }
@@ -190,24 +261,27 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
             let capabilities = if n.capabilities.is_empty() {
                 "none".to_string()
             } else {
-                n.capabilities.join(",")
+                sanitize_line(&n.capabilities.join(",")).into_owned()
             };
             let description = n
                 .port_description
                 .as_deref()
                 .filter(|d| *d != n.port_id)
-                .map_or_else(String::new, |d| format!(" ({d})"));
+                .map_or_else(String::new, |d| format!(" ({})", sanitize_line(d)));
             let management = if n.management_addresses.is_empty() {
                 String::new()
             } else {
-                format!(", management {}", n.management_addresses.join(","))
+                format!(
+                    ", management {}",
+                    sanitize_line(&n.management_addresses.join(","))
+                )
             };
             format!(
                 "{}: neighbor {}, chassis {}, port {}{description}, capabilities {capabilities}{management}, ttl {}s",
-                n.local_interface,
-                n.system_name.as_deref().unwrap_or("unnamed"),
-                n.chassis_id,
-                n.port_id,
+                sanitize_line(&n.local_interface),
+                sanitize_line(n.system_name.as_deref().unwrap_or("unnamed")),
+                sanitize_line(&n.chassis_id),
+                sanitize_line(&n.port_id),
                 n.ttl_remaining_secs,
             )
         })
@@ -218,6 +292,10 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
 /// Render `nos-lldpd`'s neighbor table one block per neighbor, for `show lldp
 /// neighbors detail`: every field, the optional ones only when sent.
 pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> String {
+    sanitize(&render_lldp_neighbors_detail_raw(neighbors)).into_owned()
+}
+
+fn render_lldp_neighbors_detail_raw(neighbors: &[nos_proto::LldpNeighbor]) -> String {
     if neighbors.is_empty() {
         return "no lldp neighbors".to_string();
     }
@@ -228,15 +306,15 @@ pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> St
             let mut lines = vec![
                 format!(
                     "{}: neighbor {}",
-                    n.local_interface,
-                    n.system_name.as_deref().unwrap_or("unnamed")
+                    sanitize_line(&n.local_interface),
+                    sanitize_line(n.system_name.as_deref().unwrap_or("unnamed"))
                 ),
-                format!("  chassis {}", n.chassis_id),
-                format!("  port {}", n.port_id),
+                format!("  chassis {}", sanitize_line(&n.chassis_id)),
+                format!("  port {}", sanitize_line(&n.port_id)),
             ];
             let mut opt = |label: &str, value: Option<String>| {
                 if let Some(v) = value {
-                    lines.push(format!("  {label} {v}"));
+                    lines.push(format!("  {label} {}", sanitize_line(&v)));
                 }
             };
             opt("port-description", n.port_description.clone());
@@ -302,6 +380,10 @@ fn bfd_method_name(m: nos_proto::schema::BfdAuthMethod) -> &'static str {
 /// Render the S-BFD reflector, for `show bfd reflector`: its discriminators
 /// (as the IPv4 addresses they are configured as) and the counters.
 pub fn render_bfd_reflector(v: &nos_proto::ReflectorView) -> String {
+    sanitize(&render_bfd_reflector_raw(v)).into_owned()
+}
+
+fn render_bfd_reflector_raw(v: &nos_proto::ReflectorView) -> String {
     if v.discriminators.is_empty() {
         return "sbfd reflector: off (no discriminator configured)".to_string();
     }
@@ -342,6 +424,10 @@ pub fn render_bfd_reflector(v: &nos_proto::ReflectorView) -> String {
 /// ordered as the daemon sent them (table, then peer). `local` and
 /// `interface` are shown only when the key carries them.
 pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
+    sanitize(&render_bfd_sessions_raw(sessions)).into_owned()
+}
+
+fn render_bfd_sessions_raw(sessions: &[nos_proto::BfdSessionView]) -> String {
     if sessions.is_empty() {
         return "no bfd sessions".to_string();
     }
@@ -403,6 +489,10 @@ pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
 
 /// Render `nos-acld`'s ACLs and their counters, for `show acl`.
 pub fn render_acls(acls: &[nos_proto::AclStatus]) -> String {
+    sanitize(&render_acls_raw(acls)).into_owned()
+}
+
+fn render_acls_raw(acls: &[nos_proto::AclStatus]) -> String {
     use nos_proto::schema::AclAction;
     use nos_proto::AclDirection;
 
@@ -460,6 +550,10 @@ pub fn render_acls(acls: &[nos_proto::AclStatus]) -> String {
 
 /// Render the flowspec rules `nos-acld` holds, after the ACLs in `show acl`.
 pub fn render_flowspec_rules(rules: &[nos_proto::FlowspecRuleStatus]) -> String {
+    sanitize(&render_flowspec_rules_raw(rules)).into_owned()
+}
+
+fn render_flowspec_rules_raw(rules: &[nos_proto::FlowspecRuleStatus]) -> String {
     let mut out = vec!["flowspec rules:".to_string()];
     for r in rules {
         let state = r
@@ -486,6 +580,10 @@ pub fn render_flowspec_rules(rules: &[nos_proto::FlowspecRuleStatus]) -> String 
 
 /// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
 pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
+    sanitize(&render_lldp_statistics_raw(stats)).into_owned()
+}
+
+fn render_lldp_statistics_raw(stats: &[nos_proto::LldpLinkStats]) -> String {
     if stats.is_empty() {
         return "no lldp links".to_string();
     }
@@ -513,6 +611,10 @@ pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
 /// Render `nos-stpd`'s summary, for `show spanning-tree`: the bridge/root
 /// block, then one row per port.
 pub fn render_spanning_tree(s: &nos_proto::StpSummary) -> String {
+    sanitize(&render_spanning_tree_raw(s)).into_owned()
+}
+
+fn render_spanning_tree_raw(s: &nos_proto::StpSummary) -> String {
     if !s.enabled {
         return "spanning-tree is disabled".to_string();
     }
@@ -606,6 +708,10 @@ const NOT_MSTP: &str = "spanning-tree is not in mode mstp";
 
 /// `show spanning-tree domain <bd>`: one Rapid-PVST+ tree.
 pub fn render_stp_domain(s: &nos_proto::StpSummary, domain: &str) -> String {
+    sanitize(&render_stp_domain_raw(s, domain)).into_owned()
+}
+
+fn render_stp_domain_raw(s: &nos_proto::StpSummary, domain: &str) -> String {
     if s.mode != nos_proto::StpMode::RapidPvst {
         return "spanning-tree is not in mode rapid-pvst".to_string();
     }
@@ -658,6 +764,10 @@ pub fn render_stp_domain(s: &nos_proto::StpSummary, domain: &str) -> String {
 
 /// `show spanning-tree mst-config`: the region identity, then the VLAN map.
 pub fn render_mst_config(s: &nos_proto::StpSummary) -> String {
+    sanitize(&render_mst_config_raw(s)).into_owned()
+}
+
+fn render_mst_config_raw(s: &nos_proto::StpSummary) -> String {
     let Some(m) = &s.mst else {
         return NOT_MSTP.to_string();
     };
@@ -683,6 +793,10 @@ pub fn render_mst_config(s: &nos_proto::StpSummary) -> String {
 
 /// `show spanning-tree instance <id>`: one tree's root and ports.
 pub fn render_stp_instance(s: &nos_proto::StpSummary, id: u16) -> String {
+    sanitize(&render_stp_instance_raw(s, id)).into_owned()
+}
+
+fn render_stp_instance_raw(s: &nos_proto::StpSummary, id: u16) -> String {
     let Some(m) = &s.mst else {
         return NOT_MSTP.to_string();
     };
@@ -810,6 +924,14 @@ fn stp_instance_detail(i: &nos_proto::StpInstance, title: bool) -> Vec<String> {
 /// `show spanning-tree [instance <id> | domain <bd>] detail`: the same tables
 /// as without `detail`, then the topology changes and the counters.
 pub fn render_stp_detail(
+    s: &nos_proto::StpSummary,
+    instance: Option<u16>,
+    domain: Option<&str>,
+) -> String {
+    sanitize(&render_stp_detail_raw(s, instance, domain)).into_owned()
+}
+
+fn render_stp_detail_raw(
     s: &nos_proto::StpSummary,
     instance: Option<u16>,
     domain: Option<&str>,
@@ -977,6 +1099,10 @@ fn render_lacp_v2(s: &PortAggregateLacpSummary) -> String {
 
 /// Render `nos-lacpd`'s per-aggregate LACP state, for `show lacp`.
 pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
+    sanitize(&render_lacp_summaries_raw(summaries)).into_owned()
+}
+
+fn render_lacp_summaries_raw(summaries: &[PortAggregateLacpSummary]) -> String {
     if summaries.is_empty() {
         return "no lacp port aggregates".to_string();
     }
@@ -1052,6 +1178,10 @@ pub fn utc(secs: u64) -> String {
 
 /// Render one log entry as one line: `<timestamp> <LEVEL> <source> <target>: <message> {fields}`.
 pub fn render_log_entry(entry: &LogEntry) -> String {
+    sanitize(&render_log_entry_raw(entry)).into_owned()
+}
+
+fn render_log_entry_raw(entry: &LogEntry) -> String {
     let timestamp = i64::try_from(entry.timestamp_ms)
         .ok()
         .and_then(|ms| OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok())
@@ -1073,9 +1203,9 @@ pub fn render_log_entry(entry: &LogEntry) -> String {
     let base = format!(
         "{timestamp} {:>5} {} {}: {}",
         render_log_level(entry.level),
-        entry.source,
-        entry.target,
-        entry.message
+        sanitize_line(&entry.source),
+        sanitize_line(&entry.target),
+        sanitize_line(&entry.message)
     );
     if entry.fields.is_empty() {
         return base;
@@ -1083,7 +1213,7 @@ pub fn render_log_entry(entry: &LogEntry) -> String {
     let fields = entry
         .fields
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
+        .map(|(k, v)| format!("{}={}", sanitize_line(k), sanitize_line(v)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{base} ({fields})")
@@ -1093,6 +1223,10 @@ pub fn render_log_entry(entry: &LogEntry) -> String {
 /// oldest-first from `nos-logd`) — used for both `show log` (a snapshot) and
 /// each streamed line of `show log --follow`.
 pub fn render_log_entries(entries: &[LogEntry]) -> String {
+    sanitize(&render_log_entries_raw(entries)).into_owned()
+}
+
+fn render_log_entries_raw(entries: &[LogEntry]) -> String {
     if entries.is_empty() {
         return "no log entries".to_string();
     }
@@ -1118,6 +1252,10 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
 /// one line per candidate. Used for both `show route <table>` (many entries)
 /// and `show route <table> <address>` (one entry, wrapped in a slice).
 pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
+    sanitize(&render_prefix_routes_raw(entries)).into_owned()
+}
+
+fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
     if entries.is_empty() {
         return "no routes".to_string();
     }
@@ -1195,10 +1333,17 @@ fn format_uptime(secs: u64) -> String {
 /// Render one BGP instance's peer summaries, one line per peer — used for
 /// `show bgp brief`.
 pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
+    sanitize(&render_bgp_summary_raw(instance, peers)).into_owned()
+}
+
+fn render_bgp_summary_raw(instance: &str, peers: &[PeerSummary]) -> String {
     if peers.is_empty() {
-        return format!("bgp instance {instance}: no peers configured");
+        return format!(
+            "bgp instance {}: no peers configured",
+            sanitize_line(instance)
+        );
     }
-    let mut lines = vec![format!("bgp instance {instance}:")];
+    let mut lines = vec![format!("bgp instance {}:", sanitize_line(instance))];
     for peer in peers {
         let remote_as = peer
             .remote_as
@@ -1258,7 +1403,7 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
         lines.push(format!(
             "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}{}{gr}",
             peer.remote_address,
-            peer.peer_group,
+            sanitize_line(&peer.peer_group),
             if peer.shutdown {
                 "Idle (shutdown)".to_string()
             } else if peer.max_prefix_held {
@@ -1277,6 +1422,10 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
 /// Render one BGP instance's received EVPN routes, one line per route — used
 /// for `show bgp evpn`.
 pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
+    sanitize(&render_bgp_evpn_raw(instance, routes)).into_owned()
+}
+
+fn render_bgp_evpn_raw(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     if routes.is_empty() {
         return format!("bgp instance {instance}: no evpn routes");
     }
@@ -1289,6 +1438,10 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
 
 /// One line per EVPN route (no header), so a page renders on its own.
 pub fn render_bgp_evpn_lines(routes: &[EvpnRouteSummary]) -> String {
+    sanitize(&render_bgp_evpn_lines_raw(routes)).into_owned()
+}
+
+fn render_bgp_evpn_lines_raw(routes: &[EvpnRouteSummary]) -> String {
     routes
         .iter()
         .map(|r| {
@@ -1314,6 +1467,14 @@ pub fn render_bgp_vpn(
     family: nos_proto::AddressFamily,
     routes: &[nos_proto::VpnRouteSummary],
 ) -> String {
+    sanitize(&render_bgp_vpn_raw(instance, family, routes)).into_owned()
+}
+
+fn render_bgp_vpn_raw(
+    instance: &str,
+    family: nos_proto::AddressFamily,
+    routes: &[nos_proto::VpnRouteSummary],
+) -> String {
     if routes.is_empty() {
         return format!("bgp instance {instance}: no {family} routes");
     }
@@ -1326,6 +1487,10 @@ pub fn render_bgp_vpn(
 
 /// One line per VPN path (no header), so a page renders on its own.
 pub fn render_bgp_vpn_lines(routes: &[nos_proto::VpnRouteSummary]) -> String {
+    sanitize(&render_bgp_vpn_lines_raw(routes)).into_owned()
+}
+
+fn render_bgp_vpn_lines_raw(routes: &[nos_proto::VpnRouteSummary]) -> String {
     routes
         .iter()
         .map(|r| {
@@ -1355,6 +1520,10 @@ pub fn render_bgp_vpn_lines(routes: &[nos_proto::VpnRouteSummary]) -> String {
 /// Render one BGP instance's received Flowspec rules, one line per rule —
 /// used for `show bgp flowspec`.
 pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> String {
+    sanitize(&render_bgp_flowspec_raw(instance, routes)).into_owned()
+}
+
+fn render_bgp_flowspec_raw(instance: &str, routes: &[FlowspecRouteSummary]) -> String {
     if routes.is_empty() {
         return format!("bgp instance {instance}: no flowspec routes");
     }
@@ -1367,6 +1536,10 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
 
 /// One line per Flowspec rule (no header), so a page renders on its own.
 pub fn render_bgp_flowspec_lines(routes: &[FlowspecRouteSummary]) -> String {
+    sanitize(&render_bgp_flowspec_lines_raw(routes)).into_owned()
+}
+
+fn render_bgp_flowspec_lines_raw(routes: &[FlowspecRouteSummary]) -> String {
     routes
         .iter()
         .map(|r| {
@@ -1399,6 +1572,10 @@ pub fn render_bgp_flowspec_lines(routes: &[FlowspecRouteSummary]) -> String {
 
 /// One BGP instance's unicast routes, one line per path — `show bgp routes`.
 pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
+    sanitize(&render_bgp_routes_raw(instance, routes)).into_owned()
+}
+
+fn render_bgp_routes_raw(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
     if routes.is_empty() {
         return format!("bgp instance {instance}: no routes");
     }
@@ -1411,23 +1588,31 @@ pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) 
 
 /// The `show bgp routes` header, printed once ahead of the pages.
 pub fn render_bgp_routes_header(instance: &str) -> String {
+    sanitize(&render_bgp_routes_header_raw(instance)).into_owned()
+}
+
+fn render_bgp_routes_header_raw(instance: &str) -> String {
     format!("bgp instance {instance}:")
 }
 
 /// One line per route (no header), so a page renders on its own: the lines
 /// have no column widths that depend on the whole table.
 pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
+    sanitize(&render_bgp_route_lines_raw(routes)).into_owned()
+}
+
+fn render_bgp_route_lines_raw(routes: &[nos_proto::BgpRouteSummary]) -> String {
     use nos_proto::RpkiValidationState as S;
     let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
     routes
         .iter()
-        .map(|r| {
+        .flat_map(|r| {
             let state = match r.validation_state {
                 S::Valid => "valid",
                 S::Invalid => "invalid",
                 S::NotFound => "not-found",
             };
-            format!(
+            let row = format!(
                 "  {} {} from {} next-hop {} as-path [{}] origin-as {} local-pref {} {}",
                 if r.best { ">" } else { " " },
                 r.prefix,
@@ -1437,7 +1622,17 @@ pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
                 opt(r.origin_as.map(|a| a.to_string())),
                 r.local_pref,
                 state
-            )
+            );
+            let attrs = r.unknown_attributes.iter().map(|a| {
+                format!(
+                    "      attr {} flags=0x{:02x} len={} {}",
+                    a.attr_type,
+                    a.flags,
+                    a.value.len() / 2,
+                    a.value
+                )
+            });
+            std::iter::once(row).chain(attrs)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1445,6 +1640,10 @@ pub fn render_bgp_route_lines(routes: &[nos_proto::BgpRouteSummary]) -> String {
 
 /// One BGP instance's RPKI caches, one line each — `show bgp rpki`.
 pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
+    sanitize(&render_bgp_rpki_raw(instance, caches)).into_owned()
+}
+
+fn render_bgp_rpki_raw(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
     if caches.is_empty() {
         return format!("bgp instance {instance}: no rpki caches");
     }
@@ -1471,6 +1670,10 @@ pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) ->
 
 /// One BGP instance's BMP stations, two lines each — `show bgp bmp`.
 pub fn render_bgp_bmp(instance: &str, stations: &[nos_proto::BmpStationStatus]) -> String {
+    sanitize(&render_bgp_bmp_raw(instance, stations)).into_owned()
+}
+
+fn render_bgp_bmp_raw(instance: &str, stations: &[nos_proto::BmpStationStatus]) -> String {
     if stations.is_empty() {
         return format!("bgp instance {instance}: no bmp stations");
     }
@@ -1538,6 +1741,10 @@ fn render_ip_or_dash(addr: Option<Ipv4Addr>) -> String {
 /// neighbor — used for `show ospf neigh`. Mirrors `render_bgp_summary`'s
 /// shape.
 pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> String {
+    sanitize(&render_ospf_neighbors_raw(instance, neighbors)).into_owned()
+}
+
+fn render_ospf_neighbors_raw(instance: &str, neighbors: &[NeighborSummary]) -> String {
     if neighbors.is_empty() {
         return format!("ospf instance {instance}: no ospf links configured");
     }
@@ -1587,6 +1794,10 @@ fn render_lls(lls: Option<nos_proto::LlsSummary>) -> String {
 /// Render one OSPF instance's installed-LSA headers, one line per LSA —
 /// used for `show ospf database`. Mirrors `render_ospf_neighbors`' shape.
 pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
+    sanitize(&render_ospf_database_raw(instance, entries)).into_owned()
+}
+
+fn render_ospf_database_raw(instance: &str, entries: &[LsaSummary]) -> String {
     if entries.is_empty() {
         return format!("ospf instance {instance}: no LSAs installed");
     }
@@ -1612,6 +1823,10 @@ pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
 /// exactly, reusing the same `OspfNeighborState`/`LinkInterfaceState`
 /// renderers since `Ospfv3NeighborSummary` shares those types verbatim.
 pub fn render_ospfv3_neighbors(instance: &str, neighbors: &[Ospfv3NeighborSummary]) -> String {
+    sanitize(&render_ospfv3_neighbors_raw(instance, neighbors)).into_owned()
+}
+
+fn render_ospfv3_neighbors_raw(instance: &str, neighbors: &[Ospfv3NeighborSummary]) -> String {
     if neighbors.is_empty() {
         return format!("ospfv3 instance {instance}: no ospfv3 links configured");
     }
@@ -1645,6 +1860,10 @@ pub fn render_ospfv3_neighbors(instance: &str, neighbors: &[Ospfv3NeighborSummar
 /// Render one `Ospfv3Instance`'s installed-LSA headers, one line per LSA —
 /// used for `show ospfv3 database`. Mirrors `render_ospf_database` exactly.
 pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
+    sanitize(&render_ospfv3_database_raw(instance, entries)).into_owned()
+}
+
+fn render_ospfv3_database_raw(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
     if entries.is_empty() {
         return format!("ospfv3 instance {instance}: no LSAs installed");
     }
@@ -1669,6 +1888,10 @@ pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> S
 /// Render a full running-config snapshot as human-readable text: the
 /// generated `nos_proto::cli::render` hierarchy, only what is configured.
 pub fn render_config(config: &Config) -> String {
+    sanitize(&render_config_raw(config)).into_owned()
+}
+
+fn render_config_raw(config: &Config) -> String {
     let mut doc = serde_json::to_value(config).unwrap_or_default();
     // The keystore is a section of its own: `show config admin` (#507).
     doc["admin"] = serde_json::to_value(nos_proto::Admin::default()).unwrap_or_default();
@@ -1682,6 +1905,10 @@ pub fn render_config(config: &Config) -> String {
 
 /// `show config admin`: the keystore, secrets as `<hidden>`.
 pub fn render_admin_config(config: &Config) -> String {
+    sanitize(&render_admin_config_raw(config)).into_owned()
+}
+
+fn render_admin_config_raw(config: &Config) -> String {
     let doc = serde_json::to_value(config).unwrap_or_default();
     if config.admin.keys.is_empty() {
         return "no admin keys configured".to_string();
@@ -1694,6 +1921,10 @@ pub fn render_admin_config(config: &Config) -> String {
 /// navigation position: the whole config at the root, else the object the
 /// position names (headed by its own words).
 pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String {
+    sanitize(&render_transaction_raw(snapshot, path)).into_owned()
+}
+
+fn render_transaction_raw(snapshot: &TransactionSnapshot, path: &Path) -> String {
     if path.segments().is_empty() {
         let header = if snapshot.dirty {
             format!("transaction '{}' (uncommitted changes):", snapshot.name)
@@ -1715,6 +1946,10 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
 /// line <n> ...`/`delete source line <n>` can be given without re-reading
 /// the source in an editor first.
 pub fn render_policy_source(source: &str) -> String {
+    sanitize(&render_policy_source_raw(source)).into_owned()
+}
+
+fn render_policy_source_raw(source: &str) -> String {
     if source.is_empty() {
         return "(empty)".to_string();
     }
@@ -1728,6 +1963,10 @@ pub fn render_policy_source(source: &str) -> String {
 
 /// Render one domain's forwarding database for `show fdb`.
 pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
+    sanitize(&render_fdb_table_raw(t)).into_owned()
+}
+
+fn render_fdb_table_raw(t: &nos_proto::FdbTable) -> String {
     let dev = |d: &Option<String>| d.as_deref().unwrap_or("not created yet").to_string();
     let mut lines = vec![format!(
         "broadcast-domain {}: vni {}, bridge {}, vxlan {}, neigh-suppress {}",
@@ -1914,7 +2153,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
 /// its `subsections` one level deeper.
 fn render_section(lines: &mut Vec<String>, section: &SectionDiff, depth: usize, color: bool) {
     let indent = "  ".repeat(depth);
-    let header = format!("{indent}{}:", section.header);
+    let header = format!("{indent}{}:", sanitize(&section.header));
     match section.status {
         // The section itself didn't change — only shown so a reader can
         // tell which section its changed fields (below) belong to.
@@ -1932,29 +2171,22 @@ fn render_section(lines: &mut Vec<String>, section: &SectionDiff, depth: usize, 
 }
 
 fn render_field_diff(lines: &mut Vec<String>, field: &FieldDiff, indent: &str, color: bool) {
-    match (&field.old, &field.new) {
+    // Values are escaped before the SGR codes go on: this renderer's output
+    // legitimately contains ESC, so it has no final `sanitize` pass (#1365).
+    let label = sanitize(&field.label);
+    let old = field.old.as_deref().map(sanitize);
+    let new = field.new.as_deref().map(sanitize);
+    match (&old, &new) {
         (Some(old), Some(new)) => {
             let (old_h, new_h) = highlight(old, new, color);
-            lines.push(removed_line(
-                &format!("{indent}{}: {old_h}", field.label),
-                color,
-            ));
-            lines.push(added_line(
-                &format!("{indent}{}: {new_h}", field.label),
-                color,
-            ));
+            lines.push(removed_line(&format!("{indent}{label}: {old_h}"), color));
+            lines.push(added_line(&format!("{indent}{label}: {new_h}"), color));
         }
         (None, Some(new)) => {
-            lines.push(added_line(
-                &format!("{indent}{}: {new}", field.label),
-                color,
-            ));
+            lines.push(added_line(&format!("{indent}{label}: {new}"), color));
         }
         (Some(old), None) => {
-            lines.push(removed_line(
-                &format!("{indent}{}: {old}", field.label),
-                color,
-            ));
+            lines.push(removed_line(&format!("{indent}{label}: {old}"), color));
         }
         (None, None) => {}
     }
@@ -2533,6 +2765,7 @@ mod tests {
             local_pref: 100,
             best,
             validation_state: state,
+            unknown_attributes: vec![],
         };
         let local = BgpRouteSummary {
             as_path: String::new(),
@@ -2549,6 +2782,34 @@ mod tests {
                 ]
             ),
             "bgp instance r1:\n  > 192.0.2.0/24 from 10.0.0.2 next-hop 10.0.0.2 as-path [65001 65002] origin-as 65002 local-pref 100 valid\n    192.0.2.0/24 from 10.0.0.3 next-hop 10.0.0.3 as-path [65001 65002] origin-as 65002 local-pref 100 invalid\n    192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 not-found"
+        );
+    }
+
+    #[test]
+    fn render_bgp_routes_lists_unknown_attributes_under_their_row() {
+        use nos_proto::{BgpRouteSummary, RpkiValidationState as S, UnknownAttributeSummary as U};
+        let r = |unknown_attributes| BgpRouteSummary {
+            prefix: "192.0.2.0/24".to_string(),
+            peer: None,
+            next_hop: None,
+            as_path: String::new(),
+            origin_as: None,
+            local_pref: 100,
+            best: true,
+            validation_state: S::Valid,
+            unknown_attributes,
+        };
+        let u = |attr_type, flags, value: &str| U {
+            attr_type,
+            flags,
+            value: value.into(),
+        };
+        let row =
+            "  > 192.0.2.0/24 from local next-hop - as-path [] origin-as - local-pref 100 valid";
+        assert_eq!(render_bgp_route_lines(&[r(vec![])]), row);
+        assert_eq!(
+            render_bgp_route_lines(&[r(vec![u(0xfe, 0xe0, "deadbeef"), u(7, 0xc0, "")]), r(vec![])]),
+            format!("{row}\n      attr 254 flags=0xe0 len=4 deadbeef\n      attr 7 flags=0xc0 len=0 \n{row}")
         );
     }
 
@@ -3293,6 +3554,7 @@ mod tests {
             ],
             link_local_address: None,
             err_disabled: false,
+            speed_mbps: None,
         };
         let out = render_interface_statuses(&[iface.clone(), iface.clone()]);
         assert_eq!(
@@ -3312,6 +3574,8 @@ mod tests {
             link_local_address: None,
             bond_name: None,
             err_disabled: false,
+            steering: Vec::new(),
+            speed_mbps: None,
         };
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),
@@ -3592,7 +3856,7 @@ mod tests {
                 }]
             }],
             "routing_tables": [{
-                "name": "rt1", "ospfv3_instance": "o3",
+                "name": "rt1", "ospfv3_instances": ["o3"],
                 "evpn": {"l3_vni": 5000, "rd": "1:1"}
             }],
             "users": [{"name": "admin", "password": "$argon2id$secret"}]
@@ -3712,6 +3976,145 @@ mod tests {
             ]}]
         }));
         assert_eq!(render_config(&cfg), "broadcast domain bd1\nswitching-profile sp1\n  broadcast-domain bd1\n    tag dot1q 100");
+    }
+
+    #[test]
+    fn sanitize_escapes_control_and_format_chars_visibly() {
+        for (raw, want) in [
+            ("\x1b[31mred", "\\x1b[31mred"),
+            ("\x1b]0;title\x07", "\\x1b]0;title\\x07"),
+            ("\x1b]52;c;AAAA\x07", "\\x1b]52;c;AAAA\\x07"),
+            ("a\u{9b}b\u{9d}", "a\\x9bb\\x9d"),
+            ("\x7f\0\r", "\\x7f\\x00\\x0d"),
+            (
+                "a\u{202e}b\u{200b}\u{2066}\u{feff}",
+                "a\\u{202e}b\\u{200b}\\u{2066}\\u{feff}",
+            ),
+        ] {
+            assert_eq!(sanitize(raw), want);
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_clean_text_borrowed_and_layout_whitespace() {
+        for clean in ["plain", "tab\there\nline two", "héllo 日本 🦀"] {
+            assert!(matches!(sanitize(clean), Cow::Borrowed(_)));
+        }
+        assert_eq!(sanitize_line("a\nb\tc"), "a\\nb\tc");
+    }
+
+    fn has_raw_control(s: &str) -> bool {
+        s.chars()
+            .any(|c| (c.is_control() && c != '\n' && c != '\t') || needs_escape(c, false))
+    }
+
+    const EVIL: &str = "x\x1b]0;pwn\x07\u{9b}31m\u{202e}\r";
+
+    #[test]
+    fn a_multi_line_lldp_name_cannot_forge_a_row() {
+        let n = nos_proto::LldpNeighbor {
+            local_interface: "eth1".to_string(),
+            system_name: Some("evil\neth9: neighbor fake".to_string()),
+            chassis_id: EVIL.to_string(),
+            port_id: "p\nq".to_string(),
+            port_description: Some("d\ne".to_string()),
+            system_description: Some("s\n  chassis forged".to_string()),
+            ..nos_proto::LldpNeighbor::default()
+        };
+        let summary = render_lldp_neighbors(std::slice::from_ref(&n));
+        assert_eq!(summary.lines().count(), 1, "{summary}");
+        assert!(!has_raw_control(&summary), "{summary}");
+        let detail = render_lldp_neighbors_detail(std::slice::from_ref(&n));
+        // header, chassis, port, port-description, system-description, ttl
+        assert_eq!(detail.lines().count(), 6, "{detail}");
+        assert!(!has_raw_control(&detail));
+        assert!(!detail.contains("\n  chassis forged"));
+    }
+
+    #[test]
+    fn log_entries_stay_one_line_each() {
+        let e = LogEntry {
+            timestamp_ms: 1,
+            level: LogLevel::Info,
+            source: EVIL.to_string(),
+            target: "t\nu".to_string(),
+            message: "m\n2026-01-01 INFO forged: hi".to_string(),
+            fields: vec![("k\n".to_string(), EVIL.to_string())],
+        };
+        let out = render_log_entry(&e);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        assert!(!has_raw_control(&out));
+    }
+
+    #[test]
+    fn names_in_bgp_and_interface_output_are_escaped() {
+        let mut peer = idle_peer("10.0.0.1");
+        peer.peer_group = EVIL.to_string();
+        let out = render_bgp_summary(EVIL, &[peer]);
+        assert!(!has_raw_control(&out), "{out}");
+        let status = InterfaceStatus {
+            link_local_address: None,
+            name: EVIL.to_string(),
+            addresses: Vec::new(),
+            routing_table: Some(EVIL.to_string()),
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            speed_mbps: None,
+            subinterfaces: Vec::new(),
+            speed_mbps: None,
+            err_disabled: false,
+            speed_mbps: None,
+        };
+        let out = render_interface_status(&status);
+        assert!(!has_raw_control(&out), "{out}");
+        assert_eq!(out.lines().count(), 1);
+    }
+
+    #[test]
+    fn diff_escapes_values_but_keeps_its_own_sgr_codes() {
+        let diff = ConfigDiff {
+            hostname: Some(FieldDiff {
+                label: EVIL.to_string(),
+                old: Some(EVIL.to_string()),
+                new: Some("new\x1b[2J".to_string()),
+            }),
+            ..ConfigDiff::default()
+        };
+        let out = render_diff(&diff, true);
+        assert!(out.contains(RED) && out.contains(GREEN) && out.contains(RESET));
+        let stripped = [RED, GREEN, EMPH_ON, EMPH_OFF, RESET]
+            .iter()
+            .fold(out, |acc, c| acc.replace(c, ""));
+        assert!(!has_raw_control(&stripped), "{stripped:?}");
+    }
+
+    #[test]
+    fn operator_text_keeps_its_newlines() {
+        let out = render_policy_source("a\n\tb\x1b");
+        assert!(out.contains("a\n") && out.contains("\tb\\x1b"), "{out}");
+    }
+
+    /// A new `render_*` cannot skip the terminal escaping (#1365).
+    #[test]
+    fn every_public_renderer_sanitizes() {
+        let src = include_str!("format.rs");
+        let body = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let mut checked = 0;
+        for chunk in body.split("\npub fn render_").skip(1) {
+            let name = chunk.split('(').next().unwrap();
+            let end = chunk.find("\n}\n").unwrap();
+            // `render_diff` emits SGR itself, so it escapes values instead.
+            if name == "diff" {
+                continue;
+            }
+            assert!(
+                chunk[..end].contains("sanitize("),
+                "render_{name} lacks a sanitize pass"
+            );
+            checked += 1;
+        }
+        assert!(checked > 30);
     }
 }
 

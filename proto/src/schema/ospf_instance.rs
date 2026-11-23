@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_key_in;
 
+use ipnet::Ipv4Net;
+
 use super::{Config, OspfArea};
 use nos_proto_derive::Cli;
 
@@ -14,6 +16,7 @@ use nos_proto_derive::Cli;
 /// beyond what a nested area's profiles can be attached to yet, and no wire
 /// protocol — this is a config-only skeleton, see `docs/protocols/ospf-internals.md`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 #[allow(clippy::struct_excessive_bools)] // one independent RFC knob per flag
@@ -157,6 +160,22 @@ pub struct OspfInstance {
     #[cli(topic = OspfInstanceHostRouter, words = "host-router")]
     pub host_router: bool,
 
+    /// RFC 3630 traffic engineering: originate area-scope TE LSAs (opaque
+    /// type 1): a Router Address LSA and a Link LSA per `Full`
+    /// point-to-point or broadcast link. Advertisement only, no CSPF. Off by
+    /// default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstanceTrafficEngineering, words = "traffic-engineering")]
+    pub traffic_engineering: bool,
+
+    /// RFC 8665 segment routing: this router's SRGB and the Prefix-SIDs it
+    /// advertises. Off by default.
+    #[serde(default)]
+    #[garde(custom(|s, ctx: &Config| valid_segment_routing(s, ctx)))]
+    #[cli(topic = OspfInstanceSegmentRouting, words = "segment-routing")]
+    pub segment_routing: SegmentRouting,
+
     /// RFC 7490 remote loop-free alternates: for a destination with no basic
     /// LFA, a backup that tunnels (IP-in-IP) to a PQ node's loopback. Also
     /// makes this router's routing table decapsulate IP-in-IP from any
@@ -175,10 +194,120 @@ pub struct OspfInstance {
     pub spf_throttle: SpfThrottle,
 }
 
+/// First label of the SRGB when none is configured (the IANA/vendor
+/// convention, clear of the VPN label allocator that starts at 1000).
+pub const DEFAULT_SRGB_START: u32 = 16000;
+/// Size of the SRGB when none is configured (16000-23999).
+pub const DEFAULT_SRGB_RANGE: u32 = 8000;
+/// Largest label an incoming MPLS packet may carry (`nos-ribd` refuses above).
+pub const MAX_SRGB_LABEL: u32 = 1_048_574;
+
+/// RFC 8665 segment routing of one OSPF instance (#1168): the router's SRGB
+/// (a static label block, so every router can agree on it, RFC 8402) and the
+/// Prefix-SIDs it originates. Only algorithm 0 (SPF).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct SegmentRouting {
+    /// Advertise the SR-Algorithm and SID/Label Range TLVs in the Router
+    /// Information LSA and the Prefix-SIDs below.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSegmentRoutingEnabled, words = "enabled")]
+    pub enabled: bool,
+    /// First label of the SRGB; `None` means 16000.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSegmentRoutingSrgbStart, words = "srgb start")]
+    pub srgb_start: Option<u32>,
+    /// Number of labels in the SRGB; `None` means 8000.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSegmentRoutingSrgbRange, words = "srgb range")]
+    pub srgb_range: Option<u32>,
+    /// Prefix-SIDs, keyed by host prefix.
+    #[serde(default)]
+    #[cli(topic = OspfInstanceSegmentRoutingPrefixSid, words = "prefix-sid")]
+    pub prefix_sids: Vec<OspfPrefixSid>,
+}
+
+impl SegmentRouting {
+    /// The effective SRGB as `(start, range)`.
+    #[must_use]
+    pub fn srgb(&self) -> (u32, u32) {
+        (
+            self.srgb_start.unwrap_or(DEFAULT_SRGB_START),
+            self.srgb_range.unwrap_or(DEFAULT_SRGB_RANGE),
+        )
+    }
+}
+
+/// One RFC 8665 §5 Prefix-SID, keyed by its /32; the label other routers push
+/// toward it is their view of our SRGB base plus `index`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub struct OspfPrefixSid {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    /// The host prefix (a /32, typically a loopback); the key.
+    pub prefix: Ipv4Net,
+    /// Index into the SRGB, below its range; unique among the SIDs.
+    #[cli(topic = OspfPrefixSidIndex)]
+    pub index: u32,
+    /// NP-flag: the penultimate hop keeps the label instead of popping it
+    /// (PHP is the default).
+    #[serde(default)]
+    #[cli(topic = OspfPrefixSidNoPhp, words = "no-php")]
+    pub no_php: bool,
+    /// E-flag: the penultimate hop swaps to explicit null. Needs `no-php`.
+    #[serde(default)]
+    #[cli(topic = OspfPrefixSidExplicitNull, words = "explicit-null")]
+    pub explicit_null: bool,
+}
+
+/// SRGB inside the label space and clear of every `vpn.label`; Prefix-SIDs
+/// /32, in range, no repeated prefix or index, `explicit-null` with `no-php`.
+fn valid_segment_routing(s: &SegmentRouting, cfg: &Config) -> garde::Result {
+    let (start, range) = s.srgb();
+    if start < 16 || range == 0 || start.saturating_add(range - 1) > MAX_SRGB_LABEL {
+        return Err(garde::Error::new(
+            "the srgb must lie within labels 16 to 1048574",
+        ));
+    }
+    let end = start + range - 1;
+    if cfg
+        .routing_tables
+        .iter()
+        .filter_map(|t| t.vpn.label)
+        .any(|l| (start..=end).contains(&l))
+    {
+        return Err(garde::Error::new("the srgb covers a vpn label"));
+    }
+    for (i, p) in s.prefix_sids.iter().enumerate() {
+        if p.prefix.prefix_len() != 32 {
+            return Err(garde::Error::new("a prefix-sid prefix must be a /32"));
+        }
+        if p.index >= range {
+            return Err(garde::Error::new(
+                "a prefix-sid index must be inside the srgb",
+            ));
+        }
+        if p.explicit_null && !p.no_php {
+            return Err(garde::Error::new("explicit-null needs no-php"));
+        }
+        if s.prefix_sids[..i]
+            .iter()
+            .any(|o| o.prefix == p.prefix || o.index == p.index)
+        {
+            return Err(garde::Error::new(
+                "prefix-sid prefixes and indexes must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Per-instance RFC 8405 SPF throttle timers, milliseconds. `None` keeps the
 /// default of `nos-ospfd` (initial 50, short 200, long 5000, holddown 10000,
 /// time-to-learn 3000).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct SpfThrottle {
     /// Delay of the first change after a quiet period.
@@ -239,6 +368,8 @@ impl Default for OspfInstance {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
+            segment_routing: SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
@@ -277,7 +408,7 @@ mod tests {
 
     use crate::schema::Config;
 
-    use super::{OspfInstance, SpfThrottle};
+    use super::{OspfInstance, SegmentRouting, SpfThrottle};
 
     fn instance(name: &str) -> OspfInstance {
         OspfInstance {
@@ -294,6 +425,8 @@ mod tests {
             max_metric_administrative: false,
             max_lsa: None,
             host_router: false,
+            traffic_engineering: false,
+            segment_routing: SegmentRouting::default(),
             remote_lfa: false,
             redistribute_metric: None,
             redistribute_metric_type: None,
@@ -325,6 +458,63 @@ mod tests {
         }));
         assert!(!ok(|t| t.holddown_ms = Some(0)));
         assert!(ok(|t| t.holddown_ms = Some(1)));
+    }
+
+    fn sid(p: &str, index: u32) -> super::OspfPrefixSid {
+        super::OspfPrefixSid {
+            prefix: p.parse().unwrap(),
+            index,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn segment_routing_rules() {
+        let ok = |f: fn(&mut super::SegmentRouting), label: Option<u32>| {
+            let mut i = instance("o1");
+            f(&mut i.segment_routing);
+            let mut cfg = config_with(vec![i]);
+            if let Some(l) = label {
+                cfg.routing_tables.push(crate::schema::RoutingTable {
+                    name: "t".into(),
+                    vpn: crate::schema::RoutingTableVpn {
+                        label: Some(l),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            }
+            let r = cfg.validate_with(&cfg);
+            r.is_ok() || !format!("{r:?}").contains("segment_routing")
+        };
+        assert!(ok(|_| {}, None));
+        assert!(ok(
+            |s| s.prefix_sids = vec![sid("1.1.1.1/32", 1), sid("2.2.2.2/32", 2)],
+            None
+        ));
+        assert!(!ok(
+            |s| s.prefix_sids = vec![sid("1.1.1.1/32", 1), sid("2.2.2.2/32", 1)],
+            None
+        ));
+        assert!(!ok(
+            |s| s.prefix_sids = vec![sid("1.1.1.1/32", 1), sid("1.1.1.1/32", 2)],
+            None
+        ));
+        assert!(!ok(|s| s.prefix_sids = vec![sid("1.1.1.0/24", 1)], None));
+        assert!(!ok(|s| s.prefix_sids = vec![sid("1.1.1.1/32", 8000)], None));
+        assert!(!ok(
+            |s| {
+                let mut p = sid("1.1.1.1/32", 1);
+                p.explicit_null = true;
+                s.prefix_sids = vec![p];
+            },
+            None
+        ));
+        assert!(!ok(|s| s.srgb_start = Some(15), None));
+        assert!(!ok(|s| s.srgb_range = Some(0), None));
+        assert!(!ok(|s| s.srgb_start = Some(1_048_000), None));
+        assert!(!ok(|_| {}, Some(16500)));
+        assert!(ok(|_| {}, Some(1000)));
     }
 
     #[test]

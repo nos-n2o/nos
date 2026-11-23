@@ -14,13 +14,13 @@ use std::net::IpAddr;
 /// SPF metric.
 /// Next hops, backup (`true`: an RFC 7490 remote LFA tunnel to that PQ node),
 /// metric.
-type Hops = (Vec<IpAddr>, Option<(IpAddr, bool)>, u32);
+type Hops = (Vec<IpAddr>, Option<(IpAddr, bool)>, u32, Vec<Vec<u32>>);
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ipnet::IpNet;
-use nos_proto::{IpcCodec, OspfRoute, OspfRouteUpdate, RibRequest, Role, ServiceRef};
+use nos_proto::{IlmRoute, IpcCodec, OspfRoute, OspfRouteUpdate, RibRequest, Role, ServiceRef};
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -117,7 +117,7 @@ async fn run(
         let (mut reader, write_half) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(write_half, IpcCodec::<RibRequest>::default());
         let mut eof_buf = [0u8; 1];
-        let routes = compute_routes(&links).await;
+        let (routes, ilm) = compute_routes(&links).await;
         if !push(
             &mut writer,
             &instance,
@@ -133,6 +133,10 @@ async fn run(
             continue;
         }
         let mut last_sent = routes;
+        let mut last_ilm = ilm;
+        if !last_ilm.is_empty() {
+            push_ilm(&mut writer, &instance, &last_ilm).await;
+        }
         debug!(table = %table, routes = last_sent.len(), "sent initial ospf route snapshot to nos-ribd");
 
         // Inner loop: same connection, same owning table, until the table
@@ -159,15 +163,23 @@ async fn run(
                     chunk,
                 )
                 .await;
+                push_ilm(&mut writer, &instance, &[]).await;
                 break;
             }
-            let new_routes = compute_routes(&links).await;
+            let (new_routes, new_ilm) = compute_routes(&links).await;
             let updates = diff_routes(&last_sent, &new_routes);
             if !push(&mut writer, &instance, updates, chunk).await {
                 warn!(table = %table, "write failure sending ospf route update, reconnecting");
                 break;
             }
             last_sent = new_routes;
+            if new_ilm != last_ilm {
+                if !push_ilm(&mut writer, &instance, &new_ilm).await {
+                    warn!(table = %table, "write failure sending ospf ilm routes, reconnecting");
+                    break;
+                }
+                last_ilm = new_ilm;
+            }
         }
         // Reconnect (or idle, if the table is now None) immediately — the
         // outer loop re-reads the current snapshot from scratch.
@@ -200,6 +212,22 @@ where
     .await
 }
 
+/// Sends the instance's whole ILM set (`PushMplsRoutes` replaces it; empty
+/// removes it), #1381.
+async fn push_ilm<S>(writer: &mut S, instance: &str, routes: &[IlmRoute]) -> bool
+where
+    S: futures::Sink<RibRequest> + Unpin,
+{
+    nos_proto::chunk::send_all(
+        writer,
+        [RibRequest::PushMplsRoutes {
+            instance: instance.to_string(),
+            routes: routes.to_vec(),
+        }],
+    )
+    .await
+}
+
 /// Waits for the next reason to recompute routes: an LSDB change (then a
 /// RFC 8405 throttle pause, so an LSU burst costs one SPF, not one per LSA),
 /// the `POLL_INTERVAL` fallback (not a change: it bypasses the throttle so a
@@ -223,12 +251,21 @@ async fn wait_for_change(
     }
 }
 
-async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
-    links
-        .compute_routes()
-        .await
+async fn compute_routes(links: &Arc<LinkManager>) -> (HashMap<IpNet, Hops>, Vec<IlmRoute>) {
+    let entries = links.compute_routes().await;
+    let ilm = links.ilm_routes(&entries);
+    let routes = entries
         .into_iter()
         .map(|e| {
+            // One stack per next hop, in next-hop order; none is plain IP.
+            let labels = if e.labels.is_empty() {
+                Vec::new()
+            } else {
+                e.next_hops
+                    .iter()
+                    .map(|h| e.labels.get(h).cloned().unwrap_or_default())
+                    .collect()
+            };
             (
                 IpNet::V4(e.prefix),
                 (
@@ -237,10 +274,12 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
                         .map(|b| (IpAddr::V4(b), false))
                         .or(e.backup_tunnel.map(|pq| (IpAddr::V4(pq), true))),
                     e.metric,
+                    labels,
                 ),
             )
         })
-        .collect()
+        .collect();
+    (routes, ilm)
 }
 
 /// Waits out `delay`, interruptible by `shutdown` firing. Returns `true` if
@@ -262,7 +301,7 @@ fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
 /// RFC 2328 next hops are routable IPv4 addresses: no interface id needed.
 /// No next hop at all is an area range's discard route
 /// (`LinkManager::compute_routes`).
-fn to_route(prefix: IpNet, (next_hops, backup, metric): &Hops) -> OspfRoute {
+fn to_route(prefix: IpNet, (next_hops, backup, metric, labels): &Hops) -> OspfRoute {
     OspfRoute {
         prefix,
         next_hops: next_hops.iter().map(|gw| (*gw, None)).collect(),
@@ -271,6 +310,7 @@ fn to_route(prefix: IpNet, (next_hops, backup, metric): &Hops) -> OspfRoute {
         backup_interface_id: None,
         metric: *metric,
         discard: next_hops.is_empty(),
+        next_hop_labels: labels.clone(),
     }
 }
 
@@ -304,7 +344,12 @@ mod tests {
     fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, Hops> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), (vec![gw.parse().unwrap()], None, 10)))
+            .map(|(p, gw)| {
+                (
+                    p.parse().unwrap(),
+                    (vec![gw.parse().unwrap()], None, 10, vec![]),
+                )
+            })
             .collect()
     }
 
@@ -333,6 +378,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -342,7 +388,7 @@ mod tests {
     #[test]
     fn discard_route_is_pushed_then_removed() {
         let p: IpNet = "10.9.0.0/16".parse().unwrap();
-        let with = HashMap::from([(p, (Vec::new(), None, 5))]);
+        let with = HashMap::from([(p, (Vec::new(), None, 5, vec![]))]);
         assert_eq!(
             diff_routes(&HashMap::new(), &with),
             vec![OspfRouteUpdate::Add(OspfRoute {
@@ -353,6 +399,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 5,
                 discard: true,
+                next_hop_labels: Vec::new(),
             })]
         );
         assert_eq!(
@@ -385,6 +432,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             }),
             OspfRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
         ];
@@ -397,8 +445,8 @@ mod tests {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let bk: IpAddr = "10.0.9.9".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let last_sent = HashMap::from([(p, (vec![gw], None, 10))]);
-        let new_routes = HashMap::from([(p, (vec![gw], Some((bk, false)), 10))]);
+        let last_sent = HashMap::from([(p, (vec![gw], None, 10, vec![]))]);
+        let new_routes = HashMap::from([(p, (vec![gw], Some((bk, false)), 10, vec![]))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
@@ -409,6 +457,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -418,7 +467,7 @@ mod tests {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let pq: IpAddr = "10.255.0.4".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let route = to_route(p, &(vec![gw], Some((pq, true)), 10));
+        let route = to_route(p, &(vec![gw], Some((pq, true)), 10, vec![]));
         assert_eq!(route.backup_next_hop, None);
         assert_eq!(route.backup_tunnel, Some(pq));
     }
@@ -427,8 +476,8 @@ mod tests {
     fn diff_ecmp_set_change_is_add_carrying_every_hop() {
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
         let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.1.1".parse().unwrap());
-        let last_sent = HashMap::from([(p, (vec![a], None, 10))]);
-        let new_routes = HashMap::from([(p, (vec![a, b], None, 10))]);
+        let last_sent = HashMap::from([(p, (vec![a], None, 10, vec![]))]);
+        let new_routes = HashMap::from([(p, (vec![a, b], None, 10, vec![]))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
@@ -439,6 +488,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })]
         );
     }
@@ -488,6 +538,7 @@ mod tests {
                 backup_tunnel: None,
                 metric: 10,
                 discard: false,
+                next_hop_labels: Vec::new(),
             })
             .collect();
 
@@ -621,5 +672,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("no push after restart mode ended");
+    }
+
+    #[test]
+    fn labels_ride_to_the_wire_and_a_label_change_is_an_add() {
+        let p: IpNet = "10.9.0.1/32".parse().unwrap();
+        let gw: IpAddr = "10.0.0.2".parse().unwrap();
+        let old = HashMap::from([(p, (vec![gw], None, 10, vec![vec![16001]]))]);
+        let new = HashMap::from([(p, (vec![gw], None, 10, vec![vec![17001]]))]);
+        let [OspfRouteUpdate::Add(r)] = &diff_routes(&old, &new)[..] else {
+            panic!("expected one add");
+        };
+        assert_eq!(r.next_hop_labels, vec![vec![17001]]);
     }
 }

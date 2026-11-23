@@ -16,11 +16,13 @@ use super::sugar;
 /// containment/orlonger-based for a bare CIDR — see root `CLAUDE.md`'s RPL
 /// section.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct PrefixListEntry {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     #[cli(topic = PrefixListEntry)]
     /// Base prefix of the entry.
+    #[cfg_attr(feature = "arbitrary", arbitrary(with = crate::arbitrary_support::ip_net))]
     pub cidr: IpNet,
     #[cli(topic = PrefixListEntry, sugar(word = "orlonger", with = sugar::orlonger, topic = PrefixListEntry), sugar(word = "upto", with = sugar::upto, topic = PrefixListEntry))]
     /// Prefix-length range `(min, max)` that matches within `cidr`; `None` is an exact match.
@@ -30,6 +32,7 @@ pub struct PrefixListEntry {
 /// A named set of prefix-match entries, referenced by bare name from an RPL
 /// script's `this.prefix in NAME`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct PrefixList {

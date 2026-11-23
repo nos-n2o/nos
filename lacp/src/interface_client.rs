@@ -12,10 +12,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use futures::SinkExt;
-use nos_proto::{InterfaceRequest, IpcCodec, LacpAggregateMembers, Role, ServiceRef};
+use nos_proto::{
+    InterfaceRequest, IpcCodec, LacpAggregateConversations, LacpAggregateMembers,
+    LacpLinkConversations, Role, ServiceRef,
+};
 use tokio::sync::{mpsc, watch};
 use tokio_util::codec::FramedWrite;
 use tracing::{info, warn};
+
+/// What `selection_loop` hands to the push connection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LacpPush {
+    Members(LacpAggregateMembers),
+    Conversations(LacpAggregateConversations),
+}
 
 /// Fixed reconnect delay, matching every other reconnect loop in this
 /// codebase.
@@ -28,10 +38,11 @@ const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 /// drops.
 pub async fn run(
     watchdog_socket: PathBuf,
-    mut rx: mpsc::Receiver<LacpAggregateMembers>,
+    mut rx: mpsc::Receiver<LacpPush>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut conversations: HashMap<String, (Vec<LacpLinkConversations>, bool)> = HashMap::new();
     let mut writer: Option<
         FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
     > = None;
@@ -53,10 +64,22 @@ pub async fn run(
                     let mut w = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
                     let mut ok = true;
                     for (aggregate, active_members) in &cache {
-                        if send_push(&mut w, aggregate.clone(), active_members.clone())
-                            .await
-                            .is_err()
-                        {
+                        let push = LacpPush::Members(LacpAggregateMembers {
+                            aggregate: aggregate.clone(),
+                            active_members: active_members.clone(),
+                        });
+                        if send_push(&mut w, push).await.is_err() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    for (aggregate, (links, discard_wrong)) in &conversations {
+                        let push = LacpPush::Conversations(LacpAggregateConversations {
+                            aggregate: aggregate.clone(),
+                            links: links.clone(),
+                            discard_wrong: *discard_wrong,
+                        });
+                        if !ok || send_push(&mut w, push).await.is_err() {
                             ok = false;
                             break;
                         }
@@ -81,9 +104,16 @@ pub async fn run(
         tokio::select! {
             msg = rx.recv() => {
                 let Some(msg) = msg else { return };
-                cache.insert(msg.aggregate.clone(), msg.active_members.clone());
+                match &msg {
+                    LacpPush::Members(m) => {
+                        cache.insert(m.aggregate.clone(), m.active_members.clone());
+                    }
+                    LacpPush::Conversations(c) => {
+                        conversations.insert(c.aggregate.clone(), (c.links.clone(), c.discard_wrong));
+                    }
+                }
                 if let Some(w) = writer.as_mut()
-                    && send_push(w, msg.aggregate, msg.active_members).await.is_err() {
+                    && send_push(w, msg).await.is_err() {
                         writer = None;
                     }
             }
@@ -98,14 +128,13 @@ pub async fn run(
 
 async fn send_push(
     writer: &mut FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
-    aggregate: String,
-    active_members: Vec<String>,
+    push: LacpPush,
 ) -> std::io::Result<()> {
     writer
-        .send(InterfaceRequest::PushLacpMembers(LacpAggregateMembers {
-            aggregate,
-            active_members,
-        }))
+        .send(match push {
+            LacpPush::Members(m) => InterfaceRequest::PushLacpMembers(m),
+            LacpPush::Conversations(c) => InterfaceRequest::PushLacpConversations(c),
+        })
         .await
 }
 

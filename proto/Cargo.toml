@@ -22,12 +22,15 @@ futures    = { workspace = true }
 nos-rpl    = { workspace = true }
 nos-proto-derive = { workspace = true }
 utoipa     = { workspace = true, optional = true }
+arbitrary  = { version = "=1.5.0", features = ["derive"], optional = true }
 precis-core     = { workspace = true }
 precis-profiles = { workspace = true }
 
 [features]
 # `ToSchema` derives for the REST API's OpenAPI spec (`nos-restd`); off for every other daemon.
 openapi = ["dep:utoipa"]
+# `Arbitrary` derives so the `nos-fuzz` `cli_format` target can build renderer inputs; enabled only by `fuzz/Cargo.toml` (#1216, tools/ci/no-arbitrary.sh).
+arbitrary = ["dep:arbitrary"]
 
 [dev-dependencies]
 proptest = { workspace = true }

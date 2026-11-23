@@ -620,8 +620,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             ),
         ),
         Topic::RoutingTableOspfv3Instance => (
-            "Associate an OSPFv3 instance with a routing table.",
-            "The OSPFv3 instance's routes are installed into this routing table (its VRF). An instance can be claimed by at most one routing table. `delete` removes the association.",
+            "Associate OSPFv3 instances with a routing table.",
+            "The OSPFv3 instances' routes are installed into this routing table (its VRF). A table may claim several instances; an instance can be claimed by at most one table. `set` adds one, `delete <instance>` removes it (and the redistribute rules naming it).",
         ),
         Topic::RoutingTableRedistribute => (
             "Redistribute this table's static routes into its BGP, OSPF or OSPFv3 instance.",
@@ -636,7 +636,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              redistributed routes through; omitted, redistribution stays unfiltered \
              (accept-all), unlike a peer-group's import-policy/export-policy, which default to \
              deny-all. For 'ospf' only, 'metric <1-16777215>' (default 20) and 'metric-type \
-             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs.",
+             <1|2>' (default 1) set the external metric and metric type of the AS-external-LSAs. For 'ospfv3' only, 'instance <name>' names one claimed instance the rule feeds; unset, the rule feeds every claimed instance without a rule of its own.",
                 " ",
                 "`delete redistribute <target>` removes that rule.",
             ),
@@ -863,6 +863,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              sending a final shutdown LLDPDU so neighbors drop this system immediately. \
              Independent of lldp receive. Physical interfaces only — rejected on a loopback \
              at commit time.",
+        ),
+        Topic::InterfaceMplsInput => (
+            "Accept MPLS-labelled packets on an interface.",
+            "`set` makes nos-interfaced write `net.mpls.conf.<interface>.input = 1`, so the \
+             kernel accepts labelled packets arriving on this link (segment routing, the \
+             L3VPN underlay); `delete` writes 0 again. Needs the host's mpls_router module.",
         ),
         Topic::InterfaceLldpReceive => (
             "Enable or disable LLDP receive on an interface.",
@@ -1211,6 +1217,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfInstanceHostRouter => (
             "Make this router a host router that never carries transit traffic (RFC 8770).",
             "Sets the H-bit in this router's Router-LSA: routers that support RFC 8770 never route through it, only to it, once every router in the area advertises that support; its transit links also cost 65535, for routers that don't. Its own prefixes stay reachable, and it is never a loop-free alternate. Can't be combined with `redistribute … to ospf` on its routing table, since a host router is not an AS boundary router. `delete` turns it off.",
+        ),
+        Topic::OspfInstanceTrafficEngineering => (
+            "Advertise this router's links in an RFC 3630 traffic engineering LSA.",
+            "Originates area-scope opaque LSAs (type 10, opaque type 1): one with this router's address and one per fully adjacent point-to-point or broadcast link with its link type, link id, local and remote interface address, TE metric (the OSPF cost), maximum bandwidth, maximum reservable bandwidth, unreserved bandwidth and administrative group. Advertisement only: nothing computes a constrained path from it. Bandwidth is advertised as 0 because the kernel link speed is not reported to nos-ospfd. `delete` turns it off.",
+        ),
+        Topic::OspfInstanceSegmentRouting => (
+            "Segment routing for this instance (RFC 8665): SRGB and Prefix-SIDs.",
+            "Advertises this router's SR-Algorithm (0, SPF) and SRGB in its Router Information LSA and one Extended Prefix LSA per `prefix-sid`; the other routers log them. Advertisement only: nothing is installed in the MPLS dataplane yet. Needs `enabled`.",
+        ),
+        Topic::OspfInstanceSegmentRoutingEnabled => (
+            "Turn segment routing advertisement on.",
+            "Off by default. `delete` turns it off and withdraws the SRGB and every Prefix-SID.",
+        ),
+        Topic::OspfInstanceSegmentRoutingSrgbStart => (
+            "First label of the SRGB (default 16000).",
+            "The block is `start` to `start + range - 1` and must lie within labels 16 to 1048574 and cover no `vpn label`. Every router should use the same block, or a Prefix-SID maps to different labels per router.",
+        ),
+        Topic::OspfInstanceSegmentRoutingSrgbRange => (
+            "Number of labels in the SRGB (default 8000).",
+            "At least 1; see `srgb start`.",
+        ),
+        Topic::OspfInstanceSegmentRoutingPrefixSid => (
+            "Advertise a Prefix-SID for a host prefix, keyed by the /32.",
+            "Typically the loopback address. The label other routers use is the SRGB base plus the `index`. Prefixes and indexes must be unique.",
+        ),
+        Topic::OspfPrefixSidIndex => (
+            "Index of the SID in the SRGB.",
+            "Below the SRGB range and unique among this instance's Prefix-SIDs.",
+        ),
+        Topic::OspfPrefixSidNoPhp => (
+            "Ask the penultimate hop not to pop the label (NP-flag).",
+            "By default the penultimate hop pops it (PHP).",
+        ),
+        Topic::OspfPrefixSidExplicitNull => (
+            "Ask the penultimate hop to swap to explicit null (E-flag).",
+            "Needs `no-php`.",
         ),
         Topic::OspfInstanceRemoteLfa => (
             "Protect links that have no loop-free alternate with a tunnel to a remote node (RFC 7490).",
