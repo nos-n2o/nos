@@ -95,59 +95,74 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     revoke_restarted_daemon(w).await
 }
 
+/// Starts the RADIUS stub with `users` (`name:password:role`), points `aaa` at it with
+/// `login-order radius local` and accounting on. `radius_down` undoes the config.
+pub(super) async fn radius_up(w: &World, users: &[&str]) -> anyhow::Result<()> {
+    let mut args = vec!["nos-radius-stub", "--secret", RADIUS_SECRET];
+    for u in users {
+        args.extend(["--user", u]);
+    }
+    w.dock
+        .start_nos_tool(RADIUS_STUB, NET, IP_RADIUS_STUB.s(), &args, &[])
+        .await?;
+    log("login-order radius local, one server");
+    w.a()?
+        .edit(|c| {
+            c.admin.keys.push(nos_proto::AdminKey {
+                label: "radius".into(),
+                secret: RADIUS_SECRET.into(),
+            });
+            c.aaa.servers = vec![nos_proto::RadiusServer {
+                name: "stub".into(),
+                address: IP_RADIUS_STUB.s().parse()?,
+                port: None,
+                accounting_port: Some(1812),
+                routing_table: Some("rt1".into()),
+                secret_ref: "radius".into(),
+                timeout_secs: Some(1),
+                retries: Some(0),
+            }];
+            c.aaa.accounting = true;
+            c.aaa.login_order = vec![
+                nos_proto::LoginBackend::Radius,
+                nos_proto::LoginBackend::Local,
+            ];
+            Ok(())
+        })
+        .await
+        .map(drop)
+}
+
+/// Removes the stub container and the `aaa` config `radius_up` added.
+pub(super) async fn radius_down(w: &World) -> anyhow::Result<()> {
+    w.dock.container_remove(RADIUS_STUB).await;
+    w.a()?
+        .edit(|c| {
+            c.aaa = nos_proto::Aaa::default();
+            c.admin.keys.retain(|k| k.label != "radius");
+            Ok(())
+        })
+        .await
+        .map(drop)
+}
+
 /// #1153: RADIUS login. A scripted server (`nos-radius-stub`) knows an admin
 /// and a read-only user; `login-order radius local` makes the watchdog ask it
 /// first. Checks the role carried in the certificate (admin edits, read-only
 /// is refused), that a reject never falls back to the local user of the same
 /// name, and that a silent server does.
 pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
-    w.dock
-        .start_nos_tool(
-            RADIUS_STUB,
-            NET,
-            IP_RADIUS_STUB.s(),
-            &[
-                "nos-radius-stub",
-                "--secret",
-                RADIUS_SECRET,
-                "--user",
-                "rad-admin:pw-admin:admin",
-                "--user",
-                "rad-ro:pw-ro:read-only",
-                "--user",
-                "rad-ext:pw-ext:read-only",
-                "--user",
-                "Rad-Upper:pw-up:read-only",
-            ],
-            &[],
-        )
-        .await?;
-    let a = w.a()?;
-
-    log("login-order radius local, one server");
-    a.edit(|c| {
-        c.admin.keys.push(nos_proto::AdminKey {
-            label: "radius".into(),
-            secret: RADIUS_SECRET.into(),
-        });
-        c.aaa.servers = vec![nos_proto::RadiusServer {
-            name: "stub".into(),
-            address: IP_RADIUS_STUB.s().parse()?,
-            port: None,
-            accounting_port: Some(1812),
-            routing_table: Some("rt1".into()),
-            secret_ref: "radius".into(),
-            timeout_secs: Some(1),
-            retries: Some(0),
-        }];
-        c.aaa.accounting = true;
-        c.aaa.login_order = vec![
-            nos_proto::LoginBackend::Radius,
-            nos_proto::LoginBackend::Local,
-        ];
-        Ok(())
-    })
+    radius_up(
+        w,
+        &[
+            "rad-admin:pw-admin:admin",
+            "rad-ro:pw-ro:read-only",
+            "rad-ext:pw-ext:read-only",
+            "Rad-Upper:pw-up:read-only",
+        ],
+    )
     .await?;
+    let a = w.a()?;
 
     log("a RADIUS admin (no local entry) provisions the router");
     let accepted = a.count("login accepted by radius user=\"rad-admin\" role=\"admin\"");

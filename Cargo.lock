@@ -2177,6 +2177,7 @@ name = "nos-pam"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "nix 0.30.1",
  "nonstick",
  "nos-pki",
  "nos-proto",

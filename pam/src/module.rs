@@ -23,6 +23,43 @@ pub fn guard<T>(f: impl FnOnce() -> PamResult<T>) -> PamResult<T> {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(Err(ErrorCode::ServiceError))
 }
 
+/// The fields of a `passwd` entry the guard looks at.
+pub struct Passwd {
+    pub uid: u32,
+    pub shell: String,
+}
+
+/// `getpwnam_r` through NSS (`files nos`); `Ok(None)` = no such name.
+pub fn lookup(name: &str) -> Result<Option<Passwd>, ()> {
+    match nix::unistd::User::from_name(name) {
+        Ok(u) => Ok(u.map(|u| Passwd {
+            uid: u.uid.as_raw(),
+            shell: u.shell.to_string_lossy().into_owned(),
+        })),
+        Err(_) => Err(()),
+    }
+}
+
+/// A system account (root, daemon, a local login) never reaches the broker (#1375): a name
+/// that resolves must be a NOS user (the `nos` shell, the NSS uid range). An unresolvable
+/// name passes: the broker decides, and over ssh its empty token already stops it.
+pub fn account_guard(
+    lookup: impl Fn(&str) -> Result<Option<Passwd>, ()>,
+    user: &str,
+) -> PamResult<()> {
+    match lookup(user) {
+        Err(()) => Err(ErrorCode::AuthInfoUnavailable),
+        Ok(None) => Ok(()),
+        Ok(Some(p))
+            if p.shell == nos_proto::NOS_LOGIN_SHELL
+                && nos_proto::NOS_UID_RANGE.contains(&p.uid) =>
+        {
+            Ok(())
+        }
+        Ok(Some(_)) => Err(ErrorCode::AuthenticationError),
+    }
+}
+
 /// The PAM-free core of `authenticate`: every input check, the broker round
 /// trip and the return-code mapping. Empty or non-UTF-8 names and passwords never
 /// reach the broker.
@@ -39,6 +76,7 @@ pub fn authenticate_user(
     let (Some(user), Some(password)) = (user, password.filter(|p| !p.is_empty())) else {
         return Err(ErrorCode::AuthenticationError);
     };
+    account_guard(lookup, user)?;
     match login(&opts.socket, &opts.ca, user, &password, timeout) {
         Ok(ticket) => Ok(ticket),
         Err(LoginError::Denied) => Err(ErrorCode::AuthenticationError),
@@ -50,6 +88,7 @@ pub fn authenticate_user(
 /// through this module passes. Never `Ignore`: with `account required` that
 /// would let a stack that skipped `authenticate` through.
 pub fn check_account(ticket: Option<&NosTicket>, user: &OsStr) -> PamResult<()> {
+    account_guard(lookup, user.to_str().ok_or(ErrorCode::AuthenticationError)?)?;
     match ticket {
         Some(s) if user.to_str() == Some(s.user.as_str()) => Ok(()),
         _ => Err(ErrorCode::AuthenticationError),
