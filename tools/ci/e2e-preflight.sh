@@ -51,8 +51,8 @@ sch_ingress acl,flowspec-dataplane,evpn-esi,evpn-dataplane,evpn-single-active,st
 cls_u32 bfd,bgp-bfd,bfd-unsolicited,bfd-echo,bfd-echo-unaffiliated,micro-bfd,ospf-bfd,ospfv3-bfd
 act_sample acl
 psample acl
-mpls_router vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath,mpls-ilm
-mpls_iptunnel vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath
+mpls_router vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath,mpls-ilm,ospf-sr
+mpls_iptunnel vpn,vpn-export,vpn-export-chunked,vpn-dataplane,vpn-v6,vpn-multipath,ospf-sr
 '
 # NOS_E2E_PREFLIGHT_ASSUME_MISSING="m1 m2" pretends those are absent (tests).
 mods=$(echo "$table" | awk 'NF { print $1 }')

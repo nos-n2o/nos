@@ -657,7 +657,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 - `set ospf instance <name> segment-routing enabled` turns it on. The Router Information LSA then carries the SR-Algorithm TLV (0) and the SID/Label Range TLV with the SRGB: `srgb start` (default 16000) and `srgb range` (default 8000), within labels 16 to 1048574 and covering no `vpn label`. Use the same SRGB on every router.
 - `set ospf instance <name> segment-routing prefix-sid <address>/32 index <n>` (optional `no-php`, `explicit-null`, which needs `no-php`) originates one Extended Prefix LSA with a Prefix-SID sub-TLV (index form, algorithm 0). The index is below the SRGB range and unique; so is the prefix. PHP is the default (NP-flag clear).
 - The receiver logs `ospf sr capabilities received area=… router=… algorithms=… srgb=…` and `ospf prefix-sid received area=… router=… prefix=… index=… flags=…` once per change. A received Adj-SID or LAN Adj-SID sub-TLV is decoded by the codec but not yet stored or shown.
-- `nos-provision --ospf-segment-routing <off|on|START:RANGE>` and `--ospf-prefix-sid <address>=<index>[,no-php][,explicit-null]` (repeatable). e2e: `ospf-sr-sid`.
+- `nos-provision --ospf-segment-routing <off|on|START:RANGE>` and `--ospf-prefix-sid <address>=<index>[,no-php][,explicit-null]` (repeatable). e2e: `ospf-sr-sid`, `ospf-sr` (forwarding).
 
 **Not supported:** redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own strict LSA checking against a persisted LSDB (see the restart-mode bullet), BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
