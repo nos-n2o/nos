@@ -231,6 +231,31 @@ pub enum Request {
         /// As on `OpenTransaction`.
         actor: Option<Actor>,
     },
+    /// Watchdog-only (#1374): gives the externally authenticated user `name`
+    /// (a RADIUS or, later, TACACS+ accept; no stored secret) a persistent
+    /// uid and an `/run/nos-users/passwd` entry. Idempotent. Replies
+    /// `Event::ExternalUser`; refused with `Event::Error` for an unsafe name,
+    /// a local user, a `nos-` name, a name or id already in `/etc/passwd` or
+    /// `/etc/group`, a full table or an exhausted uid range.
+    AllocateExternalUser {
+        /// The user name, as the AAA server accepted it.
+        name: String,
+    },
+    /// Admin-only `allocate aaa user <name>` (#1374): `AllocateExternalUser`
+    /// for a person, so an ssh-only user need not log in elsewhere first.
+    AdminAllocateExternalUser {
+        /// The user name.
+        name: String,
+    },
+    /// Admin-only `clear aaa user <name>` (#1374): drops the passwd entry; the
+    /// uid stays reserved for that name forever. Replies `Event::ExternalUser`
+    /// with the reserved uid; an unknown name is an `Event::Error`.
+    ClearExternalUser {
+        /// The user name.
+        name: String,
+    },
+    /// Admin-only `show aaa users` (#1374). Replies `Event::ExternalUsers`.
+    ListExternalUsers,
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -291,6 +316,23 @@ pub enum Event {
     },
     /// Reply to `ListHistory`: newest first.
     History(Vec<HistoryEntry>),
+    /// Reply to `AllocateExternalUser`, `AdminAllocateExternalUser` and
+    /// `ClearExternalUser` (#1374): the user's uid (= gid).
+    ExternalUser {
+        /// The allocated, or reserved, uid.
+        uid: u32,
+    },
+    /// Reply to `ListExternalUsers` (#1374): `(name, uid)`, by name.
+    ExternalUsers(Vec<(String, u32)>),
+}
+
+/// `^[a-z_][a-z0-9_-]{0,31}$`: what a passwd name may be (no `:`, newline,
+/// empty, >32). Only such names are ever ticketed or given an ssh account.
+pub fn safe_name(n: &str) -> bool {
+    let mut c = n.chars();
+    n.len() <= 32
+        && c.next().is_some_and(|f| f.is_ascii_lowercase() || f == '_')
+        && c.all(|f| f.is_ascii_lowercase() || f.is_ascii_digit() || f == '_' || f == '-')
 }
 
 /// One kept running config (#1141). `index` is what `Rollback` takes: `1` is

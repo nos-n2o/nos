@@ -14,8 +14,15 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::Unsubscribe
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
-        Request::UpgradePasswordHash { .. } => role == Role::Watchdog,
+        // `AllocateExternalUser` is the AAA accept path (#1374): only the broker, never a
+        // person or another daemon.
+        Request::UpgradePasswordHash { .. } | Request::AllocateExternalUser { .. } => {
+            role == Role::Watchdog
+        }
         Request::SetSshHostKey { .. } => role == Role::Sshd,
+        Request::AdminAllocateExternalUser { .. }
+        | Request::ClearExternalUser { .. }
+        | Request::ListExternalUsers => matches!(role, Role::User | Role::Restd),
         Request::UserExists { .. }
         | Request::ListBgpInstances
         | Request::ListOspfInstances
@@ -69,15 +76,20 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::ListOspfv3Instances
         | Request::GetRestApi { .. }
         | Request::UpgradePasswordHash { .. }
-        | Request::SetSshHostKey { .. } => true,
+        | Request::SetSshHostKey { .. }
+        | Request::AllocateExternalUser { .. } => true,
         // A non-admin may commit, but not arm a rollback timer.
         Request::CommitTransaction {
             confirm_timeout, ..
         } => confirm_timeout.is_none(),
+        // Account management (#1374) is admin only, like saving and rolling back.
         Request::Save { .. }
         | Request::Rollback { .. }
         | Request::ConfirmCommit { .. }
-        | Request::CancelCommit { .. } => false,
+        | Request::CancelCommit { .. }
+        | Request::AdminAllocateExternalUser { .. }
+        | Request::ClearExternalUser { .. }
+        | Request::ListExternalUsers => false,
         Request::ApplyOp { op, .. } => {
             matches!(op, ConfigOp::User(UserOp::SetPassword { name, .. }) if name == actor)
         }
@@ -226,6 +238,31 @@ mod tests {
             assert!(!permitted(r, "u", &back));
         }
         assert!(permitted(UserRole::Admin, "u", &back));
+    }
+
+    /// #1374: only the watchdog may allocate from an AAA accept; people manage, admin only.
+    #[test]
+    fn external_user_requests_are_classified() {
+        let name = || "u".to_string();
+        let accept = Request::AllocateExternalUser { name: name() };
+        let people = [
+            Request::AdminAllocateExternalUser { name: name() },
+            Request::ClearExternalUser { name: name() },
+            Request::ListExternalUsers,
+        ];
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &accept), role == Role::Watchdog, "{role:?}");
+            for r in &people {
+                let may = matches!(role, Role::User | Role::Restd);
+                assert_eq!(allowed(role, r), may, "{role:?} {r:?}");
+            }
+        }
+        for r in &people {
+            assert!(permitted(UserRole::Admin, "a", r));
+            for ur in [UserRole::Operator, UserRole::ReadOnly] {
+                assert!(!permitted(ur, "a", r), "{ur:?} {r:?}");
+            }
+        }
     }
 
     /// #1144: only an admin may arm, confirm or cancel a confirmed commit.

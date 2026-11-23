@@ -24,6 +24,9 @@ pub enum ConfigError {
         "validation failed: ssh host key refused: already set, or not the base64 of a 32-byte seed"
     )]
     SshHostKeyRefused,
+    /// An external-user allocation or removal refused (#1374).
+    #[error("external user refused: {0}")]
+    ExternalUser(#[from] crate::nss_users::ExternalUserError),
     #[error("validation failed: {0} was sent as the mask text '<hidden>' but has no earlier value to keep")]
     MaskedSecret(String),
     /// `nos-restd` keys on the `no history entry` prefix (404).
