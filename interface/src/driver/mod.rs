@@ -11,6 +11,7 @@
 pub mod bridge_registry;
 pub mod links;
 pub mod linux;
+pub mod mpls_input;
 pub mod noop;
 pub mod port_aggregate_registry;
 pub mod rib_client;
@@ -155,6 +156,14 @@ pub trait InterfaceDriver: Send + Sync {
     /// consumer with no kernel access of its own (`nos-ospfv3d`, sourcing
     /// RFC 5340 Hello/Link-LSA traffic from it).
     async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
+
+    /// Makes the kernel accept (`enabled`) or drop MPLS-labelled packets
+    /// arriving on `name` (`net.mpls.conf.<name>.input`, #1380). Read first,
+    /// written only when different. Called on every resync for every
+    /// configured interface: `false` reverts only a knob this process set
+    /// (an unconfigured value the operator wrote is left alone). A device
+    /// without an MPLS conf directory is skipped (warned when `enabled`).
+    async fn set_mpls_input(&self, name: &str, enabled: bool) -> Result<(), DriverError>;
 
     /// Observed kernel `IFLA_MTU` of `kernel_interface` (a bridge): a pure
     /// read; the kernel derives it from the bridge's ports. `None` = not

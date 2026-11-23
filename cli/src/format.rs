@@ -4062,6 +4062,7 @@ mod tests {
             mtu: 1500,
             subinterfaces: Vec::new(),
             err_disabled: false,
+            speed_mbps: None,
         };
         let out = render_interface_status(&status);
         assert!(!has_raw_control(&out), "{out}");

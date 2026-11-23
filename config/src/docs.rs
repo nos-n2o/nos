@@ -864,6 +864,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              Independent of lldp receive. Physical interfaces only — rejected on a loopback \
              at commit time.",
         ),
+        Topic::InterfaceMplsInput => (
+            "Accept MPLS-labelled packets on an interface.",
+            "`set` makes nos-interfaced write `net.mpls.conf.<interface>.input = 1`, so the \
+             kernel accepts labelled packets arriving on this link (segment routing, the \
+             L3VPN underlay); `delete` writes 0 again. Needs the host's mpls_router module.",
+        ),
         Topic::InterfaceLldpReceive => (
             "Enable or disable LLDP receive on an interface.",
             "`set` makes nos-lldpd listen for neighbors' LLDPDUs on this physical interface \

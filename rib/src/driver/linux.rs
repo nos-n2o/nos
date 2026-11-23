@@ -319,9 +319,6 @@ pub struct LinuxRibDriver {
     /// Per table id: the ILM entries `sync_ilm` last installed, by label.
     ilm: Mutex<HashMap<u32, BTreeMap<u32, Hops>>>,
     sysctl: Sysctl,
-    /// Underlay interfaces whose `net.mpls.conf.<if>.input` could not be
-    /// set, warned about once each.
-    input_warned: Mutex<HashSet<String>>,
     /// Startup hold (#654): `apply` leaves kernel routes it has no desired
     /// slot for alone (see `RibDriver::keep_stale`).
     keep_stale: AtomicBool,
@@ -342,7 +339,6 @@ impl LinuxRibDriver {
             mpls: Mutex::new(HashMap::new()),
             ilm: Mutex::new(HashMap::new()),
             sysctl: Sysctl::default(),
-            input_warned: Mutex::new(HashSet::new()),
             keep_stale: AtomicBool::new(false),
         })
     }
@@ -1216,9 +1212,6 @@ impl RibDriver for LinuxRibDriver {
             Some(u) => self.underlay_vrf(u).await?,
             None => None,
         };
-        if let Some(u) = underlay_vrf {
-            self.enable_input(u).await?;
-        }
 
         // Converge the AF_MPLS routes into our VRF: a stale label (a changed
         // `vpn.label`, or one left by a previous run) goes first, then ours.
@@ -1281,7 +1274,6 @@ impl RibDriver for LinuxRibDriver {
         };
         if let Some(max) = routes.iter().map(|r| r.label).max() {
             self.sysctl.ensure_platform_labels(max)?;
-            self.enable_input(vrf).await?;
         }
 
         // Resolve every hop's egress; an entry with none resolvable waits.
@@ -1384,37 +1376,6 @@ impl LinuxRibDriver {
             .find_link(&table_registry::vrf_ifname(id))
             .await?
             .map(|l| l.header.index))
-    }
-
-    /// `net.mpls.conf.<if>.input = 1` on every interface of the underlay
-    /// VRF, so labelled packets from the other PEs are accepted. One that
-    /// cannot be set is warned about once, not fatal: it may face no PE.
-    // ponytail: every underlay interface, never a CE-facing one (those are in
-    // the customer VRF); an explicit per-interface `mpls` knob is the clean model.
-    async fn enable_input(&self, underlay_vrf: u32) -> Result<(), DriverError> {
-        let mut links = self.handle.link().get().execute();
-        while let Some(link) = links.try_next().await? {
-            if master_of(&link) != Some(underlay_vrf) {
-                continue;
-            }
-            let Some(name) = link.attributes.iter().find_map(|a| match a {
-                LinkAttribute::IfName(n) => Some(n.clone()),
-                _ => None,
-            }) else {
-                continue;
-            };
-            match self.sysctl.ensure_input(&name) {
-                Ok(()) => {
-                    self.input_warned.lock().unwrap().remove(&name);
-                }
-                Err(e) => {
-                    if self.input_warned.lock().unwrap().insert(name.clone()) {
-                        warn!(interface = %name, error = %e, "mpls input not enabled on an underlay interface");
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Deletes one `AF_MPLS` route; one already gone counts as done.

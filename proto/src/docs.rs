@@ -213,6 +213,8 @@ topics! {
     SubinterfaceMtu,
     /// `Interface.lldp_transmit`
     InterfaceLldpTransmit,
+    /// `Interface.mpls_input`
+    InterfaceMplsInput,
     /// `Interface.lldp_receive`
     InterfaceLldpReceive,
     /// `Interface.lldp_destination`

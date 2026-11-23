@@ -1251,6 +1251,7 @@ mod tests {
             lacp_mode: nos_proto::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),

@@ -5647,6 +5647,55 @@ pub async fn mpls_ilm(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The operator's write of `net.mpls.conf.eth0.input` on router-a.
+async fn set_mpls_kernel(w: &World, v: &str) -> anyhow::Result<()> {
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-a",
+            &[
+                "sh",
+                "-c",
+                &format!("echo {v} > /proc/sys/net/mpls/conf/eth0/input"),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+/// `Interface.mpls_input` (#1380) against the real kernel file
+/// `net.mpls.conf.eth0.input`. Docker mounts `/proc/sys` read-only, so
+/// `nos-interfaced` can never write it here (the operator helper does, like
+/// `mpls_ready`); what is proven is that the driver reads the real value and
+/// decides to write exactly when it differs: a set knob over a 0 logs the
+/// failed write, over a 1 stays quiet, and an unset knob it had satisfied
+/// tries to write the 0 back. The write itself is unit-tested over a tempdir
+/// (`driver/mpls_input.rs`). Self-contained; needs the host module `mpls_router`.
+pub async fn mpls_input(w: &mut World) -> anyhow::Result<()> {
+    const FAILED: &str = "failed to set mpls input interface=eth0 error=net.mpls.conf.eth0.input";
+    w.up(&[]).await?;
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    // The kernel says 0, the knob wants 1: the driver tries to write.
+    set_mpls_kernel(w, "0").await?;
+    let base = w.a()?.count(FAILED);
+    w.a()?
+        .provision(&["--mpls-input-interface", "eth0"])
+        .await?;
+    w.a()?.wait_new(FAILED, base, 60).await?;
+    // The kernel says 1: nothing to write, over two re-apply ticks.
+    set_mpls_kernel(w, "1").await?;
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let base = w.a()?.count(FAILED);
+    w.a()?.assert_quiet(FAILED, base, 25).await?;
+    // Unset: the driver switched it on (it was already right), so it tries
+    // to put the 0 back.
+    w.a()?
+        .provision(&["--no-mpls-input-interface", "eth0"])
+        .await?;
+    w.a()?.wait_new(FAILED, base, 60).await?;
+    Ok(())
+}
+
 /// `s` without ANSI colour sequences (`docker logs` keeps the daemons' own).
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

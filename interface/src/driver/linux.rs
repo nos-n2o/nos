@@ -299,6 +299,7 @@ pub struct LinuxInterfaceDriver {
     /// kernel's filter handles are re-read on every call (self-healing); the
     /// redirect targets are not readable back, so they come from here.
     steering: Mutex<HashMap<String, Applied>>,
+    mpls_input: super::mpls_input::MplsInput,
 }
 
 /// Steering last installed for one aggregate.
@@ -326,6 +327,7 @@ impl LinuxInterfaceDriver {
             port_aggregate_registry_path,
             stp: Mutex::new(StpMemory::default()),
             steering: Mutex::new(HashMap::new()),
+            mpls_input: super::mpls_input::MplsInput::default(),
         })
     }
 
@@ -1550,6 +1552,10 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         }
         self.links.set_port_aggregate(&ifname, None);
         Ok(())
+    }
+
+    async fn set_mpls_input(&self, name: &str, enabled: bool) -> Result<(), DriverError> {
+        self.mpls_input.set(name, enabled)
     }
 
     async fn link_local_address(&self, kernel_interface: &str) -> Option<Ipv6Addr> {
