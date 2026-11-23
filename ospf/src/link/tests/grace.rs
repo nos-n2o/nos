@@ -431,27 +431,97 @@ async fn rs_is_ignored_when_lls_is_off_extended_virtual_or_capped_to_zero() {
     }
 }
 
-/// RFC 4811: an LR Init DBD from a Full neighbor starts a resync that keeps
-/// it held; without LR it does not.
-#[tokio::test]
-async fn lr_dbd_holds_a_full_neighbor() {
+fn oob_dbd(eof: u32, resync: bool, init: bool) -> packet::DbdPacket {
+    packet::DbdPacket {
+        lls: Some(crate::lls::Lls { eof: Some(eof) }),
+        router_id: Ipv4Addr::new(9, 9, 9, 10),
+        area_id: Ipv4Addr::UNSPECIFIED,
+        interface_mtu: 1500,
+        options: 0,
+        init,
+        resync,
+        more: true,
+        master: true,
+        dd_sequence_number: 1,
+        lsa_headers: vec![],
+    }
+}
+
+/// Feeds `dbd` to a `Full` neighbor and returns (state, held, `oob_resync`, sent R).
+async fn dbd_to_full_neighbor(dbd: &packet::DbdPacket) -> (NeighborState, bool, bool, bool) {
     let cfg = lls_link(30);
-    let lsdb = Mutex::new(Lsdb::default());
-    let local = Mutex::new(Lsdb::default());
-    for (eof, held) in [(0, false), (crate::lls::EOF_LR, true)] {
-        let status = grace_status(None);
-        let dbd = packet::DbdPacket {
-            lls: Some(crate::lls::Lls { eof: Some(eof) }),
-            router_id: Ipv4Addr::new(9, 9, 9, 10),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            interface_mtu: 1500,
-            options: 0,
-            init: true,
-            more: true,
-            master: true,
-            dd_sequence_number: 1,
-            lsa_headers: vec![],
-        };
+    let (lsdb, local) = (Mutex::new(Lsdb::default()), Mutex::new(Lsdb::default()));
+    let status = grace_status(None);
+    let actions = handle_dbd(
+        &cfg,
+        Ipv4Addr::new(1, 1, 1, 1),
+        &status,
+        &lsdb,
+        &local,
+        dbd,
+        100,
+    )
+    .await
+    .unwrap();
+    let sent_r = actions
+        .iter()
+        .any(|a| matches!(a, exchange::Action::SendDbd(d) if d.resync));
+    let s = status.borrow();
+    let n = &s.neighbors[&Ipv4Addr::new(9, 9, 9, 10)];
+    (
+        n.state,
+        n.counts_as_full(),
+        n.adjacency.as_ref().unwrap().oob_resync,
+        sent_r,
+    )
+}
+
+/// RFC 4811 §2.4: an R Init DBD (I, M, MS set) from an LR-capable `Full`
+/// neighbor opens an OOB resync that keeps it counted as `Full`; our DBDs
+/// carry R from then on.
+#[tokio::test]
+async fn r_bit_dbd_starts_an_oob_resync_that_stays_advertised() {
+    let (state, held, oob, sent_r) =
+        dbd_to_full_neighbor(&oob_dbd(crate::lls::EOF_LR, true, true)).await;
+    assert_eq!(state, NeighborState::Exchange);
+    assert!(held && oob && sent_r);
+}
+
+/// Without R an Init DBD from a `Full` peer is a genuine reset: the ordinary
+/// `SeqNumberMismatch`, never held (even from an LR-capable peer).
+#[tokio::test]
+async fn init_dbd_without_r_is_an_ordinary_mismatch() {
+    let (state, held, oob, _) =
+        dbd_to_full_neighbor(&oob_dbd(crate::lls::EOF_LR, false, true)).await;
+    assert_eq!(state, NeighborState::ExStart);
+    assert!(!held && !oob);
+}
+
+/// R from a peer that never announced LR is dropped with a mismatch, and an
+/// R DBD missing I, M or MS from a `Full` neighbor never opens a resync.
+#[tokio::test]
+async fn r_bit_from_a_non_lr_peer_or_without_imms_is_refused() {
+    let (state, held, oob, _) = dbd_to_full_neighbor(&oob_dbd(0, true, true)).await;
+    assert_eq!(state, NeighborState::ExStart);
+    assert!(!held && !oob);
+    let (state, held, oob, _) =
+        dbd_to_full_neighbor(&oob_dbd(crate::lls::EOF_LR, true, false)).await;
+    // Not a full OOB opener: ignored, and `Full` is "Exchange or higher", so
+    // the neighbor FSM gets a SeqNumberMismatch (legacy resync).
+    assert_eq!((state, held, oob), (NeighborState::ExStart, false, false));
+}
+
+/// RFC 4811 §2.4 rule 1: `OOBResync` set and an R-clear DBD is ignored with a
+/// `SeqNumberMismatch`, which ends the hold (legacy resync).
+#[tokio::test]
+async fn r_clear_dbd_cancels_an_oob_resync() {
+    let cfg = lls_link(30);
+    let (lsdb, local) = (Mutex::new(Lsdb::default()), Mutex::new(Lsdb::default()));
+    let status = grace_status(None);
+    for dbd in [
+        oob_dbd(crate::lls::EOF_LR, true, true),
+        oob_dbd(crate::lls::EOF_LR, false, true),
+    ] {
         handle_dbd(
             &cfg,
             Ipv4Addr::new(1, 1, 1, 1),
@@ -462,8 +532,117 @@ async fn lr_dbd_holds_a_full_neighbor() {
             100,
         )
         .await;
-        assert_eq!(deadline_of(&status).is_some(), held);
     }
+    let s = status.borrow();
+    let n = &s.neighbors[&Ipv4Addr::new(9, 9, 9, 10)];
+    assert_eq!(n.state, NeighborState::ExStart);
+    assert!(!n.counts_as_full() && n.oob_deadline.is_none());
+}
+
+/// RFC 4811 §2.4: an OOB resync that never completes falls back to legacy.
+#[tokio::test(start_paused = true)]
+async fn oob_resync_times_out_into_a_legacy_resync() {
+    let wire = Arc::new(wire::Wire::default());
+    let cfg = lls_link(30);
+    let sock = wire.opener()(&wired_link([10, 0, 0, 1], 24, NetworkType::PointToPoint)).unwrap();
+    let status = grace_status(None);
+    let (lsdb, local) = (Mutex::new(Lsdb::default()), Mutex::new(Lsdb::default()));
+    handle_dbd(
+        &cfg,
+        Ipv4Addr::new(1, 1, 1, 1),
+        &status,
+        &lsdb,
+        &local,
+        &oob_dbd(crate::lls::EOF_LR, true, true),
+        100,
+    )
+    .await;
+    assert!(status.borrow().neighbors[&Ipv4Addr::new(9, 9, 9, 10)].counts_as_full());
+    tokio::time::advance(Duration::from_secs(u64::from(cfg.dead_interval) + 1)).await;
+    expire_oob_resync(&sock, &cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &mut 0);
+    let s = status.borrow();
+    let n = &s.neighbors[&Ipv4Addr::new(9, 9, 9, 10)];
+    assert_eq!(n.state, NeighborState::ExStart);
+    assert!(!n.counts_as_full() && n.oob_deadline.is_none());
+}
+
+/// The whole procedure between two routers: A starts the resync, both stay
+/// counted as `Full` in every sample, neither re-originates its Router-LSA,
+/// and the pair ends `Full` with `OOBResync` cleared.
+#[tokio::test(start_paused = true)]
+async fn oob_resync_between_two_routers_never_drops_the_adjacency() {
+    let wire = Arc::new(wire::Wire::default());
+    let (a, b) = (router(&wire), router(&wire));
+    let mut la = wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint);
+    la.lls = true;
+    let mut lb = wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint);
+    lb.lls = true;
+    let attach = la.attach_point.clone();
+    a.reconcile(vec![la], HashMap::new(), id(1)).await;
+    b.reconcile(vec![lb], HashMap::new(), id(2)).await;
+    settle(60).await;
+    let seq = |m: &Arc<LinkManager>, who| {
+        let m = Arc::clone(m);
+        async move {
+            m.lsdb_for(Ipv4Addr::UNSPECIFIED)
+                .await
+                .lock()
+                .await
+                .get(&LsaKey {
+                    lsa_type: lsa::LSA_TYPE_ROUTER,
+                    link_state_id: who,
+                    advertising_router: who,
+                })
+                .unwrap()
+                .header
+                .sequence_number
+        }
+    };
+    let before = (seq(&a, id(1)).await, seq(&b, id(2)).await);
+    let all_full = |m: &Arc<LinkManager>| {
+        let m = Arc::clone(m);
+        async move {
+            m.links.lock().await.values().all(|e| {
+                e.status
+                    .borrow()
+                    .neighbors
+                    .values()
+                    .all(NeighborInfo::counts_as_full)
+            })
+        }
+    };
+    let dd = || async {
+        a.links
+            .lock()
+            .await
+            .values()
+            .next()
+            .unwrap()
+            .status
+            .borrow()
+            .neighbors[&id(2)]
+            .adjacency
+            .as_ref()
+            .unwrap()
+            .dd_sequence_number
+    };
+    let dd_before = dd().await;
+    a.oob_resync(&attach).await;
+    for _ in 0..200 {
+        settle(0).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(all_full(&a).await && all_full(&b).await);
+    }
+    for m in [&a, &b] {
+        for e in m.links.lock().await.values() {
+            let s = e.status.borrow();
+            let n = s.neighbors.values().next().unwrap();
+            assert_eq!(n.state, NeighborState::Full);
+            assert!(!n.adjacency.as_ref().unwrap().oob_resync && n.oob_deadline.is_none());
+        }
+    }
+    assert_ne!(dd().await, dd_before, "the exchange restarted");
+    assert_eq!((seq(&a, id(1)).await, seq(&b, id(2)).await), before);
 }
 
 /// #1213: after a §3.2 (c) topology exit the restarter is an ordinary

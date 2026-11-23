@@ -32,6 +32,7 @@ fn negotiation_dbd(router_id: Ipv4Addr, seq: u32) -> DbdPacket {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: true,
+        resync: false,
         more: true,
         master: true,
         dd_sequence_number: seq,
@@ -59,6 +60,7 @@ fn on_dbd_received(
         mtu,
         dbd_options: DBD_OPTIONS,
         peer_opaque_capable: false,
+        peer_oob_capable: false,
     };
     super::on_dbd_received(adj, state, &p, dbd, local_lsdb_headers, |_| true, |_| false)
 }
@@ -127,6 +129,7 @@ fn slave_accepts_masters_reply_as_exstart_trigger() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: true,
         dd_sequence_number: 42,
@@ -158,6 +161,7 @@ fn slave_accepts_masters_reply_as_exstart_trigger() {
                 interface_mtu: 1500,
                 options: DBD_OPTIONS,
                 init: false,
+                resync: false,
                 more: false,
                 master: false,
                 dd_sequence_number: 42,
@@ -223,6 +227,7 @@ fn master_accepts_neighbors_reply_as_exstart_trigger() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 7, // must echo our ExStart sequence number (#607)
@@ -267,6 +272,7 @@ fn slave_ignores_a_reply_shaped_packet_in_exstart() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 1,
@@ -307,6 +313,7 @@ fn non_negotiation_dbd_in_exstart_is_ignored() {
 fn exchange_as_master_with_empty_summaries_reaches_exchange_done() {
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -317,6 +324,7 @@ fn exchange_as_master_with_empty_summaries_reaches_exchange_done() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 5,
@@ -350,6 +358,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
     // poll.
     let mut adj = AdjacencyData {
         is_master: false,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -360,6 +369,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: true,
         dd_sequence_number: 6,
@@ -389,6 +399,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
                 interface_mtu: 1500,
                 options: DBD_OPTIONS,
                 init: false,
+                resync: false,
                 more: false,
                 master: false,
                 dd_sequence_number: 6,
@@ -405,6 +416,7 @@ fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
 fn exchange_requests_lsas_missing_locally() {
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -416,6 +428,7 @@ fn exchange_requests_lsas_missing_locally() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 5,
@@ -444,6 +457,7 @@ fn exchange_requests_lsas_missing_locally() {
 fn exchange_does_not_request_lsas_already_current_locally() {
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -456,6 +470,7 @@ fn exchange_does_not_request_lsas_already_current_locally() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 5,
@@ -489,6 +504,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
     let h2 = header("3.3.3.3", 1);
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         summary_remaining: VecDeque::from(vec![h1, h2]),
         ..Default::default()
@@ -500,6 +516,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: seq,
@@ -529,6 +546,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
             interface_mtu: 1500,
             options: DBD_OPTIONS,
             init: false,
+            resync: false,
             more: true,
             master: true,
             dd_sequence_number: 6,
@@ -558,6 +576,7 @@ fn master_paginates_own_summary_across_multiple_rounds() {
             interface_mtu: 1500,
             options: DBD_OPTIONS,
             init: false,
+            resync: false,
             more: false,
             master: true,
             dd_sequence_number: 7,
@@ -594,6 +613,7 @@ fn master_reply_listing(
 ) -> (AdjacencyData, Vec<Action>) {
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         summary_remaining: VecDeque::from(summary),
         ..Default::default()
@@ -692,6 +712,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
     let h2 = header("3.3.3.3", 1);
     let mut adj = AdjacencyData {
         is_master: false,
+        oob_resync: false,
         dd_sequence_number: 5,
         summary_remaining: VecDeque::from(vec![h1, h2]),
         ..Default::default()
@@ -703,6 +724,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more,
         master: true,
         dd_sequence_number: seq,
@@ -732,6 +754,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
             interface_mtu: 1500,
             options: DBD_OPTIONS,
             init: false,
+            resync: false,
             more: true,
             master: false,
             dd_sequence_number: 6,
@@ -763,6 +786,7 @@ fn slave_paginates_own_summary_across_multiple_rounds() {
                 interface_mtu: 1500,
                 options: DBD_OPTIONS,
                 init: false,
+                resync: false,
                 more: false,
                 master: false,
                 dd_sequence_number: 7,
@@ -786,6 +810,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
     let h_b = header("5.5.5.5", 1);
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -796,6 +821,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more,
         master: false,
         dd_sequence_number: seq,
@@ -822,6 +848,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
             interface_mtu: 1500,
             options: DBD_OPTIONS,
             init: false,
+            resync: false,
             more: false,
             master: true,
             dd_sequence_number: 6,
@@ -856,6 +883,7 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
 fn exchange_mismatch_as_master_triggers_seq_number_mismatch() {
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -866,6 +894,7 @@ fn exchange_mismatch_as_master_triggers_seq_number_mismatch() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: false,
         dd_sequence_number: 6, // wrong sequence number
@@ -896,6 +925,7 @@ fn exchange_mismatch_as_slave_triggers_seq_number_mismatch() {
     // increments).
     let mut adj = AdjacencyData {
         is_master: false,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -906,6 +936,7 @@ fn exchange_mismatch_as_slave_triggers_seq_number_mismatch() {
         interface_mtu: 0,
         options: DBD_OPTIONS,
         init: false,
+        resync: false,
         more: false,
         master: true,
         dd_sequence_number: 7, // skipped, not 6
@@ -935,6 +966,7 @@ fn exchange_ignores_negotiation_shaped_duplicate_as_master() {
     // restart signal.
     let mut adj = AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -957,6 +989,7 @@ fn exchange_ignores_negotiation_shaped_duplicate_as_master() {
 fn exchange_ignores_negotiation_shaped_duplicate_as_slave() {
     let mut adj = AdjacencyData {
         is_master: false,
+        oob_resync: false,
         dd_sequence_number: 5,
         ..Default::default()
     };
@@ -1023,6 +1056,7 @@ fn slave_after_final_reply() -> (AdjacencyData, DbdPacket, DbdPacket) {
     reply.master = false;
     let adj = AdjacencyData {
         is_master: false,
+        oob_resync: false,
         dd_sequence_number: 42,
         last_dbd_sent: Some(reply.clone()),
         ..Default::default()
@@ -1094,6 +1128,7 @@ fn slave_in_exchange_resends_last_dbd_for_masters_duplicate_poll() {
 fn master_in_exchange_discards_duplicate_reply_only() {
     let master = |seq| AdjacencyData {
         is_master: true,
+        oob_resync: false,
         dd_sequence_number: seq,
         ..Default::default()
     };

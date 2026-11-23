@@ -1822,6 +1822,75 @@ pub async fn ospf_lls_resync(w: &mut World) -> anyhow::Result<()> {
     }
     quiet_settled(b, &torn, torn0).await?;
 
+    // RFC 4811 out-of-band resync (#1371): router-a starts it on its `Full`,
+    // LR-announcing neighbor. Both sides must keep the adjacency, the routes
+    // and their Router-LSAs, and finish `Full` with the flag cleared.
+    log("router-a starts an RFC 4811 out-of-band resync");
+    topology_settled(&settle).await?;
+    let started = format!("ospf lls resync started link=eth0.0 neighbor={OSPF_ROUTER_ID_B}");
+    let done = "ospf lls resync complete link=eth0.0";
+    let churn = format!(
+        "ospf neighbor sequence mismatch\\|ospf neighbor adjacency torn down\\|ospf neighbor state changed to down\\|removed route prefix={OSPF_GR_LOOPBACK_ADDRESS}\\|ospf lsa originated"
+    );
+    let (started0, done_a0, done_b0) = (a.count(&started), a.count(done), b.count(done));
+    let (churn_a0, churn_b0) = (a.count_fresh(&churn).await, b.count_fresh(&churn).await);
+    a.provision_flags(&with_base(
+        A,
+        flags(OSPF_ROUTER_ID, &["--ospf-oob-resync", "true"]),
+    ))
+    .await?;
+    a.wait_new(&started, started0, 30).await?;
+    a.wait_new(done, done_a0, 30).await?;
+    b.wait_new(done, done_b0, 30).await?;
+    for _ in 0..10 {
+        anyhow::ensure!(
+            b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await?,
+            "router-b lost router-a's loopback route during the OOB resync"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    for (r, base) in [(a, churn_a0), (b, churn_b0)] {
+        r.assert_quiet(&churn, base, 0).await?;
+    }
+    a.provision_flags(&with_base(
+        A,
+        flags(OSPF_ROUTER_ID, &["--ospf-oob-resync", "false"]),
+    ))
+    .await?;
+
+    // RFC 4812 RS alone (#1371): without a Grace-LSA the helper's hold can
+    // only come from the RS bit of the last Hello.
+    log("router-a restarts with the restart signal only, no Grace-LSA");
+    let before_full = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    a.provision_flags(&with_base(
+        A,
+        flags(OSPF_ROUTER_ID, &["--ospf-restart-signal-only", "true"]),
+    ))
+    .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before_full, 90)
+        .await?;
+    topology_settled(&settle).await?;
+    let (signal1, torn1) = (b.count(&signal), b.count_fresh(&torn).await);
+    let grace_lsa = "ospf helper: grace period entered";
+    let grace0 = b.count(grace_lsa);
+    let (full_b1, full_a1) = (b.count(&full_on_b), a.count(&full_on_a));
+    w.dock
+        .signal_process("router-a", "nos-ospfd", "-TERM")
+        .await?;
+    b.wait_new(&signal, signal1, 30).await?;
+    b.wait_new(&full_on_b, full_b1, 90).await?;
+    a.wait_new(&full_on_a, full_a1, 90).await?;
+    anyhow::ensure!(
+        b.count(grace_lsa) == grace0,
+        "router-b saw a Grace-LSA although restart-signal-only was set"
+    );
+    quiet_settled(b, &torn, torn1).await?;
+    a.provision_flags(&with_base(
+        A,
+        flags(OSPF_ROUTER_ID, &["--ospf-restart-signal-only", "false"]),
+    ))
+    .await?;
+
     log("restoring lls off and graceful restart off");
     let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
     for r in [a, b] {

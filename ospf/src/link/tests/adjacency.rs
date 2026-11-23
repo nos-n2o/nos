@@ -531,8 +531,8 @@ async fn lls_is_exchanged_under_every_classic_auth_and_ignored_otherwise() {
             assert_eq!(
                 s.lls,
                 Some(nos_proto::LlsSummary {
-                    eof: 0,
-                    lr: false,
+                    eof: 1,
+                    lr: true,
                     rs: false
                 })
             );

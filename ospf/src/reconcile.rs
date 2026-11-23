@@ -51,6 +51,8 @@ struct State {
     degraded: HashSet<String>,
     /// Passive attach points already logged as advertised (log on change).
     passive: HashSet<String>,
+    /// Attach points whose `oob-resync` was on at the last resync.
+    oob_active: HashSet<String>,
 }
 
 /// Gates of `watched` in `table`, sorted: the resync trigger compares these.
@@ -208,6 +210,8 @@ struct Wanted {
     next_passive: HashSet<String>,
     desired_links: Vec<LinkConfig>,
     bfd_wants: HashMap<String, nos_proto::schema::BfdProfile>,
+    /// Attach points whose profile has `oob-resync` on.
+    oob_wants: HashSet<String>,
     desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>,
 }
 
@@ -241,6 +245,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         desired_stubs,
         desired_links,
         bfd_wants,
+        oob_wants,
         ..
     } = d;
     let ProfileCtx {
@@ -313,6 +318,9 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
+        if profile.oob_resync {
+            oob_wants.insert(link_name.clone());
+        }
         desired_links.push(LinkConfig {
             attach_point: link_name,
             area_id: area.area_id,
@@ -329,6 +337,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
+            restart_signal_only: profile.restart_signal_only,
             ifindex,
             auth: auth.clone(),
             stub: area.area_type.is_stub(),
@@ -389,6 +398,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         desired_stubs,
         desired_links,
         bfd_wants,
+        oob_wants,
         ..
     } = d;
     let ProfileCtx {
@@ -460,6 +470,9 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
             bfd_wants.insert(link_name.clone(), p);
         }
+        if profile.oob_resync {
+            oob_wants.insert(link_name.clone());
+        }
         desired_links.push(LinkConfig {
             attach_point: link_name,
             area_id: area.area_id,
@@ -476,6 +489,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
+            restart_signal_only: profile.restart_signal_only,
             ifindex,
             auth: auth.clone(),
             stub: area.area_type.is_stub(),
@@ -486,6 +500,19 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
     }
 }
 
+/// Starts an RFC 4811 resync on every attach point whose `oob-resync` just
+/// turned on.
+async fn fire_oob_resyncs(links: &LinkManager, state: &mut State, wants: HashSet<String>) {
+    for attach_point in wants.difference(&state.oob_active) {
+        links.oob_resync(attach_point).await;
+    }
+    state.oob_active = wants;
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one resync pass; the steps are the logic"
+)]
 async fn resync(ctx: &mut Ctx, state: &mut State) {
     let Ctx {
         config_socket,
@@ -566,6 +593,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         next_passive: HashSet::new(),
         desired_links: Vec::new(),
         bfd_wants: HashMap::new(),
+        oob_wants: HashSet::new(),
         desired_stubs: HashMap::new(),
     };
     for area in &own.areas {
@@ -633,12 +661,15 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         next_passive,
         desired_links,
         bfd_wants,
+        oob_wants,
         desired_stubs,
     } = wanted;
     links.set_bfd(bfd_wants);
     links
         .reconcile(desired_links, desired_stubs, own.router_id)
         .await;
+    // RFC 4811 trigger: edge only, so the 10s re-apply never repeats it.
+    fire_oob_resyncs(links, state, oob_wants).await;
     state.signature = signature(&table, &watched);
     state.watched = watched;
     state.down = next_down;
@@ -1543,6 +1574,7 @@ mod tests {
             speed_mbps: None,
             mtu_ignore: false,
             lls: false,
+            restart_signal_only: false,
             ifindex: 3,
             auth: crate::link::LinkAuthConfig::None,
             stub: false,

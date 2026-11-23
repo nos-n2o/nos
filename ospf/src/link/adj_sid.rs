@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
 use super::originate::router_lsa_links;
-use super::{
-    lsa, LinkConfig, LinkStatus, NeighborState, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK,
-};
+use super::{lsa, LinkConfig, LinkStatus, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK};
 
 /// First dynamic Adj-SID label: above the default SRGB (16000-23999, so a
 /// label never doubles as a Prefix-SID) and the VPN labels (from 1000).
@@ -54,7 +52,7 @@ pub(super) fn adjacencies(
     links: &[(LinkConfig, LinkStatus)],
     labels: &mut AdjLabels,
 ) -> Vec<Adjacency> {
-    let up = |n: &super::NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+    let up = |n: &super::NeighborInfo| n.counts_as_full();
     let mut out = Vec::new();
     for pair in links {
         let (cfg, status) = pair;

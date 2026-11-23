@@ -38,7 +38,7 @@ pub(super) fn network_lsa_mask(cfg: &LinkConfig, prefix_suppression: bool) -> Ip
 /// `Full`. (A neighbor in a graceful restart still counts, as on p2p.)
 /// ponytail: mirrored in `nos-ospfv3` (no shared crate for the two daemons).
 pub(super) fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
-    let up = |n: &super::NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
+    let up = |n: &super::NeighborInfo| n.counts_as_full();
     match status.dr {
         None => false,
         Some(dr) if dr == local_router_id => status.neighbors.values().any(up),
@@ -103,7 +103,7 @@ pub(super) fn router_lsa_links(
                 if let Some(neighbor_id) = status
                     .neighbors
                     .iter()
-                    .filter(|(_, n)| n.state == NeighborState::Full || n.grace_deadline.is_some())
+                    .filter(|(_, n)| n.counts_as_full())
                     .map(|(id, _)| id)
                     .min()
                 {
@@ -130,7 +130,7 @@ pub(super) fn router_lsa_links(
                 // neighbor, plus one /32 stub for our own address (not the
                 // subnet's — the neighbors needn't share one).
                 for (neighbor_id, n) in &status.neighbors {
-                    if n.state == NeighborState::Full || n.grace_deadline.is_some() {
+                    if n.counts_as_full() {
                         result.push(RouterLink {
                             tos: Vec::new(),
                             link_id: *neighbor_id,
@@ -823,9 +823,7 @@ impl LinkManager {
                             .iter()
                             // RFC 3623 §3.1: a restarting neighbor we help
                             // is still advertised as fully adjacent.
-                            .filter(|(_, n)| {
-                                n.state == NeighborState::Full || n.grace_deadline.is_some()
-                            })
+                            .filter(|(_, n)| n.counts_as_full())
                             .map(|(id, _)| *id),
                     )
                     .collect();

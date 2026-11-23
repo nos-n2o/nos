@@ -4460,6 +4460,10 @@
               }
             ]
           },
+          "oob_resync": {
+            "description": "RFC 4811 out-of-band LSDB resynchronization: setting it (false to true\non a commit) starts a resync with every `Full` neighbor that announced\nthe LR bit on this profile's links, keeping the adjacency advertised.\nNeeds `lls`. Doubles as an operator \"resync now\" action: set it again\nafter turning it off.",
+            "type": "boolean"
+          },
           "passive": {
             "description": "Passive interface: the attach point's subnet is advertised as a stub\nnetwork but no Hello is sent and no adjacency forms. Excludes `auth`,\n`bfd` and point-to-multipoint (nothing to authenticate or elect);\nchecked in `valid_profile_timers`, since it needs the siblings.",
             "type": "boolean"
@@ -4472,6 +4476,10 @@
               "integer",
               "null"
             ]
+          },
+          "restart_signal_only": {
+            "description": "Test fixture: on a planned restart send only the RFC 4812 RS Hello, no\nGrace-LSA, so a helper's hold provably comes from RS. Needs `lls`.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -74665,6 +74673,227 @@
         ]
       }
     },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/profile/{profile}/oob-resync": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `oob-resync` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "RFC 4811 out-of-band LSDB resynchronization: setting it (false to true\non a commit) starts a resync with every `Full` neighbor that announced\nthe LR bit on this profile's links, keeping the adjacency advertised.\nNeeds `lls`. Doubles as an operator \"resync now\" action: set it again\nafter turning it off.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `oob-resync` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "RFC 4811 out-of-band LSDB resynchronization: setting it (false to true\non a commit) starts a resync with every `Full` neighbor that announced\nthe LR bit on this profile's links, keeping the adjacency advertised.\nNeeds `lls`. Doubles as an operator \"resync now\" action: set it again\nafter turning it off.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `oob-resync` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "RFC 4811 out-of-band LSDB resynchronization: setting it (false to true\non a commit) starts a resync with every `Full` neighbor that announced\nthe LR bit on this profile's links, keeping the adjacency advertised.\nNeeds `lls`. Doubles as an operator \"resync now\" action: set it again\nafter turning it off.",
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "RFC 4811 out-of-band LSDB resynchronization: setting it (false to true\non a commit) starts a resync with every `Full` neighbor that announced\nthe LR bit on this profile's links, keeping the adjacency advertised.\nNeeds `lls`. Doubles as an operator \"resync now\" action: set it again\nafter turning it off.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `oob-resync` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/profile/{profile}/passive": {
       "delete": {
         "responses": {
@@ -75122,6 +75351,227 @@
           }
         },
         "summary": "Set: The `priority` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/ospf-instance/{ospf_instance}/area/{area}/profile/{profile}/restart-signal-only": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `restart-signal-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Test fixture: on a planned restart send only the RFC 4812 RS Hello, no\nGrace-LSA, so a helper's hold provably comes from RS. Needs `lls`.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `restart-signal-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "ospf_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "area",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "profile",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Test fixture: on a planned restart send only the RFC 4812 RS Hello, no\nGrace-LSA, so a helper's hold provably comes from RS. Needs `lls`.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `restart-signal-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Test fixture: on a planned restart send only the RFC 4812 RS Hello, no\nGrace-LSA, so a helper's hold provably comes from RS. Needs `lls`.",
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Test fixture: on a planned restart send only the RFC 4812 RS Hello, no\nGrace-LSA, so a helper's hold provably comes from RS. Needs `lls`.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `restart-signal-only` setting.",
         "tags": [
           "transactions"
         ]

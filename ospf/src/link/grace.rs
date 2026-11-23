@@ -93,19 +93,13 @@ pub(super) fn on_grace_lsa(
     });
 }
 
-/// RFC 4811/4812 helper side: a `Full` neighbor signalling a restart (`RS`,
-/// `resync = false`) or an out-of-band resync (`LR` on an Init DBD) is held
+/// RFC 4812 helper side: a `Full` neighbor signalling a restart (`RS`) is held
 /// in grace for `helper_max_grace_period` seconds (not extended if it is
 /// already in grace, e.g. from its Grace-LSA): its Router-LSA link
-/// stays and a one-way Hello or the Init DBD does not tear the adjacency
+/// stays and a one-way Hello does not tear the adjacency
 /// down. It ends like an RFC 3623 grace (reaching `Full` again, expiry, or a
 /// topology change). Not honoured with a zero cap.
-pub(super) fn enter_lls_grace(
-    cfg: &LinkConfig,
-    status: &StatusHandle,
-    neighbor_id: Ipv4Addr,
-    resync: bool,
-) {
+pub(super) fn enter_lls_grace(cfg: &LinkConfig, status: &StatusHandle, neighbor_id: Ipv4Addr) {
     if cfg.helper_max_grace_period == 0 {
         return;
     }
@@ -120,11 +114,7 @@ pub(super) fn enter_lls_grace(
         })
     });
     if started {
-        if resync {
-            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls resync started");
-        } else {
-            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls restart signal");
-        }
+        info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls restart signal");
     }
 }
 

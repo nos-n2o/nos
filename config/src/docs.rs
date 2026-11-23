@@ -1381,6 +1381,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              without LLS ignores the block. The peer's LLS data is recorded and shown by show \
              ospf neighbor. Has no effect with extended-sequence-numbers (RFC 7474).",
         ),
+        Topic::OspfProfileOobResync => (
+            "Resynchronize the LSDB out of band (RFC 4811) now.",
+            "Setting oob-resync on a profile (it takes effect on the change to on; turn it off \
+             and on again to repeat) restarts the database exchange with every Full neighbor \
+             on its links that announced the LR bit, while the adjacency stays advertised: \
+             no Router-LSA change and no route flap. Needs lls on both routers. A resync that \
+             has not reached Full within the dead interval falls back to the ordinary \
+             resynchronization.",
+        ),
+        Topic::OspfProfileRestartSignalOnly => (
+            "Signal a restart without a Grace-LSA (test fixture).",
+            "Sets restart-signal-only on a profile. On a planned restart the router sends the \
+             RFC 4812 restart-signal Hello but no Grace-LSA, so a helper's hold comes from the \
+             signal alone. Needs lls.",
+        ),
         Topic::OspfProfilePassive => (
             "Enable or disable passive mode on an OSPF profile.",
             "Sets passive on a profile. An attach point using a passive profile advertises its \
