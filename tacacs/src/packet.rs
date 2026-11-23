@@ -82,6 +82,7 @@ impl Header {
 fn crypt(body: &mut [u8], session: u32, key: &[u8], version: u8, seq: u8) {
     let mut prev: Vec<u8> = Vec::new();
     for chunk in body.chunks_mut(16) {
+        // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- RFC 8907 4.5 mandates MD5
         let mut h = Md5::new();
         h.update(session.to_be_bytes());
         h.update(key);
