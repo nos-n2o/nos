@@ -394,7 +394,7 @@ async fn login_policy(w: &World) -> anyhow::Result<()> {
 /// `/run/nos`.
 async fn check_uids(w: &World) -> anyhow::Result<()> {
     let a = w.a()?;
-    a.wait("starting process=nos-configd program=/usr/local/bin/nos-configd uid=10001 gid=991")
+    a.wait("starting process=nos-configd program=/usr/local/bin/nos-configd .*uid=10001 gid=991")
         .await?;
     // `/proc/<pid>/status` is world-readable; the runtime image has no `ps`.
     let uid_of = |comm: &'static str| async move {
