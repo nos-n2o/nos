@@ -30,13 +30,13 @@ pub struct Passwd {
 }
 
 /// `getpwnam_r` through NSS (`files nos`); `Ok(None)` = no such name.
-pub fn lookup(name: &str) -> Result<Option<Passwd>, ()> {
+pub fn lookup(name: &str) -> PamResult<Option<Passwd>> {
     match nix::unistd::User::from_name(name) {
         Ok(u) => Ok(u.map(|u| Passwd {
             uid: u.uid.as_raw(),
             shell: u.shell.to_string_lossy().into_owned(),
         })),
-        Err(_) => Err(()),
+        Err(_) => Err(ErrorCode::AuthInfoUnavailable),
     }
 }
 
@@ -44,11 +44,11 @@ pub fn lookup(name: &str) -> Result<Option<Passwd>, ()> {
 /// that resolves must be a NOS user (the `nos` shell, the NSS uid range). An unresolvable
 /// name passes: the broker decides, and over ssh its empty token already stops it.
 pub fn account_guard(
-    lookup: impl Fn(&str) -> Result<Option<Passwd>, ()>,
+    lookup: impl Fn(&str) -> PamResult<Option<Passwd>>,
     user: &str,
 ) -> PamResult<()> {
     match lookup(user) {
-        Err(()) => Err(ErrorCode::AuthInfoUnavailable),
+        Err(e) => Err(e),
         Ok(None) => Ok(()),
         Ok(Some(p))
             if p.shell == nos_proto::NOS_LOGIN_SHELL
