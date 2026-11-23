@@ -177,6 +177,8 @@ const TLV_GRACE_PERIOD: u16 = 1;
 const TLV_RESTART_REASON: u16 = 2;
 /// RFC 3623 Appendix A: restart reason 1, "software restart".
 pub const RESTART_REASON_SOFTWARE: u8 = 1;
+/// RFC 5187 §2: reason 0, what an unplanned (crash) restart announces.
+pub const RESTART_REASON_UNKNOWN: u8 = 0;
 
 /// RFC 8362 §3.1's extended LSAs (TLV bodies) — same information as the four
 /// legacy types above, so they decode into the very same `LsaBody` variants
