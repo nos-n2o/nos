@@ -4005,6 +4005,109 @@ async fn ospfv3_several_instances(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&flags(1, &CLEAR_B_STATIC)).await
 }
 
+/// RFC 5838 IPv4 unicast address family (#1162; requires `ospfv3`): an
+/// `ipv4-unicast` instance (id 64) next to instance 1 on both routers learns
+/// router-b's IPv4 loopback over the IPv6 link-local transport and
+/// router-a's `nos-ribd` installs it as an IPv4 route; clearing the
+/// loopback removes it again.
+pub async fn ospfv3_ipv4_af(w: &mut World) -> anyhow::Result<()> {
+    keep_ospfv3_profiles(true);
+    let result = ospfv3_ipv4_af_steps(w).await;
+    keep_ospfv3_profiles(false);
+    if result.is_err() {
+        // Best effort; the original error wins.
+        for r in [w.a()?, w.b()?] {
+            if let Err(e) = drop_extra_instances(r).await {
+                log(format!("extra instance cleanup failed: {e:#}"));
+            }
+        }
+    }
+    result
+}
+
+#[allow(
+    clippy::needless_range_loop,
+    reason = "`s` also indexes `sides` and the flag closures"
+)]
+async fn ospfv3_ipv4_af_steps(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    drop_extra_instances(a).await?;
+    drop_extra_instances(b).await?;
+    // (router, id, address, own rid, peer's rid in instance 3, own rid in instance 3)
+    let sides = [
+        (
+            a,
+            A,
+            OSPFV3_ADDRESS_A,
+            OSPFV3_ROUTER_ID,
+            OSPFV3_RID_3_B,
+            OSPFV3_RID_3_A,
+        ),
+        (
+            b,
+            B,
+            OSPFV3_ADDRESS_B,
+            OSPFV3_ROUTER_ID_B,
+            OSPFV3_RID_3_A,
+            OSPFV3_RID_3_B,
+        ),
+    ];
+    let flags = |s: usize, extra: &[&str]| {
+        let (_, id, addr, rid, ..) = sides[s];
+        let mut f = ospfv3(addr, rid);
+        f.extend(strings(extra));
+        with_base(id, f)
+    };
+    let spec3 = |s: usize| {
+        format!(
+            "{OSPFV3_INSTANCE_3}:{}:{OSPFV3_PROFILE_3}:{OSPFV3_INSTANCE_3_ID}:ipv4",
+            sides[s].5
+        )
+    };
+    let full = format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_RID_3_B}");
+    let full0 = a.count(&full);
+    log("adding the ipv4-unicast instance (id 64) on both routers");
+    for s in 0..2 {
+        sides[s]
+            .0
+            .provision_flags(&flags(s, &["--ospfv3-extra-instance", &spec3(s)]))
+            .await?;
+    }
+    a.wait_new(&full, full0, 60).await?;
+
+    let prefix = OSPFV3_IPV4_LOOPBACK;
+    let route = format!("added route prefix={prefix}.*source=Some(Ospf)");
+    let route0 = a.count(&route);
+    log("router-b advertises an IPv4 loopback into the ipv4-unicast instance");
+    b.provision(&[
+        "--ospfv3-loopback-address",
+        prefix,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE_3,
+    ])
+    .await?;
+    a.wait_new(&route, route0, 60).await?;
+    if !a.rt1_has(prefix, "Ospf").await? {
+        bail!("router-a's rt1 has no OSPF candidate for {prefix}");
+    }
+
+    log("clearing the loopback withdraws the route");
+    b.provision(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE_3])
+        .await?;
+    b.provision(&["--loopback-remove-address", prefix]).await?;
+    a.wait_ospf_route_gone(prefix, 3).await?;
+
+    log("removing the extra instance again");
+    for s in 0..2 {
+        let spec = format!("{OSPFV3_INSTANCE_3}:{OSPFV3_PROFILE_3}");
+        sides[s]
+            .0
+            .provision_flags(&flags(s, &["--ospfv3-remove-extra-instance", &spec]))
+            .await?;
+    }
+    Ok(())
+}
+
 /// #957: router-b comes back under a new router-id from the same link-local
 /// address on the point-to-point link. router-a evicts the old neighbor on the
 /// first Hello, reaches Full with the new id, removes the old entry after the

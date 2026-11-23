@@ -744,6 +744,8 @@ pub const OSPFV3_PROFILE_3: &str = "ospfv3-profile3";
 pub const OSPFV3_RID_3_A: &str = "9.9.9.22";
 pub const OSPFV3_RID_3_B: &str = "9.9.9.23";
 pub const OSPFV3_INSTANCE_3_ID: &str = "64";
+/// `ospfv3-ipv4-af`: router-b's IPv4 loopback in instance 3 (TEST-NET-2 benchmark block, unused elsewhere).
+pub const OSPFV3_IPV4_LOOPBACK: &str = "198.18.3.1/32";
 /// The IPv6 static only instance 2 originates (`--redistribute-to-ospfv3-instance`);
 /// no other phase uses it, so `nos-ribd` logs a fresh install.
 pub const OSPFV3_INSTANCE_2_PREFIX: &str = "2001:db8:79::/48";

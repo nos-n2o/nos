@@ -49,6 +49,35 @@ pub const OPTION_AT: u32 = 0x00_0400;
 /// instance sets it in Hello/DBD/LSAs and discards Hellos without it.
 pub const OPTION_AF: u32 = 0x00_0100;
 
+// RFC 5838 §2.5: an IPv4-unicast instance carries IPv4 prefixes and next
+// hops in the IPv6 fields, the address in the leading 32 bits. Inside the
+// daemon that "shadow" form is an `Ipv6Addr`/`Ipv6Net` whose first four
+// octets are the IPv4 value, so the wire codec, LSDB and SPF stay untouched;
+// the conversion happens only at the edges (interface/redistribution input,
+// route push output).
+/// The shadow form of an IPv4 address.
+pub fn v4_to_shadow(a: Ipv4Addr) -> Ipv6Addr {
+    let mut o = [0u8; 16];
+    o[..4].copy_from_slice(&a.octets());
+    Ipv6Addr::from(o)
+}
+
+/// The IPv4 address of a shadow address (its leading 32 bits).
+pub fn shadow_to_v4(a: Ipv6Addr) -> Ipv4Addr {
+    let o = a.octets();
+    Ipv4Addr::new(o[0], o[1], o[2], o[3])
+}
+
+/// The shadow form of an IPv4 prefix.
+pub fn v4_net_to_shadow(n: ipnet::Ipv4Net) -> Ipv6Net {
+    Ipv6Net::new(v4_to_shadow(n.addr()), n.prefix_len()).expect("a /0-/32 is a valid v6 length")
+}
+
+/// The IPv4 prefix of a shadow prefix, `None` when longer than /32.
+pub fn shadow_to_v4_net(n: Ipv6Net) -> Option<ipnet::Ipv4Net> {
+    ipnet::Ipv4Net::new(shadow_to_v4(n.addr()), n.prefix_len()).ok()
+}
+
 /// S2/S1 scope bits (bits 14-13): `01` = area scope. The U-bit (bit 15,
 /// "flood even if unrecognized") is left clear on the RFC 5340 `LSA_TYPE_*`
 /// constants below — every type this crate ever originates or requests is
@@ -1501,6 +1530,27 @@ mod tests {
             assert_eq!(decoded.header.lsa_type, e_type);
             assert_eq!(decoded.body, lsa.body);
         }
+    }
+
+    /// RFC 5838 §2.5: an IPv4 prefix rides the IPv6 prefix encoding, its
+    /// address in the leading 32 bits, and a /32 takes one word.
+    #[test]
+    fn ipv4_prefixes_use_the_leading_word_on_the_wire() {
+        let mut lsa = intra_area_prefix_lsa();
+        let net = v4_net_to_shadow("10.9.9.9/32".parse().unwrap());
+        let LsaBody::IntraAreaPrefix(b) = &mut lsa.body else {
+            unreachable!()
+        };
+        b.prefixes[0].prefix = net;
+        let wire = encode_lsa(&lsa);
+        assert!(wire.ends_with(&[10, 9, 9, 9]));
+        let decoded = decode_lsa(&wire).unwrap();
+        assert_eq!(decoded.body, lsa.body);
+        assert_eq!(shadow_to_v4_net(net), Some("10.9.9.9/32".parse().unwrap()));
+        assert_eq!(
+            shadow_to_v4(v4_to_shadow("192.0.2.1".parse().unwrap())).to_string(),
+            "192.0.2.1"
+        );
     }
 
     #[test]

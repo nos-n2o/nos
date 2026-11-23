@@ -1140,7 +1140,9 @@ async fn resolve_local_address_cases() {
         ],
     ));
 
-    let ok = resolve_local_address(&wd, "eth0", 0).await.expect("found");
+    let ok = resolve_local_address(&wd, "eth0", 0, false)
+        .await
+        .expect("found");
     assert_eq!(ok.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(
         ok.prefix,
@@ -1149,22 +1151,22 @@ async fn resolve_local_address_cases() {
     );
     assert_eq!(ok.mtu, Some(1500));
     assert!(
-        resolve_local_address(&wd, "eth0", 5).await.is_none(),
+        resolve_local_address(&wd, "eth0", 5, false).await.is_none(),
         "no such tag"
     );
     assert!(
-        resolve_local_address(&wd, "eth0", 1).await.is_none(),
+        resolve_local_address(&wd, "eth0", 1, false).await.is_none(),
         "no link-local address yet"
     );
     assert!(
-        resolve_local_address(&wd, "eth0", 2).await.is_none(),
+        resolve_local_address(&wd, "eth0", 2, false).await.is_none(),
         "IPv4 only"
     );
-    assert!(resolve_local_address(&wd, "nope", 0).await.is_none());
+    assert!(resolve_local_address(&wd, "nope", 0, false).await.is_none());
 
     let no_ifaced = Fakes::start(&[Fake::Watchdog]);
     assert!(
-        resolve_local_address(&no_ifaced.watchdog_socket(), "eth0", 0)
+        resolve_local_address(&no_ifaced.watchdog_socket(), "eth0", 0, false)
             .await
             .is_none(),
         "watchdog cannot resolve nos-interfaced"
@@ -1180,14 +1182,20 @@ async fn resolve_loopback_prefix_cases() {
     ifd.set_interface(loopback_status("loopback-b", &["1.1.1.1/32"]));
 
     assert_eq!(
-        resolve_loopback_prefix(&wd, "loopback-a").await,
+        resolve_loopback_prefix(&wd, "loopback-a", false).await,
         Some("2001:db8::1/128".parse().unwrap())
     );
-    assert_eq!(resolve_loopback_prefix(&wd, "loopback-b").await, None);
-    assert_eq!(resolve_loopback_prefix(&wd, "loopback-z").await, None);
+    assert_eq!(
+        resolve_loopback_prefix(&wd, "loopback-b", false).await,
+        None
+    );
+    assert_eq!(
+        resolve_loopback_prefix(&wd, "loopback-z", false).await,
+        None
+    );
     let no_ifaced = Fakes::start(&[Fake::Watchdog]);
     assert_eq!(
-        resolve_loopback_prefix(&no_ifaced.watchdog_socket(), "loopback-a").await,
+        resolve_loopback_prefix(&no_ifaced.watchdog_socket(), "loopback-a", false).await,
         None
     );
 }
@@ -1206,21 +1214,25 @@ async fn resolve_broadcast_domain_cases() {
         bd_status("v4", Some("br4"), Some(LL), &["10.1.0.1/24"]),
     );
 
-    let (l, bridge) = resolve_broadcast_domain(&wd, "ok").await.expect("found");
+    let (l, bridge) = resolve_broadcast_domain(&wd, "ok", false)
+        .await
+        .expect("found");
     assert_eq!(bridge, "br1");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(l.prefix, V6.parse::<Ipv6Net>().unwrap());
     assert_eq!(l.mtu, Some(1400), "the bridge's observed MTU");
     for name in ["nobridge", "noll", "noaddr", "v4", "gone"] {
         assert!(
-            resolve_broadcast_domain(&wd, name).await.is_none(),
+            resolve_broadcast_domain(&wd, name, false).await.is_none(),
             "{name}"
         );
     }
     let no_ifaced = Fakes::start(&[Fake::Watchdog]);
-    assert!(resolve_broadcast_domain(&no_ifaced.watchdog_socket(), "ok")
-        .await
-        .is_none());
+    assert!(
+        resolve_broadcast_domain(&no_ifaced.watchdog_socket(), "ok", false)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test(start_paused = true)]

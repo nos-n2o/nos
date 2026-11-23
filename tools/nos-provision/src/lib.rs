@@ -1788,9 +1788,9 @@ pub struct Args {
     #[arg(long, conflicts_with = "ospfv3_broadcast_domain_profile")]
     pub clear_ospfv3_broadcast_domain_profile: Option<String>,
 
-    /// If set, adds this IPv6 address to `--routing-table`'s loopback
-    /// interface (`loopback-<routing-table>`) alongside `--loopback-address`
-    /// — `OSPFv3` only ever advertises IPv6 prefixes.
+    /// If set, adds this address to `--routing-table`'s loopback interface
+    /// (`loopback-<routing-table>`) alongside `--loopback-address` — IPv6 for
+    /// an `ipv6-unicast` instance, IPv4 for an `ipv4-unicast` one (RFC 5838).
     #[arg(long)]
     pub ospfv3_loopback_address: Option<IpNet>,
 

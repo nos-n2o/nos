@@ -205,7 +205,9 @@ commit
 - `ipv6-unicast` is the default; `delete ospfv3 instance v3 address-family` goes back to it.
 - Every profile's instance ID must lie in the family's range (0-31 or 64-95), so an `ipv4-unicast` instance needs an explicit `instance-id` on each profile; the commit fails otherwise.
 - An `ipv4-unicast` instance sets the AF-bit in its Hellos, DBDs and LSAs and discards a Hello without it (`dropping ospfv3 hello without af-bit`). The base IPv6 family sets no AF-bit and accepts either, for compatibility.
-- Only the foundation is built: the adjacency forms, but no IPv4 route is computed yet. Several instances on one link are not possible yet: an attach point names one profile and a routing table claims one OSPFv3 instance.
+- An `ipv4-unicast` instance advertises and routes IPv4: the attach point needs an IPv4 address (the first IPv4 address of the interface or loopback is the one used), the packets still travel over IPv6 link-local, and `nos-ribd` receives IPv4 routes with IPv4 next hops (the neighbour's IPv4 address from its Link-LSA, RFC 5838 §2.5).
+- `redistribute ... to ospfv3` feeds an `ipv4-unicast` instance IPv4 prefixes only and an `ipv6-unicast` one IPv6 only.
+- Not supported with `extended-lsa` (RFC 8362 full mode): the commit fails; `extended-lsa-sparse` works. Virtual links and the multicast address families are not supported for IPv4.
 
 ### Use extended LSAs (RFC 8362)
 
@@ -425,7 +427,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: IPv4 route computation and the multicast address families of RFC 5838 (one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), and BFD.
+Also not supported: the multicast address families of RFC 5838 (IPv4 unicast works, see [Choose the address family](#choose-the-address-family-rfc-5838)), and BFD.
 
 ## Configuration reference
 

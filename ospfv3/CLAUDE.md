@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 
 ## Layout
 
-`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`ospf/src/link_client.rs` by `#[path]`, log prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). Acks are delayed and batched like v2 (`pending_acks`, `flush_pending_acks` on the 5s `RXMT_INTERVAL` sweep). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s, and signs RFC 7166 trailers like the real socket.
+`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`ospf/src/link_client.rs` by `#[path]`, log prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). Acks are delayed and batched like v2 (`pending_acks`, `flush_pending_acks` on the 5s `RXMT_INTERVAL` sweep). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s.
 
 ## Rules
 
@@ -33,8 +33,8 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **Virtual links** (#1158, #1159): `resolve_virtual_links` makes each a `LinkConfig` with `virtual_link: Some` (area 0, no Link-LSA); SPF: type 4 is a backbone edge (`spf::Context`, §16.3); see internals.
 - **Receive hardening** (#394): mismatched hello/dead interval dropped (#650); non-link-local sources are dropped in `link::run`; same neighbor cap and `warn_limited!` as v2. Dead timers are the 1s `sweep_dead_neighbors` on every network type (no p2p deadline); it removes idle `Down` entries and `handle_hello` evicts a same-address entry under a new router ID on p2p/p2mp (#957).
 - Own LSA flooded back newer (§13.4, #731): same `mark_reflected`/`reoriginate`/`origination_pass` mechanism as `nos-ospfd`.
+- **IPv4 AF** (#1162): IPv4 values are `lsa::v4_*_to_shadow` (leading 32 bits of an `Ipv6Net`); convert only at the edges (internals page).
 - **Hybrid** (#1180): `hybrid_router_links`. **Not built**: `docs/protocols/ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager`; attach points use `nostst0`, a device no host has. The `cfg(test)` getters on `LinkManager` are its read side.
-- Verify kernel/IPC/wire changes with the `ospfv3*` `nos-e2e` phases.
 - **Multicast flood** (#879): as `ospf/CLAUDE.md`: `flood_full_neighbors`/`flush_pending_acks` use `flood_dest` and `LinkSocket::send_flood` (`ff02::5`/`ff02::6`, one signed packet per chunk); unicast fallback on error; retransmissions, DBD/LSR, Grace stay unicast.
 - **AllDRouters** (#854): `run_election` joins/leaves `ff02::6` (DR/Backup only, never p2p) via `OspfSocket::set_all_drouters`.
