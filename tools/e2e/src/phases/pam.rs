@@ -11,7 +11,7 @@ use crate::world::World;
 
 /// Runs `pamtester <service> <user> <op>` on router-a with `password` on stdin (no tty in
 /// an exec); `(exit code, output)`. The password goes through `$1`, not the command line.
-async fn pamtester(
+pub(super) async fn pamtester(
     w: &World,
     service: &str,
     user: &str,

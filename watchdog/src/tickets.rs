@@ -16,6 +16,8 @@ const MAX_TICKETS: usize = 256;
 
 struct Entry {
     user: String,
+    /// The role a RADIUS accept granted (#1376); `None` for a local login.
+    claim: Option<String>,
     expires: Instant,
     created: u64,
 }
@@ -34,8 +36,9 @@ fn key(ticket: &[u8]) -> [u8; 32] {
 }
 
 impl Tickets {
-    /// Mints a ticket for `user`, valid until `now + LOGIN_TICKET_TTL`.
-    pub fn issue(&self, user: &str, now: Instant) -> Vec<u8> {
+    /// Mints a ticket for `user` (with the RADIUS `claim`, if any), valid until
+    /// `now + LOGIN_TICKET_TTL`.
+    pub fn issue(&self, user: &str, claim: Option<String>, now: Instant) -> Vec<u8> {
         let mut ticket = vec![0u8; LOGIN_TICKET_LEN];
         // ponytail: an unreadable OS RNG panics the login task, never mints a weak ticket.
         getrandom::getrandom(&mut ticket).expect("OS random source");
@@ -51,6 +54,7 @@ impl Tickets {
             key(&ticket),
             Entry {
                 user: user.to_string(),
+                claim,
                 expires: now + LOGIN_TICKET_TTL,
                 created,
             },
@@ -58,12 +62,12 @@ impl Tickets {
         ticket
     }
 
-    /// Consumes `ticket`: the user it was issued to, if it is known and
-    /// unexpired. A failed (late) attempt still burns it.
-    pub fn redeem(&self, ticket: &[u8], now: Instant) -> Option<String> {
+    /// Consumes `ticket`: the user it was issued to and its claim, if it is
+    /// known and unexpired. A failed (late) attempt still burns it.
+    pub fn redeem(&self, ticket: &[u8], now: Instant) -> Option<(String, Option<String>)> {
         let mut g = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let e = g.map.remove(&key(ticket))?;
-        (e.expires > now).then_some(e.user)
+        (e.expires > now).then_some((e.user, e.claim))
     }
 
     /// Drops every outstanding ticket of `user` (deleted, or password changed).
@@ -82,10 +86,10 @@ mod tests {
     fn single_use_and_unique_32_bytes() {
         let t = Tickets::default();
         let now = Instant::now();
-        let (a, b) = (t.issue("alice", now), t.issue("alice", now));
+        let (a, b) = (t.issue("alice", None, now), t.issue("alice", None, now));
         assert_eq!((a.len(), b.len()), (32, 32));
         assert_ne!(a, b);
-        assert_eq!(t.redeem(&a, now).as_deref(), Some("alice"));
+        assert_eq!(t.redeem(&a, now), Some(("alice".to_string(), None)));
         assert_eq!(t.redeem(&a, now), None);
         assert_eq!(t.redeem(&b[..31], now), None);
         assert_eq!(t.redeem(&[0; 32], now), None);
@@ -95,10 +99,10 @@ mod tests {
     fn expires_at_the_ttl_and_a_late_attempt_burns_it() {
         let t = Tickets::default();
         let now = Instant::now();
-        let a = t.issue("alice", now);
+        let a = t.issue("alice", None, now);
         assert_eq!(t.redeem(&a, now + LOGIN_TICKET_TTL), None);
         assert_eq!(t.redeem(&a, now), None);
-        let b = t.issue("alice", now);
+        let b = t.issue("alice", None, now);
         assert!(t.redeem(&b, now + Duration::from_secs(59)).is_some());
     }
 
@@ -106,7 +110,9 @@ mod tests {
     fn the_257th_ticket_evicts_the_oldest() {
         let t = Tickets::default();
         let now = Instant::now();
-        let all: Vec<_> = (0..=MAX_TICKETS).map(|_| t.issue("alice", now)).collect();
+        let all: Vec<_> = (0..=MAX_TICKETS)
+            .map(|_| t.issue("alice", None, now))
+            .collect();
         assert_eq!(t.redeem(&all[0], now), None);
         assert!(t.redeem(&all[1], now).is_some());
         assert!(t.redeem(&all[MAX_TICKETS], now).is_some());
@@ -116,16 +122,28 @@ mod tests {
     fn forget_user_drops_only_that_users_tickets() {
         let t = Tickets::default();
         let now = Instant::now();
-        let (a, b) = (t.issue("alice", now), t.issue("bob", now));
+        let (a, b) = (t.issue("alice", None, now), t.issue("bob", None, now));
         t.forget_user("alice");
         assert_eq!(t.redeem(&a, now), None);
-        assert_eq!(t.redeem(&b, now).as_deref(), Some("bob"));
+        assert_eq!(t.redeem(&b, now), Some(("bob".to_string(), None)));
+    }
+
+    #[test]
+    fn the_claim_is_stored_once_and_comes_back_at_redeem() {
+        let t = Tickets::default();
+        let now = Instant::now();
+        let a = t.issue("rad", Some("admin".into()), now);
+        assert_eq!(
+            t.redeem(&a, now),
+            Some(("rad".into(), Some("admin".into())))
+        );
+        assert_eq!(t.redeem(&a, now), None);
     }
 
     #[test]
     fn the_stored_key_is_the_hash_not_the_ticket() {
         let t = Tickets::default();
-        let a = t.issue("alice", Instant::now());
+        let a = t.issue("alice", None, Instant::now());
         let g = t.0.lock().unwrap();
         assert!(!g.map.keys().any(|k| k[..] == a[..]));
         assert!(g.map.contains_key(&key(&a)));

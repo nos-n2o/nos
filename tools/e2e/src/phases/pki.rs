@@ -114,6 +114,10 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
                 "rad-admin:pw-admin:admin",
                 "--user",
                 "rad-ro:pw-ro:read-only",
+                "--user",
+                "rad-ext:pw-ext:read-only",
+                "--user",
+                "Rad-Upper:pw-up:read-only",
             ],
             &[],
         )
@@ -206,6 +210,9 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
     log("#1360: REST logins honour login-order: rad-admin over REST, same RADIUS role");
     rest_radius(w).await?;
 
+    log("#1376: a RADIUS accept allocates the ssh account, a reject or unsafe name none");
+    external_users(w).await?;
+
     log("with the server gone the local user logs in");
     w.dock.container_remove(RADIUS_STUB).await;
     let silent = a.count("no radius server answered");
@@ -227,6 +234,75 @@ pub async fn aaa(w: &mut World) -> anyhow::Result<()> {
         bail!("local login after removing aaa failed: {code}: {out}");
     }
     Ok(())
+}
+
+/// #1376: allocation at the first RADIUS accept, and the PAM ticket path for a RADIUS user.
+async fn external_users(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let getent = |name: &'static str| async move {
+        w.dock.exec("router-a", &["getent", "passwd", name]).await
+    };
+    let uid_of = |out: &str| -> anyhow::Result<u32> {
+        let uid: u32 = out
+            .trim()
+            .split(':')
+            .nth(2)
+            .context("no uid field")?
+            .parse()?;
+        if !(20_000..=59_999).contains(&uid) {
+            bail!("uid {uid} outside 20000-59999");
+        }
+        Ok(uid)
+    };
+    if getent("rad-ext").await?.0 == 0 {
+        bail!("rad-ext resolves before any login");
+    }
+    let n = a.count("external user allocated user=\"rad-ext\"");
+    if a.rest.login("rad-ext", "pw-ext").await?.is_err() {
+        bail!("rad-ext could not log in over REST");
+    }
+    a.wait_new("external user allocated user=\"rad-ext\"", n, 15)
+        .await?;
+    let (code, out) = getent("rad-ext").await?;
+    if code != 0 {
+        bail!("getent passwd rad-ext failed after the accept: {out}");
+    }
+    let uid = uid_of(&out)?;
+
+    log("a second login keeps the uid");
+    if a.rest.login("rad-ext", "pw-ext").await?.is_err() {
+        bail!("rad-ext second login failed");
+    }
+    let (_, out) = getent("rad-ext").await?;
+    if uid_of(&out)? != uid {
+        bail!("uid changed across logins: {uid} -> {out}");
+    }
+
+    log("a rejected user and an unsafe name allocate nothing");
+    let allocs = a.count("external user allocated");
+    if a.rest.login("rad-ext", "wrong").await?.is_ok() {
+        bail!("a wrong RADIUS password logged in");
+    }
+    let accepted = a.count("login accepted by radius user=\"Rad-Upper\"");
+    if a.rest.login("Rad-Upper", "pw-up").await?.is_err() {
+        bail!("an unsafe name is still a valid RADIUS login over REST");
+    }
+    a.wait_new("login accepted by radius user=\"Rad-Upper\"", accepted, 15)
+        .await?;
+    a.assert_quiet("external user allocated", allocs, 3).await?;
+    if getent("Rad-Upper").await?.0 == 0 {
+        bail!("an unsafe name got a passwd entry");
+    }
+
+    log("pamtester: the allocated RADIUS user gets a login ticket");
+    let n = a.count("login ticket issued user=\"rad-ext\"");
+    let (code, out) =
+        super::pam::pamtester(w, PAM_SERVICE, "rad-ext", "pw-ext", "authenticate").await?;
+    if code != 0 {
+        bail!("rad-ext must authenticate through pam, got exit {code}: {out}");
+    }
+    a.wait_new("login ticket issued user=\"rad-ext\"", n, 15)
+        .await
 }
 
 /// #1360: the REST half of `aaa`. An admin with no local entry logs in over

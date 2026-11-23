@@ -5,7 +5,7 @@
 
 ## Ticket hand-off (#992)
 
-- `authenticate` sends `WatchdogRequest::LoginTicket` (the one password check) and keeps the encoded ticket as module data for `account` (`NosTicket`, zeroized, `Debug` shows only the user). It never makes a key or CSR.
+- `authenticate` sends `WatchdogRequest::LoginTicket` (the one password check) and keeps the encoded ticket as module data for `account` (`NosTicket`, zeroized, `Debug` shows only the user). The broker walks `aaa login-order` for it (#1376): a RADIUS user needs an allocated passwd entry (made at an earlier accepted `nos`/REST login or by `allocate aaa user`) for sshd to reach PAM at all. It never makes a key or CSR.
 - It also puts `NOS_LOGIN_TICKET=<nos_proto::ticket_to_env>` in the PAM environment. Why there and not in `open_session`: with `KbdInteractiveAuthentication` sshd runs `authenticate` and `acct_mgmt` in a forked child and copies that child's `pam_getenvlist()` to the session; the monitor's handle that later runs `open_session` never saw the module data. So the stack has no `session` line.
 - The login shell is `nos` (NSS shell `/usr/bin/nos`, symlink to `/usr/local/bin/nos`, listed in `/etc/shells`); it redeems the ticket (60 s, single use) for a certificate on its own key.
 - `nos` is setgid `nos`: a NOS user's uid is outside the group that alone reaches `/run/nos` (CA, sockets). Side effect: the process is non-dumpable, so even its owner cannot read `/proc/<pid>/environ`, where the ticket sits until the process ends.
