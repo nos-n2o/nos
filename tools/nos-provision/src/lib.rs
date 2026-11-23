@@ -1341,6 +1341,15 @@ pub struct Args {
     #[arg(long)]
     pub hostname: Option<String>,
 
+    /// One interface name per repetition: ensured, then `mpls input` enabled
+    /// (`InterfaceOp::SetMplsInput`).
+    #[arg(long = "mpls-input-interface")]
+    pub mpls_input_interfaces: Vec<String>,
+
+    /// Same as `--mpls-input-interface`, switching `mpls input` off again.
+    #[arg(long = "no-mpls-input-interface")]
+    pub no_mpls_input_interfaces: Vec<String>,
+
     /// One interface name per repetition: ensured, then `lldp transmit`
     /// enabled (`InterfaceOp::SetLldpTransmit`) — for verifying `nos-lldpd`
     /// really advertises on that link.
@@ -4007,6 +4016,21 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             label: label.clone(),
             secret: secret.clone(),
         }));
+    }
+
+    for (names, enabled) in [
+        (&args.mpls_input_interfaces, true),
+        (&args.no_mpls_input_interfaces, false),
+    ] {
+        for name in names {
+            ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+                name: name.clone(),
+            }));
+            ops.push(ConfigOp::Interface(InterfaceOp::SetMplsInput {
+                name: name.clone(),
+                enabled,
+            }));
+        }
     }
 
     // (interface, transmit-or-receive, enabled) — each interface is ensured

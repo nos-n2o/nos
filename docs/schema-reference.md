@@ -81,6 +81,10 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 - `Interface.lldp_transmit`/`lldp_receive: bool` (both `#[serde(default)]` so pre-existing on-disk config still loads, `#[garde(skip)]` individually) enable `nos-lldpd`'s IEEE 802.1AB transmit/receive on that link independently; `valid_lldp_physical_only` (`schema::interface`, wired in `valid_interfaces`) rejects either flag on a `loopback-*` interface — a loopback has no wire to speak LLDP on. `InterfaceOp::SetLldpTransmit`/`SetLldpReceive` carry an `enabled: bool` rather than a `Set`/`Clear` pair, since a bool has no value to clear (`set` = `true`, `delete` = `false` in `nos-cli`).
 
+## MPLS input on `Interface`
+
+- `Interface.mpls_input: bool` (`#[serde(default)]`, `#[garde(skip)]`, CLI `mpls input`, `InterfaceOp::SetMplsInput`) is the `net.mpls.conf.<if>.input` knob; `nos-interfaced` applies it (see `docs/architecture/segment-routing.md`).
+
 ## Port-aggregate membership
 
 - `Interface.port_aggregate: Option<String>` makes an interface a bonded member by naming an aggregate, the same reference-by-name shape as `switching_profile`; `valid_port_aggregate_membership` (`schema::interface`) rejects a member interface that also carries a `switching_profile` or any `subinterfaces` — the same "one Linux master per link" reasoning as `valid_subinterface_and_switching_profile_tags`.

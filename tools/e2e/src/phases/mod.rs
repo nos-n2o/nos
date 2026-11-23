@@ -92,6 +92,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "evpn-l3-chunked" => bgp::evpn_l3_chunked(w).await,
         "loopback" => drivers::loopback(w).await,
         "mpls-ilm" => drivers::mpls_ilm(w).await,
+        "mpls-input" => drivers::mpls_input(w).await,
         "sandbox-nnp" => drivers::sandbox_nnp(w).await,
         "routes-paging" => drivers::routes_paging(w).await,
         "vrf-unknown" => drivers::vrf_unknown(w).await,
@@ -250,6 +251,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "flowspec-dataplane",
             "daemon-heartbeat",
             "mpls-ilm",
+            "mpls-input",
         ],
         "rpl" => &[
             "up",
@@ -437,6 +439,7 @@ pub const ALL: &[&str] = &[
     "flowspec-dataplane",
     "daemon-heartbeat",
     "mpls-ilm",
+    "mpls-input",
     "policy",
     "redistribute-policy",
     "communities",

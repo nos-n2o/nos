@@ -36,6 +36,7 @@ async fn sample_interfaces() -> Interfaces {
                 lacp_mode: nos_proto::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
+                mpls_input: false,
                 lldp_receive: false,
                 lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![nos_proto::Subinterface {
@@ -65,6 +66,7 @@ async fn sample_interfaces() -> Interfaces {
                 lacp_mode: nos_proto::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
+                mpls_input: false,
                 lldp_receive: false,
                 lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![],
@@ -123,6 +125,10 @@ impl InterfaceDriver for RecordingDriver {
     async fn remove_port_aggregate(&self, n: &str) -> Result<(), DriverError> {
         NoopInterfaceDriver.remove_port_aggregate(n).await
     }
+    async fn set_mpls_input(&self, _name: &str, _enabled: bool) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     async fn link_local_address(&self, k: &str) -> Option<std::net::Ipv6Addr> {
         NoopInterfaceDriver.link_local_address(k).await
     }

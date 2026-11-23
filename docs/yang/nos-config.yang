@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-11-30 {
+  revision 2026-12-01 {
     description "Generated.";
   }
 
@@ -1372,6 +1372,10 @@ module nos-config {
         enum "CustomerBridge";
       }
       description "Set the LLDP destination group an interface uses.";
+    }
+    leaf mpls_input {
+      type boolean;
+      description "Accept MPLS-labelled packets on an interface.";
     }
     list subinterfaces {
       key "tag";

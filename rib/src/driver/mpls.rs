@@ -300,18 +300,6 @@ impl Sysctl {
         let want = (label + 1).next_multiple_of(1024).min(MAX_LABEL);
         write(&path, "net.mpls.platform_labels", want)
     }
-
-    /// `net.mpls.conf.<ifname>.input = 1`. A device without an MPLS conf
-    /// directory is skipped.
-    pub fn ensure_input(&self, ifname: &str) -> Result<(), DriverError> {
-        let path = self.mpls()?.join("conf").join(ifname).join("input");
-        match std::fs::read_to_string(&path) {
-            Ok(v) if v.trim() == "1" => Ok(()),
-            Ok(_) => write(&path, &format!("net.mpls.conf.{ifname}.input"), 1),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(DriverError::Registry(e)),
-        }
-    }
 }
 
 fn read(path: &Path) -> Result<String, DriverError> {
@@ -528,7 +516,6 @@ mod tests {
             .ensure_platform_labels(1000)
             .unwrap_err();
         assert!(e.to_string().contains("mpls_router"), "{e}");
-        assert!(Sysctl::new(dir.path()).ensure_input("eth0").is_err());
         assert_eq!(Sysctl::default().root, PathBuf::from("/proc/sys"));
     }
 
@@ -548,17 +535,6 @@ mod tests {
         let t = tree("1048575\n", &[]);
         Sysctl::new(t.path()).ensure_platform_labels(5000).unwrap();
         assert_eq!(get(&t, "platform_labels"), "1048575\n");
-    }
-
-    #[test]
-    fn input_is_set_once_and_unknown_devices_skipped() {
-        let t = tree("0", &[("eth0", "0\n"), ("eth1", "1\n")]);
-        let s = Sysctl::new(t.path());
-        s.ensure_input("eth0").unwrap();
-        s.ensure_input("eth1").unwrap();
-        s.ensure_input("nope").unwrap();
-        assert_eq!(get(&t, "conf/eth0/input"), "1");
-        assert_eq!(get(&t, "conf/eth1/input"), "1\n", "not rewritten");
     }
 
     #[test]
@@ -585,7 +561,5 @@ mod tests {
             e.contains("net.mpls.platform_labels=1024") && e.contains("--sysctl"),
             "{e}"
         );
-        let e = s.ensure_input("eth0").unwrap_err().to_string();
-        assert!(e.contains("net.mpls.conf.eth0.input=1"), "{e}");
     }
 }

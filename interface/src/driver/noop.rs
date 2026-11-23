@@ -119,6 +119,11 @@ impl InterfaceDriver for NoopInterfaceDriver {
         Vec::new()
     }
 
+    async fn set_mpls_input(&self, name: &str, enabled: bool) -> Result<(), DriverError> {
+        debug!(interface = %name, enabled, "would set mpls input (noop driver — no OS effect)");
+        Ok(())
+    }
+
     fn watch_links(&self) -> LinkWatch {
         LinkWatch {
             observed: false,
