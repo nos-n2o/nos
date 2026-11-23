@@ -34,9 +34,9 @@
 //! (`packet::TrailerAuth::sign`) — the trailer wraps an already-encoded
 //! packet, so this is the one place every send path already funnels
 //! through, and the strictly increasing sequence number lives here with it
-//! (seeded from wall-clock unix-seconds and floored there on every bump, so
-//! it never regresses across a link restart — `ospf::link`'s classic
-//! `AuType` 2 scheme). Verification stays in `link.rs`, next to the
+//! (RFC 7166 §4.1: the high 32 bits are a persisted boot count, taken fresh
+//! on every link (re)start, the low 32 bits count packets — strictly
+//! increasing across cold restarts, see `initial_seq`). Verification stays in `link.rs`, next to the
 //! per-neighbor anti-replay state it feeds.
 //!
 //! # No manual header strip (the other real difference)
@@ -50,7 +50,6 @@ use std::io::{self, IoSliceMut};
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nix::sys::socket::{recvmsg, MsgFlags, SockaddrIn6};
 use nos_ospf_common::exchange::{truncated, RECV_BUF_LEN};
@@ -103,12 +102,10 @@ pub struct OspfSocket {
 /// every other send they leave with a hop limit above 1.
 pub const VIRTUAL_HOP_LIMIT: u32 = 64;
 
-/// Wall-clock floor for the outgoing sequence number — mirrors
-/// `ospf::link::crypto_seq_floor`.
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+/// RFC 7166 §4.1's starting outgoing sequence number: the boot count in the
+/// high 32 bits, zero below.
+fn initial_seq(boot_count: u32) -> u64 {
+    u64::from(boot_count) << 32
 }
 
 impl OspfSocket {
@@ -122,6 +119,7 @@ impl OspfSocket {
         ifindex: u32,
         auth: Option<(TrailerAuth, Ipv6Addr)>,
         instance_id: u8,
+        boot_count: u32,
     ) -> io::Result<Self> {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
         socket.bind_device(Some(interface.as_bytes()))?;
@@ -139,7 +137,8 @@ impl OspfSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: register_fd(socket)?,
-            auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
+            auth: auth
+                .map(|(keys, source)| (keys, source, AtomicU64::new(initial_seq(boot_count)))),
             instance_id,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),
             virtual_dest: None,
@@ -158,6 +157,7 @@ impl OspfSocket {
         dest: Ipv6Addr,
         auth: Option<(TrailerAuth, Ipv6Addr)>,
         instance_id: u8,
+        boot_count: u32,
     ) -> io::Result<Self> {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
         socket.bind_device(Some(vrf.as_bytes()))?;
@@ -169,7 +169,8 @@ impl OspfSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: register_fd(socket)?,
-            auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
+            auth: auth
+                .map(|(keys, source)| (keys, source, AtomicU64::new(initial_seq(boot_count)))),
             instance_id,
             drouters: nos_ospf_common::drouters::AllDRouters::default(),
             virtual_dest: Some(dest),
@@ -197,7 +198,7 @@ impl OspfSocket {
     /// `payload` with the link's Instance ID stamped in and, when
     /// authenticated, the RFC 7166 trailer appended (after the stamp: the
     /// digest covers the header) — the sequence number is one past the
-    /// previous send or the current wall-clock second, whichever is larger.
+    /// previous send, starting from `boot_count << 32`.
     fn signed<'a>(&self, payload: &'a [u8]) -> Cow<'a, [u8]> {
         if self.auth.is_none() && self.instance_id == 0 {
             return Cow::Borrowed(payload);
@@ -205,12 +206,8 @@ impl OspfSocket {
         let mut packet = payload.to_vec();
         packet::set_instance_id(&mut packet, self.instance_id);
         if let Some((keys, source, seq)) = &self.auth {
-            let floor = unix_secs();
-            let next = |prev: u64| prev.saturating_add(1).max(floor);
-            let prev = seq
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
-                .unwrap_or(0);
-            keys.sign(&mut packet, next(prev), *source);
+            let next = seq.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+            keys.sign(&mut packet, next, *source);
         }
         Cow::Owned(packet)
     }
@@ -285,5 +282,20 @@ impl OspfSocket {
 impl AsRawFd for OspfSocket {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.inner.get_ref().as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_is_boot_count_in_the_high_half_and_increases_across_reopen() {
+        assert_eq!(initial_seq(0), 0);
+        assert_eq!(initial_seq(3), 3 << 32);
+        // A reopened socket (higher boot count) starts above anything the
+        // old one could send within its 32-bit low half.
+        let old_last = initial_seq(3) + u64::from(u32::MAX);
+        assert!(initial_seq(4) > old_last);
     }
 }

@@ -87,7 +87,8 @@ struct Args {
     #[arg(long)]
     dbd_max_headers: Option<usize>,
 
-    /// Directory for this daemon's persisted state: the RFC 5187
+    /// Directory for this daemon's persisted state: the RFC 7166 boot count
+    /// (`<instance>.boot`), and the RFC 5187
     /// graceful-restart marker (`<instance>.gr`, consumed at start; it skips
     /// RFC 6987's on-startup period after a graceful restart).
     #[arg(long, default_value = "/var/lib/nos/ospfv3d")]
@@ -132,7 +133,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospfv3-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let links = LinkManager::new(args.dev.lsa_age_multiplier, args.dbd_max_headers);
+    let links = LinkManager::new(
+        args.dev.lsa_age_multiplier,
+        args.dbd_max_headers,
+        nos_ospf_common::boot::BootCounter::persistent(
+            args.state_dir.join(format!("{}.boot", args.instance)),
+        ),
+    );
     let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
     let marker = boot::take_grace_marker(&grace_marker, unix_now());
     links.set_after_graceful_restart(marker.is_some());

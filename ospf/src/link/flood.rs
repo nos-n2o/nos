@@ -5,7 +5,8 @@ use super::rx::split_lsack;
 use super::rx::{execute_actions, next_crypto_seq, split_lsr, split_lsu};
 use super::{
     bfd, exchange, info, lsa, neighbor, warn, Dest, Duration, Instant, InterfaceState, Ipv4Addr,
-    LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborState, NetworkType, StatusHandle,
+    LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborInfo, NeighborState, NetworkType,
+    StatusHandle,
 };
 
 /// RFC 2328 §13.3 step 5 / §13.5: where this link's flooded LSUs and delayed
@@ -286,6 +287,16 @@ pub(super) async fn flood_full_neighbors(
     }
 }
 
+/// A neighbor gone `Down` forgets its crypto sequence numbers (#612): a
+/// restarted peer may legitimately reseed below the stored value, and RFC
+/// 7474 §1 / RFC 7166 keep this state per adjacency. `Init` keeps it (a live
+/// neighbor mid-handshake).
+pub(super) fn clear_replay_state(info: &mut NeighborInfo) {
+    if info.state == NeighborState::Down {
+        info.last_crypto_seq.clear();
+    }
+}
+
 /// RFC 2328 §10.2 `KillNbr` for the neighbor at `address`, because BFD found
 /// its path down. The next Hello brings it back through Init; nothing waits
 /// on BFD to form an adjacency.
@@ -296,6 +307,7 @@ pub(super) fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address
                 warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospf neighbor");
                 info.state = bfd::on_bfd_down(info.state);
                 info.adjacency = None;
+                clear_replay_state(info);
             }
         }
     });
@@ -356,6 +368,7 @@ pub(super) fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
                     info.state =
                         neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
                     info.adjacency = None;
+                    clear_replay_state(info);
                 }
             }
         });

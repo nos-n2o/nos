@@ -3507,6 +3507,28 @@ pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
+    // RFC 7166 §4.1 (#612): a SIGKILLed nos-ospfv3d takes a higher persisted
+    // boot count (high 32 bits of the trailer sequence), so router-a's replay
+    // check accepts the respawn instead of dropping it as a replay.
+    let before = a.count(&full(OSPFV3_ROUTER_ID_B));
+    let drivers = b.count("ospfv3 link driver started link=eth0.0.*authenticated=true");
+    let replays = a.count("ospfv3 packet crypto sequence number not increasing");
+    log("killing router-b's nos-ospfv3d; it must return to Full without replay drops");
+    w.dock.kill_process("router-b", "nos-ospfv3d").await?;
+    b.wait_new(
+        "ospfv3 link driver started link=eth0.0.*authenticated=true",
+        drivers,
+        60,
+    )
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 90).await?;
+    a.assert_quiet(
+        "ospfv3 packet crypto sequence number not increasing",
+        replays,
+        5,
+    )
+    .await?;
+
     // `provision_flags` edits on top of the running config, so leaving the
     // flag out would keep the key: clear it, since `ospfv3-dr` reuses this
     // profile on the bridge with a keyless router-c (#138).

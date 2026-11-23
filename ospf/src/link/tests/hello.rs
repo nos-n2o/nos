@@ -691,3 +691,15 @@ fn router_lsa_names_the_lowest_full_router_id_in_any_insert_order() {
         }
     }
 }
+
+#[test]
+fn down_clears_crypto_replay_state_init_keeps_it() {
+    // #612: a Down neighbor forgets its sequence numbers, Init does not.
+    let mut n = neighbor_info(NeighborState::Init, Ipv4Addr::new(10, 0, 0, 2));
+    n.last_crypto_seq.insert(0, 99);
+    crate::link::flood::clear_replay_state(&mut n);
+    assert_eq!(n.last_crypto_seq.len(), 1);
+    n.state = NeighborState::Down;
+    crate::link::flood::clear_replay_state(&mut n);
+    assert!(n.last_crypto_seq.is_empty());
+}

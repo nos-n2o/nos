@@ -19,7 +19,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - `packet.rs`, `lsa.rs`, `exchange.rs`, `neighbor.rs`, `election.rs`, `spf.rs` are pure (no I/O); `exchange` returns `Action`s for `link.rs` to carry out (`bgp::fsm::step`'s shape). `packet.rs` has no `nos-proto` dependency (`packet::CryptoAlgorithm` mirrors the proto enum, converted in `link::LinkAuthConfig`).
 - `socket.rs` binds to the link's own interface, never the VRF: a raw socket has no port to demultiplex by, so a VRF bind makes every link in it hear every other link (the DBD sequence-mismatch storm). Hello is multicast 224.0.0.5 on every network type; DBD/LSR/retransmitted LSUs are unicast to the neighbor's last Hello source; on broadcast links the periodic LSU flood and delayed LSAck are multicast (#879, below). Multicast loop is off.
 - `on_dbd_in_exstart` accepts a real negotiation attempt or the peer's one reply/poll, on both sides (a peer's first attempt is dropped when we have no adjacency yet, so only the reply ever arrives). It processes that chunk but only fires `NegotiationDone`; termination is decided in `Exchange` only.
-- A negotiation-shaped duplicate in `Exchange` is ignored (`SeqNumberMismatch` would make both sides re-pick sequence numbers in lockstep forever).
+- A negotiation-shaped duplicate in `Exchange` is ignored (`SeqNumberMismatch` would loop both sides).
 - An Init DBD in `Loading`/`Full` is `SeqNumberMismatch`; the slave answers a duplicate final poll from its kept last DBD (`retransmit_pending` only in `ExStart`/as `Exchange` master, #607).
 - DBD pagination budget: `exchange::mtu_based_max_headers`; `--dbd-max-headers` and `--dbd-fault` are test-only. `exchange::mtu_acceptable` drops a larger neighbor MTU unless `mtu_ignore`.
 - LSR/LSU/LSAck are cut to the link MTU (#806): every send goes through `link::rx::split_{lsr,lsu,lsack}` (`chunk_by_budget`, budget `mtu - 20 - 24 - digest [- 4 for LSU]`, an oversize LSA goes alone), one signed packet per chunk; a new send site must use them. `socket.rs` receives into a 64 KB buffer with `MSG_TRUNC` and drops a truncated datagram with a warn.
@@ -41,7 +41,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 
 - `packet.rs` stays stateless; the anti-replay sequence is `link.rs`'s (`NeighborInfo.last_crypto_seq`, per packet type, checked once at the single decode site). A replay is dropped, never fatal (AuType 2: lower only, D.4.3; RFC 7474: lower or equal); failures log `ospf packet authentication failed` (asserted by `nos-e2e ospf-auth`).
 - `checksum` excludes the 8-byte Authentication field; Crypto skips it. A key or auth change restarts the link like any `LinkConfig` change. `OspfCryptoKey.key_id` is `u16` (shared with OSPFv3's SA ID); classic AuType 2 needs <= 255 (`valid_profile_timers`).
-- RFC 7474 (AuType 3): the boot count (`boot::BootCounter`) is taken on every link (re)start, not just process start.
+- RFC 7474 (AuType 3): the boot count (`boot::BootCounter`) is taken on every link (re)start. `last_crypto_seq` clears on `Down`, not `Init` (`flood::clear_replay_state`, #612).
 
 ## SPF and routes
 
@@ -52,7 +52,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - ABR = 2+ areas and a `Full` area-0 neighbor or up virtual link (`is_backbone_abr`, RFC 3509, #1170), derived; no backbone, no B-bit/summaries (#610). §12.4.3: non-backbone `intra_area_routes` feed the backbone only; `backbone_view` (+ inter-area, Type-4 ASBRs) feeds the rest.
 - Link State IDs of Type-3/5/7 follow RFC 2328 Appendix E (`link::originate::assign_link_state_ids`, stateless, per area and type); `spf::net_from` truncates host bits on receive.
 - `lsa::in_area_scope(type, stub, nssa)` (shared core) is the one scope rule (Type-5/11 out of stub/NSSA, Type-7 only in an NSSA); every path (DBD, LSR answer, LSU, flood, SPF) must use it.
-- Stub/NSSA, virtual links, LFA/remote LFA, prefix suppression, stub router, host router, opaque LSAs: see the internals page for each knob and its tests.
+- Stub/NSSA, virtual links, LFA, prefix suppression, stub router, host router, opaque LSAs: internals page.
 
 ## Graceful restart
 
