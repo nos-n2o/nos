@@ -18,9 +18,9 @@ use self::flood::{
 use self::grace::{exit_grace_on_topology_change, expire_grace, send_grace_lsas};
 use self::originate::local_subnet;
 use self::rx::{
-    accept_crypto_sequence, advance_adjacencies, execute_actions, handle_dbd, handle_hello,
-    handle_lsack, handle_lsr, handle_lsu, initial_crypto_seq, run_election, send_hello,
-    send_hello_eof, sync_all_drouters,
+    accept_crypto_sequence, advance_adjacencies, execute_actions, expire_oob_resync, handle_dbd,
+    handle_hello, handle_lsack, handle_lsr, handle_lsu, initial_crypto_seq, run_election,
+    send_hello, send_hello_eof, start_oob_resync, sync_all_drouters,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -228,6 +228,9 @@ pub struct LinkConfig {
     pub mtu_ignore: bool,
     /// `lls`: RFC 5613 Link-Local Signaling. Read through `lls_active`.
     pub lls: bool,
+    /// Test fixture (`restart-signal-only`): a planned restart sends the RFC 4812
+    /// RS Hello but no Grace-LSA.
+    pub restart_signal_only: bool,
     /// The kernel device's ifindex from the `nos-interfaced` link stream (0 for
     /// a virtual link or before the stream's first snapshot). A recreated
     /// device gets a new one, which restarts the link (fresh raw socket).
@@ -315,6 +318,7 @@ fn resolve_virtual_link(
         mtu_ignore: true,
         // Virtual links take no profile; LLS is always off there.
         lls: false,
+        restart_signal_only: false,
         ifindex: 0,
         auth: v.auth.clone(),
         stub: false,
@@ -481,6 +485,20 @@ pub struct NeighborInfo {
     /// a Grace-LSA it sent. Until then its adjacency is held through missing
     /// Hellos and Hellos that don't list us (see `in_grace`).
     pub grace_deadline: Option<Instant>,
+    /// RFC 4811 §2.4: when an out-of-band resync that started on this
+    /// neighbor gives up and falls back to the legacy resync.
+    pub oob_deadline: Option<Instant>,
+}
+
+impl NeighborInfo {
+    /// Whether the Router-LSA/DR logic treats this neighbor as fully adjacent:
+    /// `Full`, in an RFC 3623/4812 grace, or in an RFC 4811 §2.5 out-of-band
+    /// resync (`ExStart`/`Exchange`/`Loading` count as `Full`).
+    pub fn counts_as_full(&self) -> bool {
+        self.state == NeighborState::Full
+            || self.grace_deadline.is_some()
+            || self.adjacency.as_ref().is_some_and(|a| a.oob_resync)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -551,6 +569,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         interface_mtu: cfg.mtu,
         options: exchange::dbd_options(cfg.stub),
         init: true,
+        resync: false,
         more: true,
         master: true,
         dd_sequence_number: seed,
@@ -558,6 +577,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     };
     let adj = AdjacencyData {
         is_master: false, // resolved once the neighbor's own negotiation DBD arrives
+        oob_resync: false,
         dd_sequence_number: seed,
         request_list: Vec::new(),
         retransmission_list: HashMap::new(),
@@ -747,6 +767,7 @@ pub async fn run(
             }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
+                expire_oob_resync(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 sweep_dead_neighbors(&cfg, &status);
                 if is_broadcast && !waiting {
                     run_election(&cfg, local_router_id, &status);
@@ -762,7 +783,9 @@ pub async fn run(
             }
             Some(command) = commands.recv() => match command {
                 LinkCommand::Grace(grace_period) => {
-                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, 0, &mut next_seq);
+                    if !cfg.restart_signal_only {
+                        send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, 0, &mut next_seq);
+                    }
                     // RFC 4812: the last Hello says "restarting", for peers that read LLS not the Grace-LSA.
                     if cfg.lls_active() && cfg.virtual_link.is_none() {
                         send_hello_eof(&socket, &cfg, local_router_id, &status, &mut next_seq, lls::EOF_RS);
@@ -775,6 +798,7 @@ pub async fn run(
                     flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
                 }
                 LinkCommand::BfdDown(address) => kill_bfd_neighbor(&cfg, &status, address),
+                LinkCommand::OobResync => start_oob_resync(&socket, &cfg, local_router_id, &status, &mut next_seq),
                 LinkCommand::TopologyChanged(origins) => exit_grace_on_topology_change(&cfg, &status, &origins),
             },
             _ = rxmt_sweep.tick() => {
@@ -797,6 +821,9 @@ pub enum LinkCommand {
     /// `nos-bfdd` reports the path to this neighbor address down (RFC 2328
     /// §10.2 `KillNbr`).
     BfdDown(Ipv4Addr),
+    /// Start an RFC 4811 out-of-band resync with every `Full` LR-capable
+    /// neighbor (`oob-resync`).
+    OobResync,
     /// These routers' topology LSAs changed in this link's area: a helped
     /// neighbor other than them leaves grace (RFC 3623 §3.2 (c)).
     TopologyChanged(Vec<Ipv4Addr>),
@@ -1873,6 +1900,13 @@ impl LinkManager {
     async fn send_to_links(&self, command: LinkCommand) {
         for entry in self.links.lock().await.values() {
             let _ = entry.commands.send(command.clone());
+        }
+    }
+
+    /// Starts an RFC 4811 out-of-band resync on one attach point's link.
+    pub async fn oob_resync(&self, attach_point: &str) {
+        if let Some(entry) = self.links.lock().await.get(attach_point) {
+            let _ = entry.commands.send(LinkCommand::OobResync);
         }
     }
 

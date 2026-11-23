@@ -32,7 +32,6 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - `run()`'s select is `biased;` (Hello first, RFC 4222); `note_alive` runs after `accept_crypto_sequence`; any packet proves liveness only for a neighbor at `ExStart` or later.
 
 - **Multicast flood** (#879): `flood_full_neighbors`/`flush_pending_acks` pick `nos_ospf_common::drouters::flood_dest` (DR/Backup 224.0.0.5, else 224.0.0.6; p2p/p2mp/virtual stay unicast) and send each chunk once via `LinkSocket::send_flood`; a send error falls back to unicast for that pass. `retransmit_pending`, the LSR answer and Grace-LSAs stay unicast.
-- **AllDRouters** (#855): `link::rx::sync_all_drouters` joins/leaves 224.0.0.6 (DR/Backup on broadcast only) after every election pass via `OspfSocket::set_all_drouters`; logged on change, `ospf-dr` e2e asserts it.
 - BFD (#288): `bfd_client.rs` is shared with `nos-ospfv3d` (`#[path]` include, generic over `Host`, implemented by `LinkManager`); the wanted set is polled every 250 ms from the links' neighbor tables, the `bfd` profile per attach point comes from `LinkManager::set_bfd` (never from `LinkConfig`, so it cannot restart a link). BFD only kills (`LinkCommand::BfdDown`, `neighbor::on_bfd_down`), never gates adjacency; AdminDown and connection loss kill nothing.
 - Link state (#277): gating happens only in `reconcile::resync`, never in `link::run`; a down kernel device (`link_client::gate`) is left out of `desired_links` and `apply_links` aborts it. Ungated when never connected or `observed = false`. An unresolved VRF/address/bridge keeps the running link's value (`merge_running`) while the config still gives the attach point an address, so only the stream or a config removal tears a link down. `LinkConfig.ifindex` restarts a link on a recreated device.
 
@@ -60,6 +59,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 - Only SIGTERM announces (`planned_restart` -> `announce_graceful_restart`, sets `restarting` so `shutdown` skips the flush); SIGINT still flushes. The respawn's restart mode (#1145, `restart_active()`) holds origination and the first route push; internals page.
 - Helper is always on, capped (`LinkConfig.helper_max_grace_period`, `helper_deadline_secs`: remaining = grace - Grace-LSA age) and strict (RFC 3623 §3.2 (c)): `Lsdb::install` records the origin of every new/changed/flushed type 1-5 LSA, `age_lsdbs` hands them to the links (`LinkCommand::TopologyChanged`), the restarter's own never count; the Grace-LSA leaves the link store at once. `<state-dir>/<instance>.gr` is read and deleted once at start (valid while `now < deadline <= now + u16::MAX`).
 - No RFC 6987 on-shutdown under a grace period (§3.2 (c)).
+- RFC 4811 (#1371): Router-LSA/DR/Adj-SID tests use `NeighborInfo::counts_as_full`, never `state == Full`; `oob-resync` is edge-triggered in `reconcile::resync`, not in `LinkConfig`.
 
 ## Wiring and tests
 

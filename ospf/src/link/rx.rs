@@ -7,10 +7,10 @@ use super::grace::{enter_lls_grace, in_grace, on_grace_lsa};
 use super::originate::local_netmask;
 use super::{
     debug, election, exchange, info, lsa, neighbor, packet, should_form_adjacency,
-    start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, HashMap, Instant, InterfaceState,
-    Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, Lls, LsAckPacket, LsaBody, Lsdb, LsrPacket,
-    LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket, StatusHandle,
-    SystemTime, UNIX_EPOCH,
+    start_negotiation, warn, AdjacencyData, Candidate, DbdPacket, Duration, HashMap, Instant,
+    InterfaceState, Ipv4Addr, LinkAuthConfig, LinkConfig, LinkSocket, Lls, LsAckPacket, LsaBody,
+    Lsdb, LsrPacket, LsuPacket, Mutex, NeighborInfo, NeighborState, NetworkType, OspfPacket,
+    StatusHandle, SystemTime, UNIX_EPOCH,
 };
 use crate::lls;
 
@@ -330,7 +330,9 @@ pub(super) fn send_hello_eof(
     drop(current);
 
     let pkt = packet::HelloPacket {
-        lls: cfg.lls_active().then_some(Lls { eof: Some(eof) }),
+        lls: cfg.lls_active().then_some(Lls {
+            eof: Some(eof | own_lr(cfg)),
+        }),
         router_id: local_router_id,
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
@@ -361,22 +363,29 @@ pub(super) fn send_hello_eof(
 /// Encodes a DBD built by `exchange` (which does not know the link config),
 /// adding the RFC 5613 LLS block when `cfg.lls_active()`.
 ///
-/// `resync` sets the RFC 4811 LR bit: this DBD belongs to a resynchronization
-/// of an adjacency that stays advertised (the neighbor is in grace).
+/// RFC 4811 §2.1: every DBD of an LR-capable router carries the LR bit.
 pub(super) fn encode_dbd_for(
     cfg: &LinkConfig,
     dbd: &DbdPacket,
     auth: &packet::OutgoingAuth<'_>,
-    resync: bool,
 ) -> Vec<u8> {
     if cfg.lls_active() {
         let mut d = dbd.clone();
         d.lls = Some(Lls {
-            eof: Some(if resync { lls::EOF_LR } else { 0 }),
+            eof: Some(own_lr(cfg)),
         });
         packet::encode_dbd(&d, auth)
     } else {
         packet::encode_dbd(dbd, auth)
+    }
+}
+
+/// The LR bit we advertise (RFC 4811 §2.1): on every real link with LLS.
+fn own_lr(cfg: &LinkConfig) -> u32 {
+    if cfg.virtual_link.is_some() {
+        0
+    } else {
+        lls::EOF_LR
     }
 }
 
@@ -517,7 +526,7 @@ pub(super) fn handle_hello(
     // RFC 4812: a Full neighbor announcing a restart is helped like an
     // RFC 3623 one, before its (now one-way) Hello is evaluated below.
     if peer_eof(cfg, hello.lls.as_ref()) & lls::EOF_RS != 0 {
-        enter_lls_grace(cfg, status, hello.router_id, false);
+        enter_lls_grace(cfg, status, hello.router_id);
     }
     let old_state = status
         .borrow()
@@ -576,6 +585,7 @@ pub(super) fn handle_hello(
                 adjacency: None,
                 last_crypto_seq: HashMap::new(),
                 grace_deadline: None,
+                oob_deadline: None,
             });
         note_lls(cfg, hello.router_id, entry, hello.lls.as_ref());
         entry.state = new_state;
@@ -649,10 +659,7 @@ pub(super) fn advance_adjacencies(
         let auth = cfg
             .auth
             .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-        if let Err(e) = socket.send_unicast(
-            neighbor_addr,
-            &encode_dbd_for(cfg, &dbd, &auth, in_grace(status, neighbor_id)),
-        ) {
+        if let Err(e) = socket.send_unicast(neighbor_addr, &encode_dbd_for(cfg, &dbd, &auth)) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
         }
         let new_state = neighbor::step(NeighborState::TwoWay, neighbor::Event::AdjacencyEligible);
@@ -661,6 +668,95 @@ pub(super) fn advance_adjacencies(
             if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
                 info.state = new_state;
                 info.adjacency = Some(adj);
+            }
+        });
+    }
+}
+
+/// Puts the neighbor at `ExStart` on a fresh out-of-band adjacency, bounded by
+/// the dead interval (RFC 4811 §2.4).
+pub(super) fn mark_oob_started(
+    cfg: &LinkConfig,
+    status: &StatusHandle,
+    neighbor_id: Ipv4Addr,
+    adj: &AdjacencyData,
+) {
+    let deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
+    info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls resync started");
+    status.send_modify(|s| {
+        if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
+            n.state = NeighborState::ExStart;
+            n.adjacency = Some(adj.clone());
+            n.oob_deadline = Some(deadline);
+        }
+    });
+}
+
+/// RFC 4811 §2.6: starts an out-of-band resync with every `Full` neighbor
+/// that announced LR (`oob-resync`): our DBDs carry the R bit from now on.
+pub(super) fn start_oob_resync(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+) {
+    let targets: Vec<(Ipv4Addr, Ipv4Addr)> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, n)| {
+            n.state == NeighborState::Full && peer_eof(cfg, n.lls.as_ref()) & lls::EOF_LR != 0
+        })
+        .map(|(id, n)| (*id, n.address))
+        .collect();
+    for (id, addr) in targets {
+        let (mut adj, mut dbd) = start_negotiation(cfg, local_router_id);
+        adj.oob_resync = true;
+        dbd.resync = true;
+        adj.last_dbd_sent = Some(dbd.clone());
+        mark_oob_started(cfg, status, id, &adj);
+        let auth = cfg
+            .auth
+            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+        if let Err(e) = socket.send_unicast(addr, &encode_dbd_for(cfg, &dbd, &auth)) {
+            warn!(link = %cfg.attach_point, neighbor = %id, error = %e, "failed to send ospf dbd");
+        }
+    }
+}
+
+/// RFC 4811 §2.4: an out-of-band resync that has not reached `Full` within
+/// the dead interval falls back to the legacy resync (`OOBResync` cleared,
+/// negotiation restarted at `ExStart`).
+pub(super) fn expire_oob_resync(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+) {
+    let now = Instant::now();
+    let expired: Vec<(Ipv4Addr, Ipv4Addr)> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, n)| n.oob_deadline.is_some_and(|d| d <= now))
+        .map(|(id, n)| (*id, n.address))
+        .collect();
+    for (id, addr) in expired {
+        warn!(link = %cfg.attach_point, neighbor = %id, "ospf lls resync timed out, falling back to legacy resync");
+        let (adj, dbd) = start_negotiation(cfg, local_router_id);
+        let auth = cfg
+            .auth
+            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+        if let Err(e) = socket.send_unicast(addr, &encode_dbd_for(cfg, &dbd, &auth)) {
+            warn!(link = %cfg.attach_point, neighbor = %id, error = %e, "failed to send ospf dbd");
+        }
+        status.send_modify(|s| {
+            if let Some(n) = s.neighbors.get_mut(&id) {
+                n.state = NeighborState::ExStart;
+                n.adjacency = Some(adj);
+                n.oob_deadline = None;
             }
         });
     }
@@ -694,12 +790,6 @@ pub(super) async fn handle_dbd(
         });
     }
 
-    // RFC 4811: an LR-flagged Init DBD from a Full neighbor resynchronizes it
-    // with the adjacency kept advertised (the exchange below restarts it).
-    if dbd.init && peer_eof(cfg, dbd.lls.as_ref()) & lls::EOF_LR != 0 {
-        enter_lls_grace(cfg, status, dbd.router_id, true);
-    }
-
     // RFC 2328 §10.6: only in ExStart/Exchange; the neighbor stays in ExStart.
     if matches!(old_state, NeighborState::ExStart | NeighborState::Exchange)
         && !exchange::mtu_acceptable(dbd.interface_mtu, cfg.mtu, cfg.mtu_ignore)
@@ -725,8 +815,27 @@ pub(super) async fn handle_dbd(
         mtu: cfg.mtu,
         dbd_options: exchange::dbd_options(cfg.stub),
         peer_opaque_capable: exchange::peer_opaque_capable(dbd),
+        peer_oob_capable: peer_eof(cfg, dbd.lls.as_ref()) & lls::EOF_LR != 0,
     };
-    let actions = exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
+    let mut old_state = old_state;
+    let mut actions =
+        exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
+    if actions.contains(&exchange::Action::OobResyncStart) {
+        // RFC 4811 §2.4: a Full neighbor opened an out-of-band resync. Restart
+        // at ExStart with OOBResync set and process this DBD as RFC 2328 says;
+        // the neighbor stays advertised (`NeighborInfo::counts_as_full`).
+        let (mut fresh, mut negotiation) = start_negotiation(cfg, local_router_id);
+        fresh.oob_resync = true;
+        negotiation.resync = true;
+        fresh.last_dbd_sent = Some(negotiation.clone());
+        adj = fresh;
+        old_state = NeighborState::ExStart;
+        mark_oob_started(cfg, status, dbd.router_id, &adj);
+        let mut next =
+            exchange::on_dbd_received(&mut adj, old_state, &params, dbd, &local_lsdb_headers);
+        next.insert(0, exchange::Action::SendDbd(negotiation));
+        actions = next;
+    }
 
     Some(finish_neighbor_event(
         cfg,
@@ -959,10 +1068,18 @@ pub(super) fn finish_neighbor_event(
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
             info.state = new_state;
-            info.adjacency = Some(adj.clone());
             if new_state == NeighborState::Full && old_state != NeighborState::Full {
                 info.grace_deadline = None;
+                // RFC 4811 §2.2: reaching Full ends the out-of-band resync.
+                if adj.oob_resync {
+                    adj.oob_resync = false;
+                    info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls resync complete");
+                }
             }
+            if !adj.oob_resync {
+                info.oob_deadline = None;
+            }
+            info.adjacency = Some(adj.clone());
         }
     });
 
@@ -1013,10 +1130,7 @@ pub(super) fn execute_actions(
                 if copies != 1 {
                     info!(link = %cfg.attach_point, neighbor = %neighbor_id, copies, "ospf dbd fault injected");
                 }
-                (
-                    "dbd",
-                    vec![encode_dbd_for(cfg, &pkt, &auth, in_grace(status, neighbor_id)); copies],
-                )
+                ("dbd", vec![encode_dbd_for(cfg, &pkt, &auth); copies])
             }
             exchange::Action::SendLsr(requests) => {
                 ("lsr", split_lsr(cfg, next_seq, local_router_id, &requests))
@@ -1029,7 +1143,7 @@ pub(super) fn execute_actions(
                 "lsack",
                 split_lsack(cfg, next_seq, local_router_id, &lsa_headers),
             ),
-            exchange::Action::NeighborEvent(_) => continue,
+            exchange::Action::NeighborEvent(_) | exchange::Action::OobResyncStart => continue,
         };
         for payload in payloads {
             if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {

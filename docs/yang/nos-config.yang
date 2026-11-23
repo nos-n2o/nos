@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-04 {
+  revision 2026-12-05 {
     description "Generated.";
   }
 
@@ -806,6 +806,14 @@ module nos-config {
         leaf lls {
           type boolean;
           description "Enable or disable RFC 5613 Link-Local Signaling.";
+        }
+        leaf oob_resync {
+          type boolean;
+          description "Resynchronize the LSDB out of band (RFC 4811) now.";
+        }
+        leaf restart_signal_only {
+          type boolean;
+          description "Signal a restart without a Grace-LSA (test fixture).";
         }
         leaf network_type {
           type enumeration {

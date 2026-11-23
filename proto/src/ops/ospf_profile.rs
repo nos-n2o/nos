@@ -257,6 +257,28 @@ pub enum OspfProfileOp {
         /// `true` turns the feature on, `false` turns it off.
         enabled: bool,
     },
+    /// Toggles `oob-resync` (RFC 4811); the change to `true` starts a resync.
+    SetOobResync {
+        /// Name of the OSPF instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
+    /// Toggles `restart-signal-only` (RFC 4812 RS without a Grace-LSA).
+    SetRestartSignalOnly {
+        /// Name of the OSPF instance owning the target.
+        instance: String,
+        /// Area ID in dotted-quad form (`0.0.0.0` is the backbone).
+        area_id: Ipv4Addr,
+        /// Name of the OSPF profile this op targets.
+        name: String,
+        /// `true` turns the feature on, `false` turns it off.
+        enabled: bool,
+    },
 }
 
 impl OspfProfileOp {
@@ -276,6 +298,8 @@ impl OspfProfileOp {
             | OspfProfileOp::SetMtu { .. } => self.apply_part1(config),
             OspfProfileOp::SetMtuIgnore { .. }
             | OspfProfileOp::SetLls { .. }
+            | OspfProfileOp::SetOobResync { .. }
+            | OspfProfileOp::SetRestartSignalOnly { .. }
             | OspfProfileOp::SetPassive { .. }
             | OspfProfileOp::ClearMtu { .. }
             | OspfProfileOp::SetExtendedSequenceNumbers { .. }
@@ -310,6 +334,8 @@ impl OspfProfileOp {
                         mtu: None,
                         mtu_ignore: false,
                         lls: false,
+                        oob_resync: false,
+                        restart_signal_only: false,
                         passive: false,
                         network_type: None,
                         auth: None,
@@ -438,6 +464,24 @@ impl OspfProfileOp {
                 enabled,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.lls = *enabled;
+                Ok(())
+            }
+            OspfProfileOp::SetOobResync {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.oob_resync = *enabled;
+                Ok(())
+            }
+            OspfProfileOp::SetRestartSignalOnly {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.restart_signal_only = *enabled;
                 Ok(())
             }
             OspfProfileOp::SetPassive {
@@ -658,6 +702,8 @@ mod tests {
             mtu: None,
             mtu_ignore: false,
             lls: false,
+            oob_resync: false,
+            restart_signal_only: false,
             passive: false,
             network_type: None,
             auth: None,
@@ -709,6 +755,33 @@ mod tests {
             assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].lls, enabled);
         }
         assert!(op("nope", true).apply(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn set_oob_resync_and_restart_signal_only_toggle_their_flags() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        let (instance, area_id, name) = ("o1".to_string(), area_id("0.0.0.0"), "p1".to_string());
+        OspfProfileOp::SetOobResync {
+            instance: instance.clone(),
+            area_id,
+            name: name.clone(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::SetRestartSignalOnly {
+            instance,
+            area_id,
+            name,
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let p = &cfg.ospf_instances[0].areas[0].profiles[0];
+        assert!(p.oob_resync && p.restart_signal_only);
     }
 
     #[test]

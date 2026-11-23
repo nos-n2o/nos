@@ -87,6 +87,8 @@ pub fn mtu_acceptable(neighbor_mtu: u16, local_mtu: u16, ignore: bool) -> bool {
 /// One Database Description packet's contents (RFC 2328 A.3.3, RFC 5340
 /// A.3.3), wire-agnostic: each daemon's `packet.rs` aliases it and keeps the
 /// codec. `options` is v2's 8-bit or v3's 24-bit Options field.
+// The wire's I/M/MS/R flag bits, each read on its own.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dbd<H, X = ()> {
     pub router_id: Ipv4Addr,
@@ -99,6 +101,9 @@ pub struct Dbd<H, X = ()> {
     pub more: bool,
     /// "MS" bit: the sender considers itself master for this exchange.
     pub master: bool,
+    /// RFC 4811 "R" bit: the DBD belongs to an out-of-band resynchronization
+    /// (`OSPFv2` only; v3 never sets it).
+    pub resync: bool,
     pub dd_sequence_number: u32,
     pub lsa_headers: Vec<H>,
     /// RFC 5613 LLS block carried after the packet (`OSPFv2` only; `()` for v3).
@@ -114,6 +119,10 @@ type DbdOf<L> = Dbd<<L as Lsa>::Header, <L as Lsa>::Lls>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdjacencyData<L: Lsa> {
     pub is_master: bool,
+    /// RFC 4811 §2.2 `OOBResync`: this adjacency is resynchronizing out of band
+    /// (every DBD we send carries the R bit); only ever true in
+    /// `ExStart`/`Exchange`/`Loading`.
+    pub oob_resync: bool,
     pub dd_sequence_number: u32,
     /// LSAs this router still needs a full copy of via LSR/LSU.
     pub request_list: Vec<Key<L>>,
@@ -161,6 +170,7 @@ pub struct AdjacencyData<L: Lsa> {
 impl<L: Lsa> Default for AdjacencyData<L> {
     fn default() -> Self {
         Self {
+            oob_resync: false,
             is_master: false,
             dd_sequence_number: 0,
             request_list: Vec::new(),
@@ -186,6 +196,10 @@ pub enum Action<L: Lsa> {
     SendLsu(Vec<Arc<L>>),
     SendLsAck(Vec<L::Header>),
     NeighborEvent(Event),
+    /// RFC 4811 §2.4: a `Full` neighbor opened an out-of-band resynchronization.
+    /// The daemon restarts the adjacency at `ExStart` with `oob_resync` set,
+    /// without the usual teardown, and feeds the same DBD back in.
+    OobResyncStart,
 }
 
 /// The per-call values `on_dbd_received` needs from the daemon's link.
@@ -200,6 +214,8 @@ pub struct Params {
     pub dbd_options: u32,
     /// v2: the received DBD set the O-bit (RFC 5250 §3); v3: always false.
     pub peer_opaque_capable: bool,
+    /// v2: the DBD's LLS block carried the LR bit (RFC 4811 §2.1); v3: false.
+    pub peer_oob_capable: bool,
 }
 
 /// Pops up to `max` headers off the front of `remaining` for the next DBD
@@ -240,6 +256,26 @@ where
     FS: Fn(&L::Header) -> bool,
     FO: Fn(&L::Header) -> bool,
 {
+    // RFC 4811 §2.4 DBD rules (the R bit never appears on v3).
+    if adj.oob_resync && !dbd.resync {
+        return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+    }
+    if !adj.oob_resync && dbd.resync {
+        if !p.peer_oob_capable {
+            return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+        }
+        if state == NeighborState::Full && dbd.init && dbd.more && dbd.master {
+            return vec![Action::OobResyncStart];
+        }
+        return if matches!(
+            state,
+            NeighborState::Exchange | NeighborState::Loading | NeighborState::Full
+        ) {
+            vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
+        } else {
+            Vec::new()
+        };
+    }
     // RFC 2328 §10.6: an AS-external LSA listed on a stub area's link (or a
     // Type-7 outside an NSSA) means the two databases can't agree — restart
     // the exchange.
@@ -441,6 +477,7 @@ fn slave_process_poll<L: Lsa>(
         interface_mtu: p.mtu,
         options: p.dbd_options,
         init: false,
+        resync: adj.oob_resync,
         more,
         master: false,
         dd_sequence_number: adj.dd_sequence_number,
@@ -480,6 +517,7 @@ fn master_process_reply<L: Lsa>(
         interface_mtu: p.mtu,
         options: p.dbd_options,
         init: false,
+        resync: adj.oob_resync,
         more,
         master: true,
         dd_sequence_number: adj.dd_sequence_number,
