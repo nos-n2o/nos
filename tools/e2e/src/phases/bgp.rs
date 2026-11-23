@@ -2669,6 +2669,75 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #622: a scripted speaker (`unneg.py`, router-g) negotiates IPv4 unicast
+/// only, then announces SAFI 2 and AFI 2 NLRI and an IPv4 control prefix.
+/// router-a ignores the first two with a warning, learns the control and keeps
+/// the session.
+pub async fn unnegotiated_family(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G.s(),
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    w.dock
+        .ensure_image(
+            PY_SPEAKER_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENTRYPOINT [\"python3\", \"-u\"]\n"
+            ),
+        )
+        .await?;
+    let script = include_str!("unneg.py")
+        .replace("@IP_A@", IP_A.s())
+        .replace("@IP_G@", IP_G.s())
+        .replace("@ASN@", &ASN_G.to_string())
+        .replace("@RID@", RID_G)
+        .replace("@MCAST@", UNNEG_MCAST)
+        .replace("@V6@", UNNEG_V6)
+        .replace("@CONTROL@", UNNEG_CONTROL);
+    w.dock
+        .start_plain(
+            "router-g",
+            PY_SPEAKER_IMAGE,
+            NET,
+            IP_G.s(),
+            &["/etc/unneg.py"],
+            ("/etc", "unneg.py", script.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    a.established().await?;
+    let established = a.count("bgp session established");
+    // The control follows the ignored batches on the same session, so once it
+    // is learned they have been processed.
+    a.wait(&format!("loc-rib best path for {UNNEG_CONTROL} updated"))
+        .await?;
+    a.wait(&format!(
+        "family not negotiated on this session, ignored peer={IP_G}"
+    ))
+    .await?;
+    for p in [UNNEG_MCAST, UNNEG_V6] {
+        anyhow::ensure!(
+            a.count(&format!("loc-rib best path for {p}")) == 0,
+            "router-a learned {p}, a family never negotiated"
+        );
+    }
+    anyhow::ensure!(
+        a.count("bgp session established") == established,
+        "the ignored families reset the session"
+    );
+    Ok(())
+}
+
 /// RFC 5065 confederation (#15): router-a (member AS `CONFED_ASN_A`) and
 /// router-b (`CONFED_ASN_B`) form confederation `CONFED_ID` and peer as
 /// confederation-external; ExaBGP (router-g) is outside it and peers router-a

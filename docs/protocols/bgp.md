@@ -379,6 +379,8 @@ Unrecognized path attributes (RFC 4271 sections 5 and 6.3):
 - `ipv4-flowspec` and `ipv6-flowspec` (RFC 8955, RFC 8956) carry Flowspec rules. See [Flowspec](#flowspec-rfc-8955-rfc-8956).
 - `vpnv4` and `vpnv6` (RFC 4364, RFC 4659) are the L3VPN families. See [L3VPN](#l3vpn-vpnv4vpnv6).
 
+NLRI of a family the session did not negotiate (including SAFI 2 multicast, which NOS never negotiates) is ignored, never installed as unicast. One rate-limited warning per peer says `family not negotiated on this session, ignored`; the session stays up and nothing is withdrawn.
+
 Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Unicast`, `L2vpnEvpn`, `Ipv4Flowspec`, `Ipv6Flowspec`, `Vpnv4Unicast` and `Vpnv6Unicast`: `PUT …/peer-group/pg1/address-family/Ipv6Unicast` with body `"Ipv6Unicast"` adds one, and `DELETE` on the same path removes it.
 
 ### L3VPN (VPNv4/VPNv6)

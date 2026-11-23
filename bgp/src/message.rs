@@ -103,6 +103,8 @@ pub(crate) const AFI_IPV4: u16 = 1;
 pub(crate) const AFI_IPV6: u16 = 2;
 /// RFC 7432 EVPN: AFI L2VPN (25) / SAFI EVPN (70).
 pub(crate) const AFI_L2VPN: u16 = 25;
+pub(crate) const SAFI_UNICAST: u8 = 1;
+pub(crate) const SAFI_MULTICAST: u8 = 2;
 pub(crate) const SAFI_EVPN: u8 = 70;
 /// RFC 4364 MPLS-labelled VPN unicast (VPNv4/VPNv6): SAFI 128.
 pub(crate) const SAFI_VPN: u8 = 128;
@@ -2261,8 +2263,14 @@ fn decode_mp_reach(
             rtc: Vec::new(),
         });
     }
-    let (nlri, nlri_path_ids) =
-        decode_prefixes(afi, &data[pos..], add_path_afis.contains(&(afi, safi)))?;
+    // #622: only SAFI 1 is unicast; any other SAFI (2 multicast, 4 labeled
+    // unicast, ...) is kept as an empty batch so it can never be installed
+    // as a unicast route. Unknown AFIs still error in `decode_prefixes`.
+    let (nlri, nlri_path_ids) = if safi == SAFI_UNICAST {
+        decode_prefixes(afi, &data[pos..], add_path_afis.contains(&(afi, safi)))?
+    } else {
+        decode_prefixes(afi, &[], false)?
+    };
     Ok(MpReachNlri {
         afi,
         safi,
@@ -2356,8 +2364,12 @@ fn decode_mp_unreach(
             rtc: Vec::new(),
         });
     }
-    let (withdrawn, withdrawn_path_ids) =
-        decode_prefixes(afi, &data[3..], add_path_afis.contains(&(afi, safi)))?;
+    // #622: as in `decode_mp_reach`, only SAFI 1 carries unicast prefixes.
+    let (withdrawn, withdrawn_path_ids) = if safi == SAFI_UNICAST {
+        decode_prefixes(afi, &data[3..], add_path_afis.contains(&(afi, safi)))?
+    } else {
+        decode_prefixes(afi, &[], false)?
+    };
     Ok(MpUnreachNlri {
         afi,
         safi,
@@ -5836,5 +5848,25 @@ mod shutdown_message_tests {
         // Exactly 1024 bytes on the wire (4 + 1020) is kept, one more is not.
         assert_eq!(attrs(&big(100, 1020)).unwrap().unknown.len(), 1);
         assert_eq!(attrs(&big(100, 1021)).unwrap().unknown.len(), 0);
+    }
+
+    #[test]
+    fn non_unicast_safi_decodes_to_an_empty_batch() {
+        // #622: SAFI 2 carrying a /24 must not surface as a unicast prefix.
+        let reach = [0, 1, 2, 4, 192, 0, 2, 1, 0, 24, 198, 51, 100];
+        let mp = decode_mp_reach(&reach, &HashSet::new()).unwrap();
+        assert_eq!((mp.afi, mp.safi), (1, 2));
+        assert_eq!(mp.nlri.len(), 0);
+        let un = decode_mp_unreach(&[0, 1, 2, 24, 198, 51, 100], &HashSet::new()).unwrap();
+        assert_eq!(un.withdrawn.len(), 0);
+        // SAFI 1 is unchanged.
+        let mut uni = reach;
+        uni[2] = 1;
+        assert_eq!(
+            decode_mp_reach(&uni, &HashSet::new()).unwrap().nlri.len(),
+            1
+        );
+        let un = decode_mp_unreach(&[0, 1, 1, 24, 198, 51, 100], &HashSet::new()).unwrap();
+        assert_eq!(un.withdrawn.len(), 1);
     }
 }

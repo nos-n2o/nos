@@ -424,6 +424,47 @@ pub(super) fn learn_prefix(
 }
 
 impl BgpRib {
+    /// #622: a copy of `update` without the unicast NLRI of families this
+    /// session never negotiated (legacy NLRI count as IPv4 unicast) and
+    /// without SAFI 2 batches (never negotiated, never a unicast route), or
+    /// `None` when nothing violates (the hot path clones nothing). A test
+    /// RIB without an outbox has no session to check against.
+    fn drop_unnegotiated(&mut self, from: IpAddr, update: &UpdateMessage) -> Option<UpdateMessage> {
+        let o = self.peer_outboxes.get(&from)?;
+        let bad = |afi: u16, safi: u8| match (afi, safi) {
+            (message::AFI_IPV4, message::SAFI_UNICAST) => {
+                !o.negotiated_afs.contains(&AddressFamily::Ipv4Unicast)
+            }
+            (message::AFI_IPV6, message::SAFI_UNICAST) => {
+                !o.negotiated_afs.contains(&AddressFamily::Ipv6Unicast)
+            }
+            (message::AFI_IPV4 | message::AFI_IPV6, message::SAFI_MULTICAST) => true,
+            _ => false,
+        };
+        let v4_off = !o.negotiated_afs.contains(&AddressFamily::Ipv4Unicast);
+        let legacy = v4_off && (!update.nlri.is_empty() || !update.withdrawn_routes.is_empty());
+        let reach = update.mp_reach.iter().any(|m| bad(m.afi, m.safi));
+        let unreach = update.mp_unreach.iter().any(|m| bad(m.afi, m.safi));
+        if !(legacy || reach || unreach) {
+            return None;
+        }
+        let mut u = update.clone();
+        if legacy {
+            u.nlri.clear();
+            u.nlri_path_ids.clear();
+            u.withdrawn_routes.clear();
+            u.withdrawn_path_ids.clear();
+        }
+        u.mp_reach.retain(|m| !bad(m.afi, m.safi));
+        u.mp_unreach.retain(|m| !bad(m.afi, m.safi));
+        // ponytail: shares the first-AS limiter, so one noisy kind can mute
+        // the other for `FIRST_AS_WARN_EVERY`; a separate map if that bites.
+        if let Some(suppressed) = self.first_as_warn_due(from) {
+            warn!(peer = %from, suppressed, "bgp update carries a family not negotiated on this session, ignored");
+        }
+        Some(u)
+    }
+
     /// Handles one inbound UPDATE from `from`, whose BGP Identifier is
     /// `remote_bgp_id` (used as the RFC 4271 §9.1.2.2 router-id tiebreak).
     /// Withdrawals (legacy `withdrawn_routes` plus any `mp_unreach` batch)
@@ -447,6 +488,15 @@ impl BgpRib {
         update: &UpdateMessage,
         import_policy: &CompiledPolicy,
     ) {
+        if let Some(filtered) = self.drop_unnegotiated(from, update) {
+            return self.handle_update(
+                from,
+                remote_is_ibgp,
+                remote_bgp_id,
+                &filtered,
+                import_policy,
+            );
+        }
         let peer_as = self.peer_asns.get(&from).copied().unwrap_or(0);
         // Sized from the message's own known counts so this doesn't rehash
         // its way up on every insert — bounded by the total NLRI/withdrawn
