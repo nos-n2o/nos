@@ -562,6 +562,10 @@ pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
 pub const OSPFV3_HYBRID_PROFILE: &str = "ospfv3-hybrid";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
+/// router-b's secondary address in `ospfv3` (#952) and the network the peer
+/// routes; `2001:db8:a::/64` collides with none of the phases' prefixes.
+pub const OSPFV3_EXTRA_PREFIX_B: &str = "2001:db8:a::2/64";
+pub const OSPFV3_EXTRA_NET_B: &str = "2001:db8:a::/64";
 /// The second OSPFv3 link of `ospfv3` (#276): `eth1`, a direct veth pair.
 pub const OSPFV3_ETH1_ADDRESS_A: &str = "2001:db8:5::1/64";
 pub const OSPFV3_ETH1_ADDRESS_B: &str = "2001:db8:5::2/64";

@@ -303,14 +303,16 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
                 .flatten(),
         );
         if profile.passive {
-            advertise_passive(
-                state,
-                next_passive,
-                desired_loopback_prefixes,
-                &link_name,
-                area.area_id,
-                (m.prefix, cost),
-            );
+            for &prefix in &m.prefixes {
+                advertise_passive(
+                    state,
+                    next_passive,
+                    desired_loopback_prefixes,
+                    &link_name,
+                    area.area_id,
+                    (prefix, cost),
+                );
+            }
             continue;
         }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
@@ -325,7 +327,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             kernel_interface: m.kernel_interface,
             interface_id,
             link_local_address: m.link_local_address,
-            prefix: m.prefix,
+            prefixes: m.prefixes,
             cost,
             network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
             priority,
@@ -464,14 +466,16 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
                 .flatten(),
         );
         if profile.passive {
-            advertise_passive(
-                state,
-                next_passive,
-                desired_loopback_prefixes,
-                &link_name,
-                area.area_id,
-                (m.prefix, cost),
-            );
+            for &prefix in &m.prefixes {
+                advertise_passive(
+                    state,
+                    next_passive,
+                    desired_loopback_prefixes,
+                    &link_name,
+                    area.area_id,
+                    (prefix, cost),
+                );
+            }
             continue;
         }
         if let Some(p) = bfd_profile(cfg, profile.bfd.as_deref()) {
@@ -486,7 +490,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             kernel_interface: m.kernel_interface,
             interface_id,
             link_local_address: m.link_local_address,
-            prefix: m.prefix,
+            prefixes: m.prefixes,
             cost,
             network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
             priority,
@@ -748,7 +752,7 @@ struct Resolved {
 struct Merged {
     vrf: String,
     link_local_address: Ipv6Addr,
-    prefix: Ipv6Net,
+    prefixes: Vec<Ipv6Net>,
     mtu: Option<u32>,
     speed_mbps: Option<u32>,
     kernel_interface: String,
@@ -767,10 +771,10 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
         running?.vrf.clone()
     };
     let speed_mbps = r.link.as_ref().and_then(|l| l.speed_mbps);
-    let (link_local_address, prefix, mtu) = if let Some(l) = r.link {
+    let (link_local_address, prefixes, mtu) = if let Some(l) = r.link {
         (
             l.link_local_address,
-            l.prefix,
+            l.prefixes,
             // An unobserved MTU (bridge not reporting yet) keeps the running one.
             l.mtu.or_else(|| running.map(|c| u32::from(c.mtu))),
         )
@@ -779,7 +783,11 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
         let c = running?;
         // The running effective MTU stands in for an unresolved parent MTU
         // (a profile override still wins in `resolve_effective_mtu`).
-        (c.link_local_address, c.prefix, Some(u32::from(c.mtu)))
+        (
+            c.link_local_address,
+            c.prefixes.clone(),
+            Some(u32::from(c.mtu)),
+        )
     };
     let kernel_interface = if let Some(k) = r.kernel_interface {
         k
@@ -791,7 +799,7 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
         Merged {
             vrf,
             link_local_address,
-            prefix,
+            prefixes,
             mtu,
             speed_mbps,
             kernel_interface,
@@ -1089,7 +1097,7 @@ async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
 /// MTU.
 struct ResolvedLink {
     link_local_address: Ipv6Addr,
-    prefix: Ipv6Net,
+    prefixes: Vec<Ipv6Net>,
     /// `None` = not observed (a bridge whose MTU `nos-interfaced` cannot read yet).
     mtu: Option<u32>,
     /// Kernel link speed (`InterfaceStatus.speed_mbps`), Mbit/s.
@@ -1113,10 +1121,10 @@ async fn resolve_local_address(
     let (mtu, speed_mbps) = (status.mtu, status.speed_mbps);
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let link_local_address = sub.link_local_address?;
-    let prefix = pick_prefix(sub.addresses.into_iter().map(|a| a.address), ipv4)?;
+    let prefixes = pick_prefixes(sub.addresses.into_iter().map(|a| a.address), ipv4)?;
     Some(ResolvedLink {
         link_local_address,
-        prefix,
+        prefixes,
         mtu: Some(mtu),
         speed_mbps,
     })
@@ -1213,17 +1221,24 @@ async fn resolve_loopback_prefix(
 ) -> Option<Ipv6Net> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
-    pick_prefix(status.addresses.into_iter().map(|a| a.address), ipv4)
+    pick_prefixes(status.addresses.into_iter().map(|a| a.address), ipv4)?
+        .into_iter()
+        .next()
 }
 
-/// The first address of the instance's family (RFC 5838: IPv4 for an
-/// IPv4-unicast instance, in `lsa`'s shadow form), else IPv6.
-fn pick_prefix(addrs: impl IntoIterator<Item = IpNet>, ipv4: bool) -> Option<Ipv6Net> {
-    addrs.into_iter().find_map(|a| match a {
-        IpNet::V6(v6) if !ipv4 => Some(v6),
-        IpNet::V4(v4) if ipv4 => Some(crate::lsa::v4_net_to_shadow(v4)),
-        _ => None,
-    })
+/// Every address of the instance's family, config order (RFC 5838: IPv4 for
+/// an IPv4-unicast instance, in `lsa`'s shadow form; else global/ULA IPv6,
+/// link-local excluded, RFC 5340 §4.4.3.9); `None` when there is none.
+fn pick_prefixes(addrs: impl IntoIterator<Item = IpNet>, ipv4: bool) -> Option<Vec<Ipv6Net>> {
+    let v: Vec<Ipv6Net> = addrs
+        .into_iter()
+        .filter_map(|a| match a {
+            IpNet::V6(v6) if !ipv4 && v6.addr().segments()[0] & 0xffc0 != 0xfe80 => Some(v6),
+            IpNet::V4(v4) if ipv4 => Some(crate::lsa::v4_net_to_shadow(v4)),
+            _ => None,
+        })
+        .collect();
+    (!v.is_empty()).then_some(v)
 }
 
 /// Resolves a broadcast domain's own SVI link-local address, its IPv6
@@ -1239,11 +1254,11 @@ async fn resolve_broadcast_domain(
     let bridge_name = status.bridge_name?;
     let link_local_address = status.link_local_address?;
     let mtu = status.mtu;
-    let prefix = pick_prefix(status.addresses.into_iter().map(|a| a.address), ipv4)?;
+    let prefixes = pick_prefixes(status.addresses.into_iter().map(|a| a.address), ipv4)?;
     Some((
         ResolvedLink {
             link_local_address,
-            prefix,
+            prefixes,
             // The bridge's observed kernel MTU (follows its ports).
             mtu,
             speed_mbps: status.speed_mbps,
@@ -1504,7 +1519,7 @@ mod tests {
             kernel_interface: "br-run".into(),
             interface_id: 3,
             link_local_address: "fe80::1".parse().unwrap(),
-            prefix: "2001:db8::1/64".parse().unwrap(),
+            prefixes: vec!["2001:db8::1/64".parse().unwrap()],
             cost: 1,
             network_type: nos_proto::NetworkType::Broadcast,
             priority: 1,
@@ -1525,7 +1540,7 @@ mod tests {
             vrf: Some("vrf-new".into()),
             link: Some(ResolvedLink {
                 link_local_address: "fe80::2".parse().unwrap(),
-                prefix: "2001:db8::2/64".parse().unwrap(),
+                prefixes: vec!["2001:db8::2/64".parse().unwrap()],
                 mtu: Some(1500),
                 speed_mbps: None,
             }),

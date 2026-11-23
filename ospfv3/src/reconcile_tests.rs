@@ -321,7 +321,7 @@ async fn resync_p2p_subinterface_builds_link() {
     let l = e.running("nostst0.0").await.expect("link built");
     assert_eq!(l.vrf, "vrf100");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
-    assert_eq!(l.prefix, V6.parse::<Ipv6Net>().unwrap());
+    assert_eq!(l.prefixes[0], V6.parse::<Ipv6Net>().unwrap());
     assert_eq!(l.kernel_interface, IF);
     assert_eq!(l.interface_id, 7, "the stream's ifindex");
     assert_eq!(l.area_id, Ipv4Addr::UNSPECIFIED);
@@ -1145,9 +1145,9 @@ async fn resolve_local_address_cases() {
         .expect("found");
     assert_eq!(ok.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
     assert_eq!(
-        ok.prefix,
-        "2001:db8::1/64".parse::<Ipv6Net>().unwrap(),
-        "first IPv6 address wins"
+        ok.prefixes,
+        ["2001:db8::1/64", "2001:db8:2::1/64"].map(|p| p.parse::<Ipv6Net>().unwrap()),
+        "every IPv6 address, in order"
     );
     assert_eq!(ok.mtu, Some(1500));
     assert!(
@@ -1219,7 +1219,7 @@ async fn resolve_broadcast_domain_cases() {
         .expect("found");
     assert_eq!(bridge, "br1");
     assert_eq!(l.link_local_address, LL.parse::<Ipv6Addr>().unwrap());
-    assert_eq!(l.prefix, V6.parse::<Ipv6Net>().unwrap());
+    assert_eq!(l.prefixes[0], V6.parse::<Ipv6Net>().unwrap());
     assert_eq!(l.mtu, Some(1400), "the bridge's observed MTU");
     for name in ["nobridge", "noll", "noaddr", "v4", "gone"] {
         assert!(
