@@ -759,3 +759,13 @@ pub const ILM_SWAP: u32 = 16001;
 pub const ILM_SWAP_OUT: u32 = 16002;
 pub const ILM_PHP: u32 = 16003;
 pub const ILM_LOCAL: u32 = 16004;
+
+/// `ospf-sr` (#1383): each router's loopback (the Prefix-SID prefix) and SID
+/// index; labels are the default SRGB base 16000 + index. Prefixes no other
+/// phase uses.
+pub const OSPF_SR_LOOPBACK_A: &str = "203.0.113.130";
+pub const OSPF_SR_LOOPBACK_B: &str = "203.0.113.131";
+pub const OSPF_SR_LOOPBACK_C: &str = "203.0.113.132";
+pub const OSPF_SR_INDEX_A: u32 = 11;
+pub const OSPF_SR_INDEX_B: u32 = 12;
+pub const OSPF_SR_INDEX_C: u32 = 13;

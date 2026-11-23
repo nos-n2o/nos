@@ -6300,7 +6300,7 @@ fn dp_pe(id: Id, rd: &str, l3_address: &str, extra: &[&str]) -> Vec<String> {
 
 /// The operator's part of an MPLS PE (docker mounts /proc/sys read-only, so
 /// `nos-ribd` only reads these): label space (it withholds a VRF's export
-/// without it), MPLS input on the core link, forwarding. Per container start.
+/// without it), MPLS input on every interface that exists now, forwarding. Per container start.
 pub(super) async fn mpls_ready(w: &World, routers: &[&str]) -> anyhow::Result<()> {
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     for router in routers {
@@ -6311,7 +6311,7 @@ pub(super) async fn mpls_ready(w: &World, routers: &[&str]) -> anyhow::Result<()
                 "sh",
                 "-c",
                 "echo 1048575 > /proc/sys/net/mpls/platform_labels; \
-                 echo 1 > /proc/sys/net/mpls/conf/eth0/input; \
+                 for f in /proc/sys/net/mpls/conf/*/input; do echo 1 > $f; done; \
                  echo 1 > /proc/sys/net/ipv4/ip_forward; \
                  echo 1 > /proc/sys/net/ipv6/conf/all/forwarding",
             ],

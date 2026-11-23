@@ -729,7 +729,24 @@ impl LinuxRibDriver {
     // ponytail: one lookup per labelled route install; cache per gateway if
     // VPN tables grow to many thousands of routes.
     async fn egress_of(&self, table_id: u32, gateway: IpAddr) -> Option<u32> {
-        let underlay = self.mpls.lock().unwrap().get(&table_id)?.underlay_vrf?;
+        let state = self
+            .mpls
+            .lock()
+            .unwrap()
+            .get(&table_id)
+            .map(|s| s.underlay_vrf);
+        let underlay = match state {
+            Some(u) => u?,
+            // No L3VPN here (an OSPF Prefix-SID route, #1383): the gateway is
+            // an IGP neighbour inside the table's own VRF.
+            None => {
+                self.find_link(&table_registry::vrf_ifname(table_id))
+                    .await
+                    .ok()??
+                    .header
+                    .index
+            }
+        };
         self.egress_in(underlay, gateway).await
     }
 
