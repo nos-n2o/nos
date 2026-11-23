@@ -163,6 +163,8 @@ pub struct LinkConfig {
     /// This link's own configured global/ULA prefix, advertised via a
     /// Link-LSA (as this link's own prefix list) and, once self-originated,
     /// an Intra-Area-Prefix-LSA.
+    /// For an IPv4-unicast instance (`ipv4_af`) the interface's IPv4 prefix in
+    /// `lsa`'s shadow form (RFC 5838 §2.5).
     pub prefix: Ipv6Net,
     pub cost: u16,
     pub network_type: NetworkType,
@@ -196,6 +198,24 @@ pub struct LinkConfig {
     /// transit area's SPF (`resolve_virtual_link`), never from an attach
     /// point. `link_local_address` then holds our own global source address.
     pub virtual_link: Option<VirtualLinkEnd>,
+}
+
+impl LinkConfig {
+    /// The address this link's Link-LSA advertises as its next-hop address:
+    /// the link-local one, or (RFC 5838 §2.5) the IPv4 address in shadow form.
+    fn lsa_address(&self) -> Ipv6Addr {
+        if self.ipv4_af {
+            self.prefix.addr()
+        } else {
+            self.link_local_address
+        }
+    }
+
+    /// The router's own address as a host prefix (/128, or /32 for IPv4).
+    fn host_prefix(&self) -> Ipv6Net {
+        Ipv6Net::new(self.prefix.addr(), if self.ipv4_af { 32 } else { 128 })
+            .expect("host length is valid")
+    }
 }
 
 /// A virtual link's transit area, far endpoint's router id and its global
@@ -2153,6 +2173,8 @@ pub struct LinkManager {
     /// (from before a toggle, or a previous incarnation) are prematurely aged
     /// on every origination tick (`withdraw_undesired`).
     extended_lsa: AtomicBool,
+    /// RFC 5838 IPv4-unicast instance (`set_ipv4_af`): prefixes are in `lsa`'s shadow form.
+    ipv4_af: AtomicBool,
     /// Test-only (`--originate-lsinfinity`): originate every Inter-Area-Prefix,
     /// Inter-Area-Router and AS-External LSA at `LSInfinity`, so the e2e can
     /// prove a receiver never installs one.
@@ -2316,6 +2338,15 @@ impl LsaTypes {
 impl LinkManager {
     /// Switches between legacy and RFC 8362 extended LSA origination; takes
     /// effect at the next origination tick.
+    pub fn set_ipv4_af(&self, ipv4: bool) {
+        self.ipv4_af.store(ipv4, Ordering::Relaxed);
+    }
+
+    /// Whether this instance runs the IPv4 unicast address family.
+    pub fn ipv4_af(&self) -> bool {
+        self.ipv4_af.load(Ordering::Relaxed)
+    }
+
     pub fn set_extended_lsa(&self, extended: bool) {
         self.extended_lsa.store(extended, Ordering::Relaxed);
     }
@@ -2568,6 +2599,7 @@ impl LinkManager {
             age_multiplier,
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
+            ipv4_af: AtomicBool::new(false),
             originate_lsinfinity: AtomicBool::new(false),
             no_backbone_warned: AtomicBool::new(false),
             area_ranges: std::sync::Mutex::new(HashMap::new()),
@@ -3011,7 +3043,7 @@ impl LinkManager {
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
                     options: own_options(cfg.stub, cfg.nssa, cfg.ipv4_af),
-                    link_local_address: cfg.link_local_address,
+                    link_local_address: cfg.lsa_address(),
                     prefixes: vec![LinkPrefixEntry {
                         options: 0,
                         prefix: cfg.prefix,
@@ -3044,6 +3076,7 @@ impl LinkManager {
             by_area.entry(cfg.area_id).or_default().push((cfg, status));
         }
         let loopback_prefixes = self.loopback_prefixes.lock().await.clone();
+        let host_len = if self.ipv4_af() { 32 } else { 128 };
         let area_ids: HashSet<Ipv4Addr> = by_area
             .keys()
             .copied()
@@ -3073,7 +3106,7 @@ impl LinkManager {
                             IntraAreaPrefixEntry {
                                 options: lsa::PREFIX_OPT_LA,
                                 metric: cfg.cost,
-                                prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
+                                prefix: cfg.host_prefix(),
                             },
                             IntraAreaPrefixEntry {
                                 options: 0,
@@ -3087,7 +3120,7 @@ impl LinkManager {
                         vec![IntraAreaPrefixEntry {
                             options: lsa::PREFIX_OPT_LA,
                             metric: cfg.cost,
-                            prefix: Ipv6Net::new(cfg.prefix.addr(), 128).expect("128 is valid"),
+                            prefix: cfg.host_prefix(),
                         }]
                     } else {
                         vec![IntraAreaPrefixEntry {
@@ -3101,7 +3134,7 @@ impl LinkManager {
             for (prefix, cost) in loopback_prefixes.get(&area_id).into_iter().flatten() {
                 router_prefixes.push(IntraAreaPrefixEntry {
                     // RFC 5340 §A.4.1.1: a /128 loopback is a host address.
-                    options: if prefix.prefix_len() == 128 {
+                    options: if prefix.prefix_len() == host_len {
                         lsa::PREFIX_OPT_LA
                     } else {
                         0
@@ -3466,9 +3499,11 @@ impl LinkManager {
     pub async fn apply_redistribute_update(&self, update: RedistributeUpdate) {
         {
             let mut raw = self.redistribute_raw.lock().await;
+            let ipv4 = self.ipv4_af();
             let v6 = |prefix: IpNet| match prefix {
-                IpNet::V6(p) => Some(p.trunc()),
-                IpNet::V4(_) => None,
+                IpNet::V6(p) if !ipv4 => Some(p.trunc()),
+                IpNet::V4(p) if ipv4 => Some(lsa::v4_net_to_shadow(p.trunc())),
+                _ => None,
             };
             match update {
                 RedistributeUpdate::Full(routes) => {
@@ -3499,9 +3534,10 @@ impl LinkManager {
     async fn refilter_redistributed(&self) {
         let policy = Arc::clone(&*self.redistribute_policy.lock().await);
         let raw = self.redistribute_raw.lock().await.clone();
+        let ipv4 = self.ipv4_af();
         *self.redistribute_filtered.lock().await = raw
             .into_iter()
-            .filter(|&p| passes_redistribute_policy(p, &policy))
+            .filter(|&p| passes_redistribute_policy(p, &policy, ipv4))
             .collect();
     }
 
@@ -4330,9 +4366,12 @@ fn withdraw_undesired(lsdb: &mut Lsdb, local_router_id: Ipv4Addr, desired: &Hash
 /// Evaluates `prefix` against a redistribute `policy` —
 /// `ospf::link::originate::passes_redistribute_policy` with an IPv6 prefix: a
 /// redistribute policy has no `this.bgp.*` to read, so those are empty.
-fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy) -> bool {
+fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy, ipv4: bool) -> bool {
     let input = nos_rpl::Input {
-        prefix: IpNet::V6(prefix),
+        prefix: match lsa::shadow_to_v4_net(prefix).filter(|_| ipv4) {
+            Some(v4) => IpNet::V4(v4),
+            None => IpNet::V6(prefix),
+        },
         bgp: nos_rpl::BgpInput {
             origin: nos_rpl::Origin::Igp,
             as_path: &[],
@@ -6112,6 +6151,43 @@ pub(crate) mod tests {
         assert_eq!(body.prefixes[0].metric, 5);
         // RFC 5340 A.4.1.1: a /128 loopback is flagged LA, a shorter one is not.
         assert_eq!(body.prefixes[0].options, lsa::PREFIX_OPT_LA);
+    }
+
+    /// RFC 5838: in an IPv4-unicast instance a /32 loopback is the host
+    /// prefix (LA), and a link advertises its IPv4 address.
+    #[tokio::test]
+    async fn ipv4_af_loopback_is_la_and_link_lsa_carries_the_v4_address() {
+        let manager = LinkManager::new(1, None);
+        manager.set_ipv4_af(true);
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let lo = lsa::v4_net_to_shadow("10.9.9.9/32".parse().unwrap());
+        let cfg = LinkConfig {
+            ipv4_af: true,
+            prefix: lsa::v4_net_to_shadow("192.0.2.1/24".parse().unwrap()),
+            ..link("eth0.0", 10)
+        };
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area, vec![(lo, 5)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_all(router_id).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: router_id,
+        };
+        let installed = manager.lsdb_for(area).await.lock().await.get(&key).unwrap();
+        let LsaBody::IntraAreaPrefix(body) = &installed.body else {
+            panic!("expected intra-area-prefix lsa")
+        };
+        let loopback = body.prefixes.iter().find(|p| p.prefix == lo).unwrap();
+        assert_eq!(loopback.options, lsa::PREFIX_OPT_LA);
+        assert_eq!(cfg.lsa_address(), cfg.prefix.addr());
+        assert_eq!(cfg.host_prefix().prefix_len(), 32);
     }
 
     #[tokio::test]

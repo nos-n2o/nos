@@ -11,7 +11,7 @@
 //! need it.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +25,7 @@ use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
 
 use crate::link::LinkManager;
+use crate::{lsa, spf};
 use nos_daemon::watchdog::resolve_once;
 
 // ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
@@ -231,26 +232,48 @@ async fn wait_for_change(
 }
 
 async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Pushed> {
+    let ipv4 = links.ipv4_af();
     links
         .compute_routes()
         .await
         .into_iter()
         .map(|e| {
+            let (prefix, next_hops, backup_next_hop) = to_wire(&e, ipv4);
             (
-                IpNet::V6(e.prefix),
+                prefix,
                 Pushed {
-                    next_hops: e
-                        .next_hops
-                        .iter()
-                        .map(|&(gw, ifid)| (IpAddr::V6(gw), Some(ifid)))
-                        .collect(),
-                    backup_next_hop: e.backup_next_hop.map(IpAddr::V6),
+                    next_hops,
+                    backup_next_hop,
                     backup_interface_id: e.backup_interface_id,
                     metric: e.metric,
                 },
             )
         })
         .collect()
+}
+
+/// A route's prefix, next hops and backup next hop as pushed to `nos-ribd`:
+/// IPv6 as is; an IPv4-unicast instance's shadow forms (RFC 5838, `lsa`)
+/// become IPv4 prefix and gateways, with no interface (like `nos-ospfd`'s).
+type Wire = (IpNet, Vec<(IpAddr, Option<u32>)>, Option<IpAddr>);
+
+fn to_wire(e: &spf::RouteEntry, ipv4: bool) -> Wire {
+    if let Some(v4) = lsa::shadow_to_v4_net(e.prefix).filter(|_| ipv4) {
+        let gw = |a: Ipv6Addr| IpAddr::V4(lsa::shadow_to_v4(a));
+        return (
+            IpNet::V4(v4),
+            e.next_hops.iter().map(|&(g, _)| (gw(g), None)).collect(),
+            e.backup_next_hop.map(gw),
+        );
+    }
+    (
+        IpNet::V6(e.prefix),
+        e.next_hops
+            .iter()
+            .map(|&(gw, ifid)| (IpAddr::V6(gw), Some(ifid)))
+            .collect(),
+        e.backup_next_hop.map(IpAddr::V6),
+    )
 }
 
 async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
@@ -317,6 +340,25 @@ mod tests {
             &updates[0],
             OspfRouteUpdate::Add(r) if r.backup_interface_id == Some(2)
         ));
+    }
+
+    #[test]
+    fn ipv4_af_pushes_ipv4_routes_with_ipv4_gateways() {
+        let entry = |prefix: &str, gw: &str| {
+            let mut e = spf::RouteEntry::discard(lsa::v4_net_to_shadow(prefix.parse().unwrap()), 1);
+            e.next_hops = vec![(lsa::v4_to_shadow(gw.parse().unwrap()), 7)];
+            e
+        };
+        let (prefix, hops, backup) = to_wire(&entry("10.9.9.9/32", "192.0.2.2"), true);
+        assert_eq!(prefix, "10.9.9.9/32".parse::<IpNet>().unwrap());
+        assert_eq!(hops, vec![("192.0.2.2".parse().unwrap(), None)]);
+        assert_eq!(backup, None);
+        // The IPv6 family is pushed untouched, with its interface.
+        let mut v6 = spf::RouteEntry::discard("2001:db8::/64".parse().unwrap(), 1);
+        v6.next_hops = vec![("fe80::2".parse().unwrap(), 7)];
+        let (prefix, hops, _) = to_wire(&v6, false);
+        assert_eq!(prefix, "2001:db8::/64".parse::<IpNet>().unwrap());
+        assert_eq!(hops, vec![("fe80::2".parse().unwrap(), Some(7))]);
     }
 
     #[test]

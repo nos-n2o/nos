@@ -254,6 +254,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
     let dead_interval = *dead_interval;
     let priority = *priority;
     let ref_bw = *ref_bw;
+    let ipv4 = is_ipv4_af(cfg, instance);
     for attach in subinterface_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -270,7 +271,8 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             continue;
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
-        let link = resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await;
+        let link =
+            resolve_local_address(watchdog_socket, &attach.interface, attach.tag, ipv4).await;
         let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
@@ -356,7 +358,13 @@ async fn resolve_loopback_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileCtx<'
     let ProfileCtx { area, profile, .. } = pc;
     let cost = profile.cost.unwrap_or(1);
     for attach in loopback_attach_points(cfg, &profile.name) {
-        let Some(prefix) = resolve_loopback_prefix(watchdog_socket, &attach.interface).await else {
+        let Some(prefix) = resolve_loopback_prefix(
+            watchdog_socket,
+            &attach.interface,
+            is_ipv4_af(cfg, instance),
+        )
+        .await
+        else {
             warn!(
                 instance = %instance, interface = %attach.interface,
                 "ospfv3 loopback prefix not resolvable yet"
@@ -405,6 +413,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
     let dead_interval = *dead_interval;
     let priority = *priority;
     let ref_bw = *ref_bw;
+    let ipv4 = is_ipv4_af(cfg, instance);
     for attach in broadcast_domain_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -415,7 +424,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             continue;
         };
         let vrf = resolve_vrf(watchdog_socket, routing_table).await;
-        let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name).await;
+        let bridge = resolve_broadcast_domain(watchdog_socket, &attach.name, ipv4).await;
         let running = if attach.has_address && !profile.passive {
             links.running_config(&link_name).await
         } else {
@@ -640,6 +649,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
         desired_loopback_prefixes,
     } = wanted;
     links.set_bfd(bfd_wants);
+    links.set_ipv4_af(is_ipv4_af(&cfg, instance));
     links
         .set_virtual_links(virtual_links(&own.areas, &cfg, instance))
         .await;
@@ -1096,16 +1106,14 @@ async fn resolve_local_address(
     watchdog_socket: &Path,
     interface: &str,
     tag: u16,
+    ipv4: bool,
 ) -> Option<ResolvedLink> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
     let (mtu, speed_mbps) = (status.mtu, status.speed_mbps);
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let link_local_address = sub.link_local_address?;
-    let prefix = sub.addresses.into_iter().find_map(|a| match a.address {
-        IpNet::V6(v6) => Some(v6),
-        IpNet::V4(_) => None,
-    })?;
+    let prefix = pick_prefix(sub.addresses.into_iter().map(|a| a.address), ipv4)?;
     Some(ResolvedLink {
         link_local_address,
         prefix,
@@ -1198,12 +1206,23 @@ fn resolve_effective_mtu(profile: &nos_proto::Ospfv3Profile, resolved_mtu: Optio
 /// IPv6 prefix — feeds `LinkManager`'s loopback-prefix map, since a
 /// loopback has no live link/socket to carry it through `LinkConfig` (no
 /// Hello is ever sent from it — see `link.rs`'s module doc comment).
-async fn resolve_loopback_prefix(watchdog_socket: &Path, interface: &str) -> Option<Ipv6Net> {
+async fn resolve_loopback_prefix(
+    watchdog_socket: &Path,
+    interface: &str,
+    ipv4: bool,
+) -> Option<Ipv6Net> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
-    status.addresses.into_iter().find_map(|a| match a.address {
-        IpNet::V6(v6) => Some(v6),
-        IpNet::V4(_) => None,
+    pick_prefix(status.addresses.into_iter().map(|a| a.address), ipv4)
+}
+
+/// The first address of the instance's family (RFC 5838: IPv4 for an
+/// IPv4-unicast instance, in `lsa`'s shadow form), else IPv6.
+fn pick_prefix(addrs: impl IntoIterator<Item = IpNet>, ipv4: bool) -> Option<Ipv6Net> {
+    addrs.into_iter().find_map(|a| match a {
+        IpNet::V6(v6) if !ipv4 => Some(v6),
+        IpNet::V4(v4) if ipv4 => Some(crate::lsa::v4_net_to_shadow(v4)),
+        _ => None,
     })
 }
 
@@ -1213,16 +1232,14 @@ async fn resolve_loopback_prefix(watchdog_socket: &Path, interface: &str) -> Opt
 async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
+    ipv4: bool,
 ) -> Option<(ResolvedLink, String)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
     let link_local_address = status.link_local_address?;
     let mtu = status.mtu;
-    let prefix = status.addresses.into_iter().find_map(|a| match a.address {
-        IpNet::V6(v6) => Some(v6),
-        IpNet::V4(_) => None,
-    })?;
+    let prefix = pick_prefix(status.addresses.into_iter().map(|a| a.address), ipv4)?;
     Some((
         ResolvedLink {
             link_local_address,

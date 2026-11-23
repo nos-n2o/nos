@@ -181,6 +181,11 @@ pub(crate) fn valid_address_families(instances: &[Ospfv3Instance]) -> garde::Res
                 "extended-lsa and extended-lsa-sparse are mutually exclusive (RFC 8362 Full vs Sparse mode)",
             ));
         }
+        if i.extended_lsa && i.address_family == Ospfv3AddressFamily::Ipv4Unicast {
+            return Err(garde::Error::new(
+                "extended-lsa (RFC 8362 Full mode) is not supported with an ipv4-unicast address-family; use extended-lsa-sparse",
+            ));
+        }
         let range = i.address_family.instance_ids();
         let bad = i
             .areas
@@ -309,6 +314,20 @@ mod tests {
         assert!(with(false, true));
         assert!(with(true, false));
         assert!(!with(true, true));
+    }
+
+    #[test]
+    fn ipv4_unicast_refuses_full_extended_lsa() {
+        let with = |full, sparse| {
+            let mut i = instance("o1");
+            i.address_family = super::Ospfv3AddressFamily::Ipv4Unicast;
+            i.extended_lsa = full;
+            i.extended_lsa_sparse = sparse;
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(false, true));
+        assert!(!with(true, false));
     }
 
     #[test]
