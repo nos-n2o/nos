@@ -949,6 +949,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowOspfDatabase),
+    cmd!(["show" "ospf" "segment-routing"],
+        Doc::Local {
+            summary: "Show OSPF segment routing: SRGBs, Prefix-SIDs and Adj-SIDs.",
+            detail: "Queries every configured OSPF instance's nos-ospfd for the segment routing \
+                     state in its LSDB, ours and every other router's: SRGB ranges, Prefix-SIDs \
+                     (index and label) and Adj-SIDs (label per adjacency, the neighbour for a \
+                     LAN Adj-SID).",
+        },
+        Always,
+        Command::ShowOspfSegmentRouting),
     cmd!(["show" "ospfv3" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",

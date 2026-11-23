@@ -2387,3 +2387,92 @@ fn extended_lsas_originate_and_withdraw_with_their_entry() {
     install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &[]);
     assert_eq!(live(&lsdb), Vec::<Ipv4Addr>::new());
 }
+
+/// #1382: a `Full` neighbour gets a stable dynamic Adj-SID (p2p), a LAN Adj-SID
+/// on a DR-adjacent broadcast link, and none while it is not `Full`.
+#[test]
+fn adj_sids_follow_full_adjacencies() {
+    use super::adj_sid::{adjacencies, extended_links, AdjLabels};
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    let peer = Ipv4Addr::new(9, 9, 9, 10);
+    let mut labels = AdjLabels::default();
+
+    let mut status = LinkStatus::new(NetworkType::PointToPoint);
+    status.neighbors.insert(
+        peer,
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let p2p = [(link("eth0", 10), status.clone())];
+    let adjs = adjacencies(me, &p2p, &mut labels);
+    assert_eq!(adjs.len(), 1);
+    assert!(!adjs[0].lan);
+    assert_eq!(adjs[0].gateway, Ipv4Addr::new(10, 0, 0, 2));
+    let sids = lsa::decode_adj_sids(&extended_links(&adjs)[0].sub_tlvs);
+    assert_eq!(sids[0].value, adjs[0].label);
+    assert_eq!(adjacencies(me, &p2p, &mut labels), adjs, "stable label");
+
+    status.neighbors.get_mut(&peer).unwrap().state = NeighborState::Init;
+    assert_eq!(
+        adjacencies(me, &[(link("eth0", 10), status)], &mut labels).len(),
+        0
+    );
+
+    let mut cfg = link("eth1", 10);
+    cfg.network_type = NetworkType::Broadcast;
+    let mut bc = LinkStatus::new(NetworkType::Broadcast);
+    bc.interface_state = InterfaceState::Dr;
+    bc.dr = Some(me);
+    bc.neighbors.insert(
+        peer,
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let adjs = adjacencies(me, &[(cfg, bc)], &mut labels);
+    assert_eq!(adjs.len(), 1);
+    assert!(adjs[0].lan);
+    assert_eq!(adjs[0].link_type, LINK_TYPE_TRANSIT_NETWORK);
+    let sids = lsa::decode_adj_sids(&extended_links(&adjs)[0].sub_tlvs);
+    assert_eq!(sids[0].neighbor, Some(peer));
+}
+
+/// #1382: `sr_summary` reads our own SRGB and Prefix-SID back from the LSDB,
+/// and `ilm_routes` adds the egress entry for our SID.
+#[tokio::test(start_paused = true)]
+async fn sr_summary_reports_the_local_srgb_and_prefix_sid() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    manager.set_srgb(Some((16000, 8000)));
+    manager.set_extended_prefixes(vec![lsa::ExtendedPrefix {
+        route_type: lsa::EXT_ROUTE_INTRA_AREA,
+        prefix: rid,
+        prefix_len: 32,
+        flags: lsa::EXT_PREFIX_FLAG_N,
+        sub_tlvs: lsa::encode_prefix_sid(1, false, false),
+    }]);
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(
+                Ipv4Addr::UNSPECIFIED,
+                vec![("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1)],
+            )]),
+            rid,
+        )
+        .await;
+    manager.originate_router_lsas(rid).await;
+    let sr = manager.sr_summary().await;
+    assert_eq!(
+        (sr.srgb[0].router, sr.srgb[0].base, sr.srgb[0].size),
+        (rid, 16000, 8000)
+    );
+    assert_eq!(
+        (sr.prefix_sids[0].prefix, sr.prefix_sids[0].label),
+        (rid, Some(16001))
+    );
+    assert_eq!(sr.adj_sids.len(), 0);
+    let ilm = manager.ilm_routes(&[]).await;
+    assert_eq!(ilm.iter().map(|r| r.label).collect::<Vec<_>>(), [16001]);
+}

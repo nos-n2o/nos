@@ -3852,6 +3852,7 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         "/v1/bgp/rpki",
         "/v1/ospf/neighbors",
         "/v1/ospf/database",
+        "/v1/ospf/segment-routing",
         "/v1/ospfv3/neighbors",
         "/v1/ospfv3/database",
     ] {

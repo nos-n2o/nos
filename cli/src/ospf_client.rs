@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Role};
+use nos_proto::{IpcCodec, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Role, SrSummary};
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -62,6 +62,20 @@ pub async fn get_database(ospf_socket: &Path) -> Result<Vec<LsaSummary>, OspfCli
     match reader.next().await {
         Some(Ok(OspfEvent::Database(entries))) => Ok(entries),
         Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetDatabase")),
+        Some(Err(e)) => Err(OspfClientError::Io(e)),
+        None => Err(OspfClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches the segment routing state (#1382).
+pub async fn get_segment_routing(ospf_socket: &Path) -> Result<SrSummary, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
+    writer.send(OspfRequest::GetSegmentRouting).await?;
+    match reader.next().await {
+        Some(Ok(OspfEvent::SegmentRouting(sr))) => Ok(sr),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply(
+            "reply to GetSegmentRouting",
+        )),
         Some(Err(e)) => Err(OspfClientError::Io(e)),
         None => Err(OspfClientError::ConnectionClosed),
     }

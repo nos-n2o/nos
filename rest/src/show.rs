@@ -440,6 +440,7 @@ pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type BgpBmpReport = Vec<InstanceReport<Vec<nos_proto::BmpStationStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
+pub type OspfSegmentRoutingReport = Vec<InstanceReport<nos_proto::SrSummary>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
 pub type Ospfv3DatabaseReport = Vec<InstanceReport<Vec<Ospfv3LsaSummary>>>;
 
@@ -879,7 +880,7 @@ pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeig
             |_| OspfRequest::GetNeighbors,
             |e| match e {
                 OspfEvent::Neighbors(v) => Some(v),
-                OspfEvent::Database(_) => None,
+                OspfEvent::Database(_) | OspfEvent::SegmentRouting(_) => None,
             },
         )
         .await,
@@ -897,7 +898,27 @@ pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatab
             |_| OspfRequest::GetDatabase,
             |e| match e {
                 OspfEvent::Database(v) => Some(v),
-                OspfEvent::Neighbors(_) => None,
+                OspfEvent::Neighbors(_) | OspfEvent::SegmentRouting(_) => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/ospf/segment-routing", tag = "show", summary = "OSPF segment routing (SRGB, Prefix-SIDs, Adj-SIDs), per instance", responses((status = 200, body = OspfSegmentRoutingReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn ospf_segment_routing(
+    State(d): State<Daemons>,
+) -> ApiResult<Json<OspfSegmentRoutingReport>> {
+    let names = d.ospf_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::OspfInstance,
+            |_| OspfRequest::GetSegmentRouting,
+            |e| match e {
+                OspfEvent::SegmentRouting(v) => Some(v),
+                OspfEvent::Neighbors(_) | OspfEvent::Database(_) => None,
             },
         )
         .await,

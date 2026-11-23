@@ -2836,13 +2836,14 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         "/v1/bgp/evpn",
         "/v1/ospf/neighbors",
         "/v1/ospf/database",
+        "/v1/ospf/segment-routing",
         "/v1/ospfv3/neighbors",
         "/v1/ospfv3/database",
     ] {
         let (s, _) = send(&app, Method::GET, uri, None).await;
         assert_eq!(s, StatusCode::OK, "{uri}");
     }
-    assert_eq!(lists.load(Ordering::SeqCst), 8);
+    assert_eq!(lists.load(Ordering::SeqCst), 9);
     assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");

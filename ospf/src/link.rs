@@ -6,6 +6,7 @@
 //! §10.6-10.8's DBD/LSR/LSU/LSAck adjacency-forming exchange
 //! (`crate::exchange`).
 
+mod adj_sid;
 mod flood;
 mod grace;
 mod originate;
@@ -906,6 +907,8 @@ pub struct LinkManager {
     extended_prefixes: std::sync::Mutex<Vec<lsa::ExtendedPrefix>>,
     /// The SRGB `(start, range)` advertised in the RI LSA (RFC 8665), if any.
     srgb: std::sync::Mutex<Option<(u32, u32)>>,
+    /// Dynamic Adj-SID labels (#1382), shared by origination and the ILM.
+    adj_labels: std::sync::Mutex<adj_sid::AdjLabels>,
     /// Per area, each other router's advertised SRGB, to log a change once.
     sr_state: Mutex<HashMap<Ipv4Addr, BTreeMap<Ipv4Addr, lsa::RouterInfoSr>>>,
     /// Per area, the other routers' Extended Prefix LSAs, to log a change once.
@@ -1058,6 +1061,7 @@ impl LinkManager {
             traffic_engineering: AtomicBool::new(false),
             extended_prefixes: std::sync::Mutex::new(Vec::new()),
             srgb: std::sync::Mutex::new(None),
+            adj_labels: std::sync::Mutex::default(),
             sr_state: Mutex::new(HashMap::new()),
             ext_prefix_state: Mutex::new(HashMap::new()),
             te_state: Mutex::new(HashMap::new()),
@@ -1173,7 +1177,7 @@ impl LinkManager {
     /// The ILM (#1165) for `routes`, the output of `compute_routes`: swap and
     /// PHP entries toward each Prefix-SID route, an egress entry per SID this
     /// router advertises. Empty without an SRGB.
-    pub fn ilm_routes(&self, routes: &[spf::RouteEntry]) -> Vec<nos_proto::IlmRoute> {
+    pub async fn ilm_routes(&self, routes: &[spf::RouteEntry]) -> Vec<nos_proto::IlmRoute> {
         let srgb = *self.srgb.lock().unwrap();
         if srgb.is_none() {
             return Vec::new();
@@ -1185,7 +1189,70 @@ impl LinkManager {
             .iter()
             .filter_map(|p| lsa::decode_prefix_sid(&p.sub_tlvs))
             .collect();
-        spf::ilm_routes(srgb, &own, routes)
+        let mut ilm = spf::ilm_routes(srgb, &own, routes);
+        // Adj-SID pops (#1382), one per adjacency.
+        ilm.extend(adj_sid::ilm(&self.adjacencies().await));
+        ilm
+    }
+
+    /// Every adjacency with its Adj-SID; empty without an SRGB (SR off) or
+    /// router id.
+    async fn adjacencies(&self) -> Vec<adj_sid::Adjacency> {
+        let Some(router_id) = *self.router_id.lock().await else {
+            return Vec::new();
+        };
+        if self.srgb.lock().unwrap().is_none() {
+            return Vec::new();
+        }
+        let snapshot: Vec<(LinkConfig, LinkStatus)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| (e.config.clone(), e.status.borrow().clone()))
+            .collect();
+        adj_sid::adjacencies(router_id, &snapshot, &mut self.adj_labels.lock().unwrap())
+    }
+
+    /// `show ospf segment-routing` (#1382): the SRGBs, Prefix-SIDs and
+    /// Adj-SIDs in every area's LSDB, ours included (we hold our own LSAs).
+    pub async fn sr_summary(&self) -> nos_proto::SrSummary {
+        let stores: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        let mut out = nos_proto::SrSummary::default();
+        for store in stores {
+            let lsas = store.lock().await.all();
+            let db = spf::SrDb::from_lsas(&lsas);
+            out.srgb.extend(
+                db.srgb
+                    .iter()
+                    .map(|(&router, &(base, size))| nos_proto::SrSrgb { router, base, size }),
+            );
+            out.prefix_sids
+                .extend(db.prefix_sids.iter().map(|(&(router, net), &sid)| {
+                    nos_proto::SrPrefixSid {
+                        router,
+                        prefix: net.addr(),
+                        prefix_len: net.prefix_len(),
+                        value: sid.value,
+                        absolute: sid.absolute,
+                        label: db.label_in(router, sid),
+                    }
+                }));
+            for (&router, sids) in &db.adj_sids {
+                out.adj_sids
+                    .extend(sids.iter().map(|&(link_id, _, s)| nos_proto::SrAdjSid {
+                        router,
+                        neighbor: s.neighbor,
+                        link_id,
+                        label: s.value,
+                    }));
+            }
+        }
+        out.srgb.sort_by_key(|s| (s.router, s.base));
+        out.prefix_sids
+            .sort_by_key(|s| (s.router, s.prefix, s.prefix_len));
+        out.adj_sids.sort_by_key(|s| (s.router, s.link_id, s.label));
+        out
     }
 
     /// Logs each other router's RFC 7684 Extended Prefix LSAs once, and again

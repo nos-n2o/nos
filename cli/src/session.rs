@@ -179,6 +179,8 @@ pub enum Resolved {
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowOspfNeigh`.
     ShowOspfDatabase,
+    /// `show ospf segment-routing` — mirrors `ShowOspfDatabase`.
+    ShowOspfSegmentRouting,
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
@@ -300,6 +302,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
         Command::ShowOspfDatabase => Resolved::ShowOspfDatabase,
+        Command::ShowOspfSegmentRouting => Resolved::ShowOspfSegmentRouting,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
         Command::ShowOspfv3Database => Resolved::ShowOspfv3Database,
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
@@ -422,6 +425,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh
         | Command::ShowOspfDatabase
+        | Command::ShowOspfSegmentRouting
         | Command::ShowOspfv3Neigh
         | Command::ShowOspfv3Database
         | Command::ClearBgpSoftIn { .. }

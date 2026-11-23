@@ -253,7 +253,7 @@ async fn wait_for_change(
 
 async fn compute_routes(links: &Arc<LinkManager>) -> (HashMap<IpNet, Hops>, Vec<IlmRoute>) {
     let entries = links.compute_routes().await;
-    let ilm = links.ilm_routes(&entries);
+    let ilm = links.ilm_routes(&entries).await;
     let routes = entries
         .into_iter()
         .map(|e| {

@@ -499,7 +499,7 @@ impl SrDb {
 
     /// The label a packet for `sid` carries toward `router`'s SRGB; `None`
     /// when `router` has no SRGB or the index is outside it.
-    fn label_in(&self, router: Ipv4Addr, sid: PrefixSid) -> Option<u32> {
+    pub fn label_in(&self, router: Ipv4Addr, sid: PrefixSid) -> Option<u32> {
         if sid.absolute {
             return Some(sid.value);
         }
