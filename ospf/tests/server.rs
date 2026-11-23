@@ -90,6 +90,21 @@ async fn only_people_get_the_show_queries_answered() {
     }
 }
 
+#[tokio::test]
+async fn segment_routing_query_is_for_people() {
+    let (_tmp, path, _server) = start();
+    for role in Role::ALL {
+        let (mut r, mut w) = connect_as(&path, role).await;
+        w.send(OspfRequest::GetSegmentRouting).await.unwrap();
+        let reply = next_event(&mut r).await;
+        if matches!(role, Role::User | Role::Restd) {
+            assert!(matches!(reply, Some(OspfEvent::SegmentRouting(s)) if s.srgb.is_empty()));
+        } else {
+            assert!(reply.is_none(), "{role:?}: no reply");
+        }
+    }
+}
+
 /// The redistribution feed is fire-and-forget: `ribd` keeps its connection
 /// open with no reply, any other role is disconnected.
 #[tokio::test]

@@ -1818,6 +1818,45 @@ fn render_ospf_database_raw(instance: &str, entries: &[LsaSummary]) -> String {
     lines.join("\n")
 }
 
+/// `show ospf segment-routing` (#1382): one line per SRGB, Prefix-SID and
+/// Adj-SID.
+pub fn render_ospf_segment_routing(instance: &str, sr: &nos_proto::SrSummary) -> String {
+    let dash = |l: Option<u32>| l.map_or_else(|| "-".to_string(), |l| l.to_string());
+    let mut lines = vec![format!("ospf instance {instance}:")];
+    for s in &sr.srgb {
+        lines.push(format!(
+            "  srgb router {} range {}-{}",
+            s.router,
+            s.base,
+            s.base + s.size.saturating_sub(1)
+        ));
+    }
+    for p in &sr.prefix_sids {
+        lines.push(format!(
+            "  prefix-sid router {} prefix {}/{} {} {} label {}",
+            p.router,
+            p.prefix,
+            p.prefix_len,
+            if p.absolute { "label" } else { "index" },
+            p.value,
+            dash(p.label),
+        ));
+    }
+    for a in &sr.adj_sids {
+        lines.push(format!(
+            "  adj-sid router {} link {} neighbor {} label {}",
+            a.router,
+            a.link_id,
+            render_ip_or_dash(a.neighbor),
+            a.label
+        ));
+    }
+    if lines.len() == 1 {
+        lines[0] = format!("ospf instance {instance}: no segment routing state");
+    }
+    sanitize(&lines.join("\n")).into_owned()
+}
+
 /// Render one `Ospfv3Instance`'s link/neighbor summaries, one line per
 /// neighbor — used for `show ospfv3 neigh`. Mirrors `render_ospf_neighbors`
 /// exactly, reusing the same `OspfNeighborState`/`LinkInterfaceState`
@@ -3044,6 +3083,49 @@ mod tests {
         assert_eq!(render_lls(lls(0, false, false)), "eof 0x00000000");
         assert_eq!(render_lls(lls(3, true, true)), "eof 0x00000003 lr rs");
         assert_eq!(render_lls(lls(2, false, true)), "eof 0x00000002 rs");
+    }
+
+    #[test]
+    fn render_ospf_segment_routing_lines() {
+        let ip = |n: u8| std::net::Ipv4Addr::new(n, n, n, n);
+        let sr = nos_proto::SrSummary {
+            srgb: vec![nos_proto::SrSrgb {
+                router: ip(1),
+                base: 16000,
+                size: 8000,
+            }],
+            prefix_sids: vec![nos_proto::SrPrefixSid {
+                router: ip(1),
+                prefix: ip(1),
+                prefix_len: 32,
+                value: 1,
+                absolute: false,
+                label: Some(16001),
+            }],
+            adj_sids: vec![nos_proto::SrAdjSid {
+                router: ip(1),
+                neighbor: None,
+                link_id: ip(2),
+                label: 24000,
+            }],
+        };
+        let out = render_ospf_segment_routing("o1", &sr);
+        assert!(
+            out.contains("srgb router 1.1.1.1 range 16000-23999"),
+            "{out}"
+        );
+        assert!(
+            out.contains("prefix 1.1.1.1/32 index 1 label 16001"),
+            "{out}"
+        );
+        assert!(
+            out.contains("adj-sid router 1.1.1.1 link 2.2.2.2 neighbor - label 24000"),
+            "{out}"
+        );
+        assert!(
+            render_ospf_segment_routing("o1", &nos_proto::SrSummary::default())
+                .contains("no segment routing")
+        );
     }
 
     #[test]

@@ -2387,3 +2387,49 @@ fn extended_lsas_originate_and_withdraw_with_their_entry() {
     install_opaque_lsas(&mut lsdb, rid, false, &[], &[], &[]);
     assert_eq!(live(&lsdb), Vec::<Ipv4Addr>::new());
 }
+
+/// #1382: a `Full` neighbour gets a stable dynamic Adj-SID (p2p), a LAN Adj-SID
+/// on a DR-adjacent broadcast link, and none while it is not `Full`.
+#[test]
+fn adj_sids_follow_full_adjacencies() {
+    use super::adj_sid::{adjacencies, extended_links, AdjLabels};
+    let me = Ipv4Addr::new(1, 1, 1, 1);
+    let peer = Ipv4Addr::new(9, 9, 9, 10);
+    let mut labels = AdjLabels::default();
+
+    let mut status = LinkStatus::new(NetworkType::PointToPoint);
+    status.neighbors.insert(
+        peer,
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let p2p = [(link("eth0", 10), status.clone())];
+    let adjs = adjacencies(me, &p2p, &mut labels);
+    assert_eq!(adjs.len(), 1);
+    assert!(!adjs[0].lan);
+    assert_eq!(adjs[0].gateway, Ipv4Addr::new(10, 0, 0, 2));
+    let sids = lsa::decode_adj_sids(&extended_links(&adjs)[0].sub_tlvs);
+    assert_eq!(sids[0].value, adjs[0].label);
+    assert_eq!(adjacencies(me, &p2p, &mut labels), adjs, "stable label");
+
+    status.neighbors.get_mut(&peer).unwrap().state = NeighborState::Init;
+    assert_eq!(
+        adjacencies(me, &[(link("eth0", 10), status)], &mut labels).len(),
+        0
+    );
+
+    let mut cfg = link("eth1", 10);
+    cfg.network_type = NetworkType::Broadcast;
+    let mut bc = LinkStatus::new(NetworkType::Broadcast);
+    bc.interface_state = InterfaceState::Dr;
+    bc.dr = Some(me);
+    bc.neighbors.insert(
+        peer,
+        neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    let adjs = adjacencies(me, &[(cfg, bc)], &mut labels);
+    assert_eq!(adjs.len(), 1);
+    assert!(adjs[0].lan);
+    assert_eq!(adjs[0].link_type, LINK_TYPE_TRANSIT_NETWORK);
+    let sids = lsa::decode_adj_sids(&extended_links(&adjs)[0].sub_tlvs);
+    assert_eq!(sids[0].neighbor, Some(peer));
+}

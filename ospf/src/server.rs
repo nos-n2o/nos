@@ -30,7 +30,7 @@ pub fn start(
 /// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
 fn allowed(role: Role, req: &OspfRequest) -> bool {
     match req {
-        OspfRequest::GetNeighbors | OspfRequest::GetDatabase => {
+        OspfRequest::GetNeighbors | OspfRequest::GetDatabase | OspfRequest::GetSegmentRouting => {
             matches!(role, Role::User | Role::Restd)
         }
         OspfRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -88,6 +88,12 @@ async fn handle_connection(
             }
             OspfRequest::GetDatabase => {
                 let event = OspfEvent::Database(links.database_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            OspfRequest::GetSegmentRouting => {
+                let event = OspfEvent::SegmentRouting(links.sr_summary().await);
                 if writer.send(event).await.is_err() {
                     break;
                 }

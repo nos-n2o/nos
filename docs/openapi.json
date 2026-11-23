@@ -6225,6 +6225,111 @@
         },
         "type": "object"
       },
+      "SrAdjSid": {
+        "description": "An Adj-SID or LAN Adj-SID (RFC 8665 §6, §7) a router advertises.",
+        "properties": {
+          "label": {
+            "description": "The advertised label (absolute).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "link_id": {
+            "description": "The Extended Link's Link ID.",
+            "type": "string"
+          },
+          "neighbor": {
+            "description": "The neighbour's router id (LAN Adj-SID); `None` on a point-to-point link.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "router": {
+            "description": "The advertising router.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "router",
+          "link_id",
+          "label"
+        ],
+        "type": "object"
+      },
+      "SrPrefixSid": {
+        "description": "A Prefix-SID (RFC 8665 §5) a router advertises for one prefix.",
+        "properties": {
+          "absolute": {
+            "description": "`value` is the label itself.",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "The label in the router's own SRGB, when it is known.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "prefix": {
+            "description": "The prefix address.",
+            "type": "string"
+          },
+          "prefix_len": {
+            "description": "The prefix length.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "router": {
+            "description": "The advertising router.",
+            "type": "string"
+          },
+          "value": {
+            "description": "An index into the SRGB, or the label itself when `absolute`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "router",
+          "prefix",
+          "prefix_len",
+          "value",
+          "absolute"
+        ],
+        "type": "object"
+      },
+      "SrSrgb": {
+        "description": "One router's SRGB range (RFC 8665 §3.2).",
+        "properties": {
+          "base": {
+            "description": "First label of the range.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "router": {
+            "description": "The advertising router.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Number of labels.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "router",
+          "base",
+          "size"
+        ],
+        "type": "object"
+      },
       "SshServer": {
         "description": "Where `nos-sshd` listens for a routing table: one specific address inside\nthe table's VRF. Same stance as `RestApi`: no wildcard, whether the address\nexists is operational state, not validated at commit.",
         "properties": {
@@ -9121,6 +9226,37 @@
           }
         },
         "summary": "OSPF neighbors, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospf/segment-routing": {
+      "get": {
+        "operationId": "ospf_segment_routing",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF segment routing (SRGB, Prefix-SIDs, Adj-SIDs), per instance",
         "tags": [
           "show"
         ]

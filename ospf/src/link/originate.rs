@@ -646,9 +646,28 @@ impl LinkManager {
         (flags, router_info_caps)
     }
 
+    /// The Extended Links carrying `links`' Adj-SIDs (#1382); none with SR off.
+    fn adj_sid_links(
+        &self,
+        local_router_id: Ipv4Addr,
+        links: &[(LinkConfig, LinkStatus)],
+        sr_on: bool,
+    ) -> Vec<lsa::ExtendedLink> {
+        if !sr_on {
+            return Vec::new();
+        }
+        let adjs = super::adj_sid::adjacencies(
+            local_router_id,
+            links,
+            &mut self.adj_labels.lock().unwrap(),
+        );
+        super::adj_sid::extended_links(&adjs)
+    }
+
     /// `originate_router_lsas` with an explicit RFC 6987 `max_metric`
     /// (forced on as an RFC 8770 host router). Returns whether a Router-LSA
     /// was (re)installed in some area.
+    #[allow(clippy::too_many_lines, reason = "one pass over every area")]
     pub(super) async fn originate_router_lsas_with(
         &self,
         local_router_id: Ipv4Addr,
@@ -781,8 +800,16 @@ impl LinkManager {
 
             // RFC 3630 TE and RFC 7684 extended LSAs; `withdraw_undesired` also flushes them when the
             // knob goes off or a link goes away (the RI LSA is always desired).
-            // ponytail: no Extended Link source yet (Adj-SID origination is #1169).
-            install_opaque_lsas(&mut lsdb, local_router_id, te, &links, &ext_prefixes, &[]);
+            // Adj-SIDs (#1382) only with SR on (an SRGB), one Extended Link per link.
+            let ext_links = self.adj_sid_links(local_router_id, &links, srgb.is_some());
+            install_opaque_lsas(
+                &mut lsdb,
+                local_router_id,
+                te,
+                &links,
+                &ext_prefixes,
+                &ext_links,
+            );
 
             let mut network_ids = HashSet::new();
             for (cfg, status) in &links {
