@@ -264,6 +264,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             local_addr: addr.as_ref().map(|a| a.0),
             local_prefix_len: addr.as_ref().map(|a| a.1),
             mtu: addr.as_ref().map(|a| a.2),
+            speed_mbps: addr.as_ref().and_then(|a| a.3),
             kernel_interface: Some(kernel_interface),
         };
         let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
@@ -298,6 +299,7 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
             priority,
             mtu: resolve_effective_mtu(profile, m.mtu),
+            speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
             ifindex,
@@ -399,6 +401,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             local_addr: bridge.as_ref().map(|b| b.0),
             local_prefix_len: bridge.as_ref().map(|b| b.1),
             mtu: bridge.as_ref().and_then(|b| b.3),
+            speed_mbps: bridge.as_ref().and_then(|b| b.4),
             kernel_interface: bridge.map(|b| b.2),
         };
         let Some((m, fell_back)) = merge_running(resolved, running.as_ref()) else {
@@ -438,6 +441,7 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
             priority,
             mtu: resolve_effective_mtu(profile, m.mtu),
+            speed_mbps: m.speed_mbps,
             mtu_ignore: profile.mtu_ignore,
             lls: profile.lls,
             ifindex,
@@ -627,6 +631,8 @@ struct Resolved {
     local_prefix_len: Option<u8>,
     /// The parent interface's real MTU (point-to-point only).
     mtu: Option<u32>,
+    /// Kernel link speed (`InterfaceStatus.speed_mbps`), Mbit/s.
+    speed_mbps: Option<u32>,
     kernel_interface: Option<String>,
 }
 
@@ -635,6 +641,7 @@ struct Merged {
     local_addr: Ipv4Addr,
     local_prefix_len: u8,
     mtu: Option<u32>,
+    speed_mbps: Option<u32>,
     kernel_interface: String,
 }
 
@@ -667,12 +674,20 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
     // The running effective MTU stands in for an unresolved parent MTU
     // (a profile override still wins in `resolve_effective_mtu`).
     let mtu = r.mtu.or_else(|| running.map(|c| u32::from(c.mtu)));
+    // `None` from a lookup that succeeded means "speed unknown"; only a failed
+    // lookup (address fell back) keeps the running value.
+    let speed_mbps = if fell_back.contains(&"address") {
+        running.and_then(|c| c.speed_mbps)
+    } else {
+        r.speed_mbps
+    };
     Some((
         Merged {
             vrf,
             local_addr,
             local_prefix_len,
             mtu,
+            speed_mbps,
             kernel_interface,
         },
         fell_back,
@@ -1077,14 +1092,14 @@ async fn resolve_local_address(
     watchdog_socket: &Path,
     interface: &str,
     tag: u16,
-) -> Option<(Ipv4Addr, u8, u32)> {
+) -> Option<(Ipv4Addr, u8, u32, Option<u32>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
-    let mtu = status.mtu;
+    let (mtu, speed) = (status.mtu, status.speed_mbps);
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let net = sub.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), mtu)),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), mtu, speed)),
         std::net::IpAddr::V6(_) => None,
     }
 }
@@ -1138,14 +1153,14 @@ async fn resolve_loopback_prefix(
 async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
-) -> Option<(Ipv4Addr, u8, String, Option<u32>)> {
+) -> Option<(Ipv4Addr, u8, String, Option<u32>, Option<u32>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
     let bridge_name = status.bridge_name?;
-    let mtu = status.mtu;
+    let (mtu, speed) = (status.mtu, status.speed_mbps);
     let net = status.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name, mtu)),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), bridge_name, mtu, speed)),
         std::net::IpAddr::V6(_) => None,
     }
 }
@@ -1492,6 +1507,7 @@ mod tests {
             network_type: nos_proto::NetworkType::Broadcast,
             priority: 1,
             mtu: 9000,
+            speed_mbps: None,
             mtu_ignore: false,
             lls: false,
             ifindex: 3,
@@ -1509,6 +1525,7 @@ mod tests {
             local_addr: Some(Ipv4Addr::new(10, 0, 0, 2)),
             local_prefix_len: Some(30),
             mtu: Some(1500),
+            speed_mbps: None,
             kernel_interface: Some("br-new".into()),
         }
     }
@@ -1527,6 +1544,7 @@ mod tests {
             local_addr: None,
             local_prefix_len: None,
             mtu: None,
+            speed_mbps: None,
             kernel_interface: None,
         };
         let (m, fb) = merge_running(none, Some(&run)).unwrap();

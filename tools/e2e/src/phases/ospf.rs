@@ -1010,7 +1010,6 @@ async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Res
 /// installs the other's Router Address LSA (opaque type 1, area scope) and
 /// logs the address it carries; turning it off again leaves the session up.
 pub async fn ospf_te(w: &mut World) -> anyhow::Result<()> {
-    let (a, b) = (w.a()?, w.b()?);
     let te = |rid: &str, on: bool| {
         strings(&[
             "--ospf-instance",
@@ -1024,15 +1023,41 @@ pub async fn ospf_te(w: &mut World) -> anyhow::Result<()> {
     let seen = |rid: &str| {
         format!("ospf te router address received area={OSPF_AREA} router={rid} address={rid}")
     };
+    // #1369: the Link LSA bandwidth is the advertiser's eth0 speed in bytes/s
+    // (0 when sysfs says unknown), read from the container so a veth reporting
+    // 10000 and one reporting nothing both pass. tracing prints the f32 as f64.
+    let mut want_bw = Vec::new();
+    for (name, rid) in [("router-a", OSPF_ROUTER_ID), ("router-b", OSPF_ROUTER_ID_B)] {
+        let (_, raw) = w
+            .dock
+            .exec(name, &["cat", "/sys/class/net/eth0/speed"])
+            .await?;
+        let mbps = raw.trim().parse::<u32>().ok().filter(|&v| v > 0);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "mirrors nos-ospfd's f32 wire value"
+        )]
+        let bw = mbps.map_or(0.0, |m| f64::from(m as f32 * 125_000.0));
+        log(format!(
+            "{name}: eth0 speed reads {raw:?}, expect bandwidth {bw:?}"
+        ));
+        want_bw.push(format!(
+            "ospf te link received area={OSPF_AREA} router={rid} local=.* max_bandwidth={bw:?} max_reservable={bw:?}$"
+        ));
+    }
+    let (a, b) = (w.a()?, w.b()?);
     let (a0, b0) = (
         a.count(&seen(OSPF_ROUTER_ID_B)),
         b.count(&seen(OSPF_ROUTER_ID)),
     );
+    let (al0, bl0) = (a.count(&want_bw[1]), b.count(&want_bw[0]));
     log("enabling traffic-engineering on router-a and router-b");
     a.provision(&te(OSPF_ROUTER_ID, true)).await?;
     b.provision(&te(OSPF_ROUTER_ID_B, true)).await?;
     a.wait_new(&seen(OSPF_ROUTER_ID_B), a0, 60).await?;
     b.wait_new(&seen(OSPF_ROUTER_ID), b0, 60).await?;
+    a.wait_new(&want_bw[1], al0, 60).await?;
+    b.wait_new(&want_bw[0], bl0, 60).await?;
 
     log("restoring: traffic-engineering off");
     a.provision(&te(OSPF_ROUTER_ID, false)).await?;
