@@ -3696,6 +3696,9 @@ impl LinkManager {
         // cost) is a Router-LSA metric, not a reason to restart the link.
         for (key, entry) in links.iter_mut() {
             if let Some(wanted) = desired_map.get(key) {
+                if entry.config.cost != wanted.cost {
+                    info!(link = %key, old = entry.config.cost, cost = wanted.cost, "ospfv3 link cost changed");
+                }
                 entry.config.cost = wanted.cost;
             }
         }

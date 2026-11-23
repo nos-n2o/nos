@@ -357,6 +357,8 @@ topics! {
     Ospfv3InstanceExtendedLsaSparse,
     /// `Ospfv3Instance.graceful_restart_grace_period`
     Ospfv3InstanceGracefulRestart,
+    /// `Ospfv3Instance.reference_bandwidth`
+    Ospfv3InstanceReferenceBandwidth,
     /// `Ospfv3Instance.max_lsa`
     Ospfv3InstanceMaxLsa,
     /// `Ospfv3Instance.address_family`

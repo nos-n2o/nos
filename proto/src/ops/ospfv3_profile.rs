@@ -547,6 +547,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }

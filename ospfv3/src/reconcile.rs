@@ -166,6 +166,26 @@ fn helper_cap(cfg: &nos_proto::Config, instance: &str) -> u32 {
         .unwrap_or(DEFAULT_HELPER_MAX_GRACE_PERIOD)
 }
 
+/// Default reference bandwidth, Mbit/s (10 Gbit/s).
+const DEFAULT_REFERENCE_BANDWIDTH: u32 = 10_000;
+
+/// Interface cost (RFC 2328 Appendix B.1): the profile's explicit `cost`, else
+/// `reference_bandwidth / speed` clamped to 1..=65535, else 1 when the speed
+/// is unknown. When the address lookup failed (`fell_back`) the running link's
+/// cost stands in for the unknown speed.
+fn effective_cost(
+    explicit: Option<u16>,
+    speed_mbps: Option<u32>,
+    ref_bw: u32,
+    fallback: Option<u16>,
+) -> u16 {
+    explicit.unwrap_or_else(|| match (speed_mbps, fallback) {
+        (_, Some(c)) => c,
+        (Some(s), _) if s > 0 => (ref_bw / s).clamp(1, 65535) as u16,
+        _ => 1,
+    })
+}
+
 /// What one resync pass reads (shared, immutable).
 #[derive(Clone, Copy)]
 struct Env<'a> {
@@ -195,7 +215,7 @@ struct ProfileCtx<'a> {
     hello_interval: u16,
     dead_interval: u16,
     priority: u8,
-    cost: u16,
+    ref_bw: u32,
     auth: Option<packet::TrailerAuth>,
 }
 
@@ -227,13 +247,13 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
         hello_interval,
         dead_interval,
         priority,
-        cost,
+        ref_bw,
         ..
     } = pc;
     let hello_interval = *hello_interval;
     let dead_interval = *dead_interval;
     let priority = *priority;
-    let cost = *cost;
+    let ref_bw = *ref_bw;
     for attach in subinterface_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -271,6 +291,15 @@ async fn resolve_subinterface_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileC
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        let cost = effective_cost(
+            profile.cost,
+            m.speed_mbps,
+            ref_bw,
+            fell_back
+                .contains(&"address")
+                .then(|| running.as_ref().map(|c| c.cost))
+                .flatten(),
+        );
         if profile.passive {
             advertise_passive(
                 state,
@@ -324,13 +353,8 @@ async fn resolve_loopback_links(env: &Env<'_>, d: &mut Wanted, pc: &ProfileCtx<'
         desired_loopback_prefixes,
         ..
     } = d;
-    let ProfileCtx {
-        area,
-        profile,
-        cost,
-        ..
-    } = pc;
-    let cost = *cost;
+    let ProfileCtx { area, profile, .. } = pc;
+    let cost = profile.cost.unwrap_or(1);
     for attach in loopback_attach_points(cfg, &profile.name) {
         let Some(prefix) = resolve_loopback_prefix(watchdog_socket, &attach.interface).await else {
             warn!(
@@ -374,13 +398,13 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
         hello_interval,
         dead_interval,
         priority,
-        cost,
+        ref_bw,
         ..
     } = pc;
     let hello_interval = *hello_interval;
     let dead_interval = *dead_interval;
     let priority = *priority;
-    let cost = *cost;
+    let ref_bw = *ref_bw;
     for attach in broadcast_domain_attach_points(cfg, &profile.name) {
         let link_name = attach.display_name();
         let Some(routing_table) = &attach.routing_table else {
@@ -421,6 +445,15 @@ async fn resolve_broadcast_domain_links(env: &Env<'_>, d: &mut Wanted, pc: &Prof
             continue;
         };
         note_fallback(state, next_degraded, &link_name, &fell_back);
+        let cost = effective_cost(
+            profile.cost,
+            m.speed_mbps,
+            ref_bw,
+            fell_back
+                .contains(&"address")
+                .then(|| running.as_ref().map(|c| c.cost))
+                .flatten(),
+        );
         if profile.passive {
             advertise_passive(
                 state,
@@ -564,7 +597,9 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 .dead_interval
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
-            let cost = profile.cost.unwrap_or(1);
+            let ref_bw = own
+                .reference_bandwidth
+                .unwrap_or(DEFAULT_REFERENCE_BANDWIDTH);
             // Fail closed: a dangling label (commit validation prevents it)
             // must never start the link unauthenticated.
             let auth = match resolve_auth(profile, &cfg) {
@@ -580,7 +615,7 @@ async fn resync(ctx: &mut Ctx, state: &mut State) {
                 hello_interval,
                 dead_interval,
                 priority,
-                cost,
+                ref_bw,
                 auth,
             };
             resolve_subinterface_links(&env, &mut wanted, &pc).await;
@@ -705,6 +740,7 @@ struct Merged {
     link_local_address: Ipv6Addr,
     prefix: Ipv6Net,
     mtu: Option<u32>,
+    speed_mbps: Option<u32>,
     kernel_interface: String,
 }
 
@@ -720,6 +756,7 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
         fell_back.push("vrf");
         running?.vrf.clone()
     };
+    let speed_mbps = r.link.as_ref().and_then(|l| l.speed_mbps);
     let (link_local_address, prefix, mtu) = if let Some(l) = r.link {
         (
             l.link_local_address,
@@ -746,6 +783,7 @@ fn merge_running(r: Resolved, running: Option<&LinkConfig>) -> Option<(Merged, V
             link_local_address,
             prefix,
             mtu,
+            speed_mbps,
             kernel_interface,
         },
         fell_back,
@@ -1044,6 +1082,8 @@ struct ResolvedLink {
     prefix: Ipv6Net,
     /// `None` = not observed (a bridge whose MTU `nos-interfaced` cannot read yet).
     mtu: Option<u32>,
+    /// Kernel link speed (`InterfaceStatus.speed_mbps`), Mbit/s.
+    speed_mbps: Option<u32>,
 }
 
 /// Resolves a subinterface's link-local address (populated by
@@ -1059,7 +1099,7 @@ async fn resolve_local_address(
 ) -> Option<ResolvedLink> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
-    let mtu = status.mtu;
+    let (mtu, speed_mbps) = (status.mtu, status.speed_mbps);
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let link_local_address = sub.link_local_address?;
     let prefix = sub.addresses.into_iter().find_map(|a| match a.address {
@@ -1070,6 +1110,7 @@ async fn resolve_local_address(
         link_local_address,
         prefix,
         mtu: Some(mtu),
+        speed_mbps,
     })
 }
 
@@ -1188,6 +1229,7 @@ async fn resolve_broadcast_domain(
             prefix,
             // The bridge's observed kernel MTU (follows its ports).
             mtu,
+            speed_mbps: status.speed_mbps,
         },
         bridge_name,
     ))
@@ -1468,6 +1510,7 @@ mod tests {
                 link_local_address: "fe80::2".parse().unwrap(),
                 prefix: "2001:db8::2/64".parse().unwrap(),
                 mtu: Some(1500),
+                speed_mbps: None,
             }),
             kernel_interface: Some("br-new".into()),
         }
@@ -1604,5 +1647,23 @@ mod tests {
             signature(&t, &watched),
             [("a".to_string(), Gate::Down("admin-down"))]
         );
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::{effective_cost, DEFAULT_REFERENCE_BANDWIDTH as R};
+
+    #[test]
+    fn cost_from_speed_and_reference() {
+        assert_eq!(effective_cost(None, Some(1000), R, None), 10);
+        assert_eq!(effective_cost(None, Some(10_000), R, None), 1);
+        assert_eq!(effective_cost(None, Some(1), 4_294_967, None), 65535);
+        assert_eq!(effective_cost(None, None, R, None), 1);
+        assert_eq!(effective_cost(None, Some(0), R, None), 1);
+        assert_eq!(effective_cost(Some(7), Some(1000), R, None), 7);
+        // Failed lookup keeps the running cost; an explicit cost still wins.
+        assert_eq!(effective_cost(None, None, R, Some(10)), 10);
+        assert_eq!(effective_cost(Some(3), None, R, Some(10)), 3);
     }
 }
