@@ -256,6 +256,7 @@ pub(crate) fn valid_subinterface_mtus(
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
 pub struct Interface {
     #[garde(
         length(min = 1, max = 64),
@@ -395,6 +396,14 @@ pub struct Interface {
     #[garde(skip)]
     #[cli(topic = InterfaceLldpDestination, words = "lldp destination")]
     pub lldp_destination: LldpDestination,
+
+    /// Accepts MPLS-labelled packets on this link: `nos-interfaced` writes
+    /// `net.mpls.conf.<name>.input` (1 when set, 0 when not). Needed on every
+    /// link a labelled packet arrives on (segment routing, the L3VPN underlay).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceMplsInput, words = "mpls input")]
+    pub mpls_input: bool,
 
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     #[cli(
@@ -640,6 +649,7 @@ mod tests {
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),

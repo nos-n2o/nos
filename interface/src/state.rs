@@ -629,6 +629,9 @@ pub async fn build_from_config(
         if let Err(e) = driver.apply(&state).await {
             warn!(interface = %state.name, error = %e, "failed to apply interface configuration");
         }
+        if let Err(e) = driver.set_mpls_input(&iface.name, iface.mpls_input).await {
+            warn!(interface = %state.name, error = %e, "failed to set mpls input");
+        }
         by_name.insert(state.name.clone(), state);
     }
 
@@ -783,6 +786,7 @@ mod tests {
             lacp_mode: nos_proto::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
+            mpls_input: false,
             lldp_receive: false,
             lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
@@ -861,6 +865,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Call::RemovePortAggregate(name.to_string()));
+            Ok(())
+        }
+
+        async fn set_mpls_input(&self, _name: &str, _enabled: bool) -> Result<(), DriverError> {
             Ok(())
         }
 

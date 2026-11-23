@@ -40,7 +40,7 @@ Segment routing (ILM entries, `RibDriver::sync_ilm`, #1165): [segment-routing.md
 - Ingress: a `Vpn` route is `RTA_ENCAP_TYPE=MPLS` pushing its labels, `via <gw> dev <if> onlink` in the customer table. Several next hops are one `RTA_MULTIPATH` route with an encap and `RTNH_F_ONLINK` per next hop (`nexthop encap mpls <l1> via <gw1> dev <if> onlink nexthop encap mpls <l2> via <gw2> …`); the same gateway twice with different labels is accepted. The gateway and ifindex come from `nos-bgpd`'s resolution in the underlay table; without an ifindex the driver asks the kernel (`RTM_GETROUTE` with `RTA_OIF` = the underlay VRF, `ip route get <gw> vrf <underlay>`). Logs: `installed labelled route` / `removed labelled route` with `prefix`, `labels` (one stack per hop), `gateway`.
 - Sysctls are `/proc/sys` file reads and writes (`driver/mpls.rs`, no external command, #228), each read first and written only when not already enough:
   - `net.mpls.platform_labels`: grown to the next multiple of 1024 above the label, never shrunk (that would delete routes). A failure is an `Err`, so the export is withheld.
-  - `net.mpls.conf.<if>.input=1` on every interface enslaved to the underlay VRF. A failure is a one-time `warn!` per interface (a loopback faces no PE).
+  - `net.mpls.conf.<if>.input` is not `nos-ribd`'s: it is the `Interface.mpls_input` knob of `nos-interfaced` (`set interface <name> mpls input`, #1380); the L3VPN underlay's core links need it set.
 - `/proc/sys/net/mpls` missing means `mpls_router` is not loaded: the error says so. It only appears in network namespaces created after the module loads.
 - Docker mounts `/proc/sys` read-only: the driver can only read, so the operator (or the e2e helper, `vpn-dataplane`) sets the values.
 
