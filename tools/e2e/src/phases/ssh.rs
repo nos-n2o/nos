@@ -299,8 +299,121 @@ pub async fn ssh_login_shell(w: &mut World) -> anyhow::Result<()> {
     }
     a.wait_new("login rejected", rejected, 15).await?;
 
+    radius_accounts(w, ip).await?;
+
     a.provision(&strings(&["--clear-ssh-server"])).await?;
     Ok(())
+}
+
+/// #1375: RADIUS users over ssh. An unallocated name has an empty token (sshd calls it invalid),
+/// so it never reaches the broker; a REST login allocates, then ssh works with the role from
+/// RADIUS; a system account never reaches the broker (`pam_nos`'s account guard).
+async fn radius_accounts(w: &World, ip: &str) -> anyhow::Result<()> {
+    use super::pki::{radius_down, radius_up};
+    let a = w.a()?;
+    radius_up(
+        w,
+        &[
+            "ssh-rad:pw:admin",
+            "ssh-rad-ro:pw:read-only",
+            "daemon:pw:admin",
+        ],
+    )
+    .await?;
+    let ssh_as = |user: &'static str| Ssh::password(ip, SSH_PORT, user, "pw");
+
+    log("ssh-login-shell: an unallocated RADIUS user fails over ssh, no ticket, no RADIUS, no allocation");
+    let (tickets, accepted, allocs) = (
+        a.count("login ticket issued"),
+        a.count("login accepted by radius"),
+        a.count("external user allocated"),
+    );
+    if ssh_as("ssh-rad").await?.is_some() {
+        bail!("an unallocated RADIUS user must not log in over ssh");
+    }
+    a.assert_quiet("login ticket issued", tickets, 3).await?;
+    a.assert_quiet("login accepted by radius", accepted, 1)
+        .await?;
+    a.assert_quiet("external user allocated", allocs, 1).await?;
+
+    for (user, admin) in [("ssh-rad", true), ("ssh-rad-ro", false)] {
+        log(format!(
+            "ssh-login-shell: REST login allocates {user}, then ssh lands in nos"
+        ));
+        let alloc = format!("external user allocated user=\"{user}\"");
+        let n = a.count(&alloc);
+        if a.rest.login(user, "pw").await?.is_err() {
+            bail!("{user} could not log in over REST");
+        }
+        a.wait_new(&alloc, n, 15).await?;
+        let line = |v: &str| format!("login ticket {v} user=\"{user}\"");
+        let (issued, redeemed) = (a.count(&line("issued")), a.count(&line("redeemed")));
+        let starts = |l: &str| {
+            l.matches(&format!("accounting status=1 user={user}"))
+                .count()
+        };
+        let starts_before = starts(&w.dock.logs(RADIUS_STUB).await?);
+        let ssh = ssh_as(user)
+            .await?
+            .context("an allocated RADIUS user must log in over ssh")?;
+        let mut sh = ssh.shell().await?;
+        sh.expect("NOS interactive shell", 30).await?;
+        sh.expect("> ", 30).await?;
+        a.wait_new(&line("issued"), issued, 15).await?;
+        a.wait_new(&line("redeemed"), redeemed, 15).await?;
+        let mut started = false;
+        for _ in 0..15 {
+            if starts(&w.dock.logs(RADIUS_STUB).await?) > starts_before {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !started {
+            bail!("no accounting Start for the {user} ssh login");
+        }
+        let expect = if admin {
+            format!("config commit audit.*actor=\"{user}\".*claim=Some(Admin)")
+        } else {
+            "the user's role does not allow it".to_string()
+        };
+        let n = a.count(&expect);
+        sh.send("configure ssh-rad").await?;
+        sh.expect("(ssh-rad)", 20).await?;
+        sh.send(if admin {
+            "set hostname ssh-rad-host"
+        } else {
+            "set hostname ssh-ro-host"
+        })
+        .await?;
+        sh.send("commit").await?;
+        a.wait_new(&expect, n, 20).await?;
+    }
+
+    log("ssh-login-shell: a system account never reaches the broker, even if RADIUS would accept it");
+    let tickets = a.count("login ticket issued");
+    for user in ["daemon", "root"] {
+        if ssh_as(user).await?.is_some() {
+            bail!("{user} must not log in over ssh");
+        }
+    }
+    a.assert_quiet("login ticket issued", tickets, 3).await?;
+
+    log("ssh-login-shell: an unknown name is rejected over REST, allocated nothing, refused over ssh");
+    if a.rest.login("ssh-nope", "pw").await?.is_ok() {
+        bail!("an unknown RADIUS user logged in over REST");
+    }
+    let (code, _) = w
+        .dock
+        .exec("router-a", &["getent", "passwd", "ssh-nope"])
+        .await?;
+    if code == 0 {
+        bail!("ssh-nope got a passwd entry");
+    }
+    if ssh_as("ssh-nope").await?.is_some() {
+        bail!("an unknown user logged in over ssh");
+    }
+    radius_down(w).await
 }
 
 /// `/proc/net/tcp{,6}` LISTEN (state 0A) local addresses, as `(hex addr, port)`.

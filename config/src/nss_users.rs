@@ -20,8 +20,8 @@ use nos_proto::User;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
-pub const UID_MIN: u32 = 20_000;
-pub const UID_MAX: u32 = 59_999;
+pub const UID_MIN: u32 = *nos_proto::NOS_UID_RANGE.start();
+pub const UID_MAX: u32 = *nos_proto::NOS_UID_RANGE.end();
 pub const DEFAULT_PASSWD_FILE: &str = "/run/nos-users/passwd";
 pub const DEFAULT_IDS_FILE: &str = "/var/lib/nos/configd/user-ids";
 /// Next to the ids file: the external names (one per line), 0600.
@@ -32,7 +32,7 @@ const ETC_GROUP: &str = "/etc/group";
 pub const EXTERNAL_CAP: usize = 10_000;
 /// The service-account prefix (`nos-wd`, `nos-configd`, ...): never an external name.
 const RESERVED_PREFIX: &str = "nos-";
-const SHELL: &str = "/usr/bin/nos";
+const SHELL: &str = nos_proto::NOS_LOGIN_SHELL;
 const HOME: &str = "/nonexistent";
 
 /// Why an external user was not allocated or cleared. Texts are returned to the caller

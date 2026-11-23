@@ -225,6 +225,12 @@ pub const INVALID_TICKET: &str = "invalid ticket";
 /// Environment variable carrying a login ticket (`ticket_to_env`) from PAM to `nos`.
 pub const LOGIN_TICKET_ENV: &str = "NOS_LOGIN_TICKET";
 
+/// Login shell of every NOS user in the NSS `passwd` (#999); `pam_nos` refuses any other (#1375).
+pub const NOS_LOGIN_SHELL: &str = "/usr/bin/nos";
+
+/// Uid range `nos-configd` allocates NSS users from; `pam_nos` refuses any other (#1375).
+pub const NOS_UID_RANGE: std::ops::RangeInclusive<u32> = 20_000..=59_999;
+
 /// Length of a login ticket in bytes.
 pub const LOGIN_TICKET_LEN: usize = 32;
 

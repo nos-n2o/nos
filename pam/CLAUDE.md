@@ -29,6 +29,8 @@ Unknown options are ignored with a syslog line naming the option (never its valu
 | broker `Denied(INVALID_CREDENTIALS)` | `AuthenticationError` |
 | empty or non-UTF-8 user or password (broker never contacted) | `AuthenticationError` |
 | `LOGIN_BUSY`, "login unavailable", any other `Denied`, connect/TLS/EOF/timeout, unreadable `ca.crt`, unexpected event | `AuthInfoUnavailable` |
+| name resolves (NSS) to a shell other than `/usr/bin/nos` or a uid outside 20000-59999 (broker never contacted, #1375) | `AuthenticationError` |
+| NSS lookup error | `AuthInfoUnavailable` |
 | `account_management` without a matching `NosTicket` | `AuthenticationError` (not `Ignore`: `account required` must not pass a flow that skipped `authenticate`) |
 | `set_credentials` | `Ok` for every action |
 | panic in any hook | `ServiceError` |
@@ -41,6 +43,7 @@ Fail closed: no cache, no retry, one 10 s deadline over dial + TLS handshake + r
 - **The ticket hand-off (#992)**: `authenticate` stores `NosTicket { user, encoded: Zeroizing<String> }` with `set_module_data(NosTicket::KEY, ..)` (for `account_management`) and inserts `NOS_LOGIN_TICKET` in the PAM environment right there. No `open_session`: sshd runs authenticate/acct_mgmt in a forked child and copies only that child's environment (see `docs/architecture/pam.md`); keep the ticket out of logs and `Debug`.
 - Never log the password, broker text or error sources: syslog (nonstick `Logger`, authpriv) gets `user`, `service` and `outcome=success|denied|unavailable` only. No `tracing` subscriber is installed.
 - No timing shortcut for unknown users: the watchdog's `verify_or_dummy` equalizes.
+- A system account never reaches the broker: `account_guard` runs first in `authenticate_user` and `check_account`; shell and uid range come from `nos_proto` (`NOS_LOGIN_SHELL`, `NOS_UID_RANGE`), shared with `nos-configd`. `nix` (`user` feature) does the lookup, no `unsafe`.
 - No shell-out (#228).
 - Residual risks of a password crossing sshd's monitor: see #987.
 

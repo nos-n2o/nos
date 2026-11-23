@@ -70,7 +70,7 @@ pub use bgp::{
 pub use broker::{
     ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,
     INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_ENV, LOGIN_TICKET_LEN,
-    LOGIN_TICKET_TTL, SESSION_EXPIRED,
+    LOGIN_TICKET_TTL, NOS_LOGIN_SHELL, NOS_UID_RANGE, SESSION_EXPIRED,
 };
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;

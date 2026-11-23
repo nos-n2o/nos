@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 nonstick   = "0.1.2"
+nix        = { workspace = true, features = ["user"] }
 nos-proto  = { workspace = true }
 nos-pki    = { workspace = true }
 tokio      = { workspace = true, features = ["rt"] }
