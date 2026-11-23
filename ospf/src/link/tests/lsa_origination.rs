@@ -2433,3 +2433,46 @@ fn adj_sids_follow_full_adjacencies() {
     let sids = lsa::decode_adj_sids(&extended_links(&adjs)[0].sub_tlvs);
     assert_eq!(sids[0].neighbor, Some(peer));
 }
+
+/// #1382: `sr_summary` reads our own SRGB and Prefix-SID back from the LSDB,
+/// and `ilm_routes` adds the egress entry for our SID.
+#[tokio::test(start_paused = true)]
+async fn sr_summary_reports_the_local_srgb_and_prefix_sid() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    manager.set_srgb(Some((16000, 8000)));
+    manager.set_extended_prefixes(vec![lsa::ExtendedPrefix {
+        route_type: lsa::EXT_ROUTE_INTRA_AREA,
+        prefix: rid,
+        prefix_len: 32,
+        flags: lsa::EXT_PREFIX_FLAG_N,
+        sub_tlvs: lsa::encode_prefix_sid(1, false, false),
+    }]);
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([(
+                Ipv4Addr::UNSPECIFIED,
+                vec![("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1)],
+            )]),
+            rid,
+        )
+        .await;
+    manager.originate_router_lsas(rid).await;
+    let sr = manager.sr_summary().await;
+    assert_eq!(
+        (sr.srgb[0].router, sr.srgb[0].base, sr.srgb[0].size),
+        (rid, 16000, 8000)
+    );
+    assert_eq!(
+        (sr.prefix_sids[0].prefix, sr.prefix_sids[0].label),
+        (rid, Some(16001))
+    );
+    assert_eq!(sr.adj_sids.len(), 0);
+    let ilm = manager.ilm_routes(&[]).await;
+    assert_eq!(ilm.iter().map(|r| r.label).collect::<Vec<_>>(), [16001]);
+}
