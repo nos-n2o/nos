@@ -160,12 +160,12 @@ pub struct LinkConfig {
     /// This link's own kernel-assigned IPv6 link-local address — Hello and
     /// every self-originated Link-LSA are sourced from this.
     pub link_local_address: Ipv6Addr,
-    /// This link's own configured global/ULA prefix, advertised via a
-    /// Link-LSA (as this link's own prefix list) and, once self-originated,
-    /// an Intra-Area-Prefix-LSA.
+    /// Every global/ULA prefix of this link's attach point (non-empty,
+    /// config order, primary first; link-local excluded), advertised via
+    /// a Link-LSA and an Intra-Area-Prefix-LSA (#952).
     /// For an IPv4-unicast instance (`ipv4_af`) the interface's IPv4 prefix in
     /// `lsa`'s shadow form (RFC 5838 §2.5).
-    pub prefix: Ipv6Net,
+    pub prefixes: Vec<Ipv6Net>,
     pub cost: u16,
     pub network_type: NetworkType,
     pub priority: u8,
@@ -201,20 +201,24 @@ pub struct LinkConfig {
 }
 
 impl LinkConfig {
+    /// The first (primary) prefix: its address is the router's own.
+    fn primary(&self) -> Ipv6Net {
+        self.prefixes[0]
+    }
+
     /// The address this link's Link-LSA advertises as its next-hop address:
     /// the link-local one, or (RFC 5838 §2.5) the IPv4 address in shadow form.
     fn lsa_address(&self) -> Ipv6Addr {
         if self.ipv4_af {
-            self.prefix.addr()
+            self.primary().addr()
         } else {
             self.link_local_address
         }
     }
 
-    /// The router's own address as a host prefix (/128, or /32 for IPv4).
-    fn host_prefix(&self) -> Ipv6Net {
-        Ipv6Net::new(self.prefix.addr(), if self.ipv4_af { 32 } else { 128 })
-            .expect("host length is valid")
+    /// A prefix's address as a host prefix (/128, or /32 for IPv4).
+    fn host_prefix(&self, p: &Ipv6Net) -> Ipv6Net {
+        Ipv6Net::new(p.addr(), if self.ipv4_af { 32 } else { 128 }).expect("host length is valid")
     }
 }
 
@@ -275,7 +279,7 @@ fn resolve_virtual_link(
         kernel_interface: transit.vrf.clone(),
         interface_id: u32::from(v.endpoint),
         link_local_address: local,
-        prefix: Ipv6Net::new(local, 128).expect("128 is valid"),
+        prefixes: vec![Ipv6Net::new(local, 128).expect("128 is valid")],
         cost: u16::try_from(end.cost).unwrap_or(u16::MAX),
         network_type: NetworkType::PointToPoint,
         priority: 0,
@@ -3044,10 +3048,11 @@ impl LinkManager {
                     priority: cfg.priority,
                     options: own_options(cfg.stub, cfg.nssa, cfg.ipv4_af),
                     link_local_address: cfg.lsa_address(),
-                    prefixes: vec![LinkPrefixEntry {
-                        options: 0,
-                        prefix: cfg.prefix,
-                    }],
+                    prefixes: cfg
+                        .prefixes
+                        .iter()
+                        .map(|&prefix| LinkPrefixEntry { options: 0, prefix })
+                        .collect(),
                 }),
             );
             done.links.entry(cfg.attach_point).or_default().insert(key);
@@ -3099,35 +3104,30 @@ impl LinkManager {
                             || !network_prefix_originated(status))
                 })
                 .flat_map(|(cfg, _)| {
+                    let own = |options, prefix| IntraAreaPrefixEntry {
+                        options,
+                        metric: cfg.cost,
+                        prefix,
+                    };
                     if cfg.network_type == NetworkType::Hybrid {
                         // RFC 6845 §4.6.2: the address as a /128 (LA) as on
                         // point-to-multipoint, and the interface's prefix too.
-                        vec![
-                            IntraAreaPrefixEntry {
-                                options: lsa::PREFIX_OPT_LA,
-                                metric: cfg.cost,
-                                prefix: cfg.host_prefix(),
-                            },
-                            IntraAreaPrefixEntry {
-                                options: 0,
-                                metric: cfg.cost,
-                                prefix: cfg.prefix,
-                            },
-                        ]
+                        let mut v: Vec<_> = cfg
+                            .prefixes
+                            .iter()
+                            .map(|p| own(lsa::PREFIX_OPT_LA, cfg.host_prefix(p)))
+                            .collect();
+                        v.extend(cfg.prefixes.iter().map(|&p| own(0, p)));
+                        v
                     } else if cfg.network_type == NetworkType::PointToMultipoint {
                         // RFC 5340 §4.4.3.9: the router's own address as a
                         // /128 host prefix (LA), not the subnet.
-                        vec![IntraAreaPrefixEntry {
-                            options: lsa::PREFIX_OPT_LA,
-                            metric: cfg.cost,
-                            prefix: cfg.host_prefix(),
-                        }]
+                        cfg.prefixes
+                            .iter()
+                            .map(|p| own(lsa::PREFIX_OPT_LA, cfg.host_prefix(p)))
+                            .collect()
                     } else {
-                        vec![IntraAreaPrefixEntry {
-                            options: 0,
-                            metric: cfg.cost,
-                            prefix: cfg.prefix,
-                        }]
+                        cfg.prefixes.iter().map(|&p| own(0, p)).collect::<Vec<_>>()
                     }
                 })
                 .collect();
@@ -3164,6 +3164,7 @@ impl LinkManager {
                     continue;
                 }
                 let network_key = lsa::interface_id_key(cfg.interface_id);
+                let prefixes = self.network_prefixes(cfg, status, local_router_id).await;
                 done.insert(install_self_originated(
                     &mut lsdb,
                     local_router_id,
@@ -3173,15 +3174,51 @@ impl LinkManager {
                         referenced_ls_type: types.network,
                         referenced_link_state_id: network_key,
                         referenced_advertising_router: local_router_id,
-                        prefixes: vec![IntraAreaPrefixEntry {
-                            options: 0,
-                            metric: 0,
-                            prefix: cfg.prefix,
-                        }],
+                        prefixes,
                     }),
                 ));
             }
         }
+    }
+
+    /// RFC 5340 §4.4.3.9: the DR's Network-referenced prefixes, the union of
+    /// its own and every `Full` neighbor's Link-LSA prefixes (NU/LA skipped),
+    /// each truncated network once with the options OR-ed; own first, then
+    /// neighbors by router ID.
+    async fn network_prefixes(
+        &self,
+        cfg: &LinkConfig,
+        status: &LinkStatus,
+        local_router_id: Ipv4Addr,
+    ) -> Vec<IntraAreaPrefixEntry> {
+        let mut sources: Vec<(Ipv4Addr, Vec<LinkPrefixEntry>)> = vec![(
+            local_router_id,
+            cfg.prefixes
+                .iter()
+                .map(|&prefix| LinkPrefixEntry { options: 0, prefix })
+                .collect(),
+        )];
+        let full: std::collections::BTreeSet<Ipv4Addr> = status
+            .neighbors
+            .iter()
+            .filter(|(_, n)| n.state == NeighborState::Full)
+            .map(|(id, _)| *id)
+            .collect();
+        let link_type = self.lsa_types().link;
+        let lsdb = self.link_local_lsdb_for(&cfg.attach_point).await;
+        let all = lsdb.lock().await.all();
+        for id in full {
+            for l in &all {
+                if l.header.advertising_router == id
+                    && l.header.lsa_type == link_type
+                    && l.header.age < lsa::MAX_AGE
+                    && let LsaBody::Link(body) = &l.body
+                {
+                    sources.push((id, body.prefixes.clone()));
+                }
+            }
+        }
+        merge_network_prefixes(&sources)
     }
 
     /// RFC 5340 §4.4.3.3/§4.4.3.4 (port of `ospf::link::
@@ -3375,7 +3412,7 @@ impl LinkManager {
             .await
             .values()
             .filter(|e| e.config.area_id == area_id)
-            .map(|e| e.config.prefix.addr())
+            .map(|e| e.config.primary().addr())
             .min();
         match link {
             Some(addr) => Some(addr),
@@ -4143,6 +4180,29 @@ fn hybrid_router_links(
     result
 }
 
+/// `LinkManager::network_prefixes`' merge: skip NU/LA, dedupe on the
+/// truncated network OR-ing the options, keep first-seen order.
+fn merge_network_prefixes(
+    sources: &[(Ipv4Addr, Vec<LinkPrefixEntry>)],
+) -> Vec<IntraAreaPrefixEntry> {
+    let mut out: Vec<IntraAreaPrefixEntry> = Vec::new();
+    for e in sources.iter().flat_map(|(_, p)| p) {
+        if e.options & (lsa::PREFIX_OPT_NU | lsa::PREFIX_OPT_LA) != 0 {
+            continue;
+        }
+        let prefix = e.prefix.trunc();
+        match out.iter_mut().find(|o| o.prefix == prefix) {
+            Some(o) => o.options |= e.options,
+            None => out.push(IntraAreaPrefixEntry {
+                options: e.options,
+                metric: 0,
+                prefix,
+            }),
+        }
+    }
+    out
+}
+
 fn adjacent_to_dr(local_router_id: Ipv4Addr, status: &LinkStatus) -> bool {
     let up = |n: &NeighborInfo| n.state == NeighborState::Full || n.grace_deadline.is_some();
     match status.dr {
@@ -4480,7 +4540,7 @@ pub(crate) mod tests {
             kernel_interface: "eth0".to_string(),
             interface_id: 3,
             link_local_address: "fe80::1".parse().unwrap(),
-            prefix: "2001:db8::/64".parse().unwrap(),
+            prefixes: vec!["2001:db8::/64".parse().unwrap()],
             cost: 1,
             network_type: NetworkType::PointToPoint,
             priority: 1,
@@ -5005,7 +5065,7 @@ pub(crate) mod tests {
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let mut cfg = link("eth0.0", 10);
         cfg.network_type = NetworkType::PointToMultipoint;
-        cfg.prefix = "2001:db8::1/64".parse().unwrap();
+        cfg.prefixes = vec!["2001:db8::1/64".parse().unwrap()];
         manager
             .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
             .await;
@@ -5143,7 +5203,7 @@ pub(crate) mod tests {
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let mut cfg = link("eth0.0", 10);
         cfg.network_type = NetworkType::Hybrid;
-        cfg.prefix = "2001:db8::1/64".parse().unwrap();
+        cfg.prefixes = vec!["2001:db8::1/64".parse().unwrap()];
         manager
             .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
             .await;
@@ -5853,7 +5913,7 @@ pub(crate) mod tests {
         };
         assert_eq!(body.link_local_address, cfg.link_local_address);
         assert_eq!(body.prefixes.len(), 1);
-        assert_eq!(body.prefixes[0].prefix, cfg.prefix);
+        assert_eq!(body.prefixes[0].prefix, cfg.prefixes[0]);
     }
 
     /// RFC 5340 §4.5.1 (#46): two links in one area each hold only their
@@ -6164,7 +6224,7 @@ pub(crate) mod tests {
         let lo = lsa::v4_net_to_shadow("10.9.9.9/32".parse().unwrap());
         let cfg = LinkConfig {
             ipv4_af: true,
-            prefix: lsa::v4_net_to_shadow("192.0.2.1/24".parse().unwrap()),
+            prefixes: vec![lsa::v4_net_to_shadow("192.0.2.1/24".parse().unwrap())],
             ..link("eth0.0", 10)
         };
         manager
@@ -6186,8 +6246,8 @@ pub(crate) mod tests {
         };
         let loopback = body.prefixes.iter().find(|p| p.prefix == lo).unwrap();
         assert_eq!(loopback.options, lsa::PREFIX_OPT_LA);
-        assert_eq!(cfg.lsa_address(), cfg.prefix.addr());
-        assert_eq!(cfg.host_prefix().prefix_len(), 32);
+        assert_eq!(cfg.lsa_address(), cfg.primary().addr());
+        assert_eq!(cfg.host_prefix(&cfg.prefixes[0]).prefix_len(), 32);
     }
 
     #[tokio::test]
@@ -6569,7 +6629,7 @@ pub(crate) mod tests {
                     let net = if cfg.virtual_link.is_some() {
                         Ipv6Net::default()
                     } else {
-                        cfg.prefix.trunc()
+                        cfg.prefixes[0].trunc()
                     };
                     let (tx, rx) = mpsc::unbounded_channel();
                     let mut ports = wire.ports.lock().unwrap();
@@ -6686,7 +6746,7 @@ pub(crate) mod tests {
         LinkConfig {
             attach_point: format!("link-{n}"),
             link_local_address: format!("fe80::{n}").parse().unwrap(),
-            prefix: format!("2001:db8::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8::{n}/64").parse().unwrap()],
             interface_id: u32::from(n),
             network_type,
             ..link("unused", 10)
@@ -6708,6 +6768,111 @@ pub(crate) mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     }
 
+    /// #952: every address of a p2p link is advertised (Link-LSA, router
+    /// IAP) and routed by the peer; dropping one withdraws its route.
+    #[tokio::test(start_paused = true)]
+    async fn every_address_of_a_link_is_advertised_and_withdrawn() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let nets: Vec<Ipv6Net> = ["2001:db8::1/64", "2001:db8:b::1/64"]
+            .iter()
+            .map(|p| p.parse().unwrap())
+            .collect();
+        let mut la = wired_link(1, NetworkType::PointToPoint);
+        la.prefixes = nets.clone();
+        a.reconcile(vec![la.clone()], HashMap::new(), id(1)).await;
+        b.reconcile(
+            vec![wired_link(2, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        let has =
+            |routes: &[spf::RouteEntry], n: Ipv6Net| routes.iter().any(|r| r.prefix == n.trunc());
+        let lsdb = a.link_local_lsdb_for(&la.attach_point).await;
+        let link_key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_LINK,
+            link_state_id: lsa::interface_id_key(la.interface_id),
+            advertising_router: id(1),
+        };
+        let got = lsdb.lock().await.get(&link_key).unwrap();
+        let LsaBody::Link(body) = &got.body else {
+            panic!("link lsa")
+        };
+        assert_eq!(
+            body.prefixes.iter().map(|p| p.prefix).collect::<Vec<_>>(),
+            nets
+        );
+        let routes = b.compute_routes().await;
+        assert!(has(&routes, nets[1]), "{routes:?}");
+
+        // The address list is part of the wholesale-diffed LinkConfig.
+        la.prefixes.truncate(1);
+        a.reconcile(vec![la], HashMap::new(), id(1)).await;
+        settle(120).await;
+        let routes = b.compute_routes().await;
+        assert!(!has(&routes, nets[1]), "{routes:?}");
+    }
+
+    /// #952: the DR's Network IAP is the union of its own and every Full
+    /// neighbor's Link-LSA prefixes, so a non-DR's second address is routed
+    /// by a third router on the segment.
+    #[tokio::test(start_paused = true)]
+    async fn dr_network_iap_carries_a_neighbors_extra_prefix() {
+        let wire = Arc::new(wire::Wire::default());
+        let rs = [router(&wire), router(&wire), router(&wire)];
+        let extra: Ipv6Net = "2001:db8:c::2/64".parse().unwrap();
+        for (i, r) in rs.iter().enumerate() {
+            let n = u8::try_from(i).unwrap() + 1;
+            let mut l = wired_link(n, NetworkType::Broadcast);
+            l.priority = if n == 1 { 10 } else { 1 };
+            if n == 2 {
+                l.prefixes.push(extra);
+            }
+            r.reconcile(vec![l], HashMap::new(), id(n)).await;
+        }
+        settle(90).await;
+        let routes = rs[2].compute_routes().await;
+        assert!(
+            routes.iter().any(|r| r.prefix == extra.trunc()),
+            "{routes:?}"
+        );
+        let dr = rs[0].lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        let found = dr.lock().await.all().iter().any(|l| {
+            matches!(&l.body, LsaBody::IntraAreaPrefix(b)
+                if b.referenced_ls_type == lsa::LSA_TYPE_NETWORK
+                    && b.prefixes.iter().any(|p| p.prefix == extra.trunc()))
+        });
+        assert!(found);
+    }
+
+    #[test]
+    fn merge_network_prefixes_dedupes_and_skips_nu_la() {
+        let e = |options, p: &str| LinkPrefixEntry {
+            options,
+            prefix: p.parse().unwrap(),
+        };
+        let out = merge_network_prefixes(&[
+            (
+                id(1),
+                vec![e(0, "2001:db8::1/64"), e(0, "2001:db8:1::1/64")],
+            ),
+            (
+                id(2),
+                vec![
+                    e(lsa::PREFIX_OPT_NU, "2001:db8:2::2/64"),
+                    e(lsa::PREFIX_OPT_LA, "2001:db8:3::2/128"),
+                    e(lsa::PREFIX_OPT_DN, "2001:db8::2/64"),
+                ],
+            ),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].prefix, "2001:db8::/64".parse().unwrap());
+        assert_eq!(out[0].options, lsa::PREFIX_OPT_DN);
+        assert_eq!(out[1].prefix, "2001:db8:1::/64".parse().unwrap());
+    }
+
     /// RFC 5340 §4.4.3.9 end to end (#958): over a broadcast segment the
     /// subnet's prefix is in A's LSDB at every sample — router-referenced
     /// until the DR has a Full neighbor, then network-referenced only — and
@@ -6718,7 +6883,7 @@ pub(crate) mod tests {
         let (a, b) = (router(&wire), router(&wire));
         let mut la = wired_link(1, NetworkType::Broadcast);
         la.priority = 10; // A is the DR, so its LSDB holds both flavours
-        let prefix = la.prefix;
+        let prefix = la.prefixes[0];
         a.reconcile(vec![la.clone()], HashMap::new(), id(1)).await;
         b.reconcile(
             vec![wired_link(2, NetworkType::Broadcast)],
@@ -6731,9 +6896,10 @@ pub(crate) mod tests {
             let lsdb = &lsdb;
             async move {
                 match lsdb.lock().await.get(&key).as_deref().map(|l| &l.body) {
-                    Some(LsaBody::IntraAreaPrefix(b)) => {
-                        b.prefixes.iter().any(|p| p.prefix == prefix)
-                    }
+                    Some(LsaBody::IntraAreaPrefix(b)) => b
+                        .prefixes
+                        .iter()
+                        .any(|p| p.prefix.trunc() == prefix.trunc()),
                     _ => false,
                 }
             }
@@ -7071,7 +7237,7 @@ pub(crate) mod tests {
         a.set_router_lsa_max_links(Some(max_links));
         a.set_extended_lsa(extended);
         let seg = |n: u8, k: u8| LinkConfig {
-            prefix: format!("2001:db8:{k}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{k}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let mut a_links = Vec::new();
@@ -7128,7 +7294,7 @@ pub(crate) mod tests {
             // Down to one link: fragments 1 and 2 are flushed, 0 stays live.
             a.reconcile(
                 vec![LinkConfig {
-                    prefix: "2001:db8:1::101/64".parse().unwrap(),
+                    prefixes: vec!["2001:db8:1::101/64".parse().unwrap()],
                     ..wired_link(101, NetworkType::PointToPoint)
                 }],
                 loopback(1),
@@ -7166,7 +7332,7 @@ pub(crate) mod tests {
         let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
         let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
             area_id,
-            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let loopback: Ipv6Net = "2001:db8:ff::3/128".parse().unwrap();
@@ -7342,7 +7508,7 @@ pub(crate) mod tests {
         let (b, c) = (router(&wire), router(&wire));
         let seg = |n: u8| LinkConfig {
             area_id: area1,
-            prefix: format!("2001:db8:2::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:2::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let lo = |n: u8| {
@@ -7393,7 +7559,7 @@ pub(crate) mod tests {
         let (a, b, c) = (router(&wire), router(&wire), router(&wire));
         let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
             area_id,
-            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let lo = |n: u8| {
@@ -7525,7 +7691,7 @@ pub(crate) mod tests {
             area_id,
             stub: area_id == area1,
             nssa: area_id == area1,
-            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let external: Ipv6Net = "2001:db8:e::/48".parse().unwrap();
@@ -7652,7 +7818,7 @@ pub(crate) mod tests {
             let seg = |n: u8, net: u8, area_id: Ipv4Addr, stub: bool| LinkConfig {
                 area_id,
                 stub,
-                prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+                prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
                 ..wired_link(n, NetworkType::PointToPoint)
             };
             a.reconcile(
@@ -7725,7 +7891,7 @@ pub(crate) mod tests {
         );
         let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
             area_id,
-            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         let loopback: Ipv6Net = "2001:db8:ff::1/128".parse().unwrap();
@@ -7793,7 +7959,7 @@ pub(crate) mod tests {
         let (area1, area2) = (Ipv4Addr::new(0, 0, 0, 1), Ipv4Addr::new(0, 0, 0, 2));
         let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
             area_id,
-            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:{net}::{n}/64").parse().unwrap()],
             ..wired_link(n, NetworkType::PointToPoint)
         };
         a.reconcile(

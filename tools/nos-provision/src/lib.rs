@@ -1650,6 +1650,13 @@ pub struct Args {
     /// The label of `--address6` (requires it).
     #[arg(long, requires = "address6")]
     pub address6_label: Option<String>,
+    /// A second IPv6 address on the same subinterface (requires
+    /// `--address6`): an attach point with several addresses (#952).
+    #[arg(long, requires = "address6")]
+    pub address6_extra: Option<IpNet>,
+    /// Removes `--address6-extra`'s address from the subinterface (#952).
+    #[arg(long)]
+    pub remove_address6_extra: Option<IpNet>,
 
     /// Same shape as `--ospf-instance`/`--ospf-router-id`, joining `OSPFv3`
     /// instead (`RoutingTableOp::SetOspfv3Instance`).
@@ -2861,6 +2868,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             tag: args.subinterface_tag,
         }));
     } else {
+        if let Some(address) = args.remove_address6_extra {
+            ops.push(ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+                address,
+            }));
+        }
         ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
             interface: args.interface.clone(),
             tag: args.subinterface_tag,
@@ -2878,6 +2892,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 tag: args.subinterface_tag,
                 address,
                 label: args.address6_label.clone(),
+            }));
+        }
+        if let Some(address) = args.address6_extra {
+            ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+                address,
+                label: None,
             }));
         }
     }
@@ -5109,6 +5131,37 @@ mod tests {
 
     fn has(ops: &[ConfigOp], op: &ConfigOp) {
         assert!(ops.contains(op), "{op:?} missing from {ops:#?}");
+    }
+
+    #[test]
+    fn address6_extra_flags() {
+        let extra: IpNet = "2001:db8:3::2/64".parse().unwrap();
+        let add = ops(&[
+            "--address6",
+            "2001:db8::1/64",
+            "--address6-extra",
+            "2001:db8:3::2/64",
+        ])
+        .unwrap();
+        has(
+            &add,
+            &ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                interface: "eth0".into(),
+                tag: 0,
+                address: extra,
+                label: None,
+            }),
+        );
+        let rm = ops(&["--remove-address6-extra", "2001:db8:3::2/64"]).unwrap();
+        has(
+            &rm,
+            &ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                interface: "eth0".into(),
+                tag: 0,
+                address: extra,
+            }),
+        );
+        assert!(err(&["--address6-extra", "2001:db8:3::2/64"]).contains("address6"));
     }
 
     #[test]

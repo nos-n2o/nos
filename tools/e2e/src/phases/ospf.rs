@@ -4277,9 +4277,8 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     // RFC 8362 Full mode on both routers: adjacency survives (mixed or not,
     // E-LSAs are known types), each originates E-LSAs, and the peer decodes
     // and installs them (E-Router 0xA021, E-Link 0x8028, E-Intra-Area-Prefix
-    // 0xA029). The SPF side is covered by a unit test: the loopback route is
-    // already installed from the legacy LSAs, and the daemon only advertises
-    // an interface's first IPv6 address, so no new route can prove it here.
+    // 0xA029). The SPF side is covered by a unit test; a secondary address
+    // below proves the E-Link/E-Intra-Area-Prefix prefixes route (#952).
     let e_pat = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_ROUTER}");
     let (a_before, b_before) = (a.count(&e_pat), b.count(&e_pat));
     // The legacy Router-LSA (0x2001) each side flushes on the switch (#149).
@@ -4332,6 +4331,44 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         .await?;
     assert_no_legacy_lsas(b, OSPFV3_ROUTER_ID).await?;
     assert_no_legacy_lsas(a, OSPFV3_ROUTER_ID_B).await?;
+
+    // #952: a secondary IPv6 address of router-b's attach point is advertised
+    // (E-Link-LSA + E-Intra-Area-Prefix-LSA) and routed by router-a; removing
+    // it withdraws the route. The address list is part of the wholesale-diffed
+    // link config, so the link restarts each time: wait for both sides Full.
+    let net = OSPFV3_EXTRA_NET_B;
+    let (added, removed) = (
+        format!("added route prefix={net}.*source=Some(Ospf)"),
+        format!("removed route prefix={net}"),
+    );
+    let full = |peer: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={peer}");
+    let b_flags = |extra: &[&str]| {
+        with_base(
+            B,
+            [
+                ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+                strings(&["--ospfv3-extended-lsa"]),
+                strings(extra),
+            ]
+            .concat(),
+        )
+    };
+    let (a_added, a_removed) = (a.count(&added), a.count(&removed));
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    b.provision_flags(&b_flags(&["--address6-extra", OSPFV3_EXTRA_PREFIX_B]))
+        .await?;
+    a.wait_new(&added, a_added, 60).await?;
+    b.provision_flags(&b_flags(&[
+        "--remove-address6-extra",
+        OSPFV3_EXTRA_PREFIX_B,
+    ]))
+    .await?;
+    a.wait_new(&removed, a_removed, 60).await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
     ospfv3_link_state(w).await
 }
 

@@ -412,7 +412,7 @@ on router-c (`9.9.9.10` is router-b's router ID), and the mirror image on router
 Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU override and database exchange, LSA ageing and withdrawal, and loop-free alternates behave as in [OSPF](ospf.md#features-and-behaviour). The differences:
 
 - The Interface MTU check (RFC 5340 A.3.3) and `mtu-ignore` work as in OSPF; the log line is `ospfv3 dbd rejected` (with the `link`). A broadcast-domain attach point uses the bridge's observed MTU.
-- **IPv6 only.** Only IPv6 prefixes are advertised, and neighbours are reached through their link-local addresses. On a link with several IPv6 addresses, only the first one is advertised.
+- **IPv6 only.** Only IPv6 prefixes are advertised, and neighbours are reached through their link-local addresses. On a link with several IPv6 addresses, every global one is advertised (link-local excluded, two addresses in one /64 give one prefix); adding or removing an address restarts the link. A loopback still advertises only its first IPv6 address.
 - **Loop-free alternates.** The backup next hop is a link-local address too, and may leave through a different interface from the primary; it is installed with its own interface, at a worse metric than the primary.
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
