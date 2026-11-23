@@ -52,6 +52,13 @@ pub enum Ospfv3InstanceOp {
         /// Most non-self LSAs per store; `None` restores the default.
         max_lsa: Option<u32>,
     },
+    /// Sets (`Some`) or clears (`None`) the default-cost reference bandwidth.
+    SetReferenceBandwidth {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Mbit/s; `None` restores 10000.
+        mbps: Option<u32>,
+    },
     /// Sets the RFC 5838 address family of the instance.
     SetAddressFamily {
         /// Name of the instance this op targets.
@@ -114,6 +121,7 @@ impl Ospfv3InstanceOp {
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
                         max_lsa: None,
+                        reference_bandwidth: None,
                         address_family: crate::schema::Ospfv3AddressFamily::default(),
                     });
                 }
@@ -136,6 +144,10 @@ impl Ospfv3InstanceOp {
                 address_family,
             } => {
                 find_instance_mut(config, name)?.address_family = *address_family;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetReferenceBandwidth { name, mbps } => {
+                find_instance_mut(config, name)?.reference_bandwidth = *mbps;
                 Ok(())
             }
             Ospfv3InstanceOp::SetMaxLsa { name, max_lsa } => {
@@ -205,6 +217,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             address_family: crate::schema::Ospfv3AddressFamily::default(),
         }
     }

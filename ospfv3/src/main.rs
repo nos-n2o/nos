@@ -134,7 +134,22 @@ async fn main() -> anyhow::Result<()> {
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new(args.dev.lsa_age_multiplier, args.dbd_max_headers);
     let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
-    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()).is_some());
+    let marker = boot::take_grace_marker(&grace_marker, unix_now());
+    links.set_after_graceful_restart(marker.is_some());
+    if let Some(m) = marker {
+        // RFC 5187: planned (SIGTERM marker) or unplanned (the running marker
+        // a crash left): hold origination and the first push until the old
+        // neighbors are Full again.
+        let remaining = m.deadline.saturating_sub(unix_now());
+        links.begin_restart(
+            m.neighbors,
+            std::time::Duration::from_secs(remaining),
+            m.unplanned,
+        );
+    }
+    // While a grace period is configured, keep the running marker fresh so a
+    // crash leaves one behind (#1163).
+    let marker_task = tokio::spawn(keep_running_marker(links.clone(), grace_marker.clone()));
     links.set_originate_lsinfinity(args.dev.originate_lsinfinity);
     links.set_router_lsa_max_links(args.dev.router_lsa_max_links);
     let (link_tx, link_rx) = watch::channel(nos_ospfv3::link_client::LinkTable::default());
@@ -187,15 +202,18 @@ async fn main() -> anyhow::Result<()> {
     // Before `shutdown_tx`: the log forwarder stops on it, and these lines
     // are what a neighbor's operator (and nos-e2e) looks for.
     let mut announced = false;
+    // Stop the refresh before the final marker is written or deleted.
+    marker_task.abort();
+    let _ = marker_task.await;
     if planned_restart {
         let grace_period = links.grace_period();
         if grace_period != 0 {
             // Lets the respawned process skip RFC 6987's on-startup period.
-            // ponytail: v3 writes no neighbors, so no restart mode yet (#1163 wires it).
+            let full = links.full_neighbor_ids().await;
             match boot::write_grace_marker(
                 &grace_marker,
                 unix_now() + u64::from(grace_period),
-                &std::collections::BTreeSet::new(),
+                &full,
             ) {
                 Ok(()) => {
                     info!(instance = %args.instance, "ospfv3 graceful restart marker written");
@@ -206,6 +224,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         announced = links.announce_graceful_restart().await;
+    }
+    if !announced {
+        // A clean exit that announces nothing: the respawn (if any) is cold.
+        let _ = std::fs::remove_file(&grace_marker);
     }
     // RFC 6987 §3.2 (c): never under a grace period.
     if !announced {
@@ -223,6 +245,35 @@ async fn main() -> anyhow::Result<()> {
 
     info!(instance = %args.instance, "shutting down");
     Ok(())
+}
+
+/// Rewrites the running marker (deadline `now + grace`, current `Full`
+/// neighbors) every grace/4 seconds while a grace period is configured and
+/// restart mode is off. ponytail: a crash loses neighbors that went `Full`
+/// since the last refresh (they are not waited for), and a crash during
+/// restart mode leaves no marker (cold start); refresh cost is one small
+/// atomic file write per grace/4.
+async fn keep_running_marker(links: std::sync::Arc<LinkManager>, path: PathBuf) {
+    let mut announced = false;
+    loop {
+        let grace = links.grace_period();
+        // Poll every second until a grace period is configured and restart
+        // mode is over; then refresh every grace/4.
+        let mut secs = 1;
+        if grace != 0 && !links.restart_active() {
+            let full = links.full_neighbor_ids().await;
+            match boot::write_running_marker(&path, unix_now() + u64::from(grace), &full) {
+                Ok(()) if !announced => {
+                    announced = true;
+                    info!(grace_period = grace, "ospfv3 running marker written");
+                }
+                Ok(()) => {}
+                Err(e) => tracing::warn!(error = %e, "cannot write ospfv3 running marker"),
+            }
+            secs = u64::from(grace / 4).max(1);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
 }
 
 fn unix_now() -> u64 {

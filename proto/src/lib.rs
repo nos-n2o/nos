@@ -108,7 +108,7 @@ pub use ops::{
 };
 pub use ospf::{
     LinkInterfaceState, LlsSummary, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState,
-    OspfRequest,
+    OspfRequest, SrAdjSid, SrPrefixSid, SrSrgb, SrSummary,
 };
 pub use ospfv3::{Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
 pub use paths::{

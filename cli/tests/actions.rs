@@ -303,6 +303,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",
             "show ospf database",
+            "show ospf segment-routing",
             "show ospfv3 neigh",
             "show ospfv3 database",
             "clear bgp b1 192.0.2.2 soft-in",

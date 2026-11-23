@@ -176,6 +176,9 @@ pub enum OspfRequest {
     /// routes (e.g. `redistribute from static to ospf`), to be originated as
     /// real RFC 2328 AS-external-LSAs.
     RedistributeRoutes(crate::bgp::RedistributeUpdate),
+    /// One-shot: the segment routing state (SRGBs, Prefix-SIDs, Adj-SIDs),
+    /// local and received (#1382).
+    GetSegmentRouting,
 }
 
 /// Messages sent from `nos-ospfd` to a query client.
@@ -185,4 +188,69 @@ pub enum OspfEvent {
     Neighbors(Vec<NeighborSummary>),
     /// Reply with the LSDB summary.
     Database(Vec<LsaSummary>),
+    /// Reply with the segment routing state.
+    SegmentRouting(SrSummary),
+}
+
+/// `show ospf segment-routing` (#1382): what this router advertises and what
+/// it learned, over every area.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrSummary {
+    /// Every router's first SRGB range, ours included.
+    pub srgb: Vec<SrSrgb>,
+    /// Every Prefix-SID.
+    pub prefix_sids: Vec<SrPrefixSid>,
+    /// Every Adj-SID.
+    pub adj_sids: Vec<SrAdjSid>,
+}
+
+/// One router's SRGB range (RFC 8665 §3.2).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrSrgb {
+    /// The advertising router.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub router: Ipv4Addr,
+    /// First label of the range.
+    pub base: u32,
+    /// Number of labels.
+    pub size: u32,
+}
+
+/// A Prefix-SID (RFC 8665 §5) a router advertises for one prefix.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrPrefixSid {
+    /// The advertising router.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub router: Ipv4Addr,
+    /// The prefix address.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub prefix: Ipv4Addr,
+    /// The prefix length.
+    pub prefix_len: u8,
+    /// An index into the SRGB, or the label itself when `absolute`.
+    pub value: u32,
+    /// `value` is the label itself.
+    pub absolute: bool,
+    /// The label in the router's own SRGB, when it is known.
+    pub label: Option<u32>,
+}
+
+/// An Adj-SID or LAN Adj-SID (RFC 8665 §6, §7) a router advertises.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SrAdjSid {
+    /// The advertising router.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub router: Ipv4Addr,
+    /// The neighbour's router id (LAN Adj-SID); `None` on a point-to-point link.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub neighbor: Option<Ipv4Addr>,
+    /// The Extended Link's Link ID.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub link_id: Ipv4Addr,
+    /// The advertised label (absolute).
+    pub label: u32,
 }

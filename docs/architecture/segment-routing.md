@@ -63,7 +63,10 @@ An `IlmRoute { label, hops: Vec<NextHop> }` says what a packet arriving with `la
 
 - `nos-ospfd` derives labels in `spf::attach_labels` and the ILM in `spf::ilm_routes`; `rib_push_client` sends both (`next_hop_labels` on `PushOspfRoutes`, the full ILM set on `PushMplsRoutes` whenever it changes, empty to withdraw). Rules and ceilings: [OSPF internals](../protocols/ospf-internals.md).
 - ILM per Prefix-SID: incoming label = our SRGB base + index; hops = the route's next hops with the stack each is sent with (empty = PHP pop); our own SIDs are egress entries.
-- Observable until 5d (#1383): the `installed mpls ilm route` / labelled route install lines of `nos-ribd`.
+- Adj-SIDs (#1382): with an SRGB set, each `Full` adjacency (p2p, p2mp, and each `Full` neighbour on a DR-adjacent broadcast link as a LAN Adj-SID) gets a dynamic label from 24000 up (`link/adj_sid.rs`: stable per local address and neighbour, never freed, clear of the default SRGB and the VPN labels). It goes into one Extended Link LSA per Router-LSA link (sub-TLV 2, or 3 with the neighbour) and into the ILM as a pop toward the neighbour's address (empty stack, like PHP); both disappear with the adjacency.
+- `show ospf segment-routing` (`OspfRequest::GetSegmentRouting`, `LinkManager::sr_summary`, `GET /v1/ospf/segment-routing`): SRGB ranges, Prefix-SIDs (index and label) and Adj-SIDs read from every area's LSDB, ours included. Classified like `GetDatabase` (`User`, `Restd`).
+- A labelled route whose hop carries no ifindex (an OSPF Prefix-SID route) resolves its egress with a lookup of the gateway in the table's own VRF when the table has no L3VPN underlay (`egress_of`, found by the `ospf-sr` phase, #1383); before, it was skipped as `next hop unresolved`.
+- Forwarding is e2e-proven by `ospf-sr` (#1383): labelled packets and an Adj-SID packet crossing a transit router, read from the kernel MPLS counters.
 
 ## Not here
 

@@ -319,6 +319,7 @@ pub async fn handle_action(
         | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
         | Resolved::ShowOspfDatabase
+        | Resolved::ShowOspfSegmentRouting
         | Resolved::ShowOspfv3Neigh
         | Resolved::ShowOspfv3Database
         | Resolved::ClearBgpSoftIn { .. }
@@ -341,6 +342,7 @@ fn version_line() -> String {
 
 /// The `show`/`clear` actions of `handle_action`, split out for length
 /// (#425); `handle_action` names every variant routed here.
+#[allow(clippy::too_many_lines, reason = "one arm per query command")]
 async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket: &Path) -> Outcome {
     match action {
         Resolved::ShowRunningConfig => {
@@ -456,6 +458,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowOspfNeigh => {
             show_ospf_neigh(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfSegmentRouting => {
+            show_ospf_segment_routing(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowOspfDatabase => {
@@ -1334,6 +1340,39 @@ async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
                 Ok(entries) => {
                     println!("{}", format::render_ospf_database(&instance.name, &entries));
                 }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospf segment-routing` (#1382) — mirrors `show_ospf_database`.
+async fn show_ospf_segment_routing(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(ospf_socket)) => match ospf_client::get_segment_routing(&ospf_socket).await {
+                Ok(sr) => println!(
+                    "{}",
+                    format::render_ospf_segment_routing(&instance.name, &sr)
+                ),
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospf instance '{}' is not running", instance.name),

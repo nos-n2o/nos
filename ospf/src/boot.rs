@@ -109,6 +109,16 @@ pub fn write_grace_marker(
     write_atomic(path, &restart::encode_marker(deadline, neighbors))
 }
 
+/// The running marker (#1163): same file, rewritten periodically while the
+/// daemon is up, so a respawn that finds it knows the process crashed.
+pub fn write_running_marker(
+    path: &Path,
+    deadline: u64,
+    neighbors: &BTreeSet<Ipv4Addr>,
+) -> io::Result<()> {
+    write_atomic(path, &restart::encode_running_marker(deadline, neighbors))
+}
+
 /// Consumes the marker (deleted whatever its content): `Some` only if its
 /// deadline is still ahead of `now` and at most a `u16` grace period away
 /// (rejects a clock jump or garbage). Missing, unreadable or corrupt: `None`.
@@ -151,6 +161,13 @@ mod tests {
         // At or past the deadline.
         write_grace_marker(&path, 1000, &nb).unwrap();
         assert!(take_grace_marker(&path, 1000).is_none());
+        // The running marker (#1163): a crash leaves it, a clean exit deletes it.
+        write_running_marker(&path, 1120, &nb).unwrap();
+        let m = take_grace_marker(&path, 1000).unwrap();
+        assert!(m.unplanned);
+        assert_eq!(m.neighbors, nb);
+        write_grace_marker(&path, 1120, &nb).unwrap();
+        assert!(!take_grace_marker(&path, 1000).unwrap().unplanned);
         std::fs::write(&path, "garbage").unwrap();
         assert!(take_grace_marker(&path, 1000).is_none());
         assert!(!path.exists());

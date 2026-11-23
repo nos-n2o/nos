@@ -110,6 +110,9 @@ pub enum Command {
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase,
+    /// `show ospf segment-routing` (#1382): SRGBs, Prefix-SIDs and Adj-SIDs
+    /// across every configured OSPF instance.
+    ShowOspfSegmentRouting,
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,

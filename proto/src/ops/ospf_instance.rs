@@ -39,6 +39,13 @@ pub enum OspfInstanceOp {
         /// Most non-self LSAs per store; `None` restores the default.
         max_lsa: Option<u32>,
     },
+    /// Sets (`Some`) or clears (`None`) the default-cost reference bandwidth.
+    SetReferenceBandwidth {
+        /// Name of the instance this op targets.
+        name: String,
+        /// Mbit/s; `None` restores 10000.
+        mbps: Option<u32>,
+    },
     /// Sets (`Some`) or clears (`None`) the helper-side cap on a neighbor's grace period.
     SetGracefulRestartHelperMaxGracePeriod {
         /// Name of the instance this op targets.
@@ -135,6 +142,7 @@ impl OspfInstanceOp {
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
                         max_lsa: None,
+                        reference_bandwidth: None,
                         host_router: false,
                         traffic_engineering: false,
                         segment_routing: crate::schema::SegmentRouting::default(),
@@ -152,6 +160,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetMaxLsa { name, max_lsa } => {
                 find_instance_mut(config, name)?.max_lsa = *max_lsa;
+                Ok(())
+            }
+            OspfInstanceOp::SetReferenceBandwidth { name, mbps } => {
+                find_instance_mut(config, name)?.reference_bandwidth = *mbps;
                 Ok(())
             }
             OspfInstanceOp::SetGracefulRestartHelperMaxGracePeriod { name, seconds } => {
@@ -243,6 +255,7 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             max_lsa: None,
+            reference_bandwidth: None,
             host_router: false,
             traffic_engineering: false,
             segment_routing: crate::schema::SegmentRouting::default(),

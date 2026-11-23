@@ -40,6 +40,7 @@ use crate::lsa::{
     LsaHeader, LsaKey, NetworkLsaBody, RouterLsaBody, RouterLsaLink, LINK_TYPE_POINT_TO_POINT,
     LINK_TYPE_TRANSIT_NETWORK, LINK_TYPE_VIRTUAL,
 };
+mod restart;
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
 use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket};
@@ -473,7 +474,8 @@ pub async fn run(
     as_lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
-    mut grace_rx: mpsc::UnboundedReceiver<u32>,
+    mut grace_rx: mpsc::UnboundedReceiver<GraceCmd>,
+    startup_grace: Option<(u32, u8)>,
     mut topology_rx: mpsc::UnboundedReceiver<Vec<Ipv4Addr>>,
     mut bfd_rx: mpsc::UnboundedReceiver<Ipv6Addr>,
 ) {
@@ -513,6 +515,21 @@ pub async fn run(
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, authenticated = cfg.auth.is_some(), "ospfv3 link driver started");
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospfv3 interface reached waiting");
+    }
+
+    // RFC 5187 §2.1: a restarting router announces itself before its first
+    // Hello. Its neighbor table is empty, so the LSU goes to the link's group.
+    if let Some((grace_period, reason)) = startup_grace {
+        let payload = grace_payload(&cfg, local_router_id, grace_period, reason, 0);
+        match socket.send_multicast(cfg.interface_id, &payload) {
+            Ok(()) => info!(
+                link = %cfg.attach_point, grace_period, reason,
+                "ospfv3 graceful restart: grace-lsa sent at startup"
+            ),
+            Err(e) => {
+                warn!(link = %cfg.attach_point, error = %e, "failed to send ospfv3 startup grace-lsa");
+            }
+        }
     }
 
     loop {
@@ -624,15 +641,19 @@ pub async fn run(
                 run_election(&socket, &cfg, local_router_id, &status);
                 advance_adjacencies(&socket, &cfg, local_router_id, &status);
             }
-            Some(grace_period) = grace_rx.recv() => {
-                if grace_period == 0 {
-                    // 0 is never a grace period: resend the LSDB now
-                    // (`LinkManager::flood_now`, RFC 6987 on-shutdown).
+            Some(cmd) = grace_rx.recv() => match cmd {
+                // `LinkManager::flood_now`, RFC 6987 on-shutdown.
+                GraceCmd::Resend => {
                     flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status, &mut last_flood_dest).await;
-                } else {
-                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
                 }
-            }
+                GraceCmd::Announce(grace_period) => {
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, lsa::RESTART_REASON_SOFTWARE, 0);
+                }
+                // RFC 5187 §2.3: restart mode ended, a MaxAge Grace-LSA.
+                GraceCmd::Flush => {
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, 0, lsa::RESTART_REASON_SOFTWARE, lsa::MAX_AGE);
+                }
+            },
             Some(address) = bfd_rx.recv() => kill_bfd_neighbor(&cfg, &status, address),
             Some(origins) = topology_rx.recv() => exit_grace_on_topology_change(&cfg, &status, &origins),
             _ = rxmt_sweep.tick() => {
@@ -1872,18 +1893,17 @@ fn expire_grace(cfg: &LinkConfig, status: &StatusHandle) {
     }
 }
 
-/// RFC 5187 restarting side: one Grace-LSA to every `Full` neighbor on
-/// this link, just before the process exits.
-fn send_grace_lsas(
-    socket: &LinkSocket,
+/// The LSU carrying this router's Grace-LSA (`age` `MaxAge` flushes it).
+fn grace_payload(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
-    status: &StatusHandle,
     grace_period: u32,
-) {
+    restart_reason: u8,
+    age: u16,
+) -> Vec<u8> {
     let grace = Lsa {
         header: LsaHeader {
-            age: 0,
+            age,
             lsa_type: lsa::LSA_TYPE_GRACE,
             link_state_id: lsa::interface_id_key(cfg.interface_id),
             advertising_router: local_router_id,
@@ -1893,16 +1913,31 @@ fn send_grace_lsas(
         },
         body: LsaBody::Grace(GraceLsaBody {
             grace_period,
-            restart_reason: lsa::RESTART_REASON_SOFTWARE,
+            restart_reason,
         }),
     };
-    let payload = packet::encode_lsu(&LsuPacket {
+    packet::encode_lsu(&LsuPacket {
         discarded: 0,
         last_error: None,
         router_id: local_router_id,
         area_id: cfg.area_id,
         lsas: vec![grace],
-    });
+    })
+}
+
+/// RFC 5187 restarting side: one Grace-LSA to every `Full` neighbor on
+/// this link (just before the process exits, or `age` `MaxAge` when restart
+/// mode ends).
+fn send_grace_lsas(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    grace_period: u32,
+    restart_reason: u8,
+    age: u16,
+) {
+    let payload = grace_payload(cfg, local_router_id, grace_period, restart_reason, age);
     let full: Vec<(Ipv4Addr, Ipv6Addr)> = status
         .borrow()
         .neighbors
@@ -1912,6 +1947,10 @@ fn send_grace_lsas(
         .collect();
     for (neighbor_id, address) in full {
         match socket.send_unicast(address, cfg.interface_id, &payload) {
+            Ok(()) if age >= lsa::MAX_AGE => info!(
+                link = %cfg.attach_point, neighbor = %neighbor_id,
+                "ospfv3 graceful restart: grace-lsa flushed"
+            ),
             Ok(()) => info!(
                 link = %cfg.attach_point, neighbor = %neighbor_id, grace_period,
                 "ospfv3 graceful restart: grace-lsa sent"
@@ -2028,13 +2067,23 @@ fn run_election(
     }
 }
 
+/// What a link task is asked to do with Grace-LSAs and its LSDB.
+#[derive(Debug, Clone, Copy)]
+pub enum GraceCmd {
+    /// Announce this grace period (seconds) to the `Full` neighbors.
+    Announce(u32),
+    /// Resend the LSDB to the `Full` neighbors now.
+    Resend,
+    /// Flush the Grace-LSA (restart mode ended, RFC 5187 §2.3).
+    Flush,
+}
+
 struct LinkEntry {
     config: LinkConfig,
     task: JoinHandle<()>,
     status: watch::Receiver<LinkStatus>,
-    /// Asks the link task to send Grace-LSAs (the grace period, seconds), or
-    /// with `0` to resend its LSDB to its `Full` neighbors now.
-    grace_tx: mpsc::UnboundedSender<u32>,
+    /// Asks the link task to send or flush Grace-LSAs, or to resend its LSDB.
+    grace_tx: mpsc::UnboundedSender<GraceCmd>,
     /// BFD found the path to this neighbor link-local address down.
     bfd_tx: mpsc::UnboundedSender<Ipv6Addr>,
     /// Routers whose topology LSAs changed in this link's scope (RFC 3623
@@ -2131,6 +2180,11 @@ pub struct LinkManager {
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
+    /// RFC 5187 restarting-router mode (`begin_restart`), mirrored in
+    /// `restart_on` for the lock-free reads of the origination pass and the
+    /// route push.
+    restart: std::sync::Mutex<Option<restart::RestartState>>,
+    restart_on: AtomicBool,
     /// Each attach point's `bfd` profile (`set_bfd`, every resync); a link
     /// missing here has no BFD.
     bfd: std::sync::Mutex<HashMap<String, BfdProfile>>,
@@ -2401,7 +2455,7 @@ impl LinkManager {
 
     /// Has every link resend its LSDB to its `Full` neighbors now.
     async fn flood_now(&self) {
-        let senders: Vec<mpsc::UnboundedSender<u32>> = self
+        let senders: Vec<mpsc::UnboundedSender<GraceCmd>> = self
             .links
             .lock()
             .await
@@ -2409,7 +2463,7 @@ impl LinkManager {
             .map(|e| e.grace_tx.clone())
             .collect();
         for tx in senders {
-            let _ = tx.send(0);
+            let _ = tx.send(GraceCmd::Resend);
         }
     }
 
@@ -2525,6 +2579,8 @@ impl LinkManager {
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             router_lsa_max_links: AtomicUsize::new(0),
             grace_period: AtomicU16::new(0),
+            restart: std::sync::Mutex::new(None),
+            restart_on: AtomicBool::new(false),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
         });
@@ -2626,8 +2682,11 @@ impl LinkManager {
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
         let mut by_area = HashMap::new();
+        let mut superseded = self.as_lsdb.lock().await.take_superseded_changes();
         for (area_id, lsdb) in area_stores {
-            by_area.insert(area_id, lsdb.lock().await.take_topology_changes());
+            let mut db = lsdb.lock().await;
+            superseded.extend(db.take_superseded_changes());
+            by_area.insert(area_id, db.take_topology_changes());
         }
         for e in self.links.lock().await.values() {
             let mut origins = by_area.get(&e.config.area_id).cloned().unwrap_or_default();
@@ -2636,6 +2695,9 @@ impl LinkManager {
                 let _ = e.topology_tx.send(origins);
             }
         }
+        let own = *self.router_id.lock().await;
+        self.restart_tick(superseded.iter().any(|o| Some(*o) != own))
+            .await;
         let hold: HashSet<Ipv4Addr> = self
             .links
             .lock()
@@ -3452,6 +3514,11 @@ impl LinkManager {
     /// over DBD alike. Only the stores of links this tick saw are swept: a
     /// removed link's store has no neighbor to flood to.
     async fn origination_pass(&self) {
+        // RFC 5187 §2.1: a restarting router originates nothing (the helpers
+        // hold our old LSAs); `restart_tick` wakes this on exit.
+        if self.restart_active() {
+            return;
+        }
         let Some(router_id) = *self.router_id.lock().await else {
             return;
         };
@@ -3629,6 +3696,9 @@ impl LinkManager {
         // cost) is a Router-LSA metric, not a reason to restart the link.
         for (key, entry) in links.iter_mut() {
             if let Some(wanted) = desired_map.get(key) {
+                if entry.config.cost != wanted.cost {
+                    info!(link = %key, old = entry.config.cost, cost = wanted.cost, "ospfv3 link cost changed");
+                }
                 entry.config.cost = wanted.cost;
             }
         }
@@ -3650,6 +3720,7 @@ impl LinkManager {
                 status_tx,
                 self.dbd_max_headers,
                 grace_rx,
+                self.startup_grace(),
                 topology_rx,
                 bfd_rx,
             ));
@@ -3819,7 +3890,7 @@ impl LinkManager {
             grace_period,
             "ospfv3 graceful restart: announcing grace period before shutdown"
         );
-        let senders: Vec<mpsc::UnboundedSender<u32>> = self
+        let senders: Vec<mpsc::UnboundedSender<GraceCmd>> = self
             .links
             .lock()
             .await
@@ -3828,7 +3899,7 @@ impl LinkManager {
             .collect();
         for _ in 0..2 {
             for tx in &senders {
-                let _ = tx.send(u32::from(grace_period));
+                let _ = tx.send(GraceCmd::Announce(u32::from(grace_period)));
             }
             tokio::time::sleep(GRACE_SEND_WINDOW).await;
         }
@@ -6648,6 +6719,96 @@ pub(crate) mod tests {
         b.reconcile(vec![lb], loopback(2), id(2)).await;
         settle(60).await;
         (a, b)
+    }
+
+    fn own_lsas(lsas: &[Ospfv3LsaSummary], who: Ipv4Addr) -> usize {
+        lsas.iter().filter(|l| l.advertising_router == who).count()
+    }
+
+    /// RFC 5187 restarting router (#1163): nothing is originated while it
+    /// waits; the timeout (or a topology change by a third router) ends it.
+    #[tokio::test(start_paused = true)]
+    async fn restart_mode_holds_origination_until_timeout_or_topology_change() {
+        for topology in [false, true] {
+            let wire = Arc::new(wire::Wire::default());
+            let b = router(&wire);
+            // No neighbors to wait for: not restart mode at all.
+            b.begin_restart(
+                std::collections::BTreeSet::new(),
+                std::time::Duration::from_secs(30),
+                true,
+            );
+            assert!(!b.restart_active());
+            b.begin_restart([id(9)].into(), std::time::Duration::from_secs(30), true);
+            assert!(b.restart_active());
+            b.reconcile(
+                vec![wired_link(2, NetworkType::PointToPoint)],
+                loopback(2),
+                id(2),
+            )
+            .await;
+            settle(20).await;
+            assert!(b.restart_active());
+            assert_eq!(own_lsas(&b.database_summaries().await, id(2)), 0);
+            if topology {
+                b.restart_tick(true).await;
+            } else {
+                settle(20).await;
+            }
+            assert!(!b.restart_active());
+            settle(5).await;
+            assert!(own_lsas(&b.database_summaries().await, id(2)) > 0);
+        }
+    }
+
+    /// A respawn (crash marker) ends restart mode `Complete` once its
+    /// pre-restart neighbor is `Full` again; the helper's grace ends with it.
+    #[tokio::test(start_paused = true)]
+    async fn restart_mode_ends_when_the_neighbors_are_full_again() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = pair(&wire, None, None).await;
+        b.set_graceful_restart(Some(120));
+        assert_eq!(b.full_neighbor_ids().await, [id(1)].into());
+        // SIGKILL: no announcement, the task just vanishes.
+        b.shutdown().await;
+        drop(b);
+        settle(5).await;
+
+        let b2 = router(&wire);
+        b2.begin_restart([id(1)].into(), std::time::Duration::from_secs(100), true);
+        assert_eq!(b2.startup_grace(), Some((100, lsa::RESTART_REASON_UNKNOWN)));
+        b2.reconcile(
+            vec![wired_link(2, NetworkType::PointToPoint)],
+            loopback(2),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        assert!(!b2.restart_active());
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        assert!(own_lsas(&b2.database_summaries().await, id(2)) > 0);
+    }
+
+    /// The startup Grace-LSA carries the restart reason; `MaxAge` flushes it.
+    #[test]
+    fn grace_lsa_carries_the_restart_reason() {
+        let cfg = wired_link(1, NetworkType::PointToPoint);
+        for (reason, age) in [
+            (lsa::RESTART_REASON_UNKNOWN, 0),
+            (lsa::RESTART_REASON_SOFTWARE, lsa::MAX_AGE),
+        ] {
+            let payload = grace_payload(&cfg, id(1), 60, reason, age);
+            let lsu = packet::decode_lsu(&payload).unwrap();
+            let l = &lsu.lsas[0];
+            assert_eq!(l.header.age, age);
+            let LsaBody::Grace(g) = &l.body else {
+                panic!("not a grace lsa")
+            };
+            assert_eq!((g.grace_period, g.restart_reason), (60, reason));
+        }
     }
 
     /// RFC 4222 §2 recommendation 2 — mirrors `ospf::link`'s test.

@@ -5707,6 +5707,11 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "ospfv3 helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
     ))
     .await?;
+    // The respawn is a restarting router (#1163): restart mode, then done.
+    a.wait("ospfv3 restart mode: entered neighbors=[0-9]* remaining_secs=[0-9]* unplanned=false")
+        .await?;
+    a.wait("ospfv3 restart mode: exited reason=complete")
+        .await?;
     quiet_settled(b, &torn, torn_before).await?;
     b.assert_quiet(&removed, removed_before, 5).await?;
 
@@ -5724,6 +5729,7 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         b.count(&full_on_b),
         a.count(&full_on_a),
     );
+    let running0 = a.count("ospfv3 running marker written");
     log("second SIGTERM to router-a's nos-ospfv3d; router-b changes topology meanwhile");
     w.dock
         .signal_process("router-a", "nos-ospfv3d", "-TERM")
@@ -5742,11 +5748,59 @@ pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     // The loopback address stays on router-b (flags cannot remove one) and
     // OSPFV3_LFA_LOOPBACK_ADDRESS is the one later phases use, so only the
     // OSPFv3 attachment is cleared: they re-attach it and see a fresh route.
+    let clear = helper_cap(&["--clear-ospfv3-loopback-profile", OSPFV3_PROFILE]);
+
+    // RFC 5187 unplanned restart (#1163): router-a, which keeps a running
+    // marker while a grace period is configured, is SIGKILLed. The respawn
+    // announces itself before its first Hello, enters restart mode and keeps
+    // router-a's own kernel route to router-b's loopback.
+    let running = "ospfv3 running marker written";
+    a.wait_new(running, running0, 90).await?;
     b.provision_flags(&helper_cap(&[
-        "--clear-ospfv3-loopback-profile",
+        "--ospfv3-loopback-address",
+        OSPFV3_LFA_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
         OSPFV3_PROFILE,
     ]))
-    .await
+    .await?;
+    for _ in 0..60 {
+        if a.rt1_has(OSPFV3_LFA_LOOPBACK_ADDRESS, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let (in_p, out_p) = (
+        "ospfv3 restart mode: entered neighbors=[0-9]* remaining_secs=[0-9]* unplanned=true",
+        "ospfv3 restart mode: exited reason=complete",
+    );
+    let startup = "ospfv3 graceful restart: grace-lsa sent at startup link=eth0.0 grace_period=[0-9]* reason=0";
+    let helper = format!(
+        "ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID} grace_period=[0-9]* restart_reason=0 effective_grace="
+    );
+    let removed_a = format!("removed route prefix={OSPFV3_LFA_LOOPBACK_ADDRESS}");
+    let (in0, out0, st0, helper0, removed0, torn0, full_b0, full_a0) = (
+        a.count(in_p),
+        a.count(out_p),
+        a.count(startup),
+        b.count(&helper),
+        a.count(&removed_a),
+        b.count_fresh(&torn).await,
+        b.count(&full_on_b),
+        a.count(&full_on_a),
+    );
+    log("SIGKILL to router-a's nos-ospfv3d: an unplanned restart");
+    w.dock
+        .signal_process("router-a", "nos-ospfv3d", "-KILL")
+        .await?;
+    a.wait_new(in_p, in0, 90).await?;
+    a.wait_new(startup, st0, 90).await?;
+    b.wait_new(&helper, helper0, 90).await?;
+    a.wait_new(out_p, out0, 90).await?;
+    b.wait_new(&full_on_b, full_b0, 90).await?;
+    a.wait_new(&full_on_a, full_a0, 90).await?;
+    quiet_settled(b, &torn, torn0).await?;
+    a.assert_quiet(&removed_a, removed0, 5).await?;
+    b.provision_flags(&clear).await
 }
 
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
@@ -7966,6 +8020,316 @@ pub async fn ospf_sr_sid(w: &mut World) -> anyhow::Result<()> {
     ra.provision(&sr(OSPF_ROUTER_ID, None)).await?;
     rb.provision(&sr(OSPF_ROUTER_ID_B, None)).await?;
     both_full_p2p(ra, rb).await
+}
+
+/// Total MPLS packets (received, sent) over every interface of `router`
+/// (`ip stats`, afstats/mpls): the kernel's own proof a labelled packet went by.
+async fn mpls_packets(w: &World, router: &str) -> anyhow::Result<(u64, u64)> {
+    let out = w
+        .dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            router,
+            &[
+                "ip", "-s", "stats", "show", "group", "afstats", "subgroup", "mpls",
+            ],
+        )
+        .await?;
+    // "RX:  bytes packets ..." / "TX: ..." header lines, the numbers on the next one.
+    let (mut rx, mut tx) = (0, 0);
+    let mut lines = out.lines();
+    while let Some(l) = lines.next() {
+        let dir = l.trim_start();
+        if dir.starts_with("RX:") || dir.starts_with("TX:") {
+            let packets: u64 = lines
+                .next()
+                .and_then(|n| n.split_whitespace().nth(1))
+                .and_then(|n| n.parse().ok())
+                .with_context(|| format!("{router}: unparsable mpls stats: {out}"))?;
+            if dir.starts_with("RX:") {
+                rx += packets;
+            } else {
+                tx += packets;
+            }
+        }
+    }
+    Ok((rx, tx))
+}
+
+/// `ping -I vrf100` from router-a, requiring no loss.
+async fn ping_from_a(w: &World, dst: &str, count: u32) -> anyhow::Result<()> {
+    let out = w
+        .dock
+        .in_netns(
+            HOST_IMAGE,
+            "router-a",
+            &[
+                "ping",
+                "-I",
+                RLFA_VRF,
+                "-c",
+                &count.to_string(),
+                "-i",
+                "0.3",
+                "-W",
+                "2",
+                dst,
+            ],
+        )
+        .await?;
+    if !out.contains(" 0% packet loss") {
+        bail!("router-a: ping {dst} lost packets: {out}");
+    }
+    Ok(())
+}
+
+/// #1383 / #1169 (self-contained): RFC 8665 segment routing forwards. A line
+/// a - b - c (a on eth0.0 only, c on the bd-ospf bridge only, b on both; all
+/// area 0), each with a loopback and a Prefix-SID. a and c share the docker L2
+/// of eth0 but no loopback route: the only path to c's loopback is through b.
+/// A ping alone would also pass over plain IP, so the proof is the kernel's
+/// MPLS packet counters on router-b (and a), read around the ping; then an
+/// explicit-path packet to c's bridge address rides b's Adj-SID alone.
+pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    w.start(C, None, &[]).await?;
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:trixie-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf_broadcast(OSPF_BROADCAST_ADDRESS_B)))
+        .await?;
+    c.provision_flags(&with_base(C, ospf_instance_only(OSPF_ROUTER_ID_C)))
+        .await?;
+    c.provision_flags(&with_base(C, ospf_broadcast(OSPF_BROADCAST_ADDRESS_C)))
+        .await?;
+    both_full_p2p(a, b).await?;
+    let link = format!("link=broadcast-domain:{BD}");
+    c.wait(&format!(
+        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+
+    // The interfaces exist now: MPLS input on all of them, platform labels
+    // before ribd reads them (it re-applies every 10 s).
+    super::bgp::mpls_ready(w, &["router-a", "router-b", "router-c"]).await?;
+
+    let label = |index: u32| 16000 + index;
+    let (la, lc) = (label(OSPF_SR_INDEX_A), label(OSPF_SR_INDEX_C));
+    let labelled = |lo: &str, l: u32| {
+        format!("installed labelled route prefix={lo}/32 labels=\\[\\[{l}\\]\\]")
+    };
+    let ilm = |l: u32| format!("installed mpls ilm route table=rt1 label={l} ");
+    let (a_c0, c_a0) = (
+        a.count_fresh(&labelled(OSPF_SR_LOOPBACK_C, lc)).await,
+        c.count_fresh(&labelled(OSPF_SR_LOOPBACK_A, la)).await,
+    );
+    let (b_la0, b_lc0) = (b.count_fresh(&ilm(la)).await, b.count_fresh(&ilm(lc)).await);
+    log("loopbacks with Prefix-SIDs on all three routers");
+    for (r, rid, lo, index, iface) in [
+        (a, OSPF_ROUTER_ID, OSPF_SR_LOOPBACK_A, OSPF_SR_INDEX_A, true),
+        (
+            b,
+            OSPF_ROUTER_ID_B,
+            OSPF_SR_LOOPBACK_B,
+            OSPF_SR_INDEX_B,
+            true,
+        ),
+        (
+            c,
+            OSPF_ROUTER_ID_C,
+            OSPF_SR_LOOPBACK_C,
+            OSPF_SR_INDEX_C,
+            false,
+        ),
+    ] {
+        let mut flags = if iface {
+            ospf(rid)
+        } else {
+            ospf_instance_only(rid)
+        };
+        flags.extend(strings(&[
+            "--loopback-address",
+            &format!("{lo}/32"),
+            "--ospf-loopback-profile",
+            OSPF_PROFILE,
+            "--ospf-prefix-sid",
+            &format!("{lo}={index}"),
+        ]));
+        r.provision(&flags).await?;
+    }
+    a.wait_new(&labelled(OSPF_SR_LOOPBACK_C, lc), a_c0, 90)
+        .await?;
+    c.wait_new(&labelled(OSPF_SR_LOOPBACK_A, la), c_a0, 90)
+        .await?;
+    b.wait_new(&ilm(la), b_la0, 90).await?;
+    b.wait_new(&ilm(lc), b_lc0, 90).await?;
+
+    log("a ping to c's loopback must cross b as MPLS");
+    let (rx0, _) = mpls_packets(w, "router-b").await?;
+    let (_, atx0) = mpls_packets(w, "router-a").await?;
+    ping_from_a(w, OSPF_SR_LOOPBACK_C, 5).await?;
+    let (rx1, _) = mpls_packets(w, "router-b").await?;
+    let (_, atx1) = mpls_packets(w, "router-a").await?;
+    log(format!(
+        "mpls packets: router-b rx {rx0} -> {rx1}, router-a tx {atx0} -> {atx1}"
+    ));
+    if rx1 < rx0 + 5 || atx1 < atx0 + 5 {
+        bail!("no labelled packets across router-b: rx {rx0}->{rx1}, a tx {atx0}->{atx1}");
+    }
+
+    log("explicit path: router-b's Adj-SID toward router-c as the only label");
+    let sid = b_adj_sid_to_c(w).await?;
+    let target = OSPF_BROADCAST_ADDRESS_C.trim_end_matches("/28");
+    let host = format!("{target}/32");
+    let (rx0, _) = mpls_packets(w, "router-b").await?;
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-a",
+            &[
+                "ip",
+                "route",
+                "add",
+                &host,
+                "encap",
+                "mpls",
+                &sid.to_string(),
+                "via",
+                IP_B.s(),
+                "dev",
+                "eth0",
+                "table",
+                "100",
+            ],
+        )
+        .await?;
+    let pinged = ping_from_a(w, target, 10).await;
+    let _ = w
+        .dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-a",
+            &["ip", "route", "del", &host, "table", "100"],
+        )
+        .await;
+    pinged?;
+    let (rx1, _) = mpls_packets(w, "router-b").await?;
+    // ponytail: half of the 10 pings, not all: the first packets of a fresh
+    // host route were seen unlabelled in a run; one labelled packet is the
+    // proof, the margin only rules out a fluke.
+    if rx1 < rx0 + 5 {
+        bail!("adj-sid {sid}: router-b mpls rx {rx0}->{rx1}");
+    }
+
+    log("router-c drops its Prefix-SID: the ILM entry on router-b goes, the ping stays up");
+    let gone = format!("removed mpls ilm route table=rt1 label={lc}");
+    let removed0 = b.count_fresh(&gone).await;
+    let mut flags = ospf_instance_only(OSPF_ROUTER_ID_C);
+    flags.extend(strings(&["--ospf-segment-routing", "off"]));
+    c.provision(&flags).await?;
+    b.wait_new(&gone, removed0, 60).await?;
+    // router-a keeps the labelled route until it hears c's new Extended
+    // Prefix LSA and recomputes; then the plain OSPF route carries it.
+    let mut last = Ok(());
+    for _ in 0..30 {
+        last = ping_from_a(w, OSPF_SR_LOOPBACK_C, 2).await;
+        if last.is_ok() {
+            break;
+        }
+    }
+    last?;
+    both_full_p2p(a, b).await?;
+    a.established().await
+}
+
+/// The label of router-b's Adj-SID toward router-c, from router-a's
+/// `GET /v1/ospf/segment-routing` (a LAN Adj-SID names the neighbour).
+async fn b_adj_sid_to_c(w: &World) -> anyhow::Result<u32> {
+    let a = w.a()?;
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = a
+            .rest_expect(Method::GET, "/v1/ospf/segment-routing", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let found = v[0]["result"]["adj_sids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["router"] == OSPF_ROUTER_ID_B && s["neighbor"] == OSPF_ROUTER_ID_C)
+            .and_then(|s| s["label"].as_u64());
+        if let Some(l) = found {
+            return Ok(u32::try_from(l)?);
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("router-a never saw router-b's Adj-SID toward router-c: {last}")
+}
+
+/// #1386 (self-contained): the default link cost is
+/// `reference-bandwidth / link speed`. A docker veth reports 10 Gbit/s, so the
+/// default (10000 Mbit/s) costs 1; raising the reference bandwidth to 100000
+/// makes it 10 in place (no restart), and clearing it restores 1.
+pub async fn ospf_cost(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    both_full_p2p(a, b).await?;
+    let changed =
+        |old: u32, new: u32| format!("ospf link cost changed link=eth0.0 old={old} cost={new}");
+    let up0 = a.count_fresh(&changed(1, 10)).await;
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(strings(&["--ospf-reference-bandwidth", "100000"]));
+    a.provision_flags(&with_base(A, fa)).await?;
+    a.wait_new(&changed(1, 10), up0, 60).await?;
+    let down0 = a.count_fresh(&changed(10, 1)).await;
+    let mut fa = ospf(OSPF_ROUTER_ID);
+    fa.extend(strings(&["--ospf-reference-bandwidth", "0"]));
+    a.provision_flags(&with_base(A, fa)).await?;
+    a.wait_new(&changed(10, 1), down0, 60).await?;
+    both_full_p2p(a, b).await?;
+    a.established().await
+}
+
+/// #1387 (self-contained): OSPFv3's default link cost is
+/// `reference-bandwidth / link speed`, like `ospf-cost`: the 10 Gbit/s docker
+/// veth costs 1; reference bandwidth 100000 makes it 10 in place, clearing it
+/// restores 1.
+pub async fn ospfv3_cost(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let full = |peer: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={peer}");
+    a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)))
+        .await?;
+    a.wait(&full(OSPFV3_ROUTER_ID_B)).await?;
+    b.wait(&full(OSPFV3_ROUTER_ID)).await?;
+    let changed =
+        |old: u32, new: u32| format!("ospfv3 link cost changed link=eth0.0 old={old} cost={new}");
+    for (bw, old, new) in [("100000", 1, 10), ("0", 10, 1)] {
+        let base = a.count_fresh(&changed(old, new)).await;
+        let mut fa = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        fa.extend(strings(&["--ospfv3-reference-bandwidth", bw]));
+        a.provision_flags(&with_base(A, fa)).await?;
+        a.wait_new(&changed(old, new), base, 60).await?;
+    }
+    a.established().await
 }
 
 #[cfg(test)]
