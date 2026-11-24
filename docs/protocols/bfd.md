@@ -146,7 +146,7 @@ set echo-interval 50
 - Every BFD transmit socket sets don't-fragment (`IP_PMTUDISC_DO`, `IPV6_DONTFRAG`), so a packet that does not fit fails instead of fragmenting. `nos-bfdd` logs `bfd padded packet exceeds the path mtu peer=<ip> size=<n>` once and the peer goes `down` by detection time. Restoring the MTU brings the session back by itself.
 - A peer that drops large packets also takes the session `down` by detection time. The receiver never checks the padding.
 - When several clients share one session, the profile of the last `Register` wins (as for every other setting).
-- `show bfd sessions` ends the line with `pdu <n>B` while padding is set; REST has `tx_pdu_bytes` (0 when not padded).
+- `show bfd sessions` shows the size in `Pdu` while padding is set; REST has `tx_pdu_bytes` (0 when not padded).
 
 ## Seamless BFD (RFC 7880, RFC 7881)
 
@@ -169,7 +169,7 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
 - Not available yet: `mode sbfd` is refused together with `echo-mode`, `padded-pdu-size` and `auth` (a follow-up adds S-BFD authentication after RFC 5880 authentication, #289; until then the reflector drops any packet with the A bit set and counts it).
 - Interoperability: FRR's `bfdd` implements RFC 5880, 5881, 5882 and 5883 only (its documentation lists no S-BFD, checked against FRR 10.4), so it can be neither initiator nor reflector. The e2e phase `bfd-sbfd` therefore runs `nos` against `nos`, with an FRR classical session alongside to prove the two kinds do not disturb each other.
 - Check the reflector with `show bfd reflector` (`GET /v1/bfd/reflector`): the discriminators and counters of packets received, replied and dropped per reason (`malformed`, `source_port`, `martian`, `filtered`, `rate_limited`, `authenticated`, `demand_clear`, `unknown_discriminator`).
-- An initiator is listed by `show bfd sessions` with `sbfd` after the peer; REST has `kind` (`Classical`, `SbfdInitiator` or `Unsolicited`), and `remote_discriminator` is the S-BFD discriminator probed.
+- An initiator is listed by `show bfd sessions` with `Kind` `SbfdInitiator`; REST has `kind` (`Classical`, `SbfdInitiator` or `Unsolicited`), and `remote_discriminator` is the S-BFD discriminator probed.
 - To take an initiator down on purpose, remove the discriminator from the reflector: the initiator logs `bfd session down … diag=control-detection-time-expired` and the guarded route is withdrawn. Re-adding it brings both back.
 
 ## Micro-BFD on a port aggregate (RFC 7130)
@@ -182,7 +182,7 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
 - What Up and Down do: a member is enslaved into the bond only while its session is Up, and released when it goes Down. `nos-bfdd` sends `nos-interfaced` the whole Up set of the aggregate on every change (`PushBfdMembers`); no push means no member is enslaved.
 - The sessions run on the member itself, whether or not it is enslaved, so a released member keeps probing and rejoins by itself once its session is Up again.
 - Deviation from RFC 7130 section 3: sessions exist for every configured member, not only those LACP has in Distributing or Standby. Cost: an extra probe on a link LACP has not selected yet.
-- Check with `show bfd sessions`: a micro session is listed under the aggregate's name with `member <interface>`, for example `bond0: peer 10.0.0.2 from 10.0.0.1 member eth1, up, ...`. In REST the session `key` has `aggregate` and `interface` (the member).
+- Check with `show bfd sessions`: a micro session has the aggregate's name in `Aggregate` and the member in `Interface`, for example `10.0.0.2  10.0.0.1  eth1  bond0`. In REST the session `key` has `aggregate` and `interface` (the member).
 - Log lines: `bfd session up aggregate=<a> member=<if> peer=<ip>` and `bfd session down aggregate=<a> member=<if> peer=<ip> diag=<...>`.
 - Kernel noise: the frames carry the peer's unicast IP in a multicast MAC; the kernel finds no socket on UDP port 6784 and drops them; it does not send ICMP port unreachable for a frame received as link-layer multicast.
 
@@ -198,7 +198,7 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
   - A session that has not been Up for 60 s is deleted (`bfd unsolicited session aged out`). Down or never-Up counts; coming back Up resets the clock. The peer's next packet creates a new one.
 - Editing the profile applies by Poll/Final. Removing `bfd-unsolicited` (or the profile's subinterface) deletes its sessions (`bfd unsolicited session removed: no longer configured`).
 - Registering the same peer from a client (a static route, BGP) adopts the session; the client then owns it and nothing ages it out.
-- `show bfd sessions` prints `unsolicited` after the peer; REST has `kind` `Unsolicited`.
+- `show bfd sessions` shows `Kind` `Unsolicited`; REST has `kind` `Unsolicited`.
 - Security: the TTL check and the cap are the only defences against a spoofed source filling the table. Use it only on links where every neighbour is trusted, and set `auth` on the profile when the peers support it. IPv6 sources must be inside a configured prefix (a link-local source is not accepted).
 - Not built: unsolicited sessions on port-aggregate subinterfaces, a configurable age or cap.
 
@@ -207,15 +207,17 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
 - `show bfd sessions` lists every session, `show bfd sessions <peer>` those to one address. Sample:
 
 ```
-rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminators 1/7
+Table  Peer       Local  Interface  Aggregate  Multihop  State  Diag          Local-Disc  Remote-Disc  Tx-Interval  Detection  Kind       Auth  Auth-Key  Auth-Failures  Echo  Echo-Interval  Echo-Only  Pdu
+-----  ---------  -----  ---------  ---------  --------  -----  ------------  ----------  -----------  -----------  ---------  ---------  ----  --------  -------------  ----  -------------  ---------  ---
+rt1    192.0.2.1  -      -          -          no        Up     NoDiagnostic           1            7        100ms      300ms  Classical  -            -              0  no              0us  no         0 B
 ```
 
-- `tx` is the negotiated transmit interval, `detect` the detection time, `discriminators` local/remote.
-- With `auth` set the line ends with `auth <method> key <id> (<n> failures)`; the key is never shown.
-- While Echo runs the line ends with `echo active <n>ms`, followed by `(echo-only)` for an unaffiliated session, where `tx` is the echo interval and `detect` is `echo-interval x detect-multiplier`.
-- With `padded-pdu-size` set the line ends with `pdu <n>B`.
-- An S-BFD initiator has `sbfd` after the peer, and its second discriminator is the one probed.
-- A `down` session shows why: `diag control-detection-time-expired`, `neighbor-signaled-session-down`, and so on (RFC 5880 section 4.1 names).
+- `Tx-Interval` is the negotiated transmit interval, `Detection` the detection time, `Local-Disc`/`Remote-Disc` the discriminators.
+- With `auth` set, `Auth`, `Auth-Key` and `Auth-Failures` show the method, key id and failure count; the key is never shown.
+- While Echo runs `Echo` is `yes` and `Echo-Interval` is set; `Echo-Only` is `yes` for an unaffiliated session, where `Tx-Interval` is the echo interval and `Detection` is `echo-interval x detect-multiplier`.
+- With `padded-pdu-size` set `Pdu` shows the size.
+- An S-BFD initiator has `Kind` `SbfdInitiator`, and its `Remote-Disc` is the one probed.
+- A `Down` session shows why in `Diag`: `ControlDetectionTimeExpired`, `NeighborSignaledSessionDown`, and so on (RFC 5880 section 4.1 names).
 - The REST equivalent is `GET /v1/bfd/sessions` (optionally `?peer=192.0.2.1`); it returns the same fields as JSON (`state` is `Up`, `Down`, `Init` or `AdminDown`), plus `auth_method`, `auth_key_id`, `auth_failures`, `echo_active`, `echo_interval_us` (0 while Echo is off), `echo_only` (unaffiliated) and `tx_pdu_bytes` (0 when not padded).
 - "nos-bfdd is not running" (CLI) or `503` (REST) means the daemon is not up.
 
@@ -225,7 +227,7 @@ rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminat
   - BGP: the peer-group has `max-hops` above 1, or the peer address is on no subnet configured on an interface (or subinterface) of the instance's routing table. An iBGP session between loopbacks reached over OSPF is the typical case.
   - Static routes: the gateway is on no such subnet.
 - A subnet that is not in the configuration (learned over DHCP) is not seen: the peer is then registered multi-hop, which still works.
-- Multi-hop sessions use UDP 4784 and are not tied to an interface; `show bfd sessions` prints `multihop` and no interface.
+- Multi-hop sessions use UDP 4784 and are not tied to an interface; `show bfd sessions` shows `Multihop` `yes` and no `Interface`.
 - TX TTL is 255. A received packet is dropped when its TTL is below the profile's `minimum-ttl` (default 254). Single-hop sessions still require exactly 255.
 - The local address is the peer-group's `source-address` for BGP; otherwise `nos-bfdd` uses the address the kernel would use towards the peer, fixed when the session opens.
 - Changing a peer between single-hop and multi-hop (an address added or `max-hops` edited) replaces the session: the old one is deregistered and a new one starts `down`.
