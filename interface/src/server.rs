@@ -87,7 +87,10 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         }
         InterfaceRequest::PushBfdMembers(_) => role == Role::Bfdd,
         InterfaceRequest::SubscribeLinks => {
-            matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld)
+            matches!(
+                role,
+                Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld | Role::Lacpd | Role::Lldpd
+            )
         }
         InterfaceRequest::SetStpPortStates(_)
         | InterfaceRequest::FlushFdb { .. }
@@ -552,11 +555,19 @@ mod authz_tests {
     }
 
     #[test]
-    fn only_the_routing_daemons_stpd_and_acld_may_subscribe_to_links() {
+    fn only_the_link_following_daemons_may_subscribe_to_links() {
         for role in Role::ALL {
             assert_eq!(
                 allowed(role, &InterfaceRequest::SubscribeLinks),
-                matches!(role, Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld),
+                matches!(
+                    role,
+                    Role::Ospfd
+                        | Role::Ospfv3d
+                        | Role::Stpd
+                        | Role::Acld
+                        | Role::Lacpd
+                        | Role::Lldpd
+                ),
                 "{role:?} subscribe"
             );
         }

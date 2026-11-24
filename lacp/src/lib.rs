@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod cscd;
 pub mod interface_client;
 pub mod link;
+pub mod link_client;
 pub mod mux_machine;
 pub mod packet;
 pub mod periodic_tx_machine;

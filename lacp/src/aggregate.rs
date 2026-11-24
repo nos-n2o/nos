@@ -22,6 +22,7 @@ use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
 use crate::cscd::{self, Advert, Agreement, PortIn, V2Cfg};
 use crate::interface_client::LacpPush;
 use crate::link::{self, LinkConfig, PortObservation};
+use crate::link_client::LinkTable;
 use crate::mux_machine::MuxState;
 use crate::packet::{state_bit, PortInfo};
 use crate::receive_machine::ReceiveState;
@@ -142,6 +143,7 @@ pub struct AggregateManager {
     selection_task: JoinHandle<()>,
     port_numbers: PortNumbers,
     v2: Arc<V2Shared>,
+    links: watch::Receiver<LinkTable>,
 }
 
 impl AggregateManager {
@@ -150,6 +152,7 @@ impl AggregateManager {
         key: u16,
         push_tx: mpsc::Sender<LacpPush>,
         port_numbers: PortNumbers,
+        links: watch::Receiver<LinkTable>,
     ) -> Arc<Self> {
         let derived = local_system_id();
         let observations = Arc::new(Mutex::new(HashMap::new()));
@@ -186,6 +189,7 @@ impl AggregateManager {
             selection_task,
             port_numbers,
             v2,
+            links,
         })
     }
 
@@ -319,6 +323,7 @@ impl AggregateManager {
                 active_rx,
                 rate,
                 selected_rx,
+                links: self.links.clone(),
                 churn_time: churn_time(),
                 version_pref: v2.version_pref(),
                 link_number: v2.link_numbers.get(interface).copied(),
@@ -763,7 +768,13 @@ mod tests {
     #[tokio::test]
     async fn configured_system_id_overrides_the_derived_one_and_reverts() {
         let (tx, _rx) = mpsc::channel(1);
-        let agg = AggregateManager::new("bond1", 1, tx, PortNumbers::default());
+        let agg = AggregateManager::new(
+            "bond1",
+            1,
+            tx,
+            PortNumbers::default(),
+            watch::channel(LinkTable::default()).1,
+        );
         let derived = agg.summary().actor_system_id;
         let mine = [0x02, 0, 0, 0, 0, 0x99];
         agg.reconcile(Vec::new(), LacpRate::Slow, Some(mine), DEFAULT_PRIORITY, 1);
@@ -799,8 +810,20 @@ mod tests {
     async fn two_aggregates_never_share_a_port_number() {
         let (tx, _rx) = mpsc::channel(1);
         let ports = PortNumbers::default();
-        let a = AggregateManager::new("bond1", 1, tx.clone(), ports.clone());
-        let b = AggregateManager::new("bond2", 2, tx, ports.clone());
+        let a = AggregateManager::new(
+            "bond1",
+            1,
+            tx.clone(),
+            ports.clone(),
+            watch::channel(LinkTable::default()).1,
+        );
+        let b = AggregateManager::new(
+            "bond2",
+            2,
+            tx,
+            ports.clone(),
+            watch::channel(LinkTable::default()).1,
+        );
         let m = |n: &str| vec![(n.to_string(), DEFAULT_PRIORITY, LacpMode::Active)];
         a.reconcile(m("noif-a"), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
         b.reconcile(m("noif-b"), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);

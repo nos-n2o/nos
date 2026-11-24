@@ -306,7 +306,9 @@ impl L2Socket {
     /// unregistered (veth deleted, VF removed, driver reload) and it never
     /// sees a frame again. Callers must treat it as fatal for the task and
     /// reopen (the recv paths return a `NotConnected` error once they see it).
-    pub fn is_stale(&self) -> bool {
+    /// Only checked on a link-down error; daemons learn of recreations from
+    /// `nos-interfaced`'s `LinkAdded`/`LinkRemoved` (#1431), never by polling.
+    fn is_stale(&self) -> bool {
         is_recreated(self.ifindex, if_index(&self.interface).ok())
     }
 

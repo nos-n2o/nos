@@ -709,8 +709,8 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
 /// ifindex) must be picked up again: the old `AF_PACKET` socket is bound to
 /// the dead ifindex and never sees a frame. An in-container veth pair
 /// `lpx0`/`lpx1` on router-a, `lpx0` in a throwaway Lacp aggregate, `lpx1`
-/// played by `lacp_partner.py`. `nos-lacpd` notices within its 5 s stale poll,
-/// the task exits and `reconcile`'s 10 s tick respawns it.
+/// played by `lacp_partner.py`. `nos-lacpd` is told by `nos-interfaced`
+/// (`LinkAdded`), the task exits and `reconcile`'s 10 s tick respawns it.
 async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
     log("a recreated member netdev is reopened by nos-lacpd");
     let netns = async |script: &str| {
@@ -753,15 +753,16 @@ async fn lacp_recreated_member(w: &World, a: &Router) -> anyhow::Result<()> {
         );
         netns("ip link del lpx0").await?;
         netns(mkpair).await?;
-        // Up to 5 s (stale poll) + 10 s (reconcile tick) of silence; keep sending.
-        partner("25").await?;
-        a.wait_new(heard, heard_base, 5).await?;
+        // The task exits on `nos-interfaced`'s LinkRemoved/LinkAdded within
+        // seconds (no 5 s poll, #1431); `reconcile`'s 10 s tick respawns it.
         a.wait_new(
             "lacp interface recreated, link task exiting interface=lpx0",
             exit_base,
-            5,
+            3,
         )
         .await?;
+        partner("25").await?;
+        a.wait_new(heard, heard_base, 15).await?;
         Ok(())
     }
     .await;
@@ -1978,6 +1979,24 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait_new(&learned_a(""), base_a, 30).await?;
     b.wait_new(&learned_b(""), base_b, 15).await?;
+
+    // #1431: the veth deleted and recreated under the same name (new ifindex):
+    // both nos-lldpd reopen their sockets on nos-interfaced's LinkAdded and
+    // learn each other again, without a send error on the dead socket.
+    let (base_a, base_b) = (a.count(&learned_a("")), b.count(&learned_b("")));
+    let reopened = "lldp socket reopened interface=eth1";
+    let (re_a, re_b) = (a.count(reopened), b.count(reopened));
+    let send_err = "failed to send lldpdu interface=eth1";
+    let (err_a, err_b) = (a.count(send_err), b.count(send_err));
+    log("recreating the eth1 veth: both nos-lldpd must reopen their sockets");
+    w.unlink_veth("eth1").await;
+    w.ensure_veth("eth1").await?;
+    a.wait_new(reopened, re_a, 20).await?;
+    b.wait_new(reopened, re_b, 20).await?;
+    a.wait_new(&learned_a(""), base_a, 30).await?;
+    b.wait_new(&learned_b(""), base_b, 30).await?;
+    a.assert_quiet(send_err, err_a, 5).await?;
+    b.assert_quiet(send_err, err_b, 5).await?;
 
     // Drop receive on router-a: its link restarts as transmit-only.
     a.provision(&host("router-a", &["--no-lldp-receive-interface", "eth1"]))
