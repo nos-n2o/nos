@@ -26,6 +26,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `completer.rs`, `help_menu.rs` | `NosCompleter` (Tab and live `?`, one injected config source for the tree and `*Name` slots), `HelpMenu` (the `?` menu) |
 | `client.rs` | One-shot calls to `nos-configd`, plus `subscribe`, the one long-lived exception |
 | `*_client.rs` | `watchdog`, `rib`, `interface`, `log` (also long-lived `tail`), `bgp`, `lacp`, `lldp`, `stp`, `bfd`, `fdb`, `ospf`, `ospfv3`: one-shot query per daemon |
+| `table.rs` | `table()` (header, dash rule, per-call widths, cells run through `sanitize_line`) and `human_duration`/`human_bytes` (decimal)/`human_count`/`human_us`; every table and unit in `format.rs` goes through it, no `{:<N}` columns or `{:?}` (#1406); `docs/cli.md` |
 | `format.rs` | Human-readable rendering. `render_config`/`render_transaction` are one call into `nos_proto::cli::render`, so a field can't be missing (`tests/render.rs`). every output goes through `sanitize` (control/bidi chars shown as `\xNN`, #1365; `sanitize_line` for values in one-line records, source-scan test enforces it); `render_diff` is the only ANSI emitter (hand-rolled, escapes values itself); `render_log_entry` the only `time` use |
 
 ## Commands
