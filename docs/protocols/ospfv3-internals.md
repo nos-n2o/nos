@@ -97,7 +97,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
   - Router to network: the Network-LSA lists `v`.
   - Network to router: `w` has a transit link whose `neighbor_interface_id` keys the network.
   - Applies to root edges as in v2; type-4 (virtual) links are not edges yet (#1159).
-  - Known limit, not worsened: the Network vertex key is the DR's interface id alone, so two DRs with equal interface ids collide.
+  - The Network vertex key is `(DR router id, DR interface id)` (#613, RFC 5340 §4.8.1), so LANs whose DRs share an interface id stay distinct.
   - Verified by `nos-e2e ospf-forged-lsa` (a legacy Router-LSA fragment forged with Link State ID `0.0.0.99`).
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
