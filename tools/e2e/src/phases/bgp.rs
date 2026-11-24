@@ -11179,3 +11179,69 @@ async fn start_exabgp(w: &mut World, conf: &str) -> anyhow::Result<()> {
         )
         .await
 }
+
+/// #623: IPv6 unicast over an IPv4 session needs no Extended Next Hop (RFC
+/// 4798/8950 section 1): both ends negotiate it from MP (2,1) alone, GoBGP's
+/// IPv6 route (IPv4-mapped next hop) is learned and not treated as a martian,
+/// and `nos-ribd` installs it through the mapped gateway, `onlink` with an
+/// oif (the kernel refuses `RTA_VIA` on an IPv6 route).
+pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G.s(),
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    w.a()?
+        .edit(|c| {
+            for g in c
+                .bgp_instances
+                .iter_mut()
+                .flat_map(|i| i.peer_groups.iter_mut())
+            {
+                g.address_families
+                    .push(nos_proto::AddressFamily::Ipv6Unicast);
+            }
+            Ok(())
+        })
+        .await?;
+    start_gobgp(w, &["ipv4-unicast", "ipv6-unicast"]).await?;
+    let a = w.a()?;
+    a.established().await?;
+    a.wait(&format!(
+        "address families negotiated peer={IP_G} families=\\[.*\"ipv6\""
+    ))
+    .await?;
+
+    log("GoBGP announces an IPv6 prefix over the IPv4 session: learned and installed via the IPv4 gateway");
+    gobgp(
+        w,
+        &["global", "rib", "add", "-a", "ipv6", V6_OVER_V4_PREFIX],
+    )
+    .await?;
+    a.wait(&format!(
+        "loc-rib best path for {V6_OVER_V4_PREFIX} updated"
+    ))
+    .await?;
+    a.wait(&format!(
+        "added route prefix={V6_OVER_V4_PREFIX} gateway={IP_G}"
+    ))
+    .await?;
+    a.assert_quiet("failed to add route", 0, 3).await?;
+
+    log("withdrawing it removes the kernel route (the dump reads the mapped gateway back as IPv4)");
+    gobgp(
+        w,
+        &["global", "rib", "del", "-a", "ipv6", V6_OVER_V4_PREFIX],
+    )
+    .await?;
+    a.wait(&format!("removed route prefix={V6_OVER_V4_PREFIX}"))
+        .await
+}

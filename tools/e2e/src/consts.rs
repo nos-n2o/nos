@@ -495,6 +495,9 @@ pub const FRR_IMAGE: &str = "quay.io/frrouting/frr:10.7.1";
 /// `bgp-gr-frr`: the prefix FRR (`router-f`, at `IP_G` on `NET`) announces to
 /// router-a over eBGP.
 pub const FRR_BGP_PREFIX: &str = "198.18.210.0/24";
+/// `bgp-v6-over-v4` (#623): the IPv6 prefix GoBGP announces over the IPv4
+/// session (IPv4-mapped next hop, RFC 4798).
+pub const V6_OVER_V4_PREFIX: &str = "2001:db8:210::/48";
 /// `bfd`: the BFD-guarded static route each router holds towards the other
 /// (`BFD_PREFIX_B` on router-a via router-b, `BFD_PREFIX_A` on router-b via
 /// router-a) and the one router-a holds via FRR (`BFD_PREFIX_F`).

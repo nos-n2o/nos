@@ -658,6 +658,13 @@ impl LinuxRibDriver {
         let evpn = source == Some(RouteSource::Evpn);
         let tunnel = tunnel && backup;
         let labelled = !backup && hops.iter().any(|h| !h.labels.is_empty());
+        // An IPv6 prefix over IPv4 gateways (RFC 4798, #623) goes out as an
+        // IPv4-mapped gateway, which the kernel only accepts `onlink` with
+        // an oif, like a labelled hop.
+        let mapped = !backup
+            && prefix.addr().is_ipv6()
+            && !hops.is_empty()
+            && hops.iter().all(|h| h.gateway.is_ipv4());
         let mut hops = hops.to_vec();
         let shared_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
@@ -679,7 +686,7 @@ impl LinuxRibDriver {
                 hop.interface_id = Some(dev);
             }
         }
-        if labelled {
+        if labelled || mapped {
             let mut devs = Vec::with_capacity(hops.len());
             for hop in &hops {
                 devs.push(match hop.interface_id {
@@ -697,7 +704,7 @@ impl LinuxRibDriver {
             }
             hops = kept;
         }
-        let onlink = labelled || shared_dev.is_some();
+        let onlink = labelled || mapped || shared_dev.is_some();
         let Some(route) = build_route(prefix, &hops, table_id, backup, onlink) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(false);
@@ -1962,6 +1969,23 @@ mod tests {
         // Mixed families are still a mismatch.
         let mixed = vec![plain("10.50.0.3"), plain("fd18::1")];
         assert!(build_route(p, &mixed, 100, false, false).is_none());
+    }
+
+    /// #623: a plain (unlabelled) IPv6 route over an IPv4 gateway is the
+    /// IPv4-mapped `RTA_GATEWAY` with `RTNH_F_ONLINK` and its oif, and a dump
+    /// reads the IPv4 gateway back (no churn in `diff_routes`).
+    #[test]
+    fn an_ipv6_route_over_an_ipv4_gateway_round_trips_onlink() {
+        let p = net("2001:db8:210::/48");
+        let hops = vec![hop("10.50.0.6", Some(4), &[])];
+        let route = build_route(p, &hops, 100, false, true).unwrap();
+        assert!(route.header.flags.contains(RouteFlags::Onlink));
+        assert!(route.attributes.iter().any(|a| matches!(
+            a,
+            RouteAttribute::Gateway(RouteAddress::Inet6(g)) if *g == "::ffff:10.50.0.6".parse::<Ipv6Addr>().unwrap()
+        )));
+        let want = Some(((p, false), key(&hops)));
+        assert_eq!(extract_route(&wire(&route)), want);
     }
 
     #[test]
