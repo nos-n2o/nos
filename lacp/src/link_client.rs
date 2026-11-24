@@ -210,4 +210,36 @@ mod tests {
         t.observed = false;
         assert_eq!(gate(&t, "gone"), Gate::Ungated);
     }
+
+    #[tokio::test]
+    async fn stream_keeps_table_on_loss_and_follows_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("interface.sock");
+        let listener = nos_pki::testing::shared()
+            .identity("interfaced", "")
+            .listen(&path)
+            .unwrap();
+        let (tx, rx) = watch::channel(LinkTable::default());
+        let server = tokio::spawn(async move {
+            for links in [
+                vec![ls("a", true, true), ls("b", true, true)],
+                vec![ls("a", true, true)],
+            ] {
+                let (s, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+                let (r, w) = tokio::io::split(s);
+                let mut reader = FramedRead::new(r, IpcCodec::<InterfaceRequest>::default());
+                let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceEvent>::default());
+                assert!(matches!(
+                    reader.next().await,
+                    Some(Ok(InterfaceRequest::SubscribeLinks))
+                ));
+                writer.send(snap(links)).await.unwrap();
+            }
+        });
+        stream(&path, &tx).await;
+        assert_eq!(rx.borrow().links.len(), 2);
+        stream(&path, &tx).await;
+        server.await.unwrap();
+        assert_eq!(rx.borrow().links.len(), 1);
+    }
 }
