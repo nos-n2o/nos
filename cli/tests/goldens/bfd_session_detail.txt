@@ -3,8 +3,8 @@ Key
   Peer       192.0.2.1
   Local      192.0.2.9
   Interface  eth7
-  Multihop   no
   Aggregate  ae9
+  Multihop   no
 State          Up
 Diag           NoDiagnostic
 Local-Disc     1
