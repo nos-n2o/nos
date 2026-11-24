@@ -217,3 +217,20 @@ fn graceful_restart_keeps_listed_flowspec_until_end_of_rib() {
     assert_eq!(texts(&rib), [format!("ipv4-flowspec {}", rule(1))]);
     assert_eq!(rib.stale_count(peer), 0);
 }
+
+/// RFC 7313 §4 (#625): `BoRR` marks the family's rules stale, a re-announced
+/// rule is kept, `EoRR` purges the rest and leaves the other family alone.
+#[test]
+fn borr_eorr_purges_unrefreshed_flowspec_rules() {
+    let mut rib = new_rib(65000);
+    let peer = addr("10.0.0.1");
+    let _rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), fs_afs());
+    feed(&mut rib, peer, &reach(1, vec![rule(1), rule(2)]));
+    feed(&mut rib, peer, &reach(2, vec![rule6()]));
+    rib.begin_refresh_in(peer, AddressFamily::Ipv4Flowspec);
+    assert_eq!(rib.stale_count(peer), 2);
+    feed(&mut rib, peer, &reach(1, vec![rule(1)]));
+    assert_eq!(rib.end_refresh_in(peer, AddressFamily::Ipv4Flowspec), 1);
+    assert_eq!(texts(&rib).len(), 2, "rule(1) and the untouched v6 rule");
+    assert!(!rib.has_stale(peer, None));
+}

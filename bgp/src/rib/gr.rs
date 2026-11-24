@@ -415,6 +415,27 @@ impl BgpRib {
         if family == AddressFamily::RtConstraint {
             return self.mark_rtc_stale(peer);
         }
+        if family == AddressFamily::L2vpnEvpn {
+            if let Some(t) = self.evpn_adj_rib_in.get(&peer) {
+                self.evpn_stale
+                    .entry(peer)
+                    .or_default()
+                    .extend(t.keys().cloned());
+            }
+            return;
+        }
+        if matches!(
+            family,
+            AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec
+        ) {
+            if let Some(t) = self.flowspec_adj_rib_in.get(&peer) {
+                self.flowspec_stale
+                    .entry(peer)
+                    .or_default()
+                    .extend(t.keys().filter(|k| k.0 == family).cloned());
+            }
+            return;
+        }
         let Some(table) = self.adj_rib_in.get(&peer) else {
             return;
         };
@@ -435,6 +456,13 @@ impl BgpRib {
         }
         if family == AddressFamily::RtConstraint {
             return self.purge_stale_rtc(peer);
+        }
+        match family {
+            AddressFamily::L2vpnEvpn => return self.purge_stale_evpn(peer),
+            AddressFamily::Ipv4Flowspec | AddressFamily::Ipv6Flowspec => {
+                return self.purge_stale_flowspec(peer, family)
+            }
+            _ => {}
         }
         let Some(set) = self.stale.get_mut(&peer) else {
             return 0;

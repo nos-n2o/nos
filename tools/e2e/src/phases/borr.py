@@ -43,12 +43,28 @@ def update(*prefixes):
     return msg(2, struct.pack("!HH", 0, len(attrs)) + attrs + nlri)
 
 
-def refresh(subtype):
-    return msg(5, struct.pack("!HBB", 1, subtype, 1))
+def evpn_update(*tags):
+    # One EVPN Type-3 (inclusive multicast, RD 0:65001:1) route per tag.
+    nlri = b""
+    for t in tags:
+        body = struct.pack("!HHI", 0, 65001, 1) + struct.pack("!IB", t, 32) + socket.inet_aton(NEXT_HOP)
+        nlri += bytes([3, len(body)]) + body
+    reach = struct.pack("!HBB", 25, 70, 4) + socket.inet_aton(NEXT_HOP) + b"\x00" + nlri
+    attrs = (
+        bytes([0x40, 1, 1, 0])
+        + bytes([0x40, 2, 6, 2, 1]) + struct.pack("!I", ASN)
+        + bytes([0x80, 14, len(reach)]) + reach
+    )
+    return msg(2, struct.pack("!HH", 0, len(attrs)) + attrs)
+
+
+def refresh(subtype, afi=1, safi=1):
+    return msg(5, struct.pack("!HBB", afi, subtype, safi))
 
 
 caps = (
     bytes([1, 4, 0, 1, 0, 1])  # multiprotocol ipv4 unicast
+    + bytes([1, 4, 0, 25, 0, 70])  # multiprotocol l2vpn evpn
     + bytes([2, 0])  # route refresh
     + bytes([70, 0])  # enhanced route refresh
     + bytes([65, 4]) + struct.pack("!I", ASN)  # four-octet AS
@@ -87,14 +103,17 @@ time.sleep(2)
 
 # Step 1: both prefixes, then a refresh that re-announces only KEPT and
 # never ends.
-sock.sendall(update(KEPT, PURGED))
+sock.sendall(update(KEPT, PURGED) + evpn_update(1, 2))
 time.sleep(3)
-sock.sendall(refresh(1) + update(KEPT))
+sock.sendall(refresh(1) + update(KEPT) + refresh(1, 25, 70) + evpn_update(1))
 print("borr: sent BoRR without EoRR", flush=True)
 
 # Step 2: a complete refresh, BoRR and EoRR back to back.
 time.sleep(20)
-sock.sendall(refresh(1) + update(KEPT, PURGED) + refresh(2))
+sock.sendall(
+    refresh(1) + update(KEPT, PURGED) + refresh(2)
+    + refresh(1, 25, 70) + evpn_update(1, 2) + refresh(2, 25, 70)
+)
 print("borr: sent BoRR + EoRR", flush=True)
 while True:
     time.sleep(60)

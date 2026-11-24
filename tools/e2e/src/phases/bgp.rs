@@ -2611,6 +2611,7 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
         IP_G.s(),
         "--route-refresh-stale-time",
         "5",
+        "--evpn",
     ]);
     w.start(A, Some(flags), &[]).await?;
     w.dock
@@ -2657,6 +2658,17 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
     anyhow::ensure!(
         a.count(&format!("purged stale route.*prefix={RR_STALE_KEPT}")) == 0,
         "router-a purged {RR_STALE_KEPT}, which the refresh re-announced"
+    );
+    // The EVPN Type-3 with tag 2 was left out of the (25,70) refresh (#625).
+    a.wait(&format!(
+        "evpn route withdrawn peer={IP_G} route_type=3 route=.*:\\[2\\]:"
+    ))
+    .await?;
+    anyhow::ensure!(
+        a.count(&format!(
+            "evpn route withdrawn peer={IP_G} route_type=3 route=.*:\\[1\\]:"
+        )) == 0,
+        "router-a purged the EVPN route the refresh re-announced"
     );
     anyhow::ensure!(
         a.count("bgp session established") == established,
