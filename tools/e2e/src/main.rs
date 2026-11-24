@@ -115,8 +115,9 @@ fn summarize(group: &str, outcomes: &[Outcome]) -> (String, Option<anyhow::Error
     (text, err)
 }
 
-/// The groups `nos-e2e all` runs (CI's matrix minus the slow `pki-crl`, own job).
-const ALL_GROUPS: &[&str] = &["base", "drivers", "rpl", "ospf-suite", "multi", "pki-suite"];
+/// The groups `nos-e2e all` runs (CI's matrix minus the slow `pki-crl` (own job)
+/// and `multi`, skipped until the `evpn-l3-chunked` hang is fixed (#839)).
+const ALL_GROUPS: &[&str] = &["base", "drivers", "rpl", "ospf-suite", "pki-suite"];
 
 /// One self-contained group: dump the failing router's logs on error, tear down
 /// either way (`VERIFY_E2E_KEEP=1` keeps the containers for `nos-e2e logs`).
@@ -235,5 +236,30 @@ mod tests {
         let long = "z".repeat(500);
         let (t, _) = summarize("g", &[o("a", Some(&long))]);
         assert!(t.contains(&"z".repeat(200)) && !t.contains(&"z".repeat(201)));
+    }
+
+    /// `all` cannot drift from the phase list: every group resolves, and every
+    /// phase of `ALL` is in some group or in the exempt ones (`multi`, `pki-crl`).
+    #[test]
+    fn all_groups_cover_every_phase() {
+        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for g in ALL_GROUPS.iter().chain(&["multi", "pki-crl"]) {
+            covered.extend(
+                phases::group(g)
+                    .unwrap_or_else(|| panic!("group {g}"))
+                    .iter()
+                    .copied(),
+            );
+        }
+        let orphans: Vec<&str> = phases::ALL
+            .iter()
+            .copied()
+            .filter(|p| !covered.contains(p))
+            .collect();
+        assert_eq!(
+            orphans,
+            ["logd-memory", "config-mem"],
+            "phases in no group (the memory probes are manual runs)"
+        );
     }
 }

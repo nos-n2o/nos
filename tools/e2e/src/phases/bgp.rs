@@ -1585,6 +1585,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
         .await?;
     let a = w.a()?;
     let learned_frr = format!("learned route for {FRR_BGP_PREFIX} into adj-rib-in");
+    let learned_base = w.a()?.count(&learned_frr);
     let reeval = |accepted: u32| {
         format!(
             "re-evaluated import policy peer={IP_G} family=ipv4-unicast retained=[0-9]* accepted={accepted} "
@@ -1606,7 +1607,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
     .await?;
 
     log("import policy rejects FRR's prefix: not learned, yet retained");
-    a.assert_quiet(&learned_frr, 0, 10).await?;
+    a.assert_quiet(&learned_frr, learned_base, 10).await?;
     let body = a
         .rest_expect(
             Method::POST,
@@ -1626,7 +1627,7 @@ pub async fn soft_reconfig_frr(w: &mut World) -> anyhow::Result<()> {
     let mut loose = seed.clone();
     loose.push("--soft-reconfiguration-inbound".into());
     a.provision_flags(&loose).await?;
-    a.wait_new(&learned_frr, 0, 30).await?;
+    a.wait_new(&learned_frr, learned_base, 30).await?;
     a.wait_new(&reeval(1), accepted, 30).await?;
     a.assert_quiet("bgp session established", est, 6).await?;
     a.assert_quiet("route refresh not sent", 0, 1).await?;
@@ -3120,6 +3121,7 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
     let established = a.count("bgp session established");
     let withdrawn = format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn");
     let back_to_1 = a.count(&best(ADD_PATH_MED_1));
+    let withdrawn_base = a.count(&withdrawn);
     exabgp_api(
         w,
         &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 2"),
@@ -3130,7 +3132,7 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(&best(ADD_PATH_MED_1), back_to_1, 30).await?;
-    a.assert_quiet(&withdrawn, 0, 10).await?;
+    a.assert_quiet(&withdrawn, withdrawn_base, 10).await?;
     anyhow::ensure!(
         a.count("bgp session established") == established,
         "withdrawing one path reset the session"
@@ -8902,8 +8904,13 @@ async fn same_segment_no_move(w: &World, mac: &str, pes: [(Id, &str); 2]) -> any
     }
     for (id, _) in pes {
         let r = w.get(id)?;
-        r.assert_quiet("local mac mobility lost", 0, 10).await?;
-        r.assert_quiet("duplicate mac detected", 0, 0).await?;
+        // Baselines at the end of the wait above: earlier phases may have logged both.
+        let (lost, dup) = (
+            r.count_fresh("local mac mobility lost").await,
+            r.count("duplicate mac detected"),
+        );
+        r.assert_quiet("local mac mobility lost", lost, 10).await?;
+        r.assert_quiet("duplicate mac detected", dup, 0).await?;
     }
     Ok(())
 }
@@ -10724,11 +10731,12 @@ async fn otc(w: &mut World) -> anyhow::Result<()> {
         .await?;
     w.start(C, Some(c_flags("provider")), &[]).await?;
     let (b, c) = (w.b()?, w.c()?);
+    let c_learned = c.count(&learned());
     c.wait(est).await?;
     b.wait(&format!("{} .*otc=Some({ASN_A})", learned()))
         .await?;
     b.wait(&loc_rib()).await?;
-    c.assert_quiet(&learned(), 0, 10).await?;
+    c.assert_quiet(&learned(), c_learned, 10).await?;
 
     log("otc: c becomes b's customer; it now receives a's route carrying OTC = a's asn");
     let base = c.count(est);
@@ -11229,6 +11237,7 @@ pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
         &["global", "rib", "add", "-a", "ipv6", V6_OVER_V4_PREFIX],
     )
     .await?;
+    let v6_added = a.count(&format!("added route prefix={V6_OVER_V4_PREFIX}"));
     a.wait(&format!(
         "loc-rib best path for {V6_OVER_V4_PREFIX} updated"
     ))
@@ -11237,8 +11246,12 @@ pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
         "ipv6 route over an ipv4 next hop not installed: .* prefix={V6_OVER_V4_PREFIX}"
     ))
     .await?;
-    a.assert_quiet(&format!("added route prefix={V6_OVER_V4_PREFIX}"), 0, 3)
-        .await?;
+    a.assert_quiet(
+        &format!("added route prefix={V6_OVER_V4_PREFIX}"),
+        v6_added,
+        3,
+    )
+    .await?;
     let (_, routes) = w
         .dock
         .exec("router-a", &["cat", "/proc/net/ipv6_route"])
