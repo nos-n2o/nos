@@ -374,7 +374,7 @@ Unrecognized path attributes (RFC 4271 sections 5 and 6.3):
 
 `set address-family ipv4|ipv6|l2vpn-evpn|ipv4-flowspec|ipv6-flowspec|vpnv4|vpnv6` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.
 
-- IPv6 routes over an IPv4 session need no Extended Next Hop capability (RFC 4798, RFC 8950 section 1): the next hop is IPv4-mapped (`::ffff:a.b.c.d`, 16 octets), unmapped to the IPv4 address on receipt and sent as our session address. A mapped next hop on an IPv6 session is still invalid. IPv4 routes over an IPv6 session still need the peer's Extended Next Hop capability (RFC 8950).
+- IPv6 routes over an IPv4 session need no Extended Next Hop capability (RFC 4798, RFC 8950 section 1): the next hop is IPv4-mapped (`::ffff:a.b.c.d`, 16 octets), unmapped to the IPv4 address on receipt and sent as our session address; `nos-ribd` does not program the resulting IPv6 route (see [routing tables](routing-tables.md)). A mapped next hop on an IPv6 session is still invalid. IPv4 routes over an IPv6 session still need the peer's Extended Next Hop capability (RFC 8950).
 
 - `ipv4` and `ipv6` are unicast routes, installed in the routing table.
 - `l2vpn-evpn` (RFC 7432) carries EVPN routes for VXLAN broadcast domains. It is described with the rest of EVPN.

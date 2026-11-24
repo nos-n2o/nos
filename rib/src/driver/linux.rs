@@ -658,13 +658,6 @@ impl LinuxRibDriver {
         let evpn = source == Some(RouteSource::Evpn);
         let tunnel = tunnel && backup;
         let labelled = !backup && hops.iter().any(|h| !h.labels.is_empty());
-        // An IPv6 prefix over IPv4 gateways (RFC 4798, #623) goes out as an
-        // IPv4-mapped gateway, which the kernel only accepts `onlink` with
-        // an oif, like a labelled hop.
-        let mapped = !backup
-            && prefix.addr().is_ipv6()
-            && !hops.is_empty()
-            && hops.iter().all(|h| h.gateway.is_ipv4());
         let mut hops = hops.to_vec();
         let shared_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
@@ -686,7 +679,31 @@ impl LinuxRibDriver {
                 hop.interface_id = Some(dev);
             }
         }
-        if labelled || mapped {
+        // #623: an unlabelled IPv6 route over IPv4 gateways (RFC 4798) would
+        // be an IPv4-mapped `RTA_GATEWAY`, which the kernel accepts but
+        // resolves with IPv6 neighbour discovery for `::ffff:a.b.c.d`: on
+        // Ethernet nobody answers (e2e `bgp-v6-over-v4`'s probe), so the
+        // traffic is lost. Only MPLS-encapsulated (`labelled`) and shared-
+        // device (EVPN, tunnel) routes use the mapped gateway.
+        // ponytail: the warned set grows with the prefixes seen (no pruning).
+        if !labelled
+            && shared_dev.is_none()
+            && prefix.addr().is_ipv6()
+            && !hops.is_empty()
+            && hops.iter().all(|h| h.gateway.is_ipv4())
+        {
+            static WARNED: std::sync::Mutex<Option<HashSet<IpNet>>> = std::sync::Mutex::new(None);
+            let first = WARNED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_insert_with(HashSet::new)
+                .insert(prefix);
+            if first {
+                warn!(%prefix, %gateway, table_id, "ipv6 route over an ipv4 next hop not installed: the kernel cannot forward it over ethernet");
+            }
+            return Ok(false);
+        }
+        if labelled {
             let mut devs = Vec::with_capacity(hops.len());
             for hop in &hops {
                 devs.push(match hop.interface_id {
@@ -704,7 +721,7 @@ impl LinuxRibDriver {
             }
             hops = kept;
         }
-        let onlink = labelled || mapped || shared_dev.is_some();
+        let onlink = labelled || shared_dev.is_some();
         let Some(route) = build_route(prefix, &hops, table_id, backup, onlink) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(false);
@@ -1971,9 +1988,10 @@ mod tests {
         assert!(build_route(p, &mixed, 100, false, false).is_none());
     }
 
-    /// #623: a plain (unlabelled) IPv6 route over an IPv4 gateway is the
-    /// IPv4-mapped `RTA_GATEWAY` with `RTNH_F_ONLINK` and its oif, and a dump
-    /// reads the IPv4 gateway back (no churn in `diff_routes`).
+    /// #623: `build_route` writes an IPv6 route over an IPv4 gateway as the
+    /// IPv4-mapped `RTA_GATEWAY` with `RTNH_F_ONLINK` and its oif (the path
+    /// of EVPN and labelled routes; `add_route` refuses it when unlabelled),
+    /// and a dump reads the IPv4 gateway back (no churn in `diff_routes`).
     #[test]
     fn an_ipv6_route_over_an_ipv4_gateway_round_trips_onlink() {
         let p = net("2001:db8:210::/48");

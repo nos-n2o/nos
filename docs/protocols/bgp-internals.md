@@ -558,4 +558,4 @@ Reachable through the watchdog with no watchdog code changes, via its existing o
 - No Extended Next Hop (2,1,1) is sent or required: RFC 4798/8950 §1 carry IPv6 NLRI with an IPv4-mapped (`::ffff:a.b.c.d`, 16 byte) next hop. `build_mp_capabilities` emits ENH only for IPv4 NLRI on an IPv6 session, which still needs the peer's ENH (1,1,2).
 - `encode_mp_reach` writes an `IpAddr::V4` hop of AFI 2 as mapped; `decode_mp_reach` unmaps it, so `RibRoute.next_hop` is `IpAddr::V4`.
 - A mapped hop on an IPv6 session is a martian (`adj_in` treats the unmapped V4 hop of an AFI 2 batch as bad when the session address is IPv6); `next_hop_is_martian` still rejects mapped literals (RPL).
-- `next_hop_family_ok`: an IPv6 prefix accepts an IPv4 hop only on an IPv4 session (`local_addr` V4); `build_advertisement` then sends our IPv4 address.
+- `next_hop_family_ok`: an IPv6 prefix accepts an IPv4 hop only on an IPv4 session (`local_addr` V4); `build_advertisement` then sends our IPv4 address. `nos-ribd`'s Linux driver skips such a route (one `warn` per prefix): the kernel's mapped-gateway route is lost on Ethernet (#623's probe).

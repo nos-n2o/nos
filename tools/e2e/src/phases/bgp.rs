@@ -11182,9 +11182,12 @@ async fn start_exabgp(w: &mut World, conf: &str) -> anyhow::Result<()> {
 
 /// #623: IPv6 unicast over an IPv4 session needs no Extended Next Hop (RFC
 /// 4798/8950 section 1): both ends negotiate it from MP (2,1) alone, GoBGP's
-/// IPv6 route (IPv4-mapped next hop) is learned and not treated as a martian,
-/// and `nos-ribd` installs it through the mapped gateway, `onlink` with an
-/// oif (the kernel refuses `RTA_VIA` on an IPv6 route).
+/// IPv6 route (IPv4-mapped next hop) is learned and not treated as a martian.
+/// The kernel refuses `RTA_VIA` on an IPv6 route and an IPv4-mapped
+/// `RTA_GATEWAY` is resolved by IPv6 neighbour discovery, which an Ethernet
+/// peer never answers (a probe in this phase's history sniffed router-a's
+/// unanswered NS for `::ffff:a.b.c.d`), so `nos-ribd` installs nothing and
+/// warns once.
 pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
     let flags = strings(&[
         "--address",
@@ -11220,7 +11223,7 @@ pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
-    log("GoBGP announces an IPv6 prefix over the IPv4 session: learned and installed via the IPv4 gateway");
+    log("GoBGP announces an IPv6 prefix over the IPv4 session: learned, not installed (warn once)");
     gobgp(
         w,
         &["global", "rib", "add", "-a", "ipv6", V6_OVER_V4_PREFIX],
@@ -11231,17 +11234,26 @@ pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait(&format!(
-        "added route prefix={V6_OVER_V4_PREFIX} gateway={IP_G}"
+        "ipv6 route over an ipv4 next hop not installed: .* prefix={V6_OVER_V4_PREFIX}"
     ))
     .await?;
-    a.assert_quiet("failed to add route", 0, 3).await?;
+    a.assert_quiet(&format!("added route prefix={V6_OVER_V4_PREFIX}"), 0, 3)
+        .await?;
+    let (_, routes) = w
+        .dock
+        .exec("router-a", &["cat", "/proc/net/ipv6_route"])
+        .await?;
+    anyhow::ensure!(
+        !routes.contains("20010db8021000000000000000000000"),
+        "the kernel holds a route for {V6_OVER_V4_PREFIX}:\n{routes}"
+    );
 
-    log("withdrawing it removes the kernel route (the dump reads the mapped gateway back as IPv4)");
+    log("withdrawing it needs no kernel removal");
     gobgp(
         w,
         &["global", "rib", "del", "-a", "ipv6", V6_OVER_V4_PREFIX],
     )
     .await?;
-    a.wait(&format!("removed route prefix={V6_OVER_V4_PREFIX}"))
+    a.wait(&format!("loc-rib route for {V6_OVER_V4_PREFIX} withdrawn"))
         .await
 }
