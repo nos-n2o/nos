@@ -769,15 +769,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             name: Some(name.to_string()),
         }),
     cmd!(["show" "log" [(source: LogSource)] ["--follow"]],
-        Doc::Local {
-            summary: "Show the most recent collected log entries, optionally of one source, or live-tail them.",
-            detail: "Queries nos-logd (resolved via nos-watchdogd) for its current buffer of \
-                     log entries pushed by every other component process. `<source>` comes \
-                     first and keeps only entries whose source exactly matches (e.g. \
-                     `nos-ribd[rt1]`, `nos-interfaced`, `nos-configd`). With `--follow` it \
-                     prints the buffer, then streams new entries as they're pushed until \
-                     Ctrl-C is pressed or the connection is lost.",
-        },
+        Doc::FromConfig(Topic::ShowLog),
         Always,
         |source, follow| Command::ShowLog {
             source: (!source.is_empty()).then(|| source.to_string()),

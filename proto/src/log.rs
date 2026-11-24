@@ -18,6 +18,19 @@ pub enum LogLevel {
     Error,
 }
 
+impl LogLevel {
+    /// Severity order, `Trace` lowest; for minimum-level filters.
+    pub const fn rank(self) -> u8 {
+        match self {
+            LogLevel::Trace => 0,
+            LogLevel::Debug => 1,
+            LogLevel::Info => 2,
+            LogLevel::Warn => 3,
+            LogLevel::Error => 4,
+        }
+    }
+}
+
 /// One structured log record, as forwarded by any component process to
 /// `nos-logd` (`LogRequest::Push`) or returned to a querying client
 /// (`LogEvent::Logs`/`Line`).
@@ -43,6 +56,27 @@ pub struct LogEntry {
     /// The event's structured fields (other than `message`), flattened to
     /// their `Display`/`Debug` text — e.g. `("table", "rt1")`.
     pub fields: Vec<(String, String)>,
+}
+
+impl LogEntry {
+    /// True when the entry is at least `min_level` and, if given, `needle`
+    /// is a case-insensitive substring of the source, target, message or any
+    /// field (as its key, value or `key=value`). Raw text, not sanitised.
+    pub fn matches(&self, min_level: Option<LogLevel>, needle: Option<&str>) -> bool {
+        if min_level.is_some_and(|m| self.level.rank() < m.rank()) {
+            return false;
+        }
+        let Some(n) = needle else { return true };
+        let n = n.to_lowercase();
+        let hit = |h: &str| h.to_lowercase().contains(&n);
+        hit(&self.source)
+            || hit(&self.target)
+            || hit(&self.message)
+            || self
+                .fields
+                .iter()
+                .any(|(k, v)| hit(k) || hit(v) || hit(&format!("{k}={v}")))
+    }
 }
 
 /// Messages sent from a client to `nos-logd`'s IPC socket.
@@ -84,4 +118,59 @@ pub enum LogEvent {
     Line(LogEntry),
     /// Something failed.
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(level: LogLevel) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level,
+            source: "nos-ribd[rt1]".into(),
+            target: "nos_rib::driver".into(),
+            message: "Route Installed".into(),
+            fields: vec![("Prefix".into(), "10.0.0.0/8".into())],
+        }
+    }
+
+    #[test]
+    fn level_filter() {
+        use LogLevel::*;
+        assert!(Trace.rank() < Debug.rank() && Warn.rank() < Error.rank());
+        for (min, keeps) in [
+            (Trace, [true; 5]),
+            (Warn, [false, false, false, true, true]),
+            (Error, [false, false, false, false, true]),
+        ] {
+            for (l, k) in [Trace, Debug, Info, Warn, Error].into_iter().zip(keeps) {
+                assert_eq!(entry(l).matches(Some(min), None), k, "{min:?} {l:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn needle() {
+        let e = entry(LogLevel::Info);
+        assert!(e.matches(None, None));
+        assert!(e.matches(None, Some("")));
+        for n in [
+            "RIBD[RT1]",
+            "NOS_RIB::",
+            "route installed",
+            "prefix",
+            "10.0.0.0",
+            "prefix=10.0",
+        ] {
+            assert!(e.matches(None, Some(n)), "{n}");
+        }
+        assert!(!e.matches(None, Some("rt1nos_rib")));
+        assert!(!e.matches(None, Some("absent")));
+        assert!(!e.matches(Some(LogLevel::Warn), Some("route")));
+        assert!(e.matches(Some(LogLevel::Info), Some("route")));
+        let mut u = e;
+        u.message = "café".into();
+        assert!(u.matches(None, Some("CAFÉ")));
+    }
 }
