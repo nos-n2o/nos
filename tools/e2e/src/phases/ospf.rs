@@ -1362,7 +1362,7 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
 /// still forms. Restores `lls` off and no authentication at the end.
 pub async fn ospf_lls(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let got = |peer: &str| format!("ospf lls received link=eth0.0 neighbor={peer} eof=0");
+    let got = |peer: &str| format!("ospf lls received link=eth0.0 neighbor={peer} eof=1");
     let (from_b, from_a) = (got(OSPF_ROUTER_ID_B), got(OSPF_ROUTER_ID));
     let flags = |rid: &str, lls: bool, extra: &[&str]| {
         let mut f = ospf(rid);
