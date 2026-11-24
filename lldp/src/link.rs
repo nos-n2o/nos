@@ -650,6 +650,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn follow_link_clears_neighbors_and_survives_a_failed_reopen() {
+        use nos_proto::{InterfaceEvent as E, LinkState};
+        let mut c = cfg(1);
+        c.interface = "nos-no-such0".into();
+        let ports = SharedPorts::default();
+        let mut table = LinkTable::default();
+        crate::link_client::apply(
+            &mut table,
+            E::LinkAdded(LinkState {
+                name: c.interface.clone(),
+                ifindex: 3,
+                admin_up: true,
+                carrier: true,
+                port_aggregate: None,
+            }),
+        );
+        let mut socket = None;
+        let mut epoch = 0;
+        // No socket yet and the device is there: reopen is tried, fails (no
+        // such interface), the task carries on with `None`.
+        assert!(!follow_link(&c, &ports, &table, &mut socket, &mut epoch));
+        assert!(socket.is_none());
+        assert_eq!(epoch, 0);
+        // Device gone and no socket: nothing to do.
+        crate::link_client::apply(
+            &mut table,
+            E::LinkSnapshot {
+                observed: true,
+                links: vec![],
+            },
+        );
+        assert!(!follow_link(&c, &ports, &table, &mut socket, &mut epoch));
+    }
+
     /// `handle_rx` with a fresh log bucket.
     fn rx(me: &LinkConfig, n: &SharedPorts, payload: &[u8], now: Instant) -> bool {
         handle_rx(me, n, payload, now, &mut LogBucket::new(now))
