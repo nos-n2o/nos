@@ -1,0 +1,21 @@
+Key
+  Table      rt1
+  Peer       192.0.2.1
+  Local      192.0.2.9
+  Interface  eth7
+  Multihop   no
+  Aggregate  ae9
+State          Up
+Diag           NoDiagnostic
+Local-Disc     1
+Remote-Disc    2
+Tx-Interval    100ms
+Detection      300ms
+Kind           SbfdInitiator
+Auth           MeticulousMd5
+Auth-Key       9
+Auth-Failures  4
+Echo           yes
+Echo-Interval  50ms
+Echo-Only      no
+Pdu            1.4 KB
