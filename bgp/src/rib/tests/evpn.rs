@@ -702,3 +702,27 @@ fn an_evpn_route_refresh_resends_the_last_advertisements() {
         [OutboundUpdate::AnnounceEvpn(_)]
     ));
 }
+
+/// RFC 7313 §4 (#625): `BoRR` marks every EVPN route stale, a re-announced one
+/// is kept, `EoRR` purges the rest; a `BoRR` alone leaves them for `expire_stale`.
+#[test]
+fn borr_eorr_purges_unrefreshed_evpn_routes() {
+    let mut rib = new_rib(65000);
+    let peer = addr("10.0.0.1");
+    let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+    let feed = |rib: &mut BgpRib, macs: Vec<u8>| {
+        let u = evpn_reach(macs.into_iter().map(evpn_nlri).collect(), vec![65001]);
+        rib.handle_update(peer, false, v4("192.0.2.1"), &u, &deny_all_policy());
+    };
+    feed(&mut rib, vec![1, 2]);
+    rib.begin_refresh_in(peer, AddressFamily::L2vpnEvpn);
+    assert!(rib.has_stale(peer, Some(AddressFamily::L2vpnEvpn)));
+    feed(&mut rib, vec![1]);
+    assert_eq!(rib.end_refresh_in(peer, AddressFamily::L2vpnEvpn), 1);
+    assert_eq!(rib.evpn_routes().len(), 1);
+    assert!(!rib.has_stale(peer, None));
+    // BoRR without EoRR: the stale deadline path purges the lot.
+    rib.begin_refresh_in(peer, AddressFamily::L2vpnEvpn);
+    assert_eq!(rib.purge_stale(peer, AddressFamily::L2vpnEvpn), 1);
+    assert_eq!(rib.evpn_routes().len(), 0);
+}
