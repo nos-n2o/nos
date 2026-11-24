@@ -5,6 +5,7 @@
 use std::fmt;
 
 use ipnet::IpNet;
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::AclAction;
@@ -23,11 +24,13 @@ pub enum AclDirection {
 /// One device an ACL is installed on.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, View)]
 pub struct AclAttachment {
     /// The kernel device name (`eth1`, `eth1.100`, `bond3`).
+    #[view(brief)]
     pub interface: String,
     /// The direction it filters.
+    #[view(brief, text)]
     pub direction: AclDirection,
 }
 
@@ -35,45 +38,59 @@ pub struct AclAttachment {
 /// every device the ACL is attached to.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct AclRuleStatus {
     /// The rule's name.
+    #[view(brief)]
     pub name: String,
     /// What it does with a match.
+    #[view(brief, text)]
     pub action: AclAction,
     /// `shadowed` (an earlier rule matches everything it does) or `trailing`
     /// (last rules equal to the default action): the optimiser gave the rule
     /// no filter, so its counters stay 0. `None` when it is installed.
+    #[view(brief, text)]
     pub dropped: Option<String>,
     /// The priority level the rule's filters were packed into; `None` when
     /// dropped.
+    #[view(unit = count)]
     pub level: Option<u32>,
     /// Packets matched.
+    #[view(brief, unit = count)]
     pub packets: u64,
     /// Bytes matched.
+    #[view(brief, unit = bytes)]
     pub bytes: u64,
 }
 
 /// One ACL: its compile shape, attachments and counters.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct AclStatus {
     /// The ACL's name.
+    #[view(brief)]
     pub name: String,
     /// What a packet no rule matched gets.
+    #[view(text)]
     pub default_action: AclAction,
     /// Packets that hit the default action.
+    #[view(unit = count)]
     pub default_packets: u64,
     /// Bytes that hit the default action.
+    #[view(unit = bytes)]
     pub default_bytes: u64,
     /// Priority levels the compiled ACL uses.
+    #[view(brief, unit = count)]
     pub levels: u32,
     /// Kernel filters per attachment, the two default filters included.
+    #[view(brief, unit = count)]
     pub filters: u32,
     /// Every device it is installed on (empty: unattached, counters 0).
+    #[view(nested)]
     pub attached: Vec<AclAttachment>,
     /// The rules, in order.
+    #[view(nested)]
     pub rules: Vec<AclRuleStatus>,
 }
 
@@ -218,22 +235,29 @@ pub struct FlowspecSet {
 /// `GET /v1/flowspec`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct FlowspecRuleStatus {
     /// The BGP instance that pushed it.
+    #[view(brief)]
     pub instance: String,
     /// The VRF the rule filters; `None` = the instance's own table.
+    #[view(brief, header = "vrf", text)]
     pub table: Option<String>,
     /// The flow as text.
+    #[view(brief)]
     pub flow: String,
     /// Its actions as text.
+    #[view(brief)]
     pub actions: Vec<String>,
     /// Why it is not installed (an unsupported match or action, the rule
     /// cap); `None` when installed.
+    #[view(brief, header = "state", text)]
     pub unsupported: Option<String>,
     /// Packets matched, summed over every device.
+    #[view(brief, unit = count)]
     pub packets: u64,
     /// Bytes matched, summed over every device.
+    #[view(brief, unit = bytes)]
     pub bytes: u64,
 }
 

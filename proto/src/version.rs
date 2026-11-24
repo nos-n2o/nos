@@ -1,5 +1,6 @@
 //! Compile-time build version, shared by `nos` (`show version`) and `nos-restd` (`GET /v1/version`).
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// The workspace crate version.
@@ -10,11 +11,13 @@ pub const REVISION: &str = env!("NOS_BUILD_REV");
 /// What `show version` / `GET /v1/version` report.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct VersionInfo {
     /// `CARGO_PKG_VERSION`.
+    #[view(brief)]
     pub version: String,
     /// Short git revision, or `unknown`.
+    #[view(brief)]
     pub revision: String,
 }
 

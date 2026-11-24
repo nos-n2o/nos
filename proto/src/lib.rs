@@ -49,6 +49,8 @@ pub mod stp;
 pub mod validators;
 pub mod version;
 pub mod view;
+#[cfg(test)]
+mod view_annot_tests;
 pub mod yang;
 pub use version::VersionInfo;
 

@@ -3,6 +3,7 @@
 //! over a Unix socket resolved via the watchdog broker (`ServiceRef::Lldp` — a
 //! single, system-wide instance, so no per-instance socket to pick between).
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// One remote system heard on one local interface, for `show lldp neighbors`.
@@ -92,31 +93,40 @@ pub struct LldpMacPhy {
 /// restarts or LLDP is turned off on that interface.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct LldpLinkStats {
     /// Local interface name.
+    #[view(brief, sort)]
     pub interface: String,
     /// `statsFramesOutTotal`: LLDPDUs sent (periodic, fast-start, shutdown).
+    #[view(brief, unit = count)]
     pub frames_out: u64,
     /// `statsFramesInTotal`: valid LLDPDUs received (our own reflected frames
     /// excluded).
+    #[view(brief, unit = count)]
     pub frames_in: u64,
     /// `statsFramesInErrorsTotal`: received frames that failed validation.
+    #[view(brief, unit = count)]
     pub frames_in_errors: u64,
     /// `statsFramesDiscardedTotal`: every invalid frame, plus every frame
     /// dropped because the neighbor table was full.
+    #[view(brief, unit = count)]
     pub frames_discarded: u64,
     /// `statsTLVsDiscardedTotal`: optional TLVs dropped (a malformed or non-IP
     /// Management Address, or one past the per-LLDPDU cap; a malformed or
     /// repeated 802.1/802.3 TLV nos decodes, or a VLAN Name past the cap).
+    #[view(brief, unit = count)]
     pub tlvs_discarded: u64,
     /// `statsTLVsUnrecognizedTotal`: reserved TLV types and every
     /// organizationally-specific TLV nos doesn't decode (LLDP-MED, DCBX, …).
+    #[view(brief, unit = count)]
     pub tlvs_unrecognized: u64,
     /// `statsAgeoutsTotal`: neighbors dropped because their TTL lapsed.
+    #[view(brief, unit = count)]
     pub ageouts: u64,
     /// New neighbors refused because the table was full (802.1AB
     /// tooManyNeighbors; this port's share of `lldpStatsRemTablesDrops`).
+    #[view(brief, unit = count)]
     pub too_many_neighbors: u64,
 }
 

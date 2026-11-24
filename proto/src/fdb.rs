@@ -6,6 +6,7 @@
 
 use std::net::IpAddr;
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// An Ethernet Segment Identifier; all-zero is "single-homed".
@@ -204,109 +205,136 @@ pub enum FdbEvent {
 /// A broadcast domain's forwarding table, for `show fdb`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct FdbTable {
     /// Broadcast domain name.
+    #[view(brief)]
     pub domain: String,
     /// VXLAN Network Identifier of the domain.
+    #[view(brief)]
     pub vni: u32,
     /// Bridge and VXLAN device names, once nos-fdbd has resolved/created them.
+    #[view(text)]
     pub bridge: Option<String>,
     /// Name of the VXLAN device, once created.
+    #[view(text)]
     pub vxlan: Option<String>,
     /// The MAC entries.
+    #[view(nested)]
     pub macs: Vec<MacEntry>,
     /// IP-to-MAC bindings: local ARP/ND and SVI addresses, and remote Type-2
     /// routes carrying an IP.
+    #[view(nested)]
     pub neighbours: Vec<NeighEntry>,
     /// Remote VTEPs BUM traffic is replicated to (one per received Type-3).
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    #[view(text)]
     pub flood: Vec<IpAddr>,
     /// The Ethernet Segments this domain is attached to (an aggregate with an
     /// `esi` that is a member of the domain) and this PE's Designated
     /// Forwarder role on each.
+    #[view(nested)]
     pub segments: Vec<EsEntry>,
     /// Whether ARP/ND suppression (`neigh-suppress`) is in effect on the
     /// VXLAN bridge port: the value nos-fdbd last applied to the kernel,
     /// not merely the configured one.
+    #[view(header = "neigh-suppress", unit = bool)]
     pub neigh_suppress: bool,
 }
 
 /// One locally attached Ethernet Segment, as seen from one broadcast domain.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 #[allow(clippy::struct_excessive_bools)] // wire status flags, one per independent fact
 pub struct EsEntry {
     /// `00:11:22:33:44:55:66:77:88:99`.
+    #[view(text)]
     pub esi: String,
     /// The bridge port the segment attaches through (the bond or its VLAN
     /// sub-link).
+    #[view(text)]
     pub port: String,
     /// Whether this PE is the segment's Designated Forwarder for the domain's
     /// BUM traffic. A non-DF has flooding to `port` turned off.
+    #[view(unit = bool)]
     pub designated_forwarder: bool,
     /// Every PE attached to the segment (this one included), in the order the
     /// DF election ranks them.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    #[view(text)]
     pub pes: Vec<IpAddr>,
     /// The PEs whose per-ES Ethernet A-D route for this segment is currently
     /// held (this one excluded): a remote MAC on the segment is only installed
     /// while its PE is listed here.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    #[view(text)]
     pub ad_pes: Vec<IpAddr>,
     /// Whether the segment's port is up (carrier). A down segment withdraws its
     /// Type-4 and Type-1 routes and stops being a DF candidate.
+    #[view(unit = bool)]
     pub up: bool,
     /// Single-active redundancy: a non-DF blocks the port outright (unicast
     /// too), instead of only refusing BUM.
+    #[view(unit = bool)]
     pub single_active: bool,
     /// The DF election algorithm in effect (RFC 8584 §2.2.3): `Hrw` only when
     /// every candidate PE asked for it, else `Modulo`.
+    #[view(text)]
     pub df_algorithm: crate::DfAlgorithm,
     /// EVPN local bias (RFC 8365 §8.3.1) is fully in place on this segment:
     /// the PE delivers BUM from its own hosts to the segment whatever the DF
     /// role and drops BUM from the other PEs on it. `false` on a single-active
     /// segment (it does not apply) and when the kernel could not be set up
     /// (missing tc modules), in which case only the DF floods to the segment.
+    #[view(unit = bool)]
     pub local_bias: bool,
 }
 
 /// One MAC in a domain's forwarding table.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct MacEntry {
     /// `aa:bb:cc:dd:ee:ff`.
+    #[view(text)]
     pub mac: String,
     /// How the entry was learned.
+    #[view(text)]
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry (the first of `vteps`).
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(text)]
     pub vtep: Option<IpAddr>,
     /// Every VTEP a `Remote` entry is reached through: one, or several when
     /// the MAC sits on an all-active Ethernet Segment and traffic is balanced
     /// over its PEs (aliasing, RFC 7432 §8.4.1.1). Empty for a `Local` MAC.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    #[view(text)]
     pub vteps: Vec<IpAddr>,
     /// The Ethernet Segment a `Local` MAC was learned on, when its port is one.
+    #[view(text)]
     pub esi: Option<String>,
 }
 
 /// One IP-to-MAC neighbor entry of an IP-VRF.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct NeighEntry {
     /// IP address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(text)]
     pub ip: IpAddr,
     /// `aa:bb:cc:dd:ee:ff`.
+    #[view(text)]
     pub mac: String,
     /// How the entry was learned.
+    #[view(text)]
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(text)]
     pub vtep: Option<IpAddr>,
 }
 

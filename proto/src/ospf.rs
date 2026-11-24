@@ -8,6 +8,7 @@
 
 use std::net::Ipv4Addr;
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// One neighbor's state, as reported by `nos-ospfd` — the full RFC 2328
@@ -62,60 +63,76 @@ pub enum LinkInterfaceState {
 /// comment for point-to-point vs. broadcast row-count semantics).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
 pub struct NeighborSummary {
     /// The attach point's display name, matching
     /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`/
     /// `"broadcast-domain:<name>"` convention.
+    #[view(brief, sort)]
     pub link: String,
     /// Area the interface belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "area", text)]
     pub area_id: Ipv4Addr,
     /// State of the local interface.
+    #[view(brief, header = "if-state", text)]
     pub interface_state: LinkInterfaceState,
     /// Known once at least one Hello has been received on this link.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "neighbor", text)]
     pub neighbor_router_id: Option<Ipv4Addr>,
     /// Neighbor state (RFC 2328 section 10.1).
+    #[view(brief, text)]
     pub state: OspfNeighborState,
     /// Seconds since the last Hello was received from this neighbor. `None`
     /// if none has ever been received.
+    #[view(brief, header = "last-hello", unit = secs)]
     pub last_hello_secs: Option<u64>,
     /// `HelloInterval` in seconds (RFC 2328 section 9.5).
+    #[view(brief, unit = secs)]
     pub hello_interval: u16,
     /// `RouterDeadInterval` in seconds.
+    #[view(brief, unit = secs)]
     pub dead_interval: u16,
     /// This link's own configured Router Priority — mirrors how
     /// `hello_interval`/`dead_interval` already report the *local* link's
     /// config on every row.
+    #[view(brief)]
     pub priority: u8,
     /// The remote neighbor's own decoded Router Priority. `None` if no
     /// Hello has been received from it yet.
+    #[view(brief)]
     pub neighbor_priority: Option<u8>,
     /// This link's currently elected DR/BDR — `None` on a point-to-point
     /// link (no election ever runs) or before a broadcast link's first
     /// election.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, text)]
     pub dr: Option<Ipv4Addr>,
     /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, text)]
     pub bdr: Option<Ipv4Addr>,
     /// The neighbor's RFC 5613 LLS data. `None` when it sent no valid LLS
     /// block, or LLS is off on this link.
     #[serde(default)]
+    #[view(brief, nested)]
     pub lls: Option<LlsSummary>,
 }
 
 /// A neighbor's RFC 5613 Link-Local Signaling data (EOF TLV).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct LlsSummary {
     /// Raw Extended Options and Flags word.
+    #[view(text)]
     pub eof: u32,
     /// LSDB Resynchronization bit (RFC 4811), shown only.
+    #[view(unit = bool)]
     pub lr: bool,
     /// Restart Signal bit (RFC 4812), shown only.
+    #[view(unit = bool)]
     pub rs: bool,
 }
 

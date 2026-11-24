@@ -229,7 +229,10 @@ mod tests {
         assert_eq!(sk.fields[0].key, "table");
         let cols: Vec<_> = sk.columns().iter().map(|f| f.header).collect();
         assert_eq!(cols[..4], ["Table", "Peer", "Local", "Interface"]);
-        assert!(!sk.columns().iter().any(|f| f.key == "aggregate"));
+        assert_eq!(
+            sk.columns().iter().map(|f| f.header).nth(4),
+            Some("Aggregate")
+        );
         assert_eq!(
             sk.fields.iter().find(|f| f.key == "peer").unwrap().sort,
             Some(Sort::Asc)
@@ -239,7 +242,6 @@ mod tests {
         let col_keys: Vec<_> = n.columns().iter().map(|f| f.key).collect();
         assert_eq!(col_keys[..3], ["key", "state", "diag"]);
         assert_eq!(*col_keys.last().unwrap(), "tx_pdu_bytes");
-        assert!(!col_keys.contains(&"aggregate"));
     }
 
     #[test]
