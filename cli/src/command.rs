@@ -626,6 +626,10 @@ mod tests {
                 follow: true,
             }
         );
+        assert!(matches!(
+            Command::parse("show log --follow nos-ribd"),
+            Command::Unknown(_)
+        ));
     }
 
     #[test]

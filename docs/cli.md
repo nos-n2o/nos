@@ -419,6 +419,13 @@ Moved from `cli/CLAUDE.md` (#263). Every `edit`/`set`/`delete` row below is gene
 
 Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate: every object and field of the schema is reachable, absolute (from the top) or relative (from the `edit` position), in the canonical CLI spelling (`#[cli(words)]`, e.g. `bgp instance`) or the REST segment (`bgp-instance`), and `set`/a deep `edit` creates any missing object with its `Default` (like REST's `PUT`). The rows below are the ones the shell has always documented; see `proto/src/schema/` and its `#[cli]` attributes for the complete set, including the sugar (`md5-password`, `ao-key`, `crypto-key`, `shutdown <message>`, `orlonger`/`upto`, `eth0.100`, and a physical interface's `address`/`routing-table`/`ospf`/`ospfv3` meaning its untagged subinterface).
 
+Optional clauses in a `cmd!` row (#1450):
+- `[...]` is one optional trailing clause, e.g. `cmd!(["show" "log" [(source: LogSource)] ["--follow"]], …)`; the usage string is generated (`show log [<source>] [--follow]`).
+- Clauses come after every required token. A clause starts with a keyword (`["last" (n: Number)]`, `["--follow"]`), or is the lone `<source>` argument, which is only valid as the first word after the required ones.
+- Keyword clauses may come in any order, each at most once. A `Rest` argument (`["match" (text: Rest)]`) takes the rest of the line, so it ends the row.
+- `build` gets one word per argument token, plus one per argument-less clause (the keyword); an absent clause binds `""`.
+- A source named like a clause keyword cannot be addressed (real sources start with `nos-`).
+
 | Command | Behavior |
 |---------|----------|
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned running config as an indented hierarchy in the `set` words, only what is configured (works in any mode) |
@@ -458,8 +465,7 @@ Config commands (`edit`/`set`/`delete`) are not declared anywhere in this crate:
 | `delete` / `delete static-routing-instance <name>` | Deletes the current static routing instance (returns to the transaction root) or a named one |
 | `show interface` | Resolves `nos-interfaced`'s single instance via the watchdog broker, then `InterfaceRequest::GetInterfaces` — every interface's reconciled addresses and routing-table assignment (works in any mode) |
 | `show interface <name>` | Same resolution, then `InterfaceRequest::GetInterface { name }`, or "not found" if unconfigured (works in any mode) |
-| `show log [<source>]` | Resolves `nos-logd`'s single instance via the watchdog broker, then `LogRequest::GetLogs` — the current buffer, optionally filtered to entries whose source exactly matches `<source>` (works in any mode) |
-| `show log [<source>] --follow` | Same resolution, then `LogRequest::Tail` — prints the current buffer, then streams new matching entries live until Ctrl-C or the connection is lost (works in any mode) |
+| `show log [<source>] [--follow]` | Resolves `nos-logd`'s single instance via the watchdog broker, then `LogRequest::GetLogs` — the current buffer, optionally filtered to entries whose source exactly matches `<source>` (first, before `--follow`). With `--follow`: `LogRequest::Tail` — prints the current buffer, then streams new matching entries live until Ctrl-C or the connection is lost (works in any mode) |
 | `show bgp brief` | Fetches the running config for the list of `BgpInstance`s, resolves each one's `nos-bgpd` via the watchdog broker, then `BgpRequest::GetSummary` — each peer's FSM state, remote AS, uptime, and negotiated hold-time; an instance whose `nos-bgpd` isn't running is reported individually rather than aborting the command (works in any mode) |
 | `show bgp routes` | Same shape, with `BgpRequest::GetRoutesPage` over one connection per instance, printed page by page as it arrives (header once): one line per IPv4/IPv6 unicast path (best marked `>`) with peer, next hop, AS path, origin AS, local-pref and RPKI validation state (works in any mode); a route with retained unrecognized attributes (#1035) gets one indented line each: `attr <type> flags=0x<hh> len=<n> <hex>` (#1036) |
 | `show bgp bmp` | Same shape as `show bgp rpki`, with `BgpRequest::ShowBmp { instance }`: each configured `bmp-station`'s state, monitored view, statistics interval, monitored peers, messages sent by type, queue overflows, reconnect attempts and last error. |
@@ -540,7 +546,7 @@ Command matching is exact-token only (no case-folding or abbreviations).
 
 ### Help, `?` and Tab mechanics
 
-`help` (typed + Enter), the live `?` key, and Tab-completion read the same two sources, so they always agree on what's valid to type next: the `cmd!` rows in `spec.rs` (show/shell commands, filtered to the current `Mode`/position by `spec::availability_matches`) and, for config edits, the schema's tree through `config_grammar` (`complete` for the next word, `usages` for `help`'s list — every edit reachable from the current position, in tree order, i.e. grouped by object). A config field shows its canonical spelling; its REST segment is accepted but not offered.
+`help` (typed + Enter), the live `?` key, and Tab-completion read the same two sources, so they always agree on what's valid to type next: the `cmd!` rows in `spec.rs` (show/shell commands, filtered to the current `Mode`/position by `spec::availability_matches`) and, for config edits, the schema's tree through `config_grammar` (`complete` for the next word, `usages` for `help`'s list — every edit reachable from the current position, in tree order, i.e. grouped by object). A config field shows its canonical spelling; its REST segment is accepted but not offered. For `cmd!` rows, `parse` and Tab/`?` share one matcher, `spec::walk`: it binds the typed words and returns what may come next, so only optional clauses not yet typed are offered.
 
 The *semantic* explanation of what a command does — `summary`/`detail` text — is **not** duplicated here: a config field's `#[cli(topic = …)]`, and a show/shell row's `spec::Doc::FromConfig(topic)`, point at a `nos_proto::docs::Topic`, resolved at display time via `Request::Describe { topic }` / `Event::Description(CommandDoc)` — the CLI's text, authored in `nos-config`'s `docs.rs`, separate from the schema's `///` comments that document the REST API. Only purely local shell mechanics (`help`, `exit`/`quit`/`end`, `up`, `top`, the `source` line editing, and the three config verbs) carry their text as `spec::Doc::Local`.
 

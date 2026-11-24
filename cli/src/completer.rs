@@ -100,40 +100,51 @@ impl Completer for NosCompleter {
             config.get_or_insert_with(source).clone()
         };
 
+        let typed_words: Vec<(usize, &str)> = typed.to_vec();
         for spec in spec::COMMAND_SPECS {
-            if !spec::availability_matches(spec.availability, &self.mode)
-                || words.len() >= spec.tokens.len()
-                || !words.iter().zip(spec.tokens).all(|(w, tok)| match tok {
-                    Token::Literal(lit) => lit == w,
-                    Token::Arg(_) => true,
-                })
-            {
+            if !spec::availability_matches(spec.availability, &self.mode) {
                 continue;
             }
-            match spec.tokens[words.len()] {
-                Token::Literal(lit) => {
-                    if lit.starts_with(partial) && !out.iter().any(|s| s.value == lit) {
-                        let s = self.suggestion(
-                            lit.to_string(),
-                            Some(spec.doc),
-                            spec.usage.to_string(),
-                            span,
-                        );
-                        out.push(s);
-                    }
-                }
-                Token::Arg(kind) => {
-                    let Some(list) = kind.config_list() else {
-                        continue;
-                    };
-                    let names = config(&mut self.config_source)
-                        .and_then(|doc| doc[list].as_array().cloned())
-                        .unwrap_or_default();
-                    for name in names.iter().filter_map(|e| e["name"].as_str()) {
-                        if name.starts_with(partial) && !out.iter().any(|s| s.value == name) {
-                            out.push(self.suggestion(name.to_string(), None, String::new(), span));
+            let Some(walk) = spec::walk(spec, line, &typed_words) else {
+                continue;
+            };
+            for token in walk.next {
+                match token {
+                    Token::Literal(lit) => {
+                        if lit.starts_with(partial) && !out.iter().any(|s| s.value == lit) {
+                            let s = self.suggestion(
+                                lit.to_string(),
+                                Some(spec.doc),
+                                spec.usage.to_string(),
+                                span,
+                            );
+                            out.push(s);
                         }
                     }
+                    Token::Arg(kind) => {
+                        let mut words: Vec<String> = kind
+                            .fixed_values()
+                            .into_iter()
+                            .flatten()
+                            .map(|v| (*v).to_string())
+                            .collect();
+                        if let Some(list) = kind.config_list() {
+                            let doc = config(&mut self.config_source);
+                            let names = doc.and_then(|d| d[list].as_array().cloned());
+                            let names = names.unwrap_or_default();
+                            words.extend(
+                                names
+                                    .iter()
+                                    .filter_map(|e| e["name"].as_str().map(str::to_string)),
+                            );
+                        }
+                        words.retain(|w| w.starts_with(partial));
+                        words.retain(|w| !out.iter().any(|s| &s.value == w));
+                        for w in words {
+                            out.push(self.suggestion(w, None, String::new(), span));
+                        }
+                    }
+                    Token::Opt(_) => {}
                 }
             }
         }
@@ -264,6 +275,31 @@ mod tests {
             values(Mode::Operational, "show route "),
             vec!["rt1".to_string()]
         );
+    }
+
+    #[test]
+    fn show_log_offers_only_the_clauses_not_yet_typed() {
+        for line in ["show log ", "show log nos-x "] {
+            assert_eq!(
+                values(Mode::Operational, line),
+                vec!["--follow".to_string()]
+            );
+        }
+        assert_eq!(
+            values(Mode::Operational, "show log --follow "),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            values(Mode::Operational, "show log nos-x --follow "),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn fixed_values_complete_by_prefix() {
+        let v = spec::ArgKind::LogLevel.fixed_values().unwrap();
+        assert_eq!(v, ["trace", "debug", "info", "warn", "error"]);
+        assert!(spec::ArgKind::Plain.fixed_values().is_none());
     }
 
     #[test]
