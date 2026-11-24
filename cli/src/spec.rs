@@ -230,6 +230,40 @@ macro_rules! cmd {
     };
 }
 
+const OSPF_NEIGH_DOC: Doc = Doc::Local {
+    summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",
+    detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
+             nos-watchdogd) for its links' current neighbor state, interface state, \
+             last-hello age, and elected DR/BDR. An instance whose nos-ospfd isn't \
+             running is reported individually rather than aborting the whole command.",
+};
+
+const OSPFV3_NEIGH_DOC: Doc = Doc::Local {
+    summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",
+    detail: "Mirrors 'show ospf neigh' for OSPFv3 (RFC 5340): queries every configured \
+             Ospfv3Instance's nos-ospfv3d (each resolved via nos-watchdogd) for its \
+             links' current neighbor state, interface state, last-hello age, and \
+             elected DR/BDR.",
+};
+
+const OSPF_DB_DOC: Doc = Doc::Local {
+    summary: "Show every installed LSA's header across every OSPF instance, optionally of one type and advertising router.",
+    detail: "Queries every configured OSPF instance's daemon (each resolved via nos-watchdogd) for \
+             its per-area LSDB's installed LSA headers, as a table (type, link-state-id, advertising router, sequence number, age, checksum, metric and flags). The Info column shows an \
+             external LSA's metric and E1/E2, a router LSA's B/E/V flags and virtual links. \
+             <type> is one of router, network, summary, asbr-summary, external, nssa, opaque-link, opaque-area, opaque-as, or a decimal number; <adv-router> is a router id. An instance whose daemon \
+             isn't running is reported individually rather than aborting the whole command.",
+};
+
+const OSPFV3_DB_DOC: Doc = Doc::Local {
+    summary: "Show every installed LSA's header across every OSPFv3 instance, optionally of one type and advertising router.",
+    detail: "Queries every configured OSPFv3 instance's daemon (each resolved via nos-watchdogd) for \
+             its per-area LSDB's installed LSA headers, as a table (type, link-state-id, advertising router, sequence number, age, checksum, owning link, flags). The Info column shows an \
+             external LSA's metric and E1/E2, a router LSA's B/E/V flags and virtual links. \
+             <type> is one of router, network, inter-area-prefix, inter-area-router, as-external, nssa, link, intra-area-prefix, grace and the e-* E-LSA types, or a decimal or 0x hex number; <adv-router> is a router id. An instance whose daemon \
+             isn't running is reported individually rather than aborting the whole command.",
+};
+
 #[rustfmt::skip]
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["show" "config"],
@@ -929,26 +963,26 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             rd: Some(rd.to_string()),
         }),
     cmd!(["show" "ospf" "neigh"],
-        Doc::Local {
-            summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",
-            detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
-                     nos-watchdogd) for its links' current neighbor state, interface state, \
-                     last-hello age, and elected DR/BDR. An instance whose nos-ospfd isn't \
-                     running is reported individually rather than aborting the whole command.",
-        },
+        OSPF_NEIGH_DOC,
         Always,
         Command::ShowOspfNeigh),
+    cmd!(["show" "ospf" "neighbor"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
+    cmd!(["show" "ospf" "neighbors"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
     cmd!(["show" "ospf" "database"],
-        Doc::Local {
-            summary: "Show every installed LSA's header across every OSPF instance.",
-            detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
-                     nos-watchdogd) for its per-area LSDB's installed LSA headers (type, \
-                     link-state-id, advertising router, sequence number, age, checksum). An \
-                     instance whose nos-ospfd isn't running is reported individually rather \
-                     than aborting the whole command.",
-        },
+        OSPF_DB_DOC,
         Always,
-        Command::ShowOspfDatabase),
+        Command::ShowOspfDatabase { lsa_type: None, adv_router: None }),
+    cmd!(["show" "ospf" "database" (type: Plain)],
+        OSPF_DB_DOC,
+        Always,
+        |t| Command::ShowOspfDatabase { lsa_type: Some(t.to_string()), adv_router: None }),
+    cmd!(["show" "ospf" "database" (type: Plain) (adv_router: IpAddr)],
+        OSPF_DB_DOC,
+        Always,
+        |t, r| Command::ShowOspfDatabase {
+            lsa_type: Some(t.to_string()),
+            adv_router: Some(r.to_string()),
+        }),
     cmd!(["show" "ospf" "segment-routing"],
         Doc::Local {
             summary: "Show OSPF segment routing: SRGBs, Prefix-SIDs and Adj-SIDs.",
@@ -960,22 +994,26 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always,
         Command::ShowOspfSegmentRouting),
     cmd!(["show" "ospfv3" "neigh"],
-        Doc::Local {
-            summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",
-            detail: "Mirrors 'show ospf neigh' for OSPFv3 (RFC 5340): queries every configured \
-                     Ospfv3Instance's nos-ospfv3d (each resolved via nos-watchdogd) for its \
-                     links' current neighbor state, interface state, last-hello age, and \
-                     elected DR/BDR.",
-        },
+        OSPFV3_NEIGH_DOC,
         Always,
         Command::ShowOspfv3Neigh),
+    cmd!(["show" "ospfv3" "neighbor"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
+    cmd!(["show" "ospfv3" "neighbors"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
     cmd!(["show" "ospfv3" "database"],
-        Doc::Local {
-            summary: "Show every installed LSA's header across every OSPFv3 instance.",
-            detail: "Mirrors 'show ospf database' for OSPFv3 (RFC 5340).",
-        },
+        OSPFV3_DB_DOC,
         Always,
-        Command::ShowOspfv3Database),
+        Command::ShowOspfv3Database { lsa_type: None, adv_router: None }),
+    cmd!(["show" "ospfv3" "database" (type: Plain)],
+        OSPFV3_DB_DOC,
+        Always,
+        |t| Command::ShowOspfv3Database { lsa_type: Some(t.to_string()), adv_router: None }),
+    cmd!(["show" "ospfv3" "database" (type: Plain) (adv_router: IpAddr)],
+        OSPFV3_DB_DOC,
+        Always,
+        |t, r| Command::ShowOspfv3Database {
+            lsa_type: Some(t.to_string()),
+            adv_router: Some(r.to_string()),
+        }),
     cmd!(["clear" "spanning-tree" "detected-protocols"],
         Doc::Local {
             summary: "Re-probe every spanning-tree port for RSTP (802.1Q mcheck).",

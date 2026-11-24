@@ -1,0 +1,1 @@
+ospfv3 instance v3: no LSAs installed

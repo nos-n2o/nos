@@ -319,10 +319,10 @@ pub async fn handle_action(
         | Resolved::ShowBgpVpn { .. }
         | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
-        | Resolved::ShowOspfDatabase
+        | Resolved::ShowOspfDatabase { .. }
         | Resolved::ShowOspfSegmentRouting
         | Resolved::ShowOspfv3Neigh
-        | Resolved::ShowOspfv3Database
+        | Resolved::ShowOspfv3Database { .. }
         | Resolved::ClearBgpSoftIn { .. }
         | Resolved::ClearBgpPeer { .. }
         | Resolved::ClearStpMcheck { .. }
@@ -458,16 +458,34 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_ospf_segment_routing(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowOspfDatabase => {
-            show_ospf_database(socket, watchdog_socket).await;
+        Resolved::ShowOspfDatabase {
+            lsa_type,
+            adv_router,
+        } => {
+            show_ospf_database(
+                socket,
+                watchdog_socket,
+                lsa_type.as_deref(),
+                adv_router.as_deref(),
+            )
+            .await;
             Outcome::Continue(mode)
         }
         Resolved::ShowOspfv3Neigh => {
             show_ospfv3_neigh(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowOspfv3Database => {
-            show_ospfv3_database(socket, watchdog_socket).await;
+        Resolved::ShowOspfv3Database {
+            lsa_type,
+            adv_router,
+        } => {
+            show_ospfv3_database(
+                socket,
+                watchdog_socket,
+                lsa_type.as_deref(),
+                adv_router.as_deref(),
+            )
+            .await;
             Outcome::Continue(mode)
         }
         Resolved::ClearBgpSoftIn { instance, peer } => {
@@ -1327,10 +1345,39 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
     }
 }
 
+/// Validate `show ospf[v3] database [<type> [<adv-router>]]`'s arguments
+/// before any daemon is queried.
+fn parse_db_filter<T>(
+    lsa_type: Option<&str>,
+    adv_router: Option<&str>,
+    parse_type: fn(&str) -> Result<T, String>,
+) -> Result<(Option<T>, Option<std::net::Ipv4Addr>), String> {
+    let ty = lsa_type.map(parse_type).transpose()?;
+    let router = adv_router
+        .map(|r| {
+            r.parse()
+                .map_err(|_| format!("invalid advertising router '{r}' (an IPv4 router id)"))
+        })
+        .transpose()?;
+    Ok((ty, router))
+}
+
 /// `show ospf database` — mirrors `show_ospf_neigh` exactly, one instance at
 /// a time, reporting a not-running instance individually rather than
 /// aborting the whole command.
-async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
+async fn show_ospf_database(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    lsa_type: Option<&str>,
+    adv_router: Option<&str>,
+) {
+    let filter = match parse_db_filter(lsa_type, adv_router, format::parse_ospf_lsa_type) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e));
+            return;
+        }
+    };
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1353,7 +1400,13 @@ async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(ospf_socket)) => match ospf_client::get_database(&ospf_socket).await {
                 Ok(entries) => {
-                    println!("{}", format::render_ospf_database(&instance.name, &entries));
+                    let text = if filter == (None, None) {
+                        format::render_ospf_database(&instance.name, &entries)
+                    } else {
+                        let kept = format::filter_ospf_database(&entries, filter.0, filter.1);
+                        format::render_ospf_database_filtered(&instance.name, &kept)
+                    };
+                    println!("{text}");
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
@@ -1440,7 +1493,19 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
 
 /// `show ospfv3 database` — mirrors `show_ospf_database` exactly, over every
 /// configured `Ospfv3Instance`.
-async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
+async fn show_ospfv3_database(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    lsa_type: Option<&str>,
+    adv_router: Option<&str>,
+) {
+    let filter = match parse_db_filter(lsa_type, adv_router, format::parse_ospfv3_lsa_type) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e));
+            return;
+        }
+    };
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1463,10 +1528,13 @@ async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(ospfv3_socket)) => match ospfv3_client::get_database(&ospfv3_socket).await {
                 Ok(entries) => {
-                    println!(
-                        "{}",
+                    let text = if filter == (None, None) {
                         format::render_ospfv3_database(&instance.name, &entries)
-                    );
+                    } else {
+                        let kept = format::filter_ospfv3_database(&entries, filter.0, filter.1);
+                        format::render_ospfv3_database_filtered(&instance.name, &kept)
+                    };
+                    println!("{text}");
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },

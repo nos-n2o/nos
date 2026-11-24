@@ -81,14 +81,17 @@ Within a few seconds both routers reach `Full`.
 ### Check neighbours, the LSDB and routes
 
 ```
-show ospf neigh
+show ospf neigh                      (also: neighbor, neighbors)
 show ospf database
+show ospf database external 1.1.1.1
 show route rt1
 ```
 
 - `show ospf neigh` prints one line per link and neighbour: the link, its area, the link's state (`point-to-point`, or `dr`/`backup`/`dr-other`/`waiting` on a LAN), the neighbour's router ID and state (`Init`, `2-Way`, `ExStart`, `Exchange`, `Loading`, `Full`), when its last Hello arrived, the timers and priorities, and the DR and BDR.
 - A bad LSA inside a Link State Update is discarded alone (RFC 2328 section 13): a wrong checksum, an unknown type or an unparseable body skips that LSA, the others in the packet are processed and acked, and the sender retransmits only the bad one. The daemon logs `lsu: discarded LSAs that failed to decode` (rate limited) with the count and the last error. A header whose length cannot be framed still drops the whole packet.
-- `show ospf database` lists the header of every LSA held, per area: its type (1 router, 2 network, 3 summary, 4 ASBR summary, 5 AS-external, 9/10/11 opaque, see [Opaque LSAs](#features-and-behaviour)), link-state ID, advertising router, sequence number, age and checksum.
+- `show ospf database` lists the header of every LSA held, as a table: area, type by name (`router`, `network`, `summary`, `asbr-summary`, `external`, `nssa`, `opaque-link`, `opaque-area`, `opaque-as`, see [Opaque LSAs](#features-and-behaviour); an unknown type shows its number), link-state ID, advertising router, sequence number, age, checksum and `Info`.
+- `Info` holds an external LSA's `metric <n> E1` or `E2`, and a router LSA's `B`/`E`/`V` flags and `vlink <router-id>` virtual links; `-` otherwise.
+- `show ospf database <type> [<adv-router>]` keeps one type (name or number) and, optionally, one advertising router.
 - Both cover every OSPF instance on the router.
 
 Over REST, `GET /v1/ospf/neighbors` and `GET /v1/ospf/database` return the same data as JSON, one entry per instance:

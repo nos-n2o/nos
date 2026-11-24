@@ -1,0 +1,1 @@
+ospf instance o1: no LSAs match

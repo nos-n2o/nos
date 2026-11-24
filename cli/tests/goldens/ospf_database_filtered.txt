@@ -1,0 +1,5 @@
+ospf instance o1:
+Area     Type      Link-State-ID  Adv-Router         Seq  Age  Checksum  Info
+-------  --------  -------------  ----------  ----------  ---  --------  -------------
+0.0.0.0  external  2.2.2.2        2.2.2.2     0x80000001   42    0xabcd  metric 20 E1
+0.0.0.0  external  10.0.0.0       2.2.2.2     0x80000001   42    0xabcd  metric 100 E2
