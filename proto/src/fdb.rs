@@ -249,45 +249,45 @@ pub struct FdbTable {
 #[allow(clippy::struct_excessive_bools)] // wire status flags, one per independent fact
 pub struct EsEntry {
     /// `00:11:22:33:44:55:66:77:88:99`.
-    #[view(text)]
+    #[view(brief, text)]
     pub esi: String,
     /// The bridge port the segment attaches through (the bond or its VLAN
     /// sub-link).
-    #[view(text)]
+    #[view(brief, text)]
     pub port: String,
     /// Whether this PE is the segment's Designated Forwarder for the domain's
     /// BUM traffic. A non-DF has flooding to `port` turned off.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub designated_forwarder: bool,
     /// Every PE attached to the segment (this one included), in the order the
     /// DF election ranks them.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
-    #[view(text)]
+    #[view(brief, text)]
     pub pes: Vec<IpAddr>,
     /// The PEs whose per-ES Ethernet A-D route for this segment is currently
     /// held (this one excluded): a remote MAC on the segment is only installed
     /// while its PE is listed here.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
-    #[view(text)]
+    #[view(brief, text)]
     pub ad_pes: Vec<IpAddr>,
     /// Whether the segment's port is up (carrier). A down segment withdraws its
     /// Type-4 and Type-1 routes and stops being a DF candidate.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub up: bool,
     /// Single-active redundancy: a non-DF blocks the port outright (unicast
     /// too), instead of only refusing BUM.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub single_active: bool,
     /// The DF election algorithm in effect (RFC 8584 §2.2.3): `Hrw` only when
     /// every candidate PE asked for it, else `Modulo`.
-    #[view(text)]
+    #[view(brief, text)]
     pub df_algorithm: crate::DfAlgorithm,
     /// EVPN local bias (RFC 8365 §8.3.1) is fully in place on this segment:
     /// the PE delivers BUM from its own hosts to the segment whatever the DF
     /// role and drops BUM from the other PEs on it. `false` on a single-active
     /// segment (it does not apply) and when the kernel could not be set up
     /// (missing tc modules), in which case only the DF floods to the segment.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub local_bias: bool,
 }
 
@@ -297,23 +297,23 @@ pub struct EsEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct MacEntry {
     /// `aa:bb:cc:dd:ee:ff`.
-    #[view(text)]
+    #[view(brief, text)]
     pub mac: String,
     /// How the entry was learned.
-    #[view(text)]
+    #[view(brief, text)]
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry (the first of `vteps`).
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(text)]
+    #[view(brief, text)]
     pub vtep: Option<IpAddr>,
     /// Every VTEP a `Remote` entry is reached through: one, or several when
     /// the MAC sits on an all-active Ethernet Segment and traffic is balanced
     /// over its PEs (aliasing, RFC 7432 §8.4.1.1). Empty for a `Local` MAC.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
-    #[view(text)]
+    #[view(brief, text)]
     pub vteps: Vec<IpAddr>,
     /// The Ethernet Segment a `Local` MAC was learned on, when its port is one.
-    #[view(text)]
+    #[view(brief, text)]
     pub esi: Option<String>,
 }
 
@@ -324,17 +324,17 @@ pub struct MacEntry {
 pub struct NeighEntry {
     /// IP address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    #[view(text)]
+    #[view(brief, text)]
     pub ip: IpAddr,
     /// `aa:bb:cc:dd:ee:ff`.
-    #[view(text)]
+    #[view(brief, text)]
     pub mac: String,
     /// How the entry was learned.
-    #[view(text)]
+    #[view(brief, text)]
     pub source: MacSource,
     /// The remote VTEP for a `Remote` entry.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(text)]
+    #[view(brief, text)]
     pub vtep: Option<IpAddr>,
 }
 

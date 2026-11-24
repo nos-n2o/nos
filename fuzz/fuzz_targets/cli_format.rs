@@ -65,12 +65,12 @@ fuzz_target!(|input: Input| {
             f::render_lldp_neighbors(&x),
             f::render_lldp_neighbors_detail(&x),
         ]),
-        Input::LldpStats(x) => outs.push(f::render_lldp_statistics(&x)),
+        Input::LldpStats(x) => outs.push(nos_cli::view::render(&x, "")),
         Input::LldpDetail(x) => outs.push(f::render_lldp_neighbors_detail(&x)),
         Input::BfdReflector(x) => outs.push(f::render_bfd_reflector(&x)),
         Input::BfdSessions(x) => outs.push(f::render_bfd_sessions(&x)),
-        Input::Acls(x) => outs.push(f::render_acls(&x)),
-        Input::Flowspec(x) => outs.push(f::render_flowspec_rules(&x)),
+        Input::Acls(x) => outs.push(nos_cli::view::render(&x, "")),
+        Input::Flowspec(x) => outs.push(nos_cli::view::render(&x, "")),
         Input::Stp(s, id, dom, has_id, has_dom) => {
             outs.push(f::render_spanning_tree(&s));
             outs.push(f::render_stp_domain(&s, &dom));
@@ -103,14 +103,14 @@ fuzz_target!(|input: Input| {
             f::render_bgp_routes_header(&i),
             f::render_bgp_route_lines(&x),
         ]),
-        Input::Rpki(i, x) => outs.push(f::render_bgp_rpki(&i, &x)),
+        Input::Rpki(_, x) => outs.push(nos_cli::view::render(&x, "")),
         Input::Bmp(i, x) => outs.push(f::render_bgp_bmp(&i, &x)),
         Input::Ospf(i, n, d) => outs.extend([
-            f::render_ospf_neighbors(&i, &n),
+            nos_cli::view::render(&n, ""),
             f::render_ospf_database(&i, &d),
         ]),
         Input::Ospfv3(i, n, d) => outs.extend([
-            f::render_ospfv3_neighbors(&i, &n),
+            nos_cli::view::render(&n, ""),
             f::render_ospfv3_database(&i, &d),
         ]),
         Input::Config(c) => {
@@ -119,7 +119,7 @@ fuzz_target!(|input: Input| {
         }
         Input::Transaction(t, path) => outs.push(f::render_transaction(&t, &path.into())),
         Input::Source(s) => outs.push(f::render_policy_source(&s)),
-        Input::Fdb(x) => outs.push(f::render_fdb_table(&x)),
+        Input::Fdb(x) => outs.push(nos_cli::view::render(&x, "")),
         Input::Diff(d, color) => {
             diff_color = color;
             outs.push(f::render_diff(&d, color));

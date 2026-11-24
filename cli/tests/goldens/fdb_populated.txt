@@ -1,0 +1,19 @@
+Domain          bd
+Vni             100
+Bridge          br100
+Vxlan           -
+Macs
+  Mac                Source  Vtep       Vteps                  Esi
+  -----------------  ------  ---------  ---------------------  -----------------------------
+  02:00:00:00:00:01  Local   -                                 00:11:22:33:44:55:66:77:88:99
+  02:00:00:00:00:02  Remote  192.0.2.9  192.0.2.9, 192.0.2.10  -
+Neighbours
+  Ip        Mac                Source  Vtep
+  --------  -----------------  ------  ---------
+  10.0.0.9  02:00:00:00:00:02  Remote  192.0.2.9
+Flood           192.0.2.9
+Segments
+  Esi                            Port   Designated-Forwarder  Pes                   Ad-Pes     Up   Single-Active  Df-Algorithm  Local-Bias
+  -----------------------------  -----  --------------------  --------------------  ---------  ---  -------------  ------------  ----------
+  00:11:22:33:44:55:66:77:88:99  bond1  yes                   192.0.2.1, 192.0.2.9  192.0.2.9  yes  no             Modulo        no
+neigh-suppress  yes

@@ -1,0 +1,4 @@
+Instance  vrf  Flow              Actions          state   Packets   Bytes
+--------  ---  ----------------  ---------------  ------  -------  ------
+b1        -    dst 192.0.2.0/24  discard, rate 0  -             7  9.0 KB
+b1        rt1  src 10.0.0.0/8    discard, rate 0  sample        7  9.0 KB

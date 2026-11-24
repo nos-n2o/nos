@@ -285,7 +285,7 @@ pub async fn handle_action(
             Outcome::Continue(mode)
         }
         Resolved::ShowVersion => {
-            println!("{}", version_line());
+            emit(&nos_proto::version::VersionInfo::current(), "");
             Outcome::Continue(mode)
         }
         Resolved::Error(msg) => {
@@ -330,15 +330,6 @@ pub async fn handle_action(
             run_query(action, mode, socket, watchdog_socket).await
         }
     }
-}
-
-/// `show version`'s one line.
-fn version_line() -> String {
-    format!(
-        "nos {} ({})",
-        nos_proto::version::VERSION,
-        nos_proto::version::REVISION
-    )
 }
 
 /// The `show`/`clear` actions of `handle_action`, split out for length
@@ -643,7 +634,7 @@ async fn show_fdb(watchdog_socket: &Path, domain: &str) {
         }
     };
     match fdb_client::get_table(&fdb_socket).await {
-        Ok(t) => println!("{}", format::render_fdb_table(&t)),
+        Ok(t) => emit(&t, ""),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
@@ -887,13 +878,17 @@ async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
         Ok(acls) if acls.is_empty() && name.is_some() => {
             println!("acl '{}' not found", name.unwrap_or_default());
         }
-        Ok(acls) => println!("{}", format::render_acls(&acls)),
+        Ok(acls) if acls.is_empty() => println!("no acls"),
+        Ok(acls) => emit(&acls, "no acls"),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
     if name.is_none() {
         match acl_client::show_flowspec(&acl_socket).await {
             Ok(rules) if rules.is_empty() => {}
-            Ok(rules) => println!("{}", format::render_flowspec_rules(&rules)),
+            Ok(rules) => {
+                println!("flowspec rules:");
+                emit(&rules, "");
+            }
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -904,7 +899,7 @@ async fn show_lldp_statistics(watchdog_socket: &Path) {
         return;
     };
     match lldp_client::get_statistics(&lldp_socket).await {
-        Ok(stats) => println!("{}", format::render_lldp_statistics(&stats)),
+        Ok(stats) => emit(&stats, "no lldp links"),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
@@ -1244,7 +1239,13 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
         .await
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_rpki_summary(&bgp_socket).await {
-                Ok(caches) => println!("{}", format::render_bgp_rpki(&instance.name, &caches)),
+                Ok(caches) if caches.is_empty() => {
+                    println!("bgp instance {}: no rpki caches", instance.name);
+                }
+                Ok(caches) => {
+                    println!("bgp instance {}:", instance.name);
+                    emit(&caches, "");
+                }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
@@ -1311,11 +1312,12 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
         .await
         {
             Ok(Some(ospf_socket)) => match ospf_client::get_neighbors(&ospf_socket).await {
+                Ok(neighbors) if neighbors.is_empty() => {
+                    println!("ospf instance {}: no ospf links configured", instance.name);
+                }
                 Ok(neighbors) => {
-                    println!(
-                        "{}",
-                        format::render_ospf_neighbors(&instance.name, &neighbors)
-                    );
+                    println!("ospf instance {}:", instance.name);
+                    emit(&neighbors, "");
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
@@ -1418,11 +1420,15 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
         .await
         {
             Ok(Some(ospfv3_socket)) => match ospfv3_client::get_neighbors(&ospfv3_socket).await {
-                Ok(neighbors) => {
+                Ok(neighbors) if neighbors.is_empty() => {
                     println!(
-                        "{}",
-                        format::render_ospfv3_neighbors(&instance.name, &neighbors)
+                        "ospfv3 instance {}: no ospfv3 links configured",
+                        instance.name
                     );
+                }
+                Ok(neighbors) => {
+                    println!("ospfv3 instance {}:", instance.name);
+                    emit(&neighbors, "");
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
@@ -2036,18 +2042,5 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
             None => String::new(),
         };
         println!("  {usage:<45} {summary}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn version_line_names_version_and_revision() {
-        let l = super::version_line();
-        assert!(l.starts_with("nos "), "{l}");
-        assert!(
-            l.contains(nos_proto::version::VERSION) && l.ends_with(')'),
-            "{l}"
-        );
     }
 }

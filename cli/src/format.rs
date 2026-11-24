@@ -4,8 +4,7 @@ use std::net::Ipv4Addr;
 use nos_proto::{
     BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff,
     FlowspecRouteSummary, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate,
-    LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary, NeighborSummary,
-    OspfNeighborState, Ospfv3LsaSummary, Ospfv3NeighborSummary, PeerSummary,
+    LacpReceiveState, LogEntry, LogLevel, LsaSummary, Ospfv3LsaSummary, PeerSummary,
     PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RouteSourceKind, SectionDiff,
     SubinterfaceStatus, TransactionSnapshot,
 };
@@ -17,7 +16,7 @@ use crate::session::Path;
 
 use std::borrow::Cow;
 
-use crate::table::{human_bytes, human_count, human_duration, table, Col};
+use crate::table::{human_duration, table, Col};
 
 /// One STP port row (the three port types share these fields) plus its flags.
 macro_rules! stp_row {
@@ -45,14 +44,6 @@ fn aggregate_mode_word(m: nos_proto::PortAggregateMode) -> &'static str {
     match m {
         nos_proto::PortAggregateMode::Xor => "xor",
         nos_proto::PortAggregateMode::Lacp => "lacp",
-    }
-}
-
-fn rpki_state_word(s: nos_proto::RpkiSessionState) -> &'static str {
-    match s {
-        nos_proto::RpkiSessionState::Idle => "idle",
-        nos_proto::RpkiSessionState::Syncing => "syncing",
-        nos_proto::RpkiSessionState::Established => "established",
     }
 }
 
@@ -465,129 +456,6 @@ fn render_bfd_reflector_raw(v: &nos_proto::ReflectorView) -> String {
         v.received,
         v.replied
     )
-}
-
-/// Render `nos-acld`'s ACLs and their counters, for `show acl`.
-pub fn render_acls(acls: &[nos_proto::AclStatus]) -> String {
-    sanitize(&render_acls_raw(acls)).into_owned()
-}
-
-fn render_acls_raw(acls: &[nos_proto::AclStatus]) -> String {
-    use nos_proto::schema::AclAction;
-    use nos_proto::AclDirection;
-
-    if acls.is_empty() {
-        return "no acls".to_string();
-    }
-    let action = |a: AclAction| match a {
-        AclAction::Permit => "permit",
-        AclAction::Deny => "deny",
-    };
-    let mut out = Vec::new();
-    for a in acls {
-        let attached = if a.attached.is_empty() {
-            "not attached".to_string()
-        } else {
-            let at: Vec<_> = a
-                .attached
-                .iter()
-                .map(|t| {
-                    let dir = match t.direction {
-                        AclDirection::In => "in",
-                        AclDirection::Out => "out",
-                    };
-                    format!("{} {dir}", t.interface)
-                })
-                .collect();
-            format!("attached to {}", at.join(", "))
-        };
-        out.push(format!(
-            "acl {}: {attached}, {} levels, {} filters",
-            sanitize_line(&a.name),
-            a.levels,
-            a.filters
-        ));
-        for r in &a.rules {
-            let note = r
-                .dropped
-                .as_deref()
-                .map_or(String::new(), |d| format!(" ({d}, no filter)"));
-            out.push(format!(
-                "  {}: {}, packets {}, bytes {}{note}",
-                sanitize_line(&r.name),
-                action(r.action),
-                human_count(r.packets),
-                human_bytes(r.bytes)
-            ));
-        }
-        out.push(format!(
-            "  default {}: packets {}, bytes {}",
-            action(a.default_action),
-            human_count(a.default_packets),
-            human_bytes(a.default_bytes)
-        ));
-    }
-    out.join("\n")
-}
-
-/// Render the flowspec rules `nos-acld` holds, after the ACLs in `show acl`.
-pub fn render_flowspec_rules(rules: &[nos_proto::FlowspecRuleStatus]) -> String {
-    sanitize(&render_flowspec_rules_raw(rules)).into_owned()
-}
-
-fn render_flowspec_rules_raw(rules: &[nos_proto::FlowspecRuleStatus]) -> String {
-    let mut out = vec!["flowspec rules:".to_string()];
-    for r in rules {
-        let state = r
-            .unsupported
-            .as_deref()
-            .map_or("installed".to_string(), |why| format!("unsupported: {why}"));
-        let vrf = r
-            .table
-            .as_ref()
-            .map_or(String::new(), |t| format!(" vrf {t}"));
-        out.push(format!(
-            "  {}{} {}: {} -> {}, packets {}, bytes {}",
-            sanitize_line(&r.instance),
-            sanitize_line(&vrf),
-            sanitize_line(&r.flow),
-            sanitize_line(&state),
-            sanitize_line(&r.actions.join(", ")),
-            human_count(r.packets),
-            human_bytes(r.bytes)
-        ));
-    }
-    out.join("\n")
-}
-
-/// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
-pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
-    sanitize(&render_lldp_statistics_raw(stats)).into_owned()
-}
-
-fn render_lldp_statistics_raw(stats: &[nos_proto::LldpLinkStats]) -> String {
-    if stats.is_empty() {
-        return "no lldp links".to_string();
-    }
-    stats
-        .iter()
-        .map(|s| {
-            format!(
-                "{}: tx {}, rx {}, rx errors {}, rx discarded {}, tlvs discarded {}, \
-                 tlvs unrecognized {}, ageouts {}, too many neighbors {}",
-                sanitize_line(&s.interface),
-                s.frames_out,
-                s.frames_in,
-                s.frames_in_errors,
-                s.frames_discarded,
-                s.tlvs_discarded,
-                s.tlvs_unrecognized,
-                s.ageouts,
-                s.too_many_neighbors,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Render `nos-stpd`'s summary, for `show spanning-tree`: the bridge/root
@@ -1610,36 +1478,6 @@ fn render_bgp_route_lines_raw(routes: &[nos_proto::BgpRouteSummary]) -> String {
         .join("\n")
 }
 
-/// One BGP instance's RPKI caches, one line each — `show bgp rpki`.
-pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
-    sanitize(&render_bgp_rpki_raw(instance, caches)).into_owned()
-}
-
-fn render_bgp_rpki_raw(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
-    if caches.is_empty() {
-        return format!("bgp instance {instance}: no rpki caches");
-    }
-    let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
-    let mut lines = vec![format!("bgp instance {instance}:")];
-    for c in caches {
-        lines.push(format!(
-            "  {} port {} preference {} {}{} version {} session {} serial {} vrps {} updated {} auth {}",
-            c.address,
-            c.port,
-            c.preference,
-            rpki_state_word(c.state),
-            if c.active { " (in use)" } else { "" },
-            opt(c.version.map(|v| v.to_string())),
-            opt(c.session_id.map(|v| v.to_string())),
-            opt(c.serial.map(|v| v.to_string())),
-            c.vrp_count,
-            opt(c.last_update_secs.map(|s| format!("{s}s ago"))),
-            if c.authenticated { "yes" } else { "no" },
-        ));
-    }
-    lines.join("\n")
-}
-
 /// One BGP instance's BMP stations, two lines each — `show bgp bmp`.
 pub fn render_bgp_bmp(instance: &str, stations: &[nos_proto::BmpStationStatus]) -> String {
     sanitize(&render_bgp_bmp_raw(instance, stations)).into_owned()
@@ -1684,84 +1522,8 @@ fn render_bgp_bmp_raw(instance: &str, stations: &[nos_proto::BmpStationStatus]) 
     lines.join("\n")
 }
 
-fn render_ospf_neighbor_state(state: OspfNeighborState) -> &'static str {
-    match state {
-        OspfNeighborState::Down => "Down",
-        OspfNeighborState::Init => "Init",
-        OspfNeighborState::TwoWay => "2-Way",
-        OspfNeighborState::ExStart => "ExStart",
-        OspfNeighborState::Exchange => "Exchange",
-        OspfNeighborState::Loading => "Loading",
-        OspfNeighborState::Full => "Full",
-    }
-}
-
-fn render_ospf_interface_state(state: LinkInterfaceState) -> &'static str {
-    match state {
-        LinkInterfaceState::PointToPoint => "point-to-point",
-        LinkInterfaceState::Waiting => "waiting",
-        LinkInterfaceState::Dr => "dr",
-        LinkInterfaceState::Backup => "backup",
-        LinkInterfaceState::DrOther => "dr-other",
-    }
-}
-
 fn render_ip_or_dash(addr: Option<Ipv4Addr>) -> String {
     addr.map_or_else(|| "-".to_string(), |a| a.to_string())
-}
-
-/// Render one OSPF instance's link/neighbor summaries, one line per
-/// neighbor — used for `show ospf neigh`. Mirrors `render_bgp_summary`'s
-/// shape.
-pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> String {
-    sanitize(&render_ospf_neighbors_raw(instance, neighbors)).into_owned()
-}
-
-fn render_ospf_neighbors_raw(instance: &str, neighbors: &[NeighborSummary]) -> String {
-    if neighbors.is_empty() {
-        return format!("ospf instance {instance}: no ospf links configured");
-    }
-    let mut lines = vec![format!("ospf instance {instance}:")];
-    for link in neighbors {
-        let neighbor_router_id = render_ip_or_dash(link.neighbor_router_id);
-        let last_hello = link
-            .last_hello_secs
-            .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
-        let neighbor_priority = link
-            .neighbor_priority
-            .map_or_else(|| "-".to_string(), |p| p.to_string());
-        lines.push(format!(
-            "  {} area {} if-state {} neighbor {neighbor_router_id} {} last-hello {last_hello} \
-             hello-interval {} dead-interval {} priority {} neighbor-priority {neighbor_priority} \
-             dr {} bdr {} lls {}",
-            link.link,
-            link.area_id,
-            render_ospf_interface_state(link.interface_state),
-            render_ospf_neighbor_state(link.state),
-            link.hello_interval,
-            link.dead_interval,
-            link.priority,
-            render_ip_or_dash(link.dr),
-            render_ip_or_dash(link.bdr),
-            render_lls(link.lls),
-        ));
-    }
-    lines.join("\n")
-}
-
-/// RFC 5613 LLS column: `none`, or `eof 0x<word>` plus ` lr`/` rs` when set.
-fn render_lls(lls: Option<nos_proto::LlsSummary>) -> String {
-    let Some(l) = lls else {
-        return "none".to_string();
-    };
-    let mut out = format!("eof 0x{:08x}", l.eof);
-    if l.lr {
-        out.push_str(" lr");
-    }
-    if l.rs {
-        out.push_str(" rs");
-    }
-    out
 }
 
 /// Render one OSPF instance's installed-LSA headers, one line per LSA —
@@ -1828,45 +1590,6 @@ pub fn render_ospf_segment_routing(instance: &str, sr: &nos_proto::SrSummary) ->
         lines[0] = format!("ospf instance {instance}: no segment routing state");
     }
     sanitize(&lines.join("\n")).into_owned()
-}
-
-/// Render one `Ospfv3Instance`'s link/neighbor summaries, one line per
-/// neighbor — used for `show ospfv3 neigh`. Mirrors `render_ospf_neighbors`
-/// exactly, reusing the same `OspfNeighborState`/`LinkInterfaceState`
-/// renderers since `Ospfv3NeighborSummary` shares those types verbatim.
-pub fn render_ospfv3_neighbors(instance: &str, neighbors: &[Ospfv3NeighborSummary]) -> String {
-    sanitize(&render_ospfv3_neighbors_raw(instance, neighbors)).into_owned()
-}
-
-fn render_ospfv3_neighbors_raw(instance: &str, neighbors: &[Ospfv3NeighborSummary]) -> String {
-    if neighbors.is_empty() {
-        return format!("ospfv3 instance {instance}: no ospfv3 links configured");
-    }
-    let mut lines = vec![format!("ospfv3 instance {instance}:")];
-    for link in neighbors {
-        let neighbor_router_id = render_ip_or_dash(link.neighbor_router_id);
-        let last_hello = link
-            .last_hello_secs
-            .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
-        let neighbor_priority = link
-            .neighbor_priority
-            .map_or_else(|| "-".to_string(), |p| p.to_string());
-        lines.push(format!(
-            "  {} area {} if-state {} neighbor {neighbor_router_id} {} last-hello {last_hello} \
-             hello-interval {} dead-interval {} priority {} neighbor-priority {neighbor_priority} \
-             dr {} bdr {}",
-            link.link,
-            link.area_id,
-            render_ospf_interface_state(link.interface_state),
-            render_ospf_neighbor_state(link.state),
-            link.hello_interval,
-            link.dead_interval,
-            link.priority,
-            render_ip_or_dash(link.dr),
-            render_ip_or_dash(link.bdr),
-        ));
-    }
-    lines.join("\n")
 }
 
 /// Render one `Ospfv3Instance`'s installed-LSA headers, one line per LSA —
@@ -1971,100 +1694,6 @@ fn render_policy_source_raw(source: &str) -> String {
         .map(|(i, line)| format!("{:4}  {line}", i + 1))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Render one domain's forwarding database for `show fdb`.
-pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
-    sanitize(&render_fdb_table_raw(t)).into_owned()
-}
-
-fn render_fdb_table_raw(t: &nos_proto::FdbTable) -> String {
-    let dev = |d: &Option<String>| d.as_deref().unwrap_or("not created yet").to_string();
-    let mut lines = vec![format!(
-        "broadcast-domain {}: vni {}, bridge {}, vxlan {}, neigh-suppress {}",
-        t.domain,
-        t.vni,
-        dev(&t.bridge),
-        dev(&t.vxlan),
-        if t.neigh_suppress { "on" } else { "off" }
-    )];
-    if t.macs.is_empty() {
-        lines.push("  no MAC addresses".to_string());
-    }
-    for m in &t.macs {
-        lines.push(match (m.source, m.vtep) {
-            // An aliased MAC (RFC 7432 §8.4.1.1) is balanced over several PEs.
-            (nos_proto::MacSource::Remote, Some(_)) if m.vteps.len() > 1 => format!(
-                "  {} remote via {} (aliased)",
-                m.mac,
-                m.vteps
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            (nos_proto::MacSource::Remote, Some(vtep)) => format!("  {} remote via {vtep}", m.mac),
-            // A remote MAC pinned to one of our own segments' ports.
-            (nos_proto::MacSource::Remote, None) => match &m.esi {
-                Some(esi) => format!("  {} remote, on our esi {esi}", m.mac),
-                None => format!("  {} remote", m.mac),
-            },
-            (nos_proto::MacSource::Local, _) => match &m.esi {
-                Some(esi) => format!("  {} local, esi {esi}", m.mac),
-                None => format!("  {} local", m.mac),
-            },
-        });
-    }
-    for n in &t.neighbours {
-        lines.push(match (n.source, n.vtep) {
-            (nos_proto::MacSource::Remote, Some(vtep)) => {
-                format!("  {} is at {} remote via {vtep}", n.ip, n.mac)
-            }
-            (nos_proto::MacSource::Remote, None) => format!("  {} is at {} remote", n.ip, n.mac),
-            (nos_proto::MacSource::Local, _) => format!("  {} is at {} local", n.ip, n.mac),
-        });
-    }
-    let flood: Vec<String> = t.flood.iter().map(ToString::to_string).collect();
-    lines.push(if flood.is_empty() {
-        "  flood list: none".to_string()
-    } else {
-        format!("  flood list: {}", flood.join(", "))
-    });
-    for e in &t.segments {
-        let pes: Vec<String> = e.pes.iter().map(ToString::to_string).collect();
-        let ads: Vec<String> = e.ad_pes.iter().map(ToString::to_string).collect();
-        lines.push(format!(
-            "  ethernet-segment {} on {}: {} (PEs {}){}{}{}{}",
-            e.esi,
-            e.port,
-            if !e.up {
-                "down, no carrier"
-            } else if e.designated_forwarder {
-                "designated forwarder"
-            } else if e.single_active {
-                "non-designated forwarder, port blocked"
-            } else {
-                "non-designated forwarder, BUM blocked"
-            },
-            pes.join(", "),
-            if ads.is_empty() {
-                String::new()
-            } else {
-                format!(", per-ES A-D from {}", ads.join(", "))
-            },
-            if e.single_active {
-                ", single-active"
-            } else {
-                ""
-            },
-            match e.df_algorithm {
-                nos_proto::DfAlgorithm::Modulo => "",
-                nos_proto::DfAlgorithm::Hrw => ", df-algorithm hrw",
-            },
-            if e.local_bias { ", local-bias" } else { "" }
-        ));
-    }
-    lines.join("\n")
 }
 
 // ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
@@ -2710,32 +2339,6 @@ mod tests {
     }
 
     #[test]
-    fn render_bgp_rpki_lists_one_cache_per_line() {
-        assert_eq!(
-            render_bgp_rpki("r1", &[]),
-            "bgp instance r1: no rpki caches"
-        );
-        let c = nos_proto::RpkiCacheStatus {
-            address: "192.0.2.5".parse().unwrap(),
-            port: 323,
-            preference: 1,
-            state: nos_proto::RpkiSessionState::Established,
-            active: true,
-            version: Some(1),
-            session_id: Some(7),
-            serial: Some(42),
-            vrp_count: 3,
-            last_update_secs: Some(5),
-            authenticated: true,
-        };
-        assert_eq!(
-            render_bgp_rpki("r1", &[c]),
-            "bgp instance r1:\n  192.0.2.5 port 323 preference 1 established (in use) version 1 \
-             session 7 serial 42 vrps 3 updated 5s ago auth yes"
-        );
-    }
-
-    #[test]
     fn render_bgp_bmp_lists_two_lines_per_station() {
         use nos_proto::{BmpFrameCounts, BmpMonitor, BmpStationState, BmpStationStatus};
         assert_eq!(
@@ -2982,82 +2585,6 @@ mod tests {
         );
     }
 
-    fn down_link(link: &str) -> NeighborSummary {
-        NeighborSummary {
-            link: link.to_string(),
-            area_id: "0.0.0.0".parse().unwrap(),
-            interface_state: LinkInterfaceState::PointToPoint,
-            neighbor_router_id: None,
-            state: OspfNeighborState::Down,
-            last_hello_secs: None,
-            hello_interval: 10,
-            dead_interval: 40,
-            priority: 1,
-            neighbor_priority: None,
-            dr: None,
-            bdr: None,
-            lls: None,
-        }
-    }
-
-    #[test]
-    fn render_ospf_neighbors_empty_list() {
-        assert_eq!(
-            render_ospf_neighbors("o1", &[]),
-            "ospf instance o1: no ospf links configured"
-        );
-    }
-
-    #[test]
-    fn render_ospf_neighbors_down_link_shows_dash() {
-        assert_eq!(
-            render_ospf_neighbors("o1", &[down_link("eth0.0")]),
-            "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor - Down \
-             last-hello - hello-interval 10 dead-interval 40 priority 1 neighbor-priority - \
-             dr - bdr - lls none"
-        );
-    }
-
-    #[test]
-    fn render_ospf_neighbors_two_way_link_shows_neighbor_and_last_hello() {
-        let mut link = down_link("eth0.0");
-        link.neighbor_router_id = Some("9.9.9.10".parse().unwrap());
-        link.state = OspfNeighborState::TwoWay;
-        link.last_hello_secs = Some(3);
-        link.neighbor_priority = Some(1);
-        assert_eq!(
-            render_ospf_neighbors("o1", &[link]),
-            "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor 9.9.9.10 \
-             2-Way last-hello 3s hello-interval 10 dead-interval 40 priority 1 \
-             neighbor-priority 1 dr - bdr - lls none"
-        );
-    }
-
-    #[test]
-    fn render_ospf_neighbors_broadcast_link_shows_interface_state_and_dr_bdr() {
-        let mut link = down_link("broadcast-domain:bd1");
-        link.interface_state = LinkInterfaceState::Backup;
-        link.neighbor_router_id = Some("9.9.9.10".parse().unwrap());
-        link.state = OspfNeighborState::TwoWay;
-        link.neighbor_priority = Some(200);
-        link.dr = Some("9.9.9.10".parse().unwrap());
-        link.bdr = Some("1.1.1.1".parse().unwrap());
-        assert_eq!(
-            render_ospf_neighbors("o1", &[link]),
-            "ospf instance o1:\n  broadcast-domain:bd1 area 0.0.0.0 if-state backup neighbor \
-             9.9.9.10 2-Way last-hello - hello-interval 10 dead-interval 40 priority 1 \
-             neighbor-priority 200 dr 9.9.9.10 bdr 1.1.1.1 lls none"
-        );
-    }
-
-    #[test]
-    fn render_ospf_neighbors_lls_flags() {
-        let lls = |eof, lr, rs| Some(nos_proto::LlsSummary { eof, lr, rs });
-        assert_eq!(render_lls(lls(0, false, false)), "eof 0x00000000");
-        assert_eq!(render_lls(lls(3, true, true)), "eof 0x00000003 lr rs");
-        assert_eq!(render_lls(lls(2, false, true)), "eof 0x00000002 rs");
-    }
-
     #[test]
     fn render_ospf_segment_routing_lines() {
         let ip = |n: u8| std::net::Ipv4Addr::new(n, n, n, n);
@@ -3242,98 +2769,6 @@ mod tests {
     }
 
     #[test]
-    fn render_lldp_statistics_empty_and_populated() {
-        assert_eq!(render_lldp_statistics(&[]), "no lldp links");
-        let stats = nos_proto::LldpLinkStats {
-            interface: "eth1".to_string(),
-            frames_out: 1,
-            frames_in: 2,
-            frames_in_errors: 3,
-            frames_discarded: 4,
-            tlvs_discarded: 5,
-            tlvs_unrecognized: 6,
-            ageouts: 7,
-            too_many_neighbors: 8,
-        };
-        assert_eq!(
-            render_lldp_statistics(&[stats]),
-            "eth1: tx 1, rx 2, rx errors 3, rx discarded 4, tlvs discarded 5, \
-             tlvs unrecognized 6, ageouts 7, too many neighbors 8"
-        );
-    }
-
-    #[test]
-    fn render_flowspec_rules_installed_and_unsupported() {
-        let rule = |flow: &str, unsupported: Option<&str>, packets| nos_proto::FlowspecRuleStatus {
-            instance: "b1".into(),
-            table: (flow == "vrf").then(|| "rt2".into()),
-            flow: flow.into(),
-            actions: vec!["rate 0 bytes/s".into()],
-            unsupported: unsupported.map(Into::into),
-            packets,
-            bytes: packets * 10,
-        };
-        assert_eq!(
-            render_flowspec_rules(&[
-                rule("proto =6", None, 3),
-                rule("len =64", Some("packet length: no flower key"), 0),
-                rule("vrf", None, 1),
-            ]),
-            "flowspec rules:\n  \
-             b1 proto =6: installed -> rate 0 bytes/s, packets 3, bytes 30 B\n  \
-             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0 B\n  \
-             b1 vrf rt2 vrf: installed -> rate 0 bytes/s, packets 1, bytes 10 B"
-        );
-    }
-
-    #[test]
-    fn render_acls_empty_unattached_and_attached() {
-        use nos_proto::schema::AclAction;
-        use nos_proto::{AclAttachment, AclDirection, AclRuleStatus, AclStatus};
-
-        assert_eq!(render_acls(&[]), "no acls");
-        let rule = |name: &str, action, dropped: Option<&str>, packets| AclRuleStatus {
-            name: name.into(),
-            action,
-            dropped: dropped.map(Into::into),
-            level: None,
-            packets,
-            bytes: packets * 10,
-        };
-        let mut acl = AclStatus {
-            name: "EDGE".into(),
-            default_action: AclAction::Permit,
-            default_packets: 4,
-            default_bytes: 40,
-            levels: 2,
-            filters: 5,
-            attached: vec![],
-            rules: vec![
-                rule("d-bgp", AclAction::Deny, None, 3),
-                rule("dup", AclAction::Deny, Some("shadowed"), 0),
-            ],
-        };
-        assert_eq!(
-            render_acls(std::slice::from_ref(&acl)),
-            "acl EDGE: not attached, 2 levels, 5 filters\n  \
-             d-bgp: deny, packets 3, bytes 30 B\n  \
-             dup: deny, packets 0, bytes 0 B (shadowed, no filter)\n  \
-             default permit: packets 4, bytes 40 B"
-        );
-        acl.attached = vec![
-            AclAttachment {
-                interface: "eth1".into(),
-                direction: AclDirection::In,
-            },
-            AclAttachment {
-                interface: "eth1".into(),
-                direction: AclDirection::Out,
-            },
-        ];
-        assert!(render_acls(&[acl]).starts_with("acl EDGE: attached to eth1 in, eth1 out, "));
-    }
-
-    #[test]
     fn render_lacp_summaries_empty() {
         assert_eq!(render_lacp_summaries(&[]), "no lacp port aggregates");
     }
@@ -3405,101 +2840,6 @@ mod tests {
         assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable), unsupported-version PDUs 3"), "{out}");
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive, unsupported-version PDUs 0"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none (defaulted), selected no, synchronized no, churn partner"));
-    }
-
-    #[test]
-    fn fdb_table_lists_local_remote_and_flood() {
-        let t = nos_proto::FdbTable {
-            domain: "bd1".to_string(),
-            vni: 10100,
-            bridge: Some("br1".to_string()),
-            vxlan: Some("vx10100".to_string()),
-            macs: vec![
-                nos_proto::MacEntry {
-                    mac: "02:00:00:00:00:01".to_string(),
-                    source: nos_proto::MacSource::Local,
-                    vtep: None,
-                    vteps: Vec::new(),
-                    esi: Some("00:11:22:33:44:55:66:77:88:99".to_string()),
-                },
-                nos_proto::MacEntry {
-                    mac: "02:00:00:00:00:09".to_string(),
-                    source: nos_proto::MacSource::Remote,
-                    vtep: Some("192.0.2.9".parse().unwrap()),
-                    vteps: vec!["192.0.2.9".parse().unwrap()],
-                    esi: None,
-                },
-                nos_proto::MacEntry {
-                    mac: "02:00:00:00:00:0a".to_string(),
-                    source: nos_proto::MacSource::Remote,
-                    vtep: Some("192.0.2.9".parse().unwrap()),
-                    vteps: vec!["192.0.2.9".parse().unwrap(), "192.0.2.10".parse().unwrap()],
-                    esi: None,
-                },
-            ],
-            neighbours: vec![
-                nos_proto::NeighEntry {
-                    ip: "198.51.100.7".parse().unwrap(),
-                    mac: "02:00:00:00:00:01".to_string(),
-                    source: nos_proto::MacSource::Local,
-                    vtep: None,
-                },
-                nos_proto::NeighEntry {
-                    ip: "192.0.2.10".parse().unwrap(),
-                    mac: "02:00:00:00:00:09".to_string(),
-                    source: nos_proto::MacSource::Remote,
-                    vtep: Some("192.0.2.9".parse().unwrap()),
-                },
-            ],
-            flood: vec!["192.0.2.9".parse().unwrap()],
-            segments: vec![nos_proto::EsEntry {
-                esi: "00:11:22:33:44:55:66:77:88:99".to_string(),
-                port: "bond1".to_string(),
-                designated_forwarder: false,
-                pes: vec!["192.0.2.1".parse().unwrap(), "192.0.2.9".parse().unwrap()],
-                ad_pes: vec!["192.0.2.9".parse().unwrap()],
-                up: true,
-                single_active: false,
-                df_algorithm: nos_proto::DfAlgorithm::Modulo,
-                local_bias: false,
-            }],
-            neigh_suppress: true,
-        };
-        assert_eq!(
-            render_fdb_table(&t),
-            "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100, neigh-suppress on\n  \
-             02:00:00:00:00:01 local, esi 00:11:22:33:44:55:66:77:88:99\n  \
-             02:00:00:00:00:09 remote via 192.0.2.9\n  \
-             02:00:00:00:00:0a remote via 192.0.2.9, 192.0.2.10 (aliased)\n  \
-             198.51.100.7 is at 02:00:00:00:00:01 local\n  \
-             192.0.2.10 is at 02:00:00:00:00:09 remote via 192.0.2.9\n  \
-             flood list: 192.0.2.9\n  \
-             ethernet-segment 00:11:22:33:44:55:66:77:88:99 on bond1: non-designated \
-             forwarder, BUM blocked (PEs 192.0.2.1, 192.0.2.9), per-ES A-D from 192.0.2.9"
-        );
-        // Single-active says so, and a blocked non-DF is a blocked port.
-        let mut sa = t.clone();
-        sa.segments[0].single_active = true;
-        assert!(render_fdb_table(&sa).ends_with(
-            "non-designated forwarder, port blocked (PEs 192.0.2.1, 192.0.2.9), \
-             per-ES A-D from 192.0.2.9, single-active"
-        ));
-        // Local bias in place says so (and the kernel fallback does not).
-        let mut lb = t.clone();
-        lb.segments[0].local_bias = true;
-        assert!(render_fdb_table(&lb).ends_with("per-ES A-D from 192.0.2.9, local-bias"));
-        // HRW in effect says so.
-        let mut hrw = t.clone();
-        hrw.segments[0].df_algorithm = nos_proto::DfAlgorithm::Hrw;
-        assert!(render_fdb_table(&hrw).ends_with("192.0.2.9, df-algorithm hrw"));
-        // A segment without carrier says so instead of naming a role.
-        let mut down = t.clone();
-        down.segments[0].up = false;
-        down.segments[0].ad_pes.clear();
-        assert!(render_fdb_table(&down).ends_with(
-            "ethernet-segment 00:11:22:33:44:55:66:77:88:99 on bond1: down, no carrier \
-             (PEs 192.0.2.1, 192.0.2.9)"
-        ));
     }
 
     fn addr(a: &str, label: Option<&str>) -> InterfaceAddress {
@@ -3668,32 +3008,8 @@ mod tests {
     #[test]
     fn render_ospfv3_neighbors_and_database() {
         assert_eq!(
-            render_ospfv3_neighbors("v3", &[]),
-            "ospfv3 instance v3: no ospfv3 links configured"
-        );
-        assert_eq!(
             render_ospfv3_database("v3", &[]),
             "ospfv3 instance v3: no LSAs installed"
-        );
-        let link = Ospfv3NeighborSummary {
-            link: "eth0.0".to_string(),
-            area_id: Ipv4Addr::UNSPECIFIED,
-            interface_state: LinkInterfaceState::DrOther,
-            neighbor_router_id: Some(Ipv4Addr::new(2, 2, 2, 2)),
-            state: OspfNeighborState::Full,
-            last_hello_secs: Some(1),
-            hello_interval: 10,
-            dead_interval: 40,
-            priority: 1,
-            neighbor_priority: Some(1),
-            dr: Some(Ipv4Addr::new(3, 3, 3, 3)),
-            bdr: None,
-        };
-        assert_eq!(
-            render_ospfv3_neighbors("v3", &[link]),
-            "ospfv3 instance v3:\n  eth0.0 area 0.0.0.0 if-state dr-other neighbor 2.2.2.2 Full \
-             last-hello 1s hello-interval 10 dead-interval 40 priority 1 neighbor-priority 1 \
-             dr 3.3.3.3 bdr -"
         );
         let lsa = |link: Option<&str>| Ospfv3LsaSummary {
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -3718,19 +3034,6 @@ mod tests {
 
     #[test]
     fn render_small_enums_and_edge_cases() {
-        for (s, want) in [
-            (OspfNeighborState::Init, "Init"),
-            (OspfNeighborState::ExStart, "ExStart"),
-            (OspfNeighborState::Exchange, "Exchange"),
-            (OspfNeighborState::Loading, "Loading"),
-        ] {
-            assert_eq!(render_ospf_neighbor_state(s), want);
-        }
-        assert_eq!(
-            render_ospf_interface_state(LinkInterfaceState::Waiting),
-            "waiting"
-        );
-        assert_eq!(render_ospf_interface_state(LinkInterfaceState::Dr), "dr");
         assert_eq!(
             render_bgp_session_state(BgpSessionState::OpenSent),
             "OpenSent"
@@ -3763,53 +3066,6 @@ mod tests {
         entry.timestamp_ms = u64::MAX;
         entry.fields.clear();
         assert!(render_log_entry(&entry).starts_with(&u64::MAX.to_string()));
-        // A remote FDB entry with no VTEP, no devices yet, an empty flood list.
-        let mut t = nos_proto::FdbTable {
-            domain: "bd".to_string(),
-            vni: 1,
-            bridge: None,
-            vxlan: None,
-            macs: vec![nos_proto::MacEntry {
-                mac: "02:00:00:00:00:01".to_string(),
-                source: nos_proto::MacSource::Remote,
-                vtep: None,
-                vteps: Vec::new(),
-                esi: None,
-            }],
-            neighbours: vec![nos_proto::NeighEntry {
-                ip: "10.0.0.9".parse().unwrap(),
-                mac: "02:00:00:00:00:01".to_string(),
-                source: nos_proto::MacSource::Remote,
-                vtep: None,
-            }],
-            flood: Vec::new(),
-            segments: Vec::new(),
-            neigh_suppress: false,
-        };
-        assert_eq!(
-            render_fdb_table(&t),
-            "broadcast-domain bd: vni 1, bridge not created yet, vxlan not created yet, neigh-suppress off\n  \
-             02:00:00:00:00:01 remote\n  10.0.0.9 is at 02:00:00:00:00:01 remote\n  flood list: none"
-        );
-        t.macs.clear();
-        t.neighbours.clear();
-        t.segments.push(nos_proto::EsEntry {
-            esi: "e".to_string(),
-            port: "bond1".to_string(),
-            designated_forwarder: true,
-            pes: Vec::new(),
-            ad_pes: Vec::new(),
-            up: true,
-            single_active: false,
-            df_algorithm: nos_proto::DfAlgorithm::Modulo,
-            local_bias: false,
-        });
-        let out = render_fdb_table(&t);
-        assert!(out.contains("  no MAC addresses\n"), "{out}");
-        assert!(
-            out.ends_with("on bond1: designated forwarder (PEs )"),
-            "{out}"
-        );
     }
 
     /// A config from the fields given, the rest default.
@@ -4129,18 +3385,6 @@ mod tests {
             render_bgp_bmp("r1", &[s])
         };
         assert_eq!(lines(bmp(BAD)), lines(bmp("x")));
-        let flow = |f: &str| {
-            render_flowspec_rules(&[nos_proto::FlowspecRuleStatus {
-                instance: f.into(),
-                table: None,
-                flow: f.into(),
-                actions: vec![f.into()],
-                unsupported: None,
-                packets: 1,
-                bytes: 1,
-            }])
-        };
-        assert_eq!(lines(flow(BAD)), lines(flow("x")));
         let stp = |n: &str| {
             let mut s = nos_proto::StpSummary {
                 enabled: true,

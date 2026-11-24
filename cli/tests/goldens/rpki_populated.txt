@@ -1,0 +1,4 @@
+Address    Port  Preference  State        in-use  Version  Session-Id  Serial  vrps  updated  auth
+---------  ----  ----------  -----------  ------  -------  ----------  ------  ----  -------  ----
+192.0.2.5  323   10          Established  yes     1        77          9       1.2K    2m05s  yes
+192.0.2.5  323   20          Idle         no      -        -           -       1.2K        -  no

@@ -126,13 +126,13 @@ pub struct NeighborSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct LlsSummary {
     /// Raw Extended Options and Flags word.
-    #[view(text)]
+    #[view(brief, text)]
     pub eof: u32,
     /// LSDB Resynchronization bit (RFC 4811), shown only.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub lr: bool,
     /// Restart Signal bit (RFC 4812), shown only.
-    #[view(unit = bool)]
+    #[view(brief, unit = bool)]
     pub rs: bool,
 }
 

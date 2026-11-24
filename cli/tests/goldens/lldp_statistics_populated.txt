@@ -1,0 +1,4 @@
+Interface  Frames-Out  Frames-In  Frames-In-Errors  Frames-Discarded  Tlvs-Discarded  Tlvs-Unrecognized  Ageouts  Too-Many-Neighbors
+---------  ----------  ---------  ----------------  ----------------  --------------  -----------------  -------  ------------------
+eth0               10          9                 1                 2               3                  4        5                   6
+eth1               10          9                 1                 2               3                  4        5                   6

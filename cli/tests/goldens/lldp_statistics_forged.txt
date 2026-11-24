@@ -1,0 +1,3 @@
+Interface         Frames-Out  Frames-In  Frames-In-Errors  Frames-Discarded  Tlvs-Discarded  Tlvs-Unrecognized  Ageouts  Too-Many-Neighbors
+----------------  ----------  ---------  ----------------  ----------------  --------------  -----------------  -------  ------------------
+x\nFORGED\x1b[2J          10          9                 1                 2               3                  4        5                   6
