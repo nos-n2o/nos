@@ -39,7 +39,7 @@ pub struct SessionKey {
     /// RFC 7130 micro-BFD: the `PortAggregate` this session probes a member of
     /// (`interface` is the member, `table` is empty). Appended last for postcard.
     #[serde(default)]
-    #[view(order = 100)]
+    #[view(brief, order = 4, header = "Aggregate")]
     pub aggregate: Option<String>,
 }
 
