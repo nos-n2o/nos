@@ -273,11 +273,11 @@ fn apply_policy(
 }
 
 /// Whether a unicast `prefix` may carry next hop `nh`: v6 prefix needs a v6
-/// next hop; v4 needs v4, or v6 under RFC 8950 (`local_addr`, the session's
+/// next hop, or v4 on an IPv4 session (RFC 4798, sent mapped); v4 needs v4, or v6 under RFC 8950 (`local_addr`, the session's
 /// own address, is v6).
 pub(super) fn next_hop_family_ok(prefix: IpNet, nh: IpAddr, local_addr: Option<IpAddr>) -> bool {
     match prefix {
-        IpNet::V6(_) => nh.is_ipv6(),
+        IpNet::V6(_) => nh.is_ipv6() || local_addr.is_some_and(|l| l.is_ipv4()),
         IpNet::V4(_) => nh.is_ipv4() || local_addr.is_some_and(|l| l.is_ipv6()),
     }
 }

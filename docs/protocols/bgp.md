@@ -366,13 +366,15 @@ Unrecognized path attributes (RFC 4271 sections 5 and 6.3):
 
 - A message NOS cannot decode closes the session with the RFC 4271 §6 NOTIFICATION that names the fault, data included: unknown message type (Header Error / Bad Message Type, data = the type), bad length (data = the length), bad NLRI (UPDATE / Invalid Network Field), bad `MP_REACH_NLRI` (UPDATE / Optional Attribute Error), a ROUTE-REFRESH that is not 4 octets long (code 7, RFC 7313). Details: [internals](bgp-internals.md).
 
-- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
+- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6 (except the RFC 4798 next hop of IPv6 routes on an IPv4 session, see [Address families](#address-families)), or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
 
-- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6, or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
+- A route whose next hop is unusable is treated as withdrawn and logged (`treating bgp update as withdraw: invalid next hop`): unspecified, `0.0.0.0/8`, loopback, multicast, class-E (incl. broadcast), IPv4-mapped IPv6 (except the RFC 4798 next hop of IPv6 routes on an IPv4 session, see [Address families](#address-families)), or the session's own local address. A link-local IPv6 next hop is accepted. Checked for the `NEXT_HOP` attribute and every `MP_REACH_NLRI`, EVPN included; a peer reached over loopback may advertise loopback.
 
 ### Address families
 
 `set address-family ipv4|ipv6|l2vpn-evpn|ipv4-flowspec|ipv6-flowspec|vpnv4|vpnv6` adds an address family to a peer-group, and `delete address-family <af>` removes one. A peer-group needs at least one. The address families are independent of whether the peer is reached over IPv4 or IPv6: an IPv6 peer can carry IPv4 routes and the reverse.
+
+- IPv6 routes over an IPv4 session need no Extended Next Hop capability (RFC 4798, RFC 8950 section 1): the next hop is IPv4-mapped (`::ffff:a.b.c.d`, 16 octets), unmapped to the IPv4 address on receipt and sent as our session address; `nos-ribd` does not program the resulting IPv6 route (see [routing tables](routing-tables.md)). A mapped next hop on an IPv6 session is still invalid. IPv4 routes over an IPv6 session still need the peer's Extended Next Hop capability (RFC 8950).
 
 - `ipv4` and `ipv6` are unicast routes, installed in the routing table.
 - `l2vpn-evpn` (RFC 7432) carries EVPN routes for VXLAN broadcast domains. It is described with the rest of EVPN.

@@ -294,6 +294,8 @@ Each source has a fixed preference, and the lowest wins:
 
 These are not configurable. A static route therefore beats a BGP route to the same prefix, and a BGP route beats an OSPF route. The losing candidates stay in the table and appear in `show route` below the winner; if the winner goes away, the next one takes over without any reconfiguration.
 
+An IPv6 route whose next hop is IPv4 (a BGP route learned over an IPv4 session, RFC 4798) is held in the table and shown by `show route` with its IPv4 gateway, but `nos-ribd` does not install it: the kernel refuses `RTA_VIA` on an IPv6 route, and an IPv4-mapped `RTA_GATEWAY` (`::ffff:a.b.c.d`) is resolved with IPv6 neighbour discovery, which an Ethernet peer never answers (the e2e probe saw the unanswered neighbour solicitations and no TCP SYN left the router). `nos-ribd` logs `ipv6 route over an ipv4 next hop not installed` once per prefix. VPNv6 routes (MPLS-encapsulated) and EVPN routes are not affected.
+
 Connected routes are listed in `show route` and used by BGP to check next hops, but NOS never installs them for forwarding: the operating system already routes the subnet of each address it holds.
 
 - A connected route wins over every other source, so NOS installs nothing for that prefix and leaves it to the operating system.

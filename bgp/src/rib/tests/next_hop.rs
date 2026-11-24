@@ -109,6 +109,9 @@ fn next_hop_family_rule() {
     let ok = |p, nh, l: Option<&str>| next_hop_family_ok(prefix(p), addr(nh), l.map(addr));
     assert!(ok("2001:db8::/32", "2001:db8::1", None));
     assert!(!ok("2001:db8::/32", "192.0.2.1", Some("2001:db8::9")));
+    // RFC 4798: v4 next hop for v6 only over a v4 session.
+    assert!(ok("2001:db8::/32", "192.0.2.1", Some("10.0.0.9")));
+    assert!(!ok("2001:db8::/32", "192.0.2.1", None));
     assert!(ok("198.51.100.0/24", "192.0.2.1", None));
     // RFC 8950: v6 next hop for v4 only over a v6 session.
     assert!(ok("198.51.100.0/24", "2001:db8::1", Some("2001:db8::9")));
@@ -132,4 +135,24 @@ fn import_policy_v4_next_hop_on_v6_route_is_ignored() {
     );
     let route = &rib.loc_rib[&prefix("2001:db8::/32")];
     assert_eq!(route.next_hop, Some(addr("2001:db8::3")));
+}
+
+#[test]
+fn mapped_next_hop_is_accepted_on_v4_sessions_only() {
+    let mut rib = rib_with_peer();
+    feed(&mut rib, &mp_update("2001:db8::/32", "192.0.2.3"));
+    assert_eq!(
+        rib.loc_rib[&prefix("2001:db8::/32")].next_hop,
+        Some(addr("192.0.2.3"))
+    );
+    let mut rib = new_rib(65100);
+    register_peer(&mut rib, addr("2001:db8::3"), false, addr("2001:db8::1"));
+    rib.handle_update(
+        addr("2001:db8::3"),
+        false,
+        v4("3.3.3.3"),
+        &mp_update("2001:db8:1::/48", "192.0.2.3"),
+        &accept_all_policy(),
+    );
+    assert!(rib.loc_rib.is_empty());
 }

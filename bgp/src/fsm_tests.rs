@@ -213,11 +213,6 @@ fn mp_capabilities_add_extended_next_hop_only_for_a_cross_family_unicast() {
         [
             Capability::MultiProtocol { afi: 1, safi: 1 },
             Capability::MultiProtocol { afi: 2, safi: 1 },
-            Capability::ExtendedNextHop {
-                nlri_afi: 2,
-                nlri_safi: 1,
-                nh_afi: 1
-            },
             Capability::MultiProtocol {
                 afi: message::AFI_L2VPN,
                 safi: message::SAFI_EVPN
@@ -245,16 +240,25 @@ fn a_cross_family_unicast_needs_the_peers_extended_next_hop() {
     ]);
     assert_eq!(
         negotiate_address_families(&open, &ctx),
-        (true, true, false, false),
-        "no ENH tuple: v6 over a v4 session is not carried"
+        (true, true, true, false),
+        "RFC 4798: v6 over a v4 session needs no ENH"
+    );
+    // The mirror direction still needs the peer's ENH (RFC 8950).
+    let ctx6 = NegotiationContext {
+        transport_afi: message::AFI_IPV6,
+        ..ctx
+    };
+    assert_eq!(
+        negotiate_address_families(&open, &ctx6),
+        (true, false, true, false)
     );
     open.capabilities.push(Capability::ExtendedNextHop {
-        nlri_afi: 2,
+        nlri_afi: 1,
         nlri_safi: 1,
-        nh_afi: 1,
+        nh_afi: 2,
     });
     assert_eq!(
-        negotiate_address_families(&open, &ctx),
+        negotiate_address_families(&open, &ctx6),
         (true, true, true, false)
     );
 }
@@ -1553,14 +1557,7 @@ async fn the_open_advertises_and_negotiates_add_path_role_and_graceful_restart()
     assert!(has(
         |c| matches!(c, Capability::GracefulRestart(g) if g.time == 90 && !g.restart)
     ));
-    assert!(has(|c| matches!(
-        c,
-        Capability::ExtendedNextHop {
-            nlri_afi: 2,
-            nh_afi: 1,
-            ..
-        }
-    )));
+    assert!(!has(|c| matches!(c, Capability::ExtendedNextHop { .. })));
     let status = *s.slot.status_receiver().borrow();
     assert_eq!(status.state, PeerState::Established);
     s.task.abort();

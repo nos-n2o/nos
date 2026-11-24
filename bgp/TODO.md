@@ -15,7 +15,7 @@ of re-auditing the codebase. Update this file as items are implemented.
 - **Messages**: OPEN/UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH (RFC 2918,
   both directions — see `docs/protocols/bgp-internals.md`'s "Route refresh" section).
 - **Capabilities**: 4-byte ASN, MultiProtocol AFI/SAFI, Extended Next-Hop
-  (RFC 8950), Route-Refresh (RFC 2918, code 2), ADD-PATH (RFC 7911, code 69
+  (RFC 8950, IPv4 NLRI on IPv6 sessions only; IPv6 over IPv4 uses a mapped next hop, #623), Route-Refresh (RFC 2918, code 2), ADD-PATH (RFC 7911, code 69
   — only ever advertised for a `route_server_client` peer-group). Nothing
   else (no Graceful Restart/ORF capabilities).
 - **Path attributes**: ORIGIN, AS_PATH (flattened, no SET/SEQUENCE

@@ -140,7 +140,9 @@ fn build_mp_capabilities(
         // RFC 8950 is about unicast NLRI carried with a cross-family
         // next-hop; EVPN's and Flowspec's next-hop family is independent of
         // their NLRI.
-        if is_unicast(af) && afi != transport_afi {
+        // RFC 4798/8950 §1: IPv6 NLRI over an IPv4 session uses an
+        // IPv4-mapped next hop, no ENH; only IPv4 NLRI on IPv6 needs it.
+        if is_unicast(af) && afi == AFI_IPV4 && transport_afi != AFI_IPV4 {
             caps.push(message::Capability::ExtendedNextHop {
                 nlri_afi: afi,
                 nlri_safi: 1,
@@ -204,7 +206,9 @@ fn negotiate_address_families(
             return afi == AFI_IPV4 && ctx.transport_afi == AFI_IPV4;
         }
         peer_mp.contains(&(afi, 1))
-            && (afi == ctx.transport_afi || peer_ext_nh.contains(&(afi, 1, ctx.transport_afi)))
+            && (afi != AFI_IPV4
+                || ctx.transport_afi == AFI_IPV4
+                || peer_ext_nh.contains(&(afi, 1, ctx.transport_afi)))
     };
     // EVPN needs no Extended Next Hop tuple, and has no legacy (non-MP) form.
     let evpn = ctx.address_families.contains(&AddressFamily::L2vpnEvpn)

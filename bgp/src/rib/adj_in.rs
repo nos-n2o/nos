@@ -574,7 +574,14 @@ impl BgpRib {
                                 || !m.vpn.is_empty()
                                 || !m.rtc.is_empty()
                         })
-                        .find(|m| martian(m.next_hop))
+                        .find(|m| {
+                            martian(m.next_hop)
+                                // RFC 4798 mapped hop (unmapped by the codec) is
+                                // only valid on an IPv4 session.
+                                || (m.afi == message::AFI_IPV6
+                                    && m.next_hop.is_ipv4()
+                                    && own.is_some_and(|o| o.is_ipv6()))
+                        })
                         .map(|m| m.next_hop)
                 });
             // RFC 4271 §6.3: an eBGP AS_PATH starts with the peer's own AS
