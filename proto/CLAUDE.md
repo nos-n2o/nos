@@ -13,7 +13,8 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 | Module | Purpose |
 |--------|---------|
 | `schema/` | Config tree types (`Config` and every section), `garde::Validate` for commit-time validation. Per-type patterns: `docs/schema-reference.md`. |
-| `cli` | The CLI's view of the schema (#109): `#[derive(Cli)]` (`nos-proto-derive`) builds a static tree from the real field types. Every struct field **must** carry `#[cli(...)]` or the crate doesn't compile. A struct needs `Default` (a new element's starting point) unless `#[cli(no_default)]`; an enum's `#[default]` variant is what `delete` resets to. `secret` prints `<hidden>`; `render = path` gives a sugar-only field its `show config` lines. `cli::render` is the inverse of the grammar. `words`/`alias`/`sugar` catalogue: schema reference. |
+| `cli` | The CLI's view of the schema (#109): `#[derive(Cli)]` (`nos-proto-derive`) builds a static tree from the real field types. Every struct field **must** carry `#[cli(...)]` or the crate doesn't compile. A struct needs `Default` (a new element's starting point) unless `#[cli(no_default)]`; an enum's `#[default]` variant is what `delete` resets to. `secret` prints `<hidden>`; `render = path` gives a sugar-only field its `show config` lines. |
+| `view` | `#[derive(View)]` (#1425): reply presentation, every field needs `#[view]`; keys in the config-protocol page. |
 | `yang` | YANG module from `cli::root()` (#1174): `docs/yang/`. |
 | `derive` | `sync_routing_table_refs` recomputes every `BgpInstance.routing_table` from `RoutingTable.bgp_instance`. |
 | `validators` | Reusable helpers (`unique_key_in`, `unique_addresses`, `routing_table_reference_valid`, `bfd_reference_valid`); cross-collection or type-specific checks live next to their schema type. |
