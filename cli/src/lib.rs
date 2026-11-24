@@ -22,4 +22,5 @@ pub mod session;
 pub mod spec;
 pub mod stp_client;
 pub mod table;
+pub mod view;
 pub mod watchdog_client;

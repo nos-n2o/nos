@@ -1,0 +1,3 @@
+Table  Peer      Local     Interface  Multihop  State  Diag          Local-Disc  Remote-Disc  Tx-Interval  Detection  Kind       Auth  Auth-Key  Auth-Failures  Echo  Echo-Interval  Echo-Only  Pdu
+-----  --------  --------  ---------  --------  -----  ------------  ----------  -----------  -----------  ---------  ---------  ----  --------  -------------  ----  -------------  ---------  ---
+       10.0.0.2  10.0.0.1  eth1       no        Up     NoDiagnostic           1            2        100ms      300ms  Classical  -            -              0  no              0us  no         0 B

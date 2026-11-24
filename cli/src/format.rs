@@ -17,7 +17,7 @@ use crate::session::Path;
 
 use std::borrow::Cow;
 
-use crate::table::{human_bytes, human_count, human_duration, human_us, table, Col};
+use crate::table::{human_bytes, human_count, human_duration, table, Col};
 
 /// One STP port row (the three port types share these fields) plus its flags.
 macro_rules! stp_row {
@@ -424,17 +424,6 @@ fn render_lldp_neighbors_detail_raw(neighbors: &[nos_proto::LldpNeighbor]) -> St
         .join("\n")
 }
 
-fn bfd_method_name(m: nos_proto::schema::BfdAuthMethod) -> &'static str {
-    use nos_proto::schema::BfdAuthMethod as M;
-    match m {
-        M::SimplePassword => "simple-password",
-        M::KeyedMd5 => "keyed-md5",
-        M::MeticulousMd5 => "meticulous-md5",
-        M::KeyedSha1 => "keyed-sha1",
-        M::MeticulousSha1 => "meticulous-sha1",
-    }
-}
-
 /// Render the S-BFD reflector, for `show bfd reflector`: its discriminators
 /// (as the IPv4 addresses they are configured as) and the counters.
 pub fn render_bfd_reflector(v: &nos_proto::ReflectorView) -> String {
@@ -476,76 +465,6 @@ fn render_bfd_reflector_raw(v: &nos_proto::ReflectorView) -> String {
         v.received,
         v.replied
     )
-}
-
-/// Render `nos-bfdd`'s sessions, for `show bfd sessions`: one line each,
-/// ordered as the daemon sent them (table, then peer). `local` and
-/// `interface` are shown only when the key carries them.
-pub fn render_bfd_sessions(sessions: &[nos_proto::BfdSessionView]) -> String {
-    sanitize(&render_bfd_sessions_raw(sessions)).into_owned()
-}
-
-fn render_bfd_sessions_raw(sessions: &[nos_proto::BfdSessionView]) -> String {
-    if sessions.is_empty() {
-        return "no bfd sessions".to_string();
-    }
-    sessions
-        .iter()
-        .map(|s| {
-            let k = &s.key;
-            let local = k.local.map_or_else(String::new, |l| format!(" from {l}"));
-            let interface = k.interface.as_deref().map_or_else(String::new, |i| {
-                // RFC 7130: the interface is a LAG member, the "table" its aggregate.
-                let word = if k.aggregate.is_some() {
-                    "member"
-                } else {
-                    "on"
-                };
-                format!(" {word} {i}")
-            });
-            let multihop = if k.multihop { " multihop" } else { "" };
-            let sbfd = match s.kind {
-                nos_proto::BfdSessionKind::SbfdInitiator => " sbfd",
-                nos_proto::BfdSessionKind::Unsolicited => " unsolicited",
-                nos_proto::BfdSessionKind::Classical => "",
-            };
-            let auth = match (s.auth_method, s.auth_key_id) {
-                (Some(m), Some(id)) => format!(
-                    ", auth {} key {id} ({} failures)",
-                    bfd_method_name(m),
-                    s.auth_failures
-                ),
-                _ => String::new(),
-            };
-            let pdu = if s.tx_pdu_bytes > 0 {
-                format!(", pdu {}B", s.tx_pdu_bytes)
-            } else {
-                String::new()
-            };
-            let echo = if s.echo_active {
-                let only = if s.echo_only { " (echo-only)" } else { "" };
-                format!(
-                    ", echo active {}{only}",
-                    human_us(u64::from(s.echo_interval_us))
-                )
-            } else {
-                String::new()
-            };
-            format!(
-                "{}: peer {}{local}{interface}{multihop}{sbfd}, {}, diag {}, tx {}, detect {}, \
-                 discriminators {}/{}{auth}{pdu}{echo}",
-                k.aggregate.as_deref().unwrap_or(&k.table),
-                k.peer,
-                s.state,
-                s.diag,
-                human_us(u64::from(s.tx_interval_us)),
-                human_us(u64::from(s.detection_time_us)),
-                s.local_discriminator,
-                s.remote_discriminator,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Render `nos-acld`'s ACLs and their counters, for `show acl`.
@@ -3319,79 +3238,6 @@ mod tests {
         assert!(
             out.ends_with("dropped: martian-source 1, unknown-discriminator 2"),
             "{out}"
-        );
-    }
-
-    #[test]
-    fn render_bfd_sessions_empty_and_populated() {
-        use nos_proto::{BfdDiag, BfdSessionView, BfdState, SessionKey};
-        assert_eq!(render_bfd_sessions(&[]), "no bfd sessions");
-        let view = |peer: &str, state, diag, interface: Option<&str>| BfdSessionView {
-            key: SessionKey {
-                aggregate: None,
-                table: "rt1".into(),
-                peer: peer.parse().unwrap(),
-                local: None,
-                interface: interface.map(String::from),
-                multihop: false,
-            },
-            state,
-            diag,
-            local_discriminator: 1,
-            remote_discriminator: 2,
-            tx_interval_us: 100_000,
-            detection_time_us: 300_000,
-            auth_method: None,
-            auth_key_id: None,
-            auth_failures: 0,
-            echo_active: false,
-            echo_interval_us: 0,
-            echo_only: false,
-            tx_pdu_bytes: 0,
-            kind: nos_proto::BfdSessionKind::Classical,
-        };
-        let up = view("192.0.2.1", BfdState::Up, BfdDiag::NoDiagnostic, None);
-        let down = view(
-            "192.0.2.2",
-            BfdState::Down,
-            BfdDiag::ControlDetectionTimeExpired,
-            Some("eth1"),
-        );
-        let mut micro = view(
-            "10.0.0.2",
-            BfdState::Up,
-            BfdDiag::NoDiagnostic,
-            Some("eth1"),
-        );
-        micro.key.aggregate = Some("bond0".into());
-        micro.key.table = String::new();
-        micro.key.local = Some("10.0.0.1".parse().unwrap());
-        assert!(render_bfd_sessions(&[micro])
-            .starts_with("bond0: peer 10.0.0.2 from 10.0.0.1 member eth1, up,"),);
-        let authed = BfdSessionView {
-            auth_method: Some(nos_proto::schema::BfdAuthMethod::KeyedSha1),
-            auth_key_id: Some(2),
-            auth_failures: 5,
-            ..up.clone()
-        };
-        let echoing = BfdSessionView {
-            echo_active: true,
-            echo_interval_us: 50_000,
-            ..up.clone()
-        };
-        assert!(render_bfd_sessions(std::slice::from_ref(&echoing))
-            .ends_with("discriminators 1/2, echo active 50ms"));
-        let only = BfdSessionView {
-            echo_only: true,
-            ..echoing
-        };
-        assert!(render_bfd_sessions(&[only]).ends_with("echo active 50ms (echo-only)"));
-        assert!(render_bfd_sessions(&[authed])
-            .ends_with("discriminators 1/2, auth keyed-sha1 key 2 (5 failures)"));
-        assert_eq!(
-            render_bfd_sessions(&[up, down]),
-            "rt1: peer 192.0.2.1, up, diag no-diagnostic, tx 100ms, detect 300ms, discriminators 1/2\n\
-             rt1: peer 192.0.2.2 on eth1, down, diag control-detection-time-expired, tx 100ms, detect 300ms, discriminators 1/2"
         );
     }
 
