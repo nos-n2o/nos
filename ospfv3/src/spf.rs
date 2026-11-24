@@ -90,13 +90,17 @@ pub struct VirtualNextHops {
     pub next_hops: Vec<(Ipv6Addr, u32)>,
 }
 
+/// A transit network's identity: (DR router id, `interface_id_key` of the
+/// DR's interface id). Interface ids alone collide across LANs (#613).
+type NetId = (Ipv4Addr, Ipv4Addr);
+
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
-/// (keyed by its Network-LSA's `link_state_id`, the DR's own interface id
-/// on that link — see `link.rs`'s origination convention).
+/// (keyed by `NetId`, RFC 5340 §4.8.1: the DR's router id and its interface
+/// id on that link — see `link.rs`'s origination convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Vertex {
     Router(Ipv4Addr),
-    Network(Ipv4Addr),
+    Network(NetId),
 }
 
 /// A vertex's derived next-hop. `Network` is a sentinel for a root-adjacent
@@ -291,11 +295,7 @@ fn merge_router_fragments(mut parts: Vec<(u16, Ipv4Addr, &RouterLsaBody)>) -> Ro
 /// Link-LSA's own link-local address.
 fn routers_networks_links(
     lsas: &[std::sync::Arc<Lsa>],
-) -> (
-    Routers,
-    HashMap<Ipv4Addr, &NetworkLsaBody>,
-    LinkLocalAddresses,
-) {
+) -> (Routers, HashMap<NetId, &NetworkLsaBody>, LinkLocalAddresses) {
     let mut fragments: HashMap<Ipv4Addr, Vec<(u16, Ipv4Addr, &RouterLsaBody)>> = HashMap::new();
     let mut networks = HashMap::new();
     let mut links = HashMap::new();
@@ -308,7 +308,7 @@ fn routers_networks_links(
                     .push((l.header.lsa_type, l.header.link_state_id, r));
             }
             LsaBody::Network(n) => {
-                networks.insert(l.header.link_state_id, n);
+                networks.insert((l.header.advertising_router, l.header.link_state_id), n);
             }
             LsaBody::Link(link) => {
                 links.insert(
@@ -383,7 +383,10 @@ pub fn intra_area_routes(
             LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER => {
                 Vertex::Router(body.referenced_advertising_router)
             }
-            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network(body.referenced_link_state_id),
+            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network((
+                body.referenced_advertising_router,
+                body.referenced_link_state_id,
+            )),
             _ => continue,
         };
         let Some(&d) = dist.get(&vertex) else {
@@ -753,7 +756,7 @@ struct Alternate {
 fn alternates(
     root: Ipv4Addr,
     routers: &Routers,
-    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    networks: &HashMap<NetId, &NetworkLsaBody>,
     links: &LinkLocalAddresses,
 ) -> Vec<Alternate> {
     let Some(root_lsa) = routers.get(&root) else {
@@ -785,7 +788,10 @@ fn alternates(
                 }
             }
             LINK_TYPE_TRANSIT_NETWORK => {
-                let network_id = lsa::interface_id_key(l.neighbor_interface_id);
+                let network_id = (
+                    l.neighbor_router_id,
+                    lsa::interface_id_key(l.neighbor_interface_id),
+                );
                 let Some(net) = networks.get(&network_id) else {
                     continue;
                 };
@@ -793,7 +799,10 @@ fn alternates(
                     let back_ok = routers.get(&r).is_some_and(|b| {
                         b.links.iter().any(|bl| {
                             bl.link_type == LINK_TYPE_TRANSIT_NETWORK
-                                && lsa::interface_id_key(bl.neighbor_interface_id) == network_id
+                                && (
+                                    bl.neighbor_router_id,
+                                    lsa::interface_id_key(bl.neighbor_interface_id),
+                                ) == network_id
                                 && usable(bl)
                         })
                     });
@@ -853,7 +862,7 @@ fn pick_backup<'a>(
 fn run_dijkstra(
     root: Ipv4Addr,
     routers: &Routers,
-    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    networks: &HashMap<NetId, &NetworkLsaBody>,
     links: Option<&LinkLocalAddresses>,
     ctx: &Context,
 ) -> (HashMap<Vertex, u32>, HashMap<Vertex, Vec<NextHop>>) {
@@ -951,7 +960,7 @@ fn run_dijkstra(
 fn neighbors(
     vertex: Vertex,
     routers: &Routers,
-    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    networks: &HashMap<NetId, &NetworkLsaBody>,
     backbone: bool,
 ) -> Vec<(Vertex, u32, bool)> {
     match vertex {
@@ -973,7 +982,10 @@ fn neighbors(
                         true,
                     )),
                     LINK_TYPE_TRANSIT_NETWORK => Some((
-                        Vertex::Network(lsa::interface_id_key(l.neighbor_interface_id)),
+                        Vertex::Network((
+                            l.neighbor_router_id,
+                            lsa::interface_id_key(l.neighbor_interface_id),
+                        )),
                         u32::from(l.metric),
                         false,
                     )),
@@ -1001,7 +1013,7 @@ fn back_link(
     v: Vertex,
     w: Vertex,
     routers: &Routers,
-    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    networks: &HashMap<NetId, &NetworkLsaBody>,
     virtual_link: bool,
 ) -> bool {
     let kind = if virtual_link {
@@ -1021,7 +1033,8 @@ fn back_link(
         (Vertex::Network(n), Vertex::Router(w)) => routers.get(&w).is_some_and(|b| {
             b.links.iter().any(|l| {
                 l.link_type == LINK_TYPE_TRANSIT_NETWORK
-                    && lsa::interface_id_key(l.neighbor_interface_id) == n
+                    && l.neighbor_router_id == n.0
+                    && lsa::interface_id_key(l.neighbor_interface_id) == n.1
             })
         }),
         (Vertex::Network(_), Vertex::Network(_)) => false,
@@ -1103,14 +1116,12 @@ fn p2p_next_hop(
 /// Root's own local interface id for its transit-network link to
 /// `network_id`, if root is attached to it at all — mirrors
 /// `root_attached_to_network`'s own lookup, which now delegates here.
-fn root_network_interface_id(
-    root: Ipv4Addr,
-    routers: &Routers,
-    network_id: Ipv4Addr,
-) -> Option<u32> {
-    let network_key = lsa::key_to_interface_id(network_id);
+fn root_network_interface_id(root: Ipv4Addr, routers: &Routers, network_id: NetId) -> Option<u32> {
+    let network_key = lsa::key_to_interface_id(network_id.1);
     routers.get(&root)?.links.iter().find_map(|l| {
-        (l.link_type == LINK_TYPE_TRANSIT_NETWORK && l.neighbor_interface_id == network_key)
+        (l.link_type == LINK_TYPE_TRANSIT_NETWORK
+            && l.neighbor_router_id == network_id.0
+            && l.neighbor_interface_id == network_key)
             .then_some(l.interface_id)
     })
 }
@@ -1123,12 +1134,14 @@ fn root_network_interface_id(
 fn network_next_hop(
     routers: &Routers,
     links: &LinkLocalAddresses,
-    network_id: Ipv4Addr,
+    network_id: NetId,
     child_router: Ipv4Addr,
 ) -> Option<Ipv6Addr> {
-    let network_key = lsa::key_to_interface_id(network_id);
+    let network_key = lsa::key_to_interface_id(network_id.1);
     let own_interface_id = routers.get(&child_router)?.links.iter().find_map(|l| {
-        (l.link_type == LINK_TYPE_TRANSIT_NETWORK && l.neighbor_interface_id == network_key)
+        (l.link_type == LINK_TYPE_TRANSIT_NETWORK
+            && l.neighbor_router_id == network_id.0
+            && l.neighbor_interface_id == network_key)
             .then_some(l.interface_id)
     })?;
     links
@@ -1136,7 +1149,7 @@ fn network_next_hop(
         .copied()
 }
 
-fn root_attached_to_network(root: Ipv4Addr, routers: &Routers, network_id: Ipv4Addr) -> bool {
+fn root_attached_to_network(root: Ipv4Addr, routers: &Routers, network_id: NetId) -> bool {
     root_network_interface_id(root, routers, network_id).is_some()
 }
 
@@ -1169,7 +1182,10 @@ fn collect_prefix_routes(
             LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER => {
                 Vertex::Router(body.referenced_advertising_router)
             }
-            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network(body.referenced_link_state_id),
+            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network((
+                body.referenced_advertising_router,
+                body.referenced_link_state_id,
+            )),
             _ => continue,
         };
         if vertex == Vertex::Router(root) {
@@ -2398,6 +2414,64 @@ mod tests {
         // resolved router next-hop.
         assert_eq!(routes[0].interface_id, network_if_on_root);
         assert_eq!(routes[0].metric, 2);
+    }
+
+    /// #613 (RFC 5340 §4.8.1): two LANs whose DRs both use interface id 3 are
+    /// distinct vertices; each router's prefix resolves over its own LAN.
+    #[test]
+    fn lans_with_equal_dr_interface_ids_stay_distinct() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let (pa, pb): (Ipv6Net, Ipv6Net) = (
+            "2001:db8:a::/64".parse().unwrap(),
+            "2001:db8:b::/64".parse().unwrap(),
+        );
+        let routes = compute(
+            r1,
+            &[
+                router_lsa(r1, vec![transit(3, 1, r2, 1), transit(3, 2, r3, 5)]),
+                router_lsa(r2, vec![transit(3, 3, r2, 1)]),
+                router_lsa(r3, vec![transit(3, 3, r3, 1)]),
+                network_lsa(3, r2, vec![r1, r2]),
+                network_lsa(3, r3, vec![r1, r3]),
+                link_lsa(r2, 3, "fe80::2".parse().unwrap()),
+                link_lsa(r3, 3, "fe80::3".parse().unwrap()),
+                router_prefix_lsa(r2, vec![(pa, 1)]),
+                router_prefix_lsa(r3, vec![(pb, 1)]),
+            ],
+        );
+        let get = |p: Ipv6Net| routes.iter().find(|r| r.prefix == p).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(get(pa).next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!((get(pa).interface_id, get(pa).metric), (1, 2));
+        assert_eq!(get(pb).next_hop, "fe80::3".parse::<Ipv6Addr>().unwrap());
+        assert_eq!((get(pb).interface_id, get(pb).metric), (2, 6));
+    }
+
+    /// #613: a router listing the right interface id but another DR is not
+    /// on this network (no back link).
+    #[test]
+    fn transit_back_link_requires_the_same_dr() {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let routers: Routers = [(
+            r3,
+            RouterLsaBody {
+                flags: 0,
+                options: 0,
+                links: vec![transit(3, 1, r1, 1)],
+            },
+        )]
+        .into();
+        let none = HashMap::new();
+        let wrong = Vertex::Network((r2, lsa::interface_id_key(3)));
+        assert!(!back_link(
+            wrong,
+            Vertex::Router(r3),
+            &routers,
+            &none,
+            false
+        ));
+        let right = Vertex::Network((r1, lsa::interface_id_key(3)));
+        assert!(back_link(right, Vertex::Router(r3), &routers, &none, false));
     }
 
     #[test]
