@@ -324,6 +324,16 @@ async fn interfaced_lookups_links_and_pushed() {
         next(&mut rx).await,
         InterfaceEvent::LinkChanged(l) if !l.admin_up
     ));
+    i.push_link(link("eth1", true));
+    assert!(matches!(
+        next(&mut rx).await,
+        InterfaceEvent::LinkAdded(l) if l.name == "eth1"
+    ));
+    i.remove_link("eth1");
+    assert!(matches!(
+        next(&mut rx).await,
+        InterfaceEvent::LinkRemoved { name } if name == "eth1"
+    ));
     let before = i.connections();
     i.close_connections();
     assert!(rx.next().await.is_none());

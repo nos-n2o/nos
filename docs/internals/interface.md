@@ -51,6 +51,6 @@ There is an external query API: `server.rs` serves `nos_proto::interface::{Inter
 - **Semantics.** `admin_up` is `IFF_UP`; `carrier` is `IFF_LOWER_UP` with oper state up or unknown (dummy/bridge devices report unknown). `is_up()` needs both; `down_reason()` is `admin-down` or `no-carrier`, and a consumer adds `absent` for a name not in the table.
 - **Serving it.** `server::stream_links` sends `LinkSnapshot { observed, links }`, then forwards events. On a lagged receiver it sends a new snapshot (never a silent gap). The connection lives until the client closes or writes anything; only `ospfd`/`ospfv3d` may subscribe.
 - **`observed = false`** means the driver does not watch the kernel (noop): consumers must not gate on link state.
-- **Consuming it.** Resolve `ServiceRef::Interfaces`, send `SubscribeLinks`, replace the whole table on every snapshot, and on disconnect reconnect after a fixed 1 s and take the new snapshot.
+- **Consuming it.** Resolve `ServiceRef::Interfaces`, send `SubscribeLinks`, replace the whole table on every snapshot, fold `LinkAdded`/`LinkChanged` as insert-or-replace and `LinkRemoved` as delete (a recreated veth is `LinkRemoved` then `LinkAdded`, a stale `RTM_DELLINK` for a replaced ifindex is ignored), close sockets bound to a device on `LinkRemoved`, reopen them on `LinkAdded` or a snapshot, and on disconnect reconnect after a fixed 1 s and take the new snapshot.
 - **Log anchors** (debug): `link state changed name=… ifindex=… admin_up=… carrier=…`, `link removed name=…`.
 

@@ -63,6 +63,8 @@ impl BpduIo for L2Socket {
 struct Io {
     socket: Arc<dyn BpduIo>,
     reader: JoinHandle<()>,
+    /// The link epoch it was opened under (`LinkTable::epochs`).
+    epoch: u64,
 }
 
 type Frames = mpsc::Sender<(String, Vec<u8>)>;
@@ -80,7 +82,11 @@ fn open_l2(name: &str, pvst: Option<bool>, frames: &Frames) -> io::Result<Io> {
     };
     let socket = Arc::new(s);
     let reader = tokio::spawn(read_loop(socket.clone(), name.to_string(), frames.clone()));
-    Ok(Io { socket, reader })
+    Ok(Io {
+        socket,
+        reader,
+        epoch: 0,
+    })
 }
 
 /// Which ports `nos-interfaced` holds err-disabled; `None`: unreachable. The
@@ -455,6 +461,8 @@ impl Daemon {
             }
             if carrier {
                 self.ensure_io(i, &cfg.name);
+            } else if g == Gate::Down("absent") {
+                self.close_io(&cfg.name);
             }
             let enabled = carrier && self.io.contains_key(&cfg.name);
             if self.rt[i].carrier == Some(carrier)
@@ -486,18 +494,32 @@ impl Daemon {
         self.rt[i].open_warned = warned;
     }
 
+    /// Drops the socket of `name` (bound to a device that is gone or replaced).
+    fn close_io(&mut self, name: &str) {
+        if let Some(io) = self.io.remove(name) {
+            io.reader.abort();
+            info!(port = %name, "bpdu socket closed");
+        }
+    }
+
     /// Opens the BPDU socket of link `name` unless it is open: the IEEE group
     /// only (`None`), or the SSTP group with (`Some(true)`) or without the
     /// IEEE group. `warned` limits the failure log to once per outage.
     fn open_io(&mut self, name: &str, pvst: Option<bool>, warned: &mut bool) {
-        if self.io.get(name).is_some_and(|io| io.reader.is_finished()) {
-            self.io.remove(name);
+        let epoch = self.links.epoch(name);
+        if self
+            .io
+            .get(name)
+            .is_some_and(|io| io.reader.is_finished() || io.epoch != epoch)
+        {
+            self.close_io(name);
         }
         if self.io.contains_key(name) {
             return;
         }
         match (self.opener)(name, pvst, &self.frames_tx) {
-            Ok(io) => {
+            Ok(mut io) => {
+                io.epoch = epoch;
                 self.io.insert(name.to_string(), io);
                 *warned = false;
                 info!(port = %name, "bpdu socket open");
@@ -545,6 +567,9 @@ impl Daemon {
                     } else {
                         info!(port = %link, "port carrier lost");
                     }
+                }
+                if !carrier && gate(&self.links, &link) == Gate::Down("absent") {
+                    self.close_io(&link);
                 }
                 if carrier {
                     let mut warned = self.prt[t][j].open_warned;
