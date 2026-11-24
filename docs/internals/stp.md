@@ -88,6 +88,7 @@ Fail-safe rules:
 
 - While `spanning-tree mode` is not `disabled` (the default is `rstp`), a bridge port is blocked and trapped until `nos-stpd` pushes a state. Log: `bridge port enslaved blocking interface=<link>`, `bpdu trap installed interface=<link>`. Until `nos-stpd` pushes a state this blackholes the bridge port by design.
 - Window: one netlink round trip between the kernel opening a freshly enslaved running port and the block; and, after a carrier flap, up to the 10s resync. `nos-stpd` shortens the second one by reacting to `SubscribeLinks`.
+- Sockets follow the device: `LinkRemoved` closes a port's BPDU socket (`bpdu socket closed`), `LinkAdded` or a `LinkSnapshot` makes the next sync reopen it on the new ifindex (`bpdu socket open`); a carrier or admin flap is `LinkChanged` and keeps the socket.
 - Mode `disabled` restores forwarding and removes the trap, but only on ports this process blocked or trapped (`nos-fdbd` also disables ports, for single-active segments). Logs: `bridge port forwarding restored`, `bpdu trap removed`.
 - The VXLAN port of a VNI domain is never touched.
 

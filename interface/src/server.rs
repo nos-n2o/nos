@@ -298,6 +298,7 @@ where
             _ = reader.next() => return,
         };
         let out = match event {
+            Ok(LinkEvent::Added(l)) => InterfaceEvent::LinkAdded(l),
             Ok(LinkEvent::Changed(l)) => InterfaceEvent::LinkChanged(l),
             Ok(LinkEvent::Removed(name)) => InterfaceEvent::LinkRemoved { name },
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -620,6 +621,10 @@ mod stream_tests {
         hub.remove("a");
         assert!(
             matches!(ev_rx.next().await.unwrap(), InterfaceEvent::LinkRemoved { name } if name == "a")
+        );
+        hub.upsert(l("a", true));
+        assert!(
+            matches!(ev_rx.next().await.unwrap(), InterfaceEvent::LinkAdded(s) if s == l("a", true))
         );
         drop(req_tx);
         task.await.unwrap();

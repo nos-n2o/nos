@@ -23,6 +23,19 @@ pub struct LinkTable {
     /// False when the driver does not watch the kernel (noop): no gating.
     pub observed: bool,
     pub links: HashMap<String, LinkState>,
+    /// Per name, how many times its device was removed or added (a snapshot
+    /// counts as both): a socket opened under another epoch is bound to a dead
+    /// device. Survives the table coalescing a `LinkRemoved` + `LinkAdded`.
+    pub epochs: HashMap<String, u64>,
+}
+
+impl LinkTable {
+    pub fn epoch(&self, name: &str) -> u64 {
+        self.epochs.get(name).copied().unwrap_or(0)
+    }
+    fn bump(&mut self, name: &str) {
+        *self.epochs.entry(name.to_string()).or_default() += 1;
+    }
 }
 
 /// What the table says about one kernel device.
@@ -50,14 +63,28 @@ pub fn apply(table: &mut LinkTable, event: InterfaceEvent) -> bool {
     match event {
         InterfaceEvent::LinkSnapshot { observed, links } => {
             let links: HashMap<_, _> = links.into_iter().map(|l| (l.name.clone(), l)).collect();
-            let changed = !table.snapshot || table.observed != observed || table.links != links;
+            // A resync may have swallowed deletes: every socket is suspect.
+            let names: std::collections::HashSet<String> =
+                table.links.keys().chain(links.keys()).cloned().collect();
+            for n in names {
+                table.bump(&n);
+            }
             table.snapshot = true;
             table.observed = observed;
             table.links = links;
-            changed
+            true
+        }
+        InterfaceEvent::LinkAdded(l) => {
+            table.bump(&l.name);
+            table.links.insert(l.name.clone(), l);
+            true
         }
         InterfaceEvent::LinkChanged(l) => table.links.insert(l.name.clone(), l.clone()) != Some(l),
-        InterfaceEvent::LinkRemoved { name } => table.links.remove(&name).is_some(),
+        InterfaceEvent::LinkRemoved { name } => {
+            table.bump(&name);
+            table.links.remove(&name);
+            true
+        }
         _ => false,
     }
 }
@@ -127,7 +154,10 @@ mod tests {
     fn apply_events() {
         let mut t = LinkTable::default();
         assert!(apply(&mut t, snap(vec![ls("a", true, true)])));
-        assert!(!apply(&mut t, snap(vec![ls("a", true, true)])));
+        assert_eq!(t.epoch("a"), 1);
+        // A re-snapshot always counts: sockets are reopened.
+        assert!(apply(&mut t, snap(vec![ls("a", true, true)])));
+        assert_eq!(t.epoch("a"), 2);
         assert!(apply(
             &mut t,
             InterfaceEvent::LinkChanged(ls("a", true, false))
@@ -140,10 +170,17 @@ mod tests {
             &mut t,
             InterfaceEvent::LinkRemoved { name: "a".into() }
         ));
-        assert!(!apply(
+        assert_eq!(
+            t.epoch("a"),
+            3,
+            "LinkChanged keeps the epoch, removal bumps"
+        );
+        assert!(apply(
             &mut t,
-            InterfaceEvent::LinkRemoved { name: "a".into() }
+            InterfaceEvent::LinkAdded(ls("a", true, true))
         ));
+        assert_eq!(t.epoch("a"), 4);
+        assert!(t.links.contains_key("a"));
         assert!(!apply(&mut t, InterfaceEvent::NotFound));
     }
 

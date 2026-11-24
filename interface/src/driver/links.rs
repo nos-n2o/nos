@@ -20,6 +20,9 @@ pub const HUB_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkEvent {
+    /// A netdev appeared under this name (first sight, or recreated).
+    Added(LinkState),
+    /// Flags/carrier/aggregate of the same device.
     Changed(LinkState),
     Removed(String),
 }
@@ -50,9 +53,19 @@ impl Table {
     /// Stores `link` (its `port_aggregate` stamped) and returns the events.
     fn upsert(&mut self, mut link: LinkState) -> Vec<LinkEvent> {
         link.port_aggregate = self.aggregates.get(&link.name).cloned();
-        if self.links.get(&link.name) == Some(&link) {
+        let existing = self.links.get(&link.name);
+        if existing == Some(&link) {
             return Vec::new();
         }
+        let mut events = Vec::new();
+        // Same name, other ifindex: the old device is gone (its DELLINK was
+        // lost or folded into a dump), so owners of its sockets must reopen.
+        let recreated = existing.is_some_and(|e| e.ifindex != link.ifindex);
+        if recreated {
+            debug!(name = %link.name, "link recreated");
+            events.push(LinkEvent::Removed(link.name.clone()));
+        }
+        let announce = existing.is_none() || recreated;
         // A rename arrives as RTM_NEWLINK only: drop the old name.
         let stale: Vec<String> = self
             .links
@@ -60,7 +73,6 @@ impl Table {
             .filter(|l| l.ifindex == link.ifindex && l.name != link.name)
             .map(|l| l.name.clone())
             .collect();
-        let mut events = Vec::new();
         for old in stale {
             self.links.remove(&old);
             debug!(name = %old, "link removed");
@@ -72,7 +84,11 @@ impl Table {
             "link state changed"
         );
         self.links.insert(link.name.clone(), link.clone());
-        events.push(LinkEvent::Changed(link));
+        events.push(if announce {
+            LinkEvent::Added(link)
+        } else {
+            LinkEvent::Changed(link)
+        });
         events
     }
 }
@@ -113,7 +129,16 @@ impl LinkHub {
     }
 
     pub fn remove(&self, name: &str) {
+        self.remove_if(name, None);
+    }
+
+    /// Removes `name`; with `Some(ifindex)` only when it is still that device
+    /// (a delayed `RTM_DELLINK` for a replaced device must not delete the new one).
+    pub fn remove_if(&self, name: &str, ifindex: Option<u32>) {
         let mut table = self.inner.lock().unwrap();
+        if ifindex.is_some_and(|i| table.links.get(name).is_some_and(|l| l.ifindex != i)) {
+            return;
+        }
         if table.links.remove(name).is_some() {
             debug!(name = %name, "link removed");
             let _ = self.tx.send(LinkEvent::Removed(name.to_string()));
@@ -152,7 +177,7 @@ impl LinkHub {
 
 pub enum Delta {
     Upsert(LinkState),
-    Remove(String),
+    Remove(String, u32),
 }
 
 pub fn link_state(msg: &LinkMessage) -> Option<LinkState> {
@@ -184,7 +209,7 @@ pub fn decode(msg: NetlinkPayload<RouteNetlinkMessage>) -> Option<Delta> {
             link_state(&m).map(Delta::Upsert)
         }
         NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(m)) => {
-            link_state(&m).map(|l| Delta::Remove(l.name))
+            link_state(&m).map(|l| Delta::Remove(l.name, l.ifindex))
         }
         _ => None,
     }
@@ -243,7 +268,7 @@ mod tests {
         let new = NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(m.clone()));
         assert!(matches!(decode(new), Some(Delta::Upsert(s)) if s.name == "a"));
         let del = NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(m));
-        assert!(matches!(decode(del), Some(Delta::Remove(n)) if n == "a"));
+        assert!(matches!(decode(del), Some(Delta::Remove(n, 7)) if n == "a"));
         assert!(decode(NetlinkPayload::Noop).is_none());
     }
 
@@ -256,10 +281,49 @@ mod tests {
         hub.upsert(l("a", 1, false));
         hub.remove("a");
         hub.remove("a");
-        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(l("a", 1, true)));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("a", 1, true)));
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(l("a", 1, false)));
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("a".into()));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn delete_then_recreate_is_removed_then_added() {
+        let hub = LinkHub::new(16);
+        hub.upsert(l("eth2", 5, true));
+        let mut rx = hub.watch().rx.unwrap();
+        hub.remove_if("eth2", Some(5));
+        hub.upsert(l("eth2", 9, true));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("eth2".into()));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("eth2", 9, true)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn missed_dellink_synthesizes_the_pair() {
+        let hub = LinkHub::new(16);
+        hub.upsert(l("eth2", 5, true));
+        let mut rx = hub.watch().rx.unwrap();
+        hub.upsert(l("eth2", 9, true));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("eth2".into()));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("eth2", 9, true)));
+        // A re-dump listing a new ifindex does the same.
+        hub.replace_all(vec![l("eth2", 11, true)]);
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("eth2".into()));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            LinkEvent::Added(l("eth2", 11, true))
+        );
+    }
+
+    #[test]
+    fn stale_dellink_is_ignored() {
+        let hub = LinkHub::new(16);
+        hub.upsert(l("eth2", 9, true));
+        let mut rx = hub.watch().rx.unwrap();
+        hub.remove_if("eth2", Some(5));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(hub.watch().links, vec![l("eth2", 9, true)]);
     }
 
     #[test]
@@ -269,10 +333,7 @@ mod tests {
         let mut rx = hub.watch().rx.unwrap();
         hub.upsert(l("new", 3, true));
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("old".into()));
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            LinkEvent::Changed(l("new", 3, true))
-        );
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("new", 3, true)));
         assert_eq!(hub.watch().links, vec![l("new", 3, true)]);
     }
 
@@ -286,7 +347,7 @@ mod tests {
             port_aggregate: Some("agg".into()),
             ..l("bond1", 4, true)
         };
-        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(named.clone()));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(named.clone()));
         // Re-sent without it once forgotten; a name never seen is a no-op.
         hub.set_port_aggregate("bond1", None);
         assert_eq!(
@@ -305,7 +366,7 @@ mod tests {
         hub.replace_all(vec![l("a", 1, true), l("b", 2, true)]);
         let mut rx = hub.watch().rx.unwrap();
         hub.replace_all(vec![l("a", 1, true), l("c", 3, true)]);
-        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(l("c", 3, true)));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("c", 3, true)));
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Removed("b".into()));
         assert!(rx.try_recv().is_err());
     }
@@ -320,6 +381,6 @@ mod tests {
         let mut rx = w.rx.unwrap();
         assert!(rx.try_recv().is_err());
         hub.upsert(l("b", 2, true));
-        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Changed(l("b", 2, true)));
+        assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("b", 2, true)));
     }
 }

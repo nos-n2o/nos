@@ -1692,7 +1692,7 @@ async fn run_link_watcher(hub: Arc<LinkHub>) {
                         msg = messages.next() => match msg {
                             Some((m, _)) => match links::decode(m.payload) {
                                 Some(Delta::Upsert(l)) => hub.upsert(l),
-                                Some(Delta::Remove(n)) => hub.remove(&n),
+                                Some(Delta::Remove(n, i)) => hub.remove_if(&n, Some(i)),
                                 None => {}
                             },
                             None => break,

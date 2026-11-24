@@ -74,7 +74,11 @@ impl Fakes {
             } else {
                 tokio::spawn(std::future::pending())
             };
-            Ok(Io { socket, reader })
+            Ok(Io {
+                socket,
+                reader,
+                epoch: 0,
+            })
         })
     }
     fn held_reader(&self) -> HeldReader {
@@ -206,6 +210,7 @@ fn table(links: &[(&str, bool)]) -> LinkTable {
                 )
             })
             .collect(),
+        epochs: HashMap::new(),
     }
 }
 

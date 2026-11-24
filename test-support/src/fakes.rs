@@ -356,11 +356,29 @@ struct InterfacedState {
     links: Vec<LinkState>,
 }
 
+/// One link event the fake pushes to `SubscribeLinks` subscribers.
+#[derive(Clone)]
+enum LinkPush {
+    Added(LinkState),
+    Changed(LinkState),
+    Removed(String),
+}
+
+impl From<LinkPush> for InterfaceEvent {
+    fn from(p: LinkPush) -> Self {
+        match p {
+            LinkPush::Added(l) => InterfaceEvent::LinkAdded(l),
+            LinkPush::Changed(l) => InterfaceEvent::LinkChanged(l),
+            LinkPush::Removed(name) => InterfaceEvent::LinkRemoved { name },
+        }
+    }
+}
+
 /// `nos-interfaced` (identity `interfaced/`).
 pub struct FakeInterfaced {
     server: Server<InterfaceRequest>,
     state: Shared<InterfacedState>,
-    link_changes: broadcast::Sender<LinkState>,
+    link_changes: broadcast::Sender<LinkPush>,
 }
 
 fn found<T: Clone>(
@@ -399,7 +417,7 @@ impl FakeInterfaced {
                         observed: s.observed,
                         links: s.links.clone(),
                     }],
-                    feed(&lc, InterfaceEvent::LinkChanged),
+                    feed(&lc, InterfaceEvent::from),
                 ),
                 InterfaceRequest::PushLacpMembers(_)
                 | InterfaceRequest::PushLacpConversations(_)
@@ -446,12 +464,24 @@ impl FakeInterfaced {
         s.observed = observed;
         s.links = links;
     }
-    /// Updates the snapshot and sends `LinkChanged` to open subscribers.
+    /// Updates the snapshot and sends `LinkAdded` (new name) or `LinkChanged`
+    /// to open subscribers.
     pub fn push_link(&self, link: LinkState) {
         let mut s = self.state.lock().unwrap();
+        let known = s.links.iter().any(|l| l.name == link.name);
         s.links.retain(|l| l.name != link.name);
         s.links.push(link.clone());
-        let _ = self.link_changes.send(link);
+        let _ = self.link_changes.send(if known {
+            LinkPush::Changed(link)
+        } else {
+            LinkPush::Added(link)
+        });
+    }
+    /// Drops the link from the snapshot and sends `LinkRemoved`.
+    pub fn remove_link(&self, name: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.links.retain(|l| l.name != name);
+        let _ = self.link_changes.send(LinkPush::Removed(name.into()));
     }
     /// Drains `PushLacpMembers`/`PushBfdMembers`/`SetStpPortStates`/
     /// `FlushFdb`/`SetErrDisabled` received.

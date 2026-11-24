@@ -56,7 +56,9 @@ pub fn apply(table: &mut LinkTable, event: InterfaceEvent) -> bool {
             table.links = links;
             changed
         }
-        InterfaceEvent::LinkChanged(l) => table.links.insert(l.name.clone(), l.clone()) != Some(l),
+        InterfaceEvent::LinkAdded(l) | InterfaceEvent::LinkChanged(l) => {
+            table.links.insert(l.name.clone(), l.clone()) != Some(l)
+        }
         InterfaceEvent::LinkRemoved { name } => table.links.remove(&name).is_some(),
         _ => false,
     }

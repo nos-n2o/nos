@@ -305,7 +305,7 @@ pub enum InterfaceRequest {
     /// (not deferred to the periodic re-apply tick), gating which of its
     /// `Lacp`-mode members are currently enslaved. No reply.
     PushLacpMembers(LacpAggregateMembers),
-    /// Streaming: replies `LinkSnapshot`, then `LinkChanged`/`LinkRemoved`
+    /// Streaming: replies `LinkSnapshot`, then `LinkAdded`/`LinkChanged`/`LinkRemoved`
     /// (and a fresh `LinkSnapshot` after any lag) until the client closes the
     /// connection. The client never writes again after this request.
     SubscribeLinks,
@@ -387,13 +387,19 @@ pub enum InterfaceEvent {
         /// Current link table.
         links: Vec<LinkState>,
     },
-    /// One link appeared or changed state.
+    /// One link's flags, carrier or aggregate changed (same device, same
+    /// ifindex): consumers never reopen sockets on it.
     LinkChanged(LinkState),
-    /// One link disappeared.
+    /// One link disappeared (`RTM_DELLINK`, a rename's old name, or a re-dump
+    /// that no longer lists it): every socket bound to it is dead.
     LinkRemoved {
         /// Name of the object.
         name: String,
     },
+    /// A netdev appeared under this name: first sight, or recreated with a new
+    /// ifindex (then always preceded by `LinkRemoved`). Per name the lifecycle
+    /// is `LinkAdded`, `LinkChanged*`, `LinkRemoved`, repeat.
+    LinkAdded(LinkState),
 }
 
 #[cfg(test)]
@@ -461,6 +467,13 @@ mod tests {
         assert_eq!(b[0], 7);
         let b = postcard::to_allocvec(&InterfaceEvent::LinkRemoved { name: "x".into() }).unwrap();
         assert_eq!(b[0], 8);
+        let ev = InterfaceEvent::LinkAdded(ls(true, true));
+        let b = postcard::to_allocvec(&ev).unwrap();
+        assert_eq!(b[0], 9);
+        assert!(matches!(
+            postcard::from_bytes::<InterfaceEvent>(&b).unwrap(),
+            InterfaceEvent::LinkAdded(l) if l == ls(true, true)
+        ));
         assert_eq!(
             postcard::to_allocvec(&InterfaceEvent::NotFound).unwrap()[0],
             2
