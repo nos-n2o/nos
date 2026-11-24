@@ -7,6 +7,7 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{BfdAuthMethod, BfdProfile};
@@ -16,23 +17,29 @@ use crate::schema::{BfdAuthMethod, BfdProfile};
 /// multihop is not).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, View)]
 pub struct SessionKey {
     /// Routing table (VRF) the session runs in.
+    #[view(brief, order = 0, header = "Table")]
     pub table: String,
     /// Remote system's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, order = 1, sort, header = "Peer", text)]
     pub peer: IpAddr,
     /// Local source address, if pinned.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, order = 2, header = "Local", text)]
     pub local: Option<IpAddr>,
     /// Egress interface, required for single-hop sessions on link-local addresses.
+    #[view(brief, order = 3, header = "Interface")]
     pub interface: Option<String>,
     /// Whether this is a multihop session (RFC 5883) rather than single-hop (RFC 5881).
+    #[view(brief, order = 40, header = "Multihop", unit = bool)]
     pub multihop: bool,
     /// RFC 7130 micro-BFD: the `PortAggregate` this session probes a member of
     /// (`interface` is the member, `table` is empty). Appended last for postcard.
     #[serde(default)]
+    #[view(order = 100)]
     pub aggregate: Option<String>,
 }
 
@@ -162,37 +169,52 @@ impl fmt::Display for BfdDiag {
 /// One session, for `show bfd sessions`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct BfdSessionView {
     /// Session identity.
+    #[view(brief, nested, order = 0)]
     pub key: SessionKey,
     /// Current session state.
+    #[view(brief, order = 1, text)]
     pub state: BfdState,
     /// Diagnostic for the last state change.
+    #[view(brief, order = 2, text)]
     pub diag: BfdDiag,
     /// My Discriminator (RFC 5880 section 6.8.1).
+    #[view(brief, order = 3, header = "Local-Disc", unit = count)]
     pub local_discriminator: u32,
     /// Your Discriminator learned from the peer; zero until heard.
+    #[view(brief, order = 4, header = "Remote-Disc", unit = count)]
     pub remote_discriminator: u32,
     /// Negotiated transmit interval, microseconds.
+    #[view(brief, order = 5, header = "Tx-Interval", unit = micros)]
     pub tx_interval_us: u32,
     /// Detection time, microseconds.
+    #[view(brief, order = 6, header = "Detection", unit = micros)]
     pub detection_time_us: u32,
     /// The configured authentication (never the key), `None` when off.
+    #[view(brief, order = 42, header = "Auth", text)]
     pub auth_method: Option<BfdAuthMethod>,
     /// Key ID of the authentication key in use, if the session is authenticated (RFC 5880 section 6.7).
+    #[view(brief, order = 43, header = "Auth-Key", unit = count)]
     pub auth_key_id: Option<u8>,
     /// Packets dropped by RFC 5880 §6.7 authentication since the session started.
+    #[view(brief, order = 44, header = "Auth-Failures", unit = count)]
     pub auth_failures: u64,
     /// The Echo function is running (RFC 5880 §6.4).
+    #[view(brief, order = 45, header = "Echo", unit = bool)]
     pub echo_active: bool,
     /// Negotiated Echo transmit interval, microseconds; 0 while inactive.
+    #[view(brief, order = 46, header = "Echo-Interval", unit = micros)]
     pub echo_interval_us: u32,
     /// RFC 9747 unaffiliated Echo: no Control traffic at all.
+    #[view(brief, order = 47, header = "Echo-Only", unit = bool)]
     pub echo_only: bool,
     /// RFC 9764: the UDP payload size Control packets are padded to, 0 when not padded.
+    #[view(brief, order = 48, header = "Pdu", unit = bytes)]
     pub tx_pdu_bytes: u32,
     /// RFC 7880 S-BFD: which end of which protocol this session is.
+    #[view(brief, order = 41, header = "Kind", text)]
     pub kind: BfdSessionKind,
 }
 

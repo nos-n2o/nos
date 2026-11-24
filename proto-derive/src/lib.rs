@@ -37,6 +37,8 @@
 //! }
 //! ```
 
+mod view;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
@@ -46,6 +48,34 @@ use syn::{parse_macro_input, Attribute, Data, DeriveInput, Fields, Ident, LitStr
 pub fn derive_cli(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `#[derive(View)]`: presentation metadata of a reply struct
+/// (`nos_proto::view`). Every field must carry `#[view(...)]`; `#[view()]` is
+/// "detail only, plain text".
+///
+/// Keys: `brief` (table column), `hidden` (never shown), `header = "…"`,
+/// `unit = secs|micros|bytes|mbps|count|bool|text`, `order = N`,
+/// `sort` / `sort = desc` (default row order, needs `brief`, one per struct),
+/// `key = "…"` (the JSON key when it differs from the Rust name: serde
+/// attributes are not parsed), `nested` (a struct deriving `View`, or an
+/// `Option`/`Vec` of one), `text` (a struct/enum rendered as one string).
+/// A struct or enum field with neither `nested` nor `text` does not compile.
+///
+/// A field without `#[view]` does not compile:
+///
+/// ```compile_fail
+/// #[derive(nos_proto_derive::View)]
+/// struct Missing {
+///     asn: u32,
+/// }
+/// ```
+#[proc_macro_derive(View, attributes(view))]
+pub fn derive_view(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    view::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
