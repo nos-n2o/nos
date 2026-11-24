@@ -6,6 +6,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// The FSM state a peer's session is in, as reported by `nos-bgpd`.
@@ -299,32 +300,43 @@ pub enum RpkiSessionState {
 /// One configured RPKI cache's status, for `show bgp rpki`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
 pub struct RpkiCacheStatus {
     /// The cache's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, text)]
     pub address: IpAddr,
     /// The cache's RTR TCP port (RFC 8210).
+    #[view(brief)]
     pub port: u16,
     /// Cache preference; the lowest is used first.
+    #[view(brief, sort)]
     pub preference: u8,
     /// Session state.
+    #[view(brief, text)]
     pub state: RpkiSessionState,
     /// This cache's VRPs are the ones validating routes right now.
+    #[view(brief, header = "in-use", unit = bool)]
     pub active: bool,
     /// RTR protocol version negotiated (0 or 1).
+    #[view(brief)]
     pub version: Option<u8>,
     /// RTR Session ID (RFC 8210 section 5.1), once received.
+    #[view(brief)]
     pub session_id: Option<u16>,
     /// Latest RTR serial number applied.
+    #[view(brief)]
     pub serial: Option<u32>,
     /// Validated ROA Payloads currently held from this cache.
+    #[view(brief, header = "vrps", unit = count)]
     pub vrp_count: usize,
     /// Seconds since the last End of Data from this cache.
+    #[view(brief, header = "updated", unit = secs)]
     pub last_update_secs: Option<u64>,
     /// The RTR session is configured with TCP-MD5 or TCP-AO (RFC 8210 §9);
     /// never the secret itself. Appended last: postcard is positional.
     #[serde(default)]
+    #[view(brief, header = "auth", unit = bool)]
     pub authenticated: bool,
 }
 
@@ -812,56 +824,76 @@ pub enum BmpStationState {
 /// BMP messages sent to one station, by type, since its task started.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct BmpFrameCounts {
     /// Initiation.
+    #[view(unit = count)]
     pub initiation: u64,
     /// Peer Up.
+    #[view(unit = count)]
     pub peer_up: u64,
     /// Peer Down.
+    #[view(unit = count)]
     pub peer_down: u64,
     /// Route Monitoring, pre-policy.
+    #[view(unit = count)]
     pub route_monitoring_pre: u64,
     /// Route Monitoring, post-policy.
+    #[view(unit = count)]
     pub route_monitoring_post: u64,
     /// End-of-RIB markers (a Route Monitoring message with no routes), either
     /// stream; not counted in the two fields above.
+    #[view(unit = count)]
     pub end_of_rib: u64,
     /// Statistics Report.
+    #[view(unit = count)]
     pub stats: u64,
     /// Termination.
+    #[view(unit = count)]
     pub termination: u64,
 }
 
 /// One `bmp-station`'s status, for `show bgp bmp`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct BmpStationStatus {
     /// The `bmp-station` name.
+    #[view(brief, sort)]
     pub name: String,
     /// The collector's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, text)]
     pub address: IpAddr,
     /// The collector's TCP port.
+    #[view(brief)]
     pub port: u16,
     /// Connection state.
+    #[view(brief, text)]
     pub state: BmpStationState,
     /// Unix seconds the current connection came up; `None` unless connected.
+    #[view(text)]
     pub connected_since: Option<u64>,
     /// The policy view this station gets.
+    #[view(brief, text)]
     pub monitor: crate::BmpMonitor,
     /// Seconds between Statistics Reports; `None` = none.
+    #[view(brief, unit = secs)]
     pub statistics_interval: Option<u32>,
     /// Established peers reported to the station.
+    #[view(brief, header = "peers", unit = count)]
     pub peers_monitored: u32,
     /// Messages sent, by type.
+    #[view(nested)]
     pub frames_sent: BmpFrameCounts,
     /// Queue overflows (each one resynchronised the station).
+    #[view(brief, unit = count)]
     pub overflows: u64,
     /// Dial attempts after the first (a lost or failed connection retried).
+    #[view(brief, unit = count)]
     pub reconnects: u64,
     /// Why the last dial or session failed.
+    #[view(text)]
     pub last_error: Option<String>,
 }
 

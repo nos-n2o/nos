@@ -44,6 +44,7 @@ Server → Client:
 - Every field needs `#[view(...)]`; `#[view()]` means detail only, plain text.
 - Keys: `brief` (table column), `hidden`, `header = ".."`, `unit = secs|micros|bytes|mbps|count|bool|text`, `order = N`, `sort` / `sort = desc` (one per struct, needs `brief`), `nested`, `text`.
 - A struct field is `nested` (it derives `View`, or is an `Option`/`Vec` of one); an enum or other non-scalar is `text` and prints by its serde name. Anything else fails to compile.
+- Annotated flat replies (#1426): `AclStatus`, `FlowspecRuleStatus`, `LldpLinkStats` (all counters brief), `RpkiCacheStatus`, `BmpStationStatus` (`frames_sent`, `last_error` detail only), `FdbTable`, `NeighborSummary` (`lls` brief), `Ospfv3NeighborSummary`, `VersionInfo`, plus their nested helper types. `proto/src/view_annot_tests.rs` checks keys against sample JSON and pins the postcard bytes.
 - Serde attributes are not parsed: a field whose JSON name differs from the Rust name carries `key = ".."`. A proto test compares the sample reply's JSON keys with the view's keys.
 - No help text in `#[view]`; help stays in `Topic`. The derive changes no wire bytes (a postcard golden test pins it).
 
