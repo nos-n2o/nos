@@ -1362,7 +1362,7 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
 /// still forms. Restores `lls` off and no authentication at the end.
 pub async fn ospf_lls(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let got = |peer: &str| format!("ospf lls received link=eth0.0 neighbor={peer} eof=0");
+    let got = |peer: &str| format!("ospf lls received link=eth0.0 neighbor={peer} eof=1");
     let (from_b, from_a) = (got(OSPF_ROUTER_ID_B), got(OSPF_ROUTER_ID));
     let flags = |rid: &str, lls: bool, extra: &[&str]| {
         let mut f = ospf(rid);
@@ -3808,11 +3808,29 @@ async fn drop_extra_instances(r: &Router) -> anyhow::Result<()> {
     .map(drop)
 }
 
+/// Switches `extended-lsa` off on `r` (#1402): RFC 5838 AF instances use the
+/// legacy LSA formats, so the validator rejects Full extended-lsa left on by
+/// the `ospfv3` phase. An absent instance is fine (the error is ignored).
+async fn ospfv3_extended_lsa_off(r: &Router) -> anyhow::Result<()> {
+    r.edit(|c| {
+        let _ = nos_proto::Ospfv3InstanceOp::SetExtendedLsa {
+            name: OSPFV3_INSTANCE.into(),
+            enabled: false,
+        }
+        .apply(c);
+        Ok(())
+    })
+    .await
+    .map(drop)
+}
+
 async fn ospfv3_instance_id_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     // A lab left dirty by an aborted run: start from instance 1 alone.
     drop_extra_instances(a).await?;
     drop_extra_instances(b).await?;
+    ospfv3_extended_lsa_off(a).await?;
+    ospfv3_extended_lsa_off(b).await?;
     // `ospfv3-abr`/`-area-range` leave router-b's area-1 profile (instance-id
     // 0) behind; #1161's validator then refuses the ipv4-unicast step below
     // ("every profile's instance-id must be 64-95"). Drop the area if present.
@@ -4124,6 +4142,8 @@ async fn ospfv3_ipv4_af_steps(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     drop_extra_instances(a).await?;
     drop_extra_instances(b).await?;
+    ospfv3_extended_lsa_off(a).await?;
+    ospfv3_extended_lsa_off(b).await?;
     // (router, id, address, own rid, peer's rid in instance 3, own rid in instance 3)
     let sides = [
         (
