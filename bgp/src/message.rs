@@ -2167,7 +2167,13 @@ fn decode_mp_reach(
         16 | 32 => {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&data[4..20]);
-            Ipv6Addr::from(octets).into()
+            let a = Ipv6Addr::from(octets);
+            // RFC 4798 mapped hop: unmapped here; `adj_in` rejects it on an
+            // IPv6 session (no way to know the transport in the codec).
+            match a.to_ipv4_mapped() {
+                Some(v4) if afi == AFI_IPV6 && safi == SAFI_UNICAST => v4.into(),
+                _ => a.into(),
+            }
         }
         // RFC 8955 section 4: Flowspec carries no next hop (length 0) and
         // any value is ignored; keep the unspecified address of the AFI.
@@ -2465,6 +2471,11 @@ fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
         vpn::encode_next_hop(mp.afi, mp.next_hop, &mut out);
     } else {
         match mp.next_hop {
+            // RFC 4798: IPv6 NLRI with an IPv4 next hop is IPv4-mapped.
+            IpAddr::V4(a) if mp.afi == AFI_IPV6 => {
+                out.push(16);
+                out.extend_from_slice(&a.to_ipv6_mapped().octets());
+            }
             IpAddr::V4(a) => {
                 out.push(4);
                 out.extend_from_slice(&a.octets());
@@ -2950,6 +2961,30 @@ fn encode_update(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
 #[allow(clippy::decimal_bitwise_operands, clippy::identity_op)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v6_mp_reach_with_v4_next_hop_is_sent_mapped_and_unmapped_on_receive() {
+        let mp = MpReachNlri {
+            afi: AFI_IPV6,
+            safi: SAFI_UNICAST,
+            next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
+            nlri: vec!["2001:db8::/32".parse().unwrap()],
+            nlri_path_ids: vec![],
+            evpn: vec![],
+            flowspec: vec![],
+            flowspec_vpn: vec![],
+            vpn: vec![],
+            rtc: vec![],
+        };
+        let wire = encode_mp_reach(&mp);
+        assert_eq!(wire[3], 16);
+        assert_eq!(
+            wire[4..20],
+            Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped().octets()
+        );
+        let back = decode_mp_reach(&wire, &HashSet::new()).unwrap();
+        assert_eq!(back.next_hop, IpAddr::from(Ipv4Addr::new(192, 0, 2, 1)));
+    }
 
     fn roundtrip(msg: BgpMessage) -> BgpMessage {
         let mut codec = BgpCodec::default();
