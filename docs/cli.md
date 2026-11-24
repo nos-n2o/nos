@@ -72,6 +72,15 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - A literal `\x1b` sent by a peer looks like an escaped ESC: accepted, the output is display-only. `nos-lldpd` and the other daemons do not sanitize at the source.
 - The `cli_format` fuzz target asserts no output holds a control character other than `\n` and `\t`.
 
+### Tables and units in `show` output (#1406)
+
+- `cli/src/table.rs` is the one place that lays out a table: header row, a dash rule under each column (as wide as the column), then the rows; two-space gaps, no trailing spaces.
+- Column widths come from the rows of that call, so a paged walk renders each page as its own table, header, rule and widths included.
+- Every cell goes through `sanitize_line`: a daemon string with `\n` cannot add a row. No rows renders nothing (the caller prints its empty state).
+- Build one with `table(&[Col::left("Name"), Col::right("Cost")], &rows)`; a column that only sometimes exists (STP `Flags`) is added to `cols` when needed.
+- Units are decimal: `human_duration` (`45s`, `3m05s`, `1h02m`, `3d00h00m`), `human_bytes` (`512 B`, `1.5 KB`, `840.3 MB`, base 1000), `human_count` (`1.2M`), `human_us` (`250us`, `3.3ms`, `1.5s`).
+- Output words for enums are explicit `match`es (no `{:?}`), so a new variant fails to compile; a unit test forbids `{:?}` in `format.rs`.
+
 ## The two modes
 
 The shell is always in one of two modes, and the prompt shows which.
@@ -572,4 +581,5 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 | `fdb_client.rs` | One-shot IPC call to a domain's resolved `nos-fdbd` instance: `get_table` (`FdbRequest::GetMacs`), connecting with `connect_role` like `rib_client.rs`. |
 | `ospf_client.rs` | One-shot IPC calls to a resolved `nos-ospfd` instance: `get_neighbors` (`OspfRequest::GetNeighbors`), `get_database` (`OspfRequest::GetDatabase`) |
 | `ospfv3_client.rs` | Same shape as `ospf_client.rs`, against a resolved `nos-ospfv3d` instance: `get_neighbors` (`Ospfv3Request::GetNeighbors`), `get_database` (`Ospfv3Request::GetDatabase`) |
+| `table.rs` | `table`/`Col` (header, dash rule, per-call widths, sanitized cells), `human_duration`/`human_bytes`/`human_count`/`human_us` (see "Tables and units") |
 | `format.rs` | `render_config`/`render_transaction` (`show config`/`show this`, #116: one call into `nos_proto::cli::render`, generated from the schema tree — no per-type config renderer exists, so a field can't be missing from the output; `cli/tests/render.rs` replays a sample with every field set through `config_grammar` to prove it), `render_diff`, `render_prefix_routes`, `render_interface_statuses`, `render_log_entries`/`render_log_entry`, `render_bgp_summary`, `render_ospf_neighbors`, `render_ospf_database`, `render_ospfv3_neighbors`, `render_ospfv3_database`, `render_lacp_summaries`, `render_lldp_neighbors`, `render_lldp_neighbors_detail`, `render_lldp_statistics`, `render_bfd_sessions` — human-readable rendering. `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate. `render_log_entry` is the one place `time` is used, to format `LogEntry.timestamp_ms` as RFC 3339 |

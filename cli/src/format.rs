@@ -17,6 +17,61 @@ use crate::session::Path;
 
 use std::borrow::Cow;
 
+use crate::table::{human_bytes, human_count, human_duration, human_us, table, Col};
+
+/// One STP port row (the three port types share these fields) plus its flags.
+macro_rules! stp_row {
+    ($p:expr, $flags:expr) => {{
+        let p = $p;
+        (
+            vec![
+                p.name.clone(),
+                p.role.as_str().to_string(),
+                p.state.as_str().to_string(),
+                p.cost.to_string(),
+                p.priority.to_string(),
+                if p.designated_bridge.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!("{} {}", p.designated_bridge, p.designated_port)
+                },
+            ],
+            $flags,
+        )
+    }};
+}
+
+fn aggregate_mode_word(m: nos_proto::PortAggregateMode) -> &'static str {
+    match m {
+        nos_proto::PortAggregateMode::Xor => "xor",
+        nos_proto::PortAggregateMode::Lacp => "lacp",
+    }
+}
+
+fn rpki_state_word(s: nos_proto::RpkiSessionState) -> &'static str {
+    match s {
+        nos_proto::RpkiSessionState::Idle => "idle",
+        nos_proto::RpkiSessionState::Syncing => "syncing",
+        nos_proto::RpkiSessionState::Established => "established",
+    }
+}
+
+fn bmp_state_word(s: nos_proto::BmpStationState) -> &'static str {
+    match s {
+        nos_proto::BmpStationState::Connecting => "connecting",
+        nos_proto::BmpStationState::Connected => "connected",
+        nos_proto::BmpStationState::Backoff => "backoff",
+    }
+}
+
+fn bmp_monitor_word(m: nos_proto::BmpMonitor) -> &'static str {
+    match m {
+        nos_proto::BmpMonitor::PostPolicy => "post-policy",
+        nos_proto::BmpMonitor::PrePolicy => "pre-policy",
+        nos_proto::BmpMonitor::Both => "both",
+    }
+}
+
 /// Escape a daemon-supplied string for the terminal (#1365): every control
 /// char (C0 incl. ESC, DEL, C1) except `\n` and `\t`, and the bidi/zero-width
 /// format chars that reorder or hide text, becomes a visible `\xNN` /
@@ -153,8 +208,11 @@ pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
 fn render_port_aggregate_status_raw(status: &PortAggregateStatus) -> String {
     let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
     let mut lines = vec![format!(
-        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {}",
-        status.name, status.mode, status.mtu
+        "port-aggregate {}: mode {}, switching-profile {}, mtu {}",
+        sanitize_line(&status.name),
+        aggregate_mode_word(status.mode),
+        sanitize_line(switching_profile),
+        status.mtu
     )];
     if status.err_disabled {
         lines.push("  Err-disabled: yes".to_string());
@@ -231,7 +289,7 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
     };
     format!(
         "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}{individual}, unsupported-version PDUs {}",
-        port.interface,
+        sanitize_line(&port.interface),
         port.actor_port_number,
         yes_no(port.selected),
         yes_no(port.synchronized),
@@ -466,19 +524,22 @@ fn render_bfd_sessions_raw(sessions: &[nos_proto::BfdSessionView]) -> String {
             };
             let echo = if s.echo_active {
                 let only = if s.echo_only { " (echo-only)" } else { "" };
-                format!(", echo active {}ms{only}", s.echo_interval_us / 1000)
+                format!(
+                    ", echo active {}{only}",
+                    human_us(u64::from(s.echo_interval_us))
+                )
             } else {
                 String::new()
             };
             format!(
-                "{}: peer {}{local}{interface}{multihop}{sbfd}, {}, diag {}, tx {}ms, detect {}ms, \
+                "{}: peer {}{local}{interface}{multihop}{sbfd}, {}, diag {}, tx {}, detect {}, \
                  discriminators {}/{}{auth}{pdu}{echo}",
                 k.aggregate.as_deref().unwrap_or(&k.table),
                 k.peer,
                 s.state,
                 s.diag,
-                s.tx_interval_us / 1000,
-                s.detection_time_us / 1000,
+                human_us(u64::from(s.tx_interval_us)),
+                human_us(u64::from(s.detection_time_us)),
                 s.local_discriminator,
                 s.remote_discriminator,
             )
@@ -523,7 +584,9 @@ fn render_acls_raw(acls: &[nos_proto::AclStatus]) -> String {
         };
         out.push(format!(
             "acl {}: {attached}, {} levels, {} filters",
-            a.name, a.levels, a.filters
+            sanitize_line(&a.name),
+            a.levels,
+            a.filters
         ));
         for r in &a.rules {
             let note = r
@@ -532,17 +595,17 @@ fn render_acls_raw(acls: &[nos_proto::AclStatus]) -> String {
                 .map_or(String::new(), |d| format!(" ({d}, no filter)"));
             out.push(format!(
                 "  {}: {}, packets {}, bytes {}{note}",
-                r.name,
+                sanitize_line(&r.name),
                 action(r.action),
-                r.packets,
-                r.bytes
+                human_count(r.packets),
+                human_bytes(r.bytes)
             ));
         }
         out.push(format!(
             "  default {}: packets {}, bytes {}",
             action(a.default_action),
-            a.default_packets,
-            a.default_bytes
+            human_count(a.default_packets),
+            human_bytes(a.default_bytes)
         ));
     }
     out.join("\n")
@@ -566,13 +629,13 @@ fn render_flowspec_rules_raw(rules: &[nos_proto::FlowspecRuleStatus]) -> String 
             .map_or(String::new(), |t| format!(" vrf {t}"));
         out.push(format!(
             "  {}{} {}: {} -> {}, packets {}, bytes {}",
-            r.instance,
-            vrf,
-            r.flow,
-            state,
-            r.actions.join(", "),
-            r.packets,
-            r.bytes
+            sanitize_line(&r.instance),
+            sanitize_line(&vrf),
+            sanitize_line(&r.flow),
+            sanitize_line(&state),
+            sanitize_line(&r.actions.join(", ")),
+            human_count(r.packets),
+            human_bytes(r.bytes)
         ));
     }
     out.join("\n")
@@ -593,7 +656,7 @@ fn render_lldp_statistics_raw(stats: &[nos_proto::LldpLinkStats]) -> String {
             format!(
                 "{}: tx {}, rx {}, rx errors {}, rx discarded {}, tlvs discarded {}, \
                  tlvs unrecognized {}, ageouts {}, too many neighbors {}",
-                s.interface,
+                sanitize_line(&s.interface),
                 s.frames_out,
                 s.frames_in,
                 s.frames_in_errors,
@@ -619,27 +682,38 @@ fn render_spanning_tree_raw(s: &nos_proto::StpSummary) -> String {
         return "spanning-tree is disabled".to_string();
     }
     if s.mode == nos_proto::StpMode::RapidPvst {
+        let rows: Vec<Vec<String>> = s
+            .pvst
+            .iter()
+            .map(|t| {
+                vec![
+                    t.domains.join(","),
+                    t.id.to_string(),
+                    t.root_id.clone(),
+                    t.root_port
+                        .as_deref()
+                        .unwrap_or("(this bridge is the root)")
+                        .to_string(),
+                ]
+            })
+            .collect();
         let mut lines = vec![
             format!("mode {}", mode_word(s.mode)),
             format!(
                 "bridge id {} (priority; each VLAN adds its id)",
                 s.bridge_id
             ),
-            String::new(),
-            format!(
-                "{:<16} {:>4}  {:<24} Root port",
-                "Domain", "VLAN", "Root id"
-            ),
         ];
-        for t in &s.pvst {
-            lines.push(format!(
-                "{:<16} {:>4}  {:<24} {}",
-                t.domains.join(","),
-                t.id,
-                t.root_id,
-                t.root_port
-                    .as_deref()
-                    .unwrap_or("(this bridge is the root)")
+        if !rows.is_empty() {
+            lines.push(String::new());
+            lines.push(table(
+                &[
+                    Col::left("Domain"),
+                    Col::right("VLAN"),
+                    Col::left("Root id"),
+                    Col::left("Root port"),
+                ],
+                &rows,
             ));
         }
         return lines.join("\n");
@@ -662,38 +736,36 @@ fn render_spanning_tree_raw(s: &nos_proto::StpSummary) -> String {
         return lines.join("\n");
     }
     lines.push(String::new());
-    let flagged = s.ports.iter().any(|p| !stp_flags(p).is_empty());
-    lines.push(format!(
-        "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated{}",
-        "Name",
-        "Role",
-        "State",
-        "Cost",
-        "Prio",
-        if flagged { "  Flags" } else { "" }
+    lines.push(stp_port_table(
+        s.ports.iter().map(|p| stp_row!(p, stp_flags(p))).collect(),
     ));
-    for p in &s.ports {
-        let designated = if p.designated_bridge.is_empty() {
-            "-".to_string()
-        } else {
-            format!("{} {}", p.designated_bridge, p.designated_port)
-        };
-        let flags = stp_flags(p);
-        lines.push(format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{}",
-            p.name,
-            p.role.as_str(),
-            p.state.as_str(),
-            p.cost,
-            p.priority,
-            if flags.is_empty() {
-                String::new()
-            } else {
-                format!("  {flags}")
-            }
-        ));
-    }
     lines.join("\n")
+}
+
+/// The shared STP port table; a `Flags` column only when some port has one.
+fn stp_port_table(rows: Vec<(Vec<String>, String)>) -> String {
+    let flagged = rows.iter().any(|(_, f)| !f.is_empty());
+    let mut cols = vec![
+        Col::left("Name"),
+        Col::left("Role"),
+        Col::left("State"),
+        Col::right("Cost"),
+        Col::right("Prio"),
+        Col::left("Designated"),
+    ];
+    if flagged {
+        cols.push(Col::left("Flags"));
+    }
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|(mut r, f)| {
+            if flagged {
+                r.push(f);
+            }
+            r
+        })
+        .collect();
+    table(&cols, &rows)
 }
 
 fn mode_word(m: nos_proto::StpMode) -> &'static str {
@@ -726,39 +798,28 @@ fn render_stp_domain_raw(s: &nos_proto::StpSummary, domain: &str) -> String {
         Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
         None => "this bridge is the root".to_string(),
     };
-    let mut lines = vec![
+    let lines = [
         format!("domain    {domain}"),
         format!("vlan      {}", i.vlans),
         format!("bridge id {}", i.bridge_id),
         format!("root id   {} ({root})", i.root_id),
         String::new(),
-        format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
-            "Name", "Role", "State", "Cost", "Prio"
+        stp_port_table(
+            i.ports
+                .iter()
+                .map(|p| {
+                    let mut f = Vec::new();
+                    if p.compat {
+                        f.push("Compat");
+                    }
+                    if p.inconsistent {
+                        f.push("PVID-inconsistent");
+                    }
+                    stp_row!(p, f.join(" "))
+                })
+                .collect(),
         ),
     ];
-    for p in &i.ports {
-        let designated = if p.designated_bridge.is_empty() {
-            "-".to_string()
-        } else {
-            format!("{} {}", p.designated_bridge, p.designated_port)
-        };
-        let mut flags = String::new();
-        if p.compat {
-            flags.push_str("  Compat");
-        }
-        if p.inconsistent {
-            flags.push_str("  PVID-inconsistent");
-        }
-        lines.push(format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{flags}",
-            p.name,
-            p.role.as_str(),
-            p.state.as_str(),
-            p.cost,
-            p.priority,
-        ));
-    }
     lines.join("\n")
 }
 
@@ -771,23 +832,34 @@ fn render_mst_config_raw(s: &nos_proto::StpSummary) -> String {
     let Some(m) = &s.mst else {
         return NOT_MSTP.to_string();
     };
-    let mut lines = vec![
+    let lines = [
         format!("name     {}", m.region_name),
         format!("revision {}", m.revision),
         format!("digest   {}", m.digest),
         format!("max hops {}", m.max_hops),
         String::new(),
-        format!("{:<9} {:<20} Domains", "Instance", "VLANs"),
+        table(
+            &[
+                Col::right("Instance"),
+                Col::left("VLANs"),
+                Col::left("Domains"),
+            ],
+            &m.instances
+                .iter()
+                .map(|i| {
+                    vec![
+                        i.id.to_string(),
+                        if i.vlans.is_empty() { "-" } else { &i.vlans }.to_string(),
+                        if i.domains.is_empty() {
+                            "-".to_string()
+                        } else {
+                            i.domains.join(",")
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        ),
     ];
-    for i in &m.instances {
-        let vlans = if i.vlans.is_empty() { "-" } else { &i.vlans };
-        let domains = if i.domains.is_empty() {
-            "-".to_string()
-        } else {
-            i.domains.join(",")
-        };
-        lines.push(format!("{:<9} {vlans:<20} {domains}", i.id));
-    }
     lines.join("\n")
 }
 
@@ -807,7 +879,7 @@ fn render_stp_instance_raw(s: &nos_proto::StpSummary, id: u16) -> String {
         Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
         None => "this bridge is the root".to_string(),
     };
-    let mut lines = vec![
+    let lines = [
         format!(
             "instance {} ({})",
             i.id,
@@ -820,27 +892,13 @@ fn render_stp_instance_raw(s: &nos_proto::StpSummary, id: u16) -> String {
         format!("bridge id {}", i.bridge_id),
         format!("root id   {} ({root})", i.root_id),
         String::new(),
-        format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  Designated",
-            "Name", "Role", "State", "Cost", "Prio"
+        stp_port_table(
+            i.ports
+                .iter()
+                .map(|p| stp_row!(p, if p.boundary { "Boundary" } else { "" }.to_string()))
+                .collect(),
         ),
     ];
-    for p in &i.ports {
-        let designated = if p.designated_bridge.is_empty() {
-            "-".to_string()
-        } else {
-            format!("{} {}", p.designated_bridge, p.designated_port)
-        };
-        lines.push(format!(
-            "{:<12} {:<11} {:<11} {:>9} {:>4}  {designated}{}",
-            p.name,
-            p.role.as_str(),
-            p.state.as_str(),
-            p.cost,
-            p.priority,
-            if p.boundary { "  Boundary" } else { "" }
-        ));
-    }
     lines.join("\n")
 }
 
@@ -1050,12 +1108,16 @@ mod stp_tests {
         s.ports[1].err_disabled = true;
         s.ports[1].err_recovery_secs = Some(12);
         let flagged = render_spanning_tree(&s);
-        assert!(flagged.contains("Designated  Flags"));
+        assert!(flagged.contains("Designated"), "{flagged}");
+        assert!(flagged.lines().any(|l| l.ends_with("  Flags")), "{flagged}");
         assert!(flagged.contains("RootGuard,Err-disabled (recovers in 12s)"));
         s.ports[1] = StpPortInfo::default();
         let out = render_spanning_tree(&s);
         assert!(out.contains("root id   8000.02:00:00:00:00:01 (root port eth1, cost 20000)"));
-        assert!(out.contains("eth1         root        forwarding"));
+        assert!(
+            out.contains("eth1  root      forwarding  20000   128"),
+            "{out}"
+        );
         assert!(out.contains("8000.02:00:00:00:00:01 128.1"));
         assert!(out.lines().last().unwrap().ends_with("  -"));
         s.root_port = None;
@@ -1321,15 +1383,6 @@ fn render_bgp_session_state(state: BgpSessionState) -> &'static str {
     }
 }
 
-fn format_uptime(secs: u64) -> String {
-    format!(
-        "{:02}:{:02}:{:02}",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
-}
-
 /// Render one BGP instance's peer summaries, one line per peer — used for
 /// `show bgp brief`.
 pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
@@ -1350,7 +1403,7 @@ fn render_bgp_summary_raw(instance: &str, peers: &[PeerSummary]) -> String {
             .map_or_else(|| "-".to_string(), |asn| asn.to_string());
         let uptime = peer
             .uptime_secs
-            .map_or_else(|| "-".to_string(), format_uptime);
+            .map_or_else(|| "-".to_string(), human_duration);
         let hold_time = peer
             .negotiated_hold_time
             .map_or_else(|| "-".to_string(), |h| h.to_string());
@@ -1651,11 +1704,11 @@ fn render_bgp_rpki_raw(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) ->
     let mut lines = vec![format!("bgp instance {instance}:")];
     for c in caches {
         lines.push(format!(
-            "  {} port {} preference {} {:?}{} version {} session {} serial {} vrps {} updated {} auth {}",
+            "  {} port {} preference {} {}{} version {} session {} serial {} vrps {} updated {} auth {}",
             c.address,
             c.port,
             c.preference,
-            c.state,
+            rpki_state_word(c.state),
             if c.active { " (in use)" } else { "" },
             opt(c.version.map(|v| v.to_string())),
             opt(c.session_id.map(|v| v.to_string())),
@@ -1681,20 +1734,21 @@ fn render_bgp_bmp_raw(instance: &str, stations: &[nos_proto::BmpStationStatus]) 
     for s in stations {
         let f = &s.frames_sent;
         lines.push(format!(
-            "  {} {}:{} {:?} monitor {:?} statistics {} peers {} overflows {} reconnects {}{}",
+            "  {} {}:{} {} monitor {} statistics {} peers {} overflows {} reconnects {}{}",
             s.name,
             s.address,
             s.port,
-            s.state,
-            s.monitor,
+            bmp_state_word(s.state),
+            bmp_monitor_word(s.monitor),
             s.statistics_interval
                 .map_or_else(|| "-".to_string(), |i| format!("{i}s")),
             s.peers_monitored,
             s.overflows,
             s.reconnects,
-            s.last_error
-                .as_ref()
-                .map_or_else(String::new, |e| format!(" last-error \"{e}\"")),
+            s.last_error.as_ref().map_or_else(String::new, |e| format!(
+                " last-error \"{}\"",
+                sanitize_line(e)
+            )),
         ));
         lines.push(format!(
             "    sent: initiation {} peer-up {} peer-down {} route-monitoring pre {} post {} end-of-rib {} stats {} termination {}",
@@ -2757,7 +2811,7 @@ mod tests {
         };
         assert_eq!(
             render_bgp_rpki("r1", &[c]),
-            "bgp instance r1:\n  192.0.2.5 port 323 preference 1 Established (in use) version 1 \
+            "bgp instance r1:\n  192.0.2.5 port 323 preference 1 established (in use) version 1 \
              session 7 serial 42 vrps 3 updated 5s ago auth yes"
         );
     }
@@ -2787,7 +2841,7 @@ mod tests {
             last_error: Some("refused".into()),
         };
         let out = render_bgp_bmp("r1", &[s]);
-        assert!(out.contains("c1 192.0.2.9:11019 Backoff monitor Both statistics 60s peers 2 overflows 1 reconnects 3 last-error \"refused\""));
+        assert!(out.contains("c1 192.0.2.9:11019 backoff monitor both statistics 60s peers 2 overflows 1 reconnects 3 last-error \"refused\""));
         assert!(out.contains("route-monitoring pre 4 post 0 end-of-rib 0"));
     }
 
@@ -2978,7 +3032,7 @@ mod tests {
         peer.negotiated_hold_time = Some(90);
         assert_eq!(
             render_bgp_summary("r1", &[peer]),
-            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 01:02:05 hold-time 90"
+            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 1h02m hold-time 90"
         );
     }
 
@@ -3004,7 +3058,7 @@ mod tests {
         peer.ao_packets_key_not_found = Some(0);
         assert_eq!(
             render_bgp_summary("r1", &[peer]),
-            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 00:00:05 \
+            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 5s \
              hold-time 90 ao-current 1 ao-rnext 2 ao-good 42 ao-bad 1 ao-no-key 0"
         );
     }
@@ -3380,9 +3434,9 @@ mod tests {
                 rule("vrf", None, 1),
             ]),
             "flowspec rules:\n  \
-             b1 proto =6: installed -> rate 0 bytes/s, packets 3, bytes 30\n  \
-             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0\n  \
-             b1 vrf rt2 vrf: installed -> rate 0 bytes/s, packets 1, bytes 10"
+             b1 proto =6: installed -> rate 0 bytes/s, packets 3, bytes 30 B\n  \
+             b1 len =64: unsupported: packet length: no flower key -> rate 0 bytes/s, packets 0, bytes 0 B\n  \
+             b1 vrf rt2 vrf: installed -> rate 0 bytes/s, packets 1, bytes 10 B"
         );
     }
 
@@ -3416,9 +3470,9 @@ mod tests {
         assert_eq!(
             render_acls(std::slice::from_ref(&acl)),
             "acl EDGE: not attached, 2 levels, 5 filters\n  \
-             d-bgp: deny, packets 3, bytes 30\n  \
-             dup: deny, packets 0, bytes 0 (shadowed, no filter)\n  \
-             default permit: packets 4, bytes 40"
+             d-bgp: deny, packets 3, bytes 30 B\n  \
+             dup: deny, packets 0, bytes 0 B (shadowed, no filter)\n  \
+             default permit: packets 4, bytes 40 B"
         );
         acl.attached = vec![
             AclAttachment {
@@ -3661,7 +3715,7 @@ mod tests {
         };
         assert_eq!(
             render_port_aggregate_statuses(std::slice::from_ref(&agg)),
-            "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000\n  \
+            "port-aggregate bond1: mode xor, switching-profile unset, mtu 9000\n  \
              subinterface 0: address [none], routing-table rt1, mtu 1500"
         );
         let held = PortAggregateStatus {
@@ -4196,6 +4250,64 @@ mod tests {
         }
         assert!(checked > 30);
     }
+
+    /// No Debug formatting in production code: output words are explicit.
+    #[test]
+    fn no_debug_formatting_outside_tests() {
+        let src = include_str!("format.rs");
+        let body = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(!body.contains("{:?}"), "format.rs uses {{:?}}");
+    }
+
+    /// A daemon string with a newline must not add a line to a one-record
+    /// renderer (the whole-output `sanitize` keeps `\n`).
+    #[test]
+    fn newline_in_daemon_strings_cannot_forge_a_row() {
+        const BAD: &str = "x\nFORGED";
+        let lines = |s: String| s.lines().count();
+        let bmp = |err: &str| {
+            let s = nos_proto::BmpStationStatus {
+                name: "c1".into(),
+                address: "192.0.2.9".parse().unwrap(),
+                port: 1,
+                state: nos_proto::BmpStationState::Backoff,
+                connected_since: None,
+                monitor: nos_proto::BmpMonitor::Both,
+                statistics_interval: None,
+                peers_monitored: 0,
+                frames_sent: nos_proto::BmpFrameCounts::default(),
+                overflows: 0,
+                reconnects: 0,
+                last_error: Some(err.into()),
+            };
+            render_bgp_bmp("r1", &[s])
+        };
+        assert_eq!(lines(bmp(BAD)), lines(bmp("x")));
+        let flow = |f: &str| {
+            render_flowspec_rules(&[nos_proto::FlowspecRuleStatus {
+                instance: f.into(),
+                table: None,
+                flow: f.into(),
+                actions: vec![f.into()],
+                unsupported: None,
+                packets: 1,
+                bytes: 1,
+            }])
+        };
+        assert_eq!(lines(flow(BAD)), lines(flow("x")));
+        let stp = |n: &str| {
+            let mut s = nos_proto::StpSummary {
+                enabled: true,
+                ..Default::default()
+            };
+            s.ports = vec![nos_proto::StpPortInfo {
+                name: n.into(),
+                ..nos_proto::StpPortInfo::default()
+            }];
+            render_spanning_tree(&s)
+        };
+        assert_eq!(lines(stp(BAD)), lines(stp("x")));
+    }
 }
 
 #[cfg(test)]
@@ -4241,8 +4353,8 @@ mod mst_tests {
         let out = render_mst_config(&summary());
         assert!(out.contains("name     lab"));
         assert!(out.contains("digest   9357ebb7a8d74dd5fef4f2bab50531aa"));
-        assert!(out.contains("1         10,20-30             bd1,bd2"));
-        assert!(out.contains("0         -                    -"));
+        assert!(out.contains("       1  10,20-30  bd1,bd2"), "{out}");
+        assert!(out.contains("       0  -         -"), "{out}");
         assert_eq!(
             render_mst_config(&StpSummary::default()),
             "spanning-tree is not in mode mstp"
@@ -4291,7 +4403,7 @@ mod mst_tests {
         let out = render_stp_domain(&s, "bd1");
         assert!(out.contains("vlan      10"));
         assert!(out.contains("root port eth1"));
-        let rows: Vec<_> = out.lines().skip(6).collect();
+        let rows: Vec<_> = out.lines().skip(7).collect();
         assert!(rows[0].ends_with("  Compat"), "{out}");
         assert!(rows[1].ends_with("  PVID-inconsistent"), "{out}");
         assert_eq!(

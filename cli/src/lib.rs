@@ -21,4 +21,5 @@ pub mod rib_client;
 pub mod session;
 pub mod spec;
 pub mod stp_client;
+pub mod table;
 pub mod watchdog_client;
