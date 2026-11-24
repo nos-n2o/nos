@@ -1,0 +1,4 @@
+Link    area     if-state      neighbor  State   last-hello  Hello-Interval  Dead-Interval  Priority  Neighbor-Priority  Dr        Bdr      Eof  Lr   Rs
+------  -------  ------------  --------  ------  ----------  --------------  -------------  --------  -----------------  --------  -------  ---  ---  ---
+eth0.0  0.0.0.0  PointToPoint  -         Down             -             10s            40s  1         -                  -         -        -    -    -
+eth1.0  0.0.0.0  Backup        9.9.9.10  TwoWay          3s             10s            40s  1         200                9.9.9.10  1.1.1.1  3    yes  yes

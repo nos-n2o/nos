@@ -1,0 +1,9 @@
+Domain          bd
+Vni             100
+Bridge          br100
+Vxlan           -
+Macs            
+Neighbours      
+Flood           
+Segments        
+neigh-suppress  yes

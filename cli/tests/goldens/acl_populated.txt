@@ -1,0 +1,16 @@
+Name             EDGE
+Default-Action   Deny
+Default-Packets  1.5K
+Default-Bytes    2.0 MB
+Levels           2
+Filters          5
+Attached
+  Interface  Direction
+  ---------  ---------
+  eth1       In
+  eth1       Out
+Rules
+  Name  Action  Dropped   Packets   Bytes
+  ----  ------  --------  -------  ------
+  r10   Permit  -              12  3.4 KB
+  r20   Deny    shadowed        0     0 B
