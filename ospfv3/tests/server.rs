@@ -51,7 +51,7 @@ fn start() -> (
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("ospfv3.sock");
     // Nothing configured: every query answers with an empty list.
-    let links = LinkManager::new(1, None);
+    let links = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
     let server = nos_ospfv3::server::start(
         &path,
         "r1".to_string(),
@@ -126,7 +126,7 @@ async fn redistribution_past_max_frame_is_staged_until_the_closing_full() {
 
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("ospfv3.sock");
-    let links = LinkManager::new(1, None);
+    let links = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
     let _server = nos_ospfv3::server::start(
         &path,
         "r1".to_string(),

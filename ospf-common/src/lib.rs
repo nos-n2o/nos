@@ -9,6 +9,7 @@
 
 pub mod areas;
 pub mod bfd;
+pub mod boot;
 pub mod dbd_fault;
 pub mod drouters;
 pub mod election;

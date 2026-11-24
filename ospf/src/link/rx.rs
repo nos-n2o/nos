@@ -1284,6 +1284,7 @@ fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv4Addr,
                 );
                 info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
                 info.adjacency = None;
+                super::flood::clear_replay_state(info);
             }
         }
     });

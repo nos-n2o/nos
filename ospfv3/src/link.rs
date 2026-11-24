@@ -114,7 +114,9 @@ impl LinkSocket {
 }
 
 /// Opens one link's socket — the real one in production, see `LinkSocket`.
-pub type Opener = Arc<dyn Fn(&LinkConfig) -> std::io::Result<LinkSocket> + Send + Sync>;
+/// Opens a link's socket; the `u32` is the RFC 7166 §4.1 boot count (fresh per
+/// link (re)start).
+pub type Opener = Arc<dyn Fn(&LinkConfig, u32) -> std::io::Result<LinkSocket> + Send + Sync>;
 use crate::spf;
 
 /// RFC 2328 Appendix C.3's `RxmtInterval` — same fixed value/ponytail
@@ -376,6 +378,16 @@ pub enum InterfaceState {
     Dr,
     Backup,
     DrOther,
+}
+
+/// A neighbor gone `Down` forgets its crypto sequence numbers (#612): a
+/// restarted peer may legitimately reseed below the stored value (RFC 7166
+/// keeps this state per adjacency). `Init` keeps it (a live neighbor
+/// mid-handshake).
+fn clear_replay_state(info: &mut NeighborInfo) {
+    if info.state == NeighborState::Down {
+        info.last_crypto_seq.clear();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1689,6 +1701,7 @@ fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address: Ipv6Addr)
                 warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospfv3 neighbor");
                 info.state = bfd::on_bfd_down(info.state);
                 info.adjacency = None;
+                clear_replay_state(info);
             }
         }
     });
@@ -1740,6 +1753,7 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
                     info.state =
                         neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
                     info.adjacency = None;
+                    clear_replay_state(info);
                 }
             }
         });
@@ -1788,6 +1802,7 @@ fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv6Addr,
                 );
                 info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
                 info.adjacency = None;
+                clear_replay_state(info);
             }
         }
     });
@@ -2220,6 +2235,8 @@ pub struct LinkManager {
     /// `max_metric_active`.
     max_metric: std::sync::Mutex<MaxMetric>,
     opener: Opener,
+    /// RFC 7166 §4.1 boot count, taken per authenticated link (re)start.
+    boots: nos_ospf_common::boot::BootCounter,
 }
 
 /// RFC 6987 `MaxLinkMetric`.
@@ -2546,11 +2563,16 @@ impl LinkManager {
             .store(max.unwrap_or(0), Ordering::Relaxed);
     }
 
-    pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
-        Self::with_opener(
+    pub fn new(
+        age_multiplier: u16,
+        dbd_max_headers: Option<usize>,
+        boots: nos_ospf_common::boot::BootCounter,
+    ) -> Arc<Self> {
+        Self::build(
             age_multiplier,
             dbd_max_headers,
-            Arc::new(|cfg: &LinkConfig| {
+            boots,
+            Arc::new(|cfg: &LinkConfig, boot_count: u32| {
                 let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
                 if let Some(v) = cfg.virtual_link {
                     return OspfSocket::open_virtual(
@@ -2559,6 +2581,7 @@ impl LinkManager {
                         v.neighbor,
                         auth,
                         cfg.instance_id,
+                        boot_count,
                     )
                     .map(LinkSocket::Os);
                 }
@@ -2567,6 +2590,7 @@ impl LinkManager {
                     cfg.interface_id,
                     auth,
                     cfg.instance_id,
+                    boot_count,
                 )
                 .map(LinkSocket::Os)
             }),
@@ -2578,6 +2602,20 @@ impl LinkManager {
     pub fn with_opener(
         age_multiplier: u16,
         dbd_max_headers: Option<usize>,
+        opener: Opener,
+    ) -> Arc<Self> {
+        Self::build(
+            age_multiplier,
+            dbd_max_headers,
+            nos_ospf_common::boot::BootCounter::in_memory(),
+            opener,
+        )
+    }
+
+    fn build(
+        age_multiplier: u16,
+        dbd_max_headers: Option<usize>,
+        boots: nos_ospf_common::boot::BootCounter,
         opener: Opener,
     ) -> Arc<Self> {
         let route_changed = Arc::new(tokio::sync::Notify::new());
@@ -2621,6 +2659,7 @@ impl LinkManager {
             restart_on: AtomicBool::new(false),
             bfd: std::sync::Mutex::new(HashMap::new()),
             opener,
+            boots,
         });
         let background = Arc::clone(&manager);
         tokio::spawn(async move {
@@ -3785,8 +3824,19 @@ impl LinkManager {
             let (grace_tx, grace_rx) = mpsc::unbounded_channel();
             let (bfd_tx, bfd_rx) = mpsc::unbounded_channel();
             let (topology_tx, topology_rx) = mpsc::unbounded_channel();
+            // A fresh boot count per authenticated (re)start keeps RFC 7166
+            // sequence numbers increasing across link and process restarts.
+            let boot_count = if cfg.auth.is_some() {
+                let n = self.boots.next();
+                if let Some(w) = n.warning {
+                    warn!(warning = %w, "ospfv3 boot count problem");
+                }
+                n.count
+            } else {
+                0
+            };
             let task = tokio::spawn(run(
-                (self.opener)(&cfg),
+                (self.opener)(&cfg, boot_count),
                 cfg.clone(),
                 local_router_id,
                 lsdb,
@@ -4997,6 +5047,17 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    fn down_clears_crypto_replay_state_init_keeps_it() {
+        let mut n = neighbor_info(NeighborState::Init, Ipv6Addr::LOCALHOST, 1);
+        n.last_crypto_seq.insert(packet::TYPE_HELLO, 99);
+        clear_replay_state(&mut n);
+        assert_eq!(n.last_crypto_seq.len(), 1);
+        n.state = NeighborState::Down;
+        clear_replay_state(&mut n);
+        assert!(n.last_crypto_seq.is_empty());
+    }
+
     fn neighbor_info(state: NeighborState, address: Ipv6Addr, interface_id: u32) -> NeighborInfo {
         NeighborInfo {
             state,
@@ -5064,7 +5125,7 @@ pub(crate) mod tests {
     /// address as a /128 with LA, not the subnet.
     #[tokio::test]
     async fn p2mp_link_advertises_its_address_as_a_host_prefix() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let mut cfg = link("eth0.0", 10);
         cfg.network_type = NetworkType::PointToMultipoint;
@@ -5202,7 +5263,7 @@ pub(crate) mod tests {
     /// carries both the /128 (LA) and the interface prefix.
     #[tokio::test]
     async fn hybrid_originates_no_network_lsa_and_both_prefixes() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let mut cfg = link("eth0.0", 10);
         cfg.network_type = NetworkType::Hybrid;
@@ -5245,7 +5306,8 @@ pub(crate) mod tests {
     async fn router_lsa_targets_collects_other_routers_point_to_point_links() {
         let mut db = Lsdb::new();
         let dr = Ipv4Addr::new(9, 9, 9, 10);
-        let types = LinkManager::new(1, None).lsa_types();
+        let types =
+            LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory()).lsa_types();
         let link_to = |id| RouterLsaLink {
             link_type: LINK_TYPE_POINT_TO_POINT,
             metric: 1,
@@ -5299,7 +5361,7 @@ pub(crate) mod tests {
     /// each logged once through `max_metric_tick`.
     #[tokio::test(start_paused = true)]
     async fn max_metric_reasons_and_expiry() {
-        let m = LinkManager::new(1, None);
+        let m = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         assert!(!m.max_metric_tick());
         m.set_max_metric(Some(10), None, false);
         assert!(m.max_metric_tick(), "on-startup");
@@ -5318,12 +5380,12 @@ pub(crate) mod tests {
     /// on-shutdown hold lasts its configured seconds.
     #[tokio::test(start_paused = true)]
     async fn max_metric_on_startup_is_skipped_after_graceful_restart() {
-        let m = LinkManager::new(1, None);
+        let m = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         m.set_after_graceful_restart(true);
         m.set_max_metric(Some(10), Some(2), false);
         assert!(!m.max_metric_tick());
 
-        let m = LinkManager::new(1, None);
+        let m = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         m.set_max_metric(None, Some(2), false);
         *m.router_id.lock().await = Some(Ipv4Addr::new(1, 1, 1, 1));
         let t = Instant::now();
@@ -5793,7 +5855,7 @@ pub(crate) mod tests {
     /// whose interface id moved, are both flushed.
     #[tokio::test]
     async fn emptied_router_iap_and_moved_link_lsa_are_flushed() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let me = Ipv4Addr::new(1, 1, 1, 1);
         let p2p = link("eth0.0", 10);
         let mut bd = link("broadcast-domain:bd1", 10);
@@ -5855,7 +5917,7 @@ pub(crate) mod tests {
     /// prefix gets a fresh ID while its old LSA is MaxAge-flushed.
     #[tokio::test]
     async fn lsids_are_pruned_and_never_reused() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let me = Ipv4Addr::new(1, 1, 1, 1);
 
         set_redist(&manager, &[1, 2]).await;
@@ -5892,7 +5954,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn originate_link_lsas_installs_one_per_live_link() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let cfg = link("eth0.0", 10);
         manager
@@ -5924,7 +5986,7 @@ pub(crate) mod tests {
     /// DBD summary/flood can ever offer the other's.
     #[tokio::test]
     async fn link_lsas_are_kept_per_link_not_per_area() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let eth = link("eth0.0", 10);
         let mut bd = link("broadcast-domain:bd1", 10);
@@ -5973,7 +6035,7 @@ pub(crate) mod tests {
     /// silently dropped (`spf::no_link_lsa_for_neighbor_is_treated_as_unreachable`).
     #[tokio::test]
     async fn compute_routes_merges_link_local_stores_into_spf_input() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let root = Ipv4Addr::new(1, 1, 1, 1);
         let w = Ipv4Addr::new(2, 2, 2, 2);
         let cfg = link("eth0.0", 10);
@@ -6050,7 +6112,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn extended_mode_originates_only_extended_lsas() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         manager.set_extended_lsa(true);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let cfg = link("eth0.0", 10);
@@ -6087,7 +6149,7 @@ pub(crate) mod tests {
             lsa::LSA_TYPE_E_LINK,
             lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
         ];
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         manager
             .reconcile(vec![link("eth0.0", 10)], HashMap::new(), router_id)
@@ -6134,7 +6196,7 @@ pub(crate) mod tests {
     /// the NSSA-LSA (`0x2007` <-> `0xA027`) with its sequence number kept.
     #[tokio::test]
     async fn extended_mode_toggle_flushes_the_other_nssa_flavor() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         manager.set_stub_areas(HashMap::from([(area1, (true, 1))]));
@@ -6185,7 +6247,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn originate_intra_area_prefix_lsas_includes_loopback_for_area_with_no_live_link() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let stub: Ipv6Net = "2001:db8:9::/128".parse().unwrap();
@@ -6220,7 +6282,7 @@ pub(crate) mod tests {
     /// prefix (LA), and a link advertises its IPv4 address.
     #[tokio::test]
     async fn ipv4_af_loopback_is_la_and_link_lsa_carries_the_v4_address() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         manager.set_ipv4_af(true);
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -6255,7 +6317,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn loopback_subnet_prefix_has_no_la_bit() {
-        let manager = LinkManager::new(1, None);
+        let manager = LinkManager::new(1, None, nos_ospf_common::boot::BootCounter::in_memory());
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let net: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
@@ -6627,7 +6689,7 @@ pub(crate) mod tests {
         impl Wire {
             pub fn opener(self: &Arc<Self>) -> Opener {
                 let wire = Arc::clone(self);
-                Arc::new(move |cfg: &LinkConfig| {
+                Arc::new(move |cfg: &LinkConfig, _boot: u32| {
                     // A virtual link's ports share one net, whatever their addresses.
                     let net = if cfg.virtual_link.is_some() {
                         Ipv6Net::default()
@@ -6728,7 +6790,7 @@ pub(crate) mod tests {
     }
 
     fn mem_socket(cfg: &LinkConfig) -> LinkSocket {
-        Arc::new(wire::Wire::default()).opener()(cfg).unwrap()
+        Arc::new(wire::Wire::default()).opener()(cfg, 0).unwrap()
     }
 
     fn joined(wire: &wire::Wire, n: u8) -> bool {
@@ -8082,7 +8144,7 @@ pub(crate) mod tests {
     fn all_drouters_follows_the_election_role() {
         let wire = Arc::new(wire::Wire::default());
         let mut cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg).unwrap();
+        let socket = wire.opener()(&cfg, 0).unwrap();
         let me = id(1);
         let status = watch::channel(LinkStatus::new(NetworkType::Broadcast)).0;
 
@@ -8124,7 +8186,7 @@ pub(crate) mod tests {
         // Never on point-to-point, whatever the role.
         cfg.network_type = NetworkType::PointToPoint;
         let p2p = Arc::new(wire::Wire::default());
-        let socket = p2p.opener()(&cfg).unwrap();
+        let socket = p2p.opener()(&cfg, 0).unwrap();
         let status = watch::channel(LinkStatus::new(NetworkType::PointToPoint)).0;
         run_election(&socket, &cfg, me, &status);
         assert_eq!(status.borrow().interface_state, InterfaceState::Dr);
@@ -8340,9 +8402,9 @@ pub(crate) mod tests {
     async fn retransmit_pending_resends_a_dbd_only_in_exstart_or_as_exchange_master() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::PointToPoint);
-        let socket = (wire.opener())(&cfg).unwrap();
+        let socket = (wire.opener())(&cfg, 0).unwrap();
         let LinkSocket::Mem(peer) =
-            (wire.opener())(&wired_link(2, NetworkType::PointToPoint)).unwrap()
+            (wire.opener())(&wired_link(2, NetworkType::PointToPoint), 0).unwrap()
         else {
             unreachable!()
         };
@@ -8579,7 +8641,7 @@ pub(crate) mod tests {
     async fn delayed_acks_are_one_deduplicated_group_set() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg).unwrap();
+        let socket = wire.opener()(&cfg, 0).unwrap();
         let status = dr_status(InterfaceState::Dr, &[2, 3]);
         queue_acks(&status);
         flush_pending_acks(&socket, &cfg, id(1), &status);
@@ -8596,7 +8658,7 @@ pub(crate) mod tests {
             .unwrap()
             .insert("fe80::1".parse().unwrap());
         let cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg).unwrap();
+        let socket = wire.opener()(&cfg, 0).unwrap();
         let status = dr_status(InterfaceState::DrOther, &[2]);
         queue_acks(&status);
         flush_pending_acks(&socket, &cfg, id(1), &status);
@@ -8610,7 +8672,7 @@ pub(crate) mod tests {
     async fn destination_is_reported_only_on_change() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg).unwrap();
+        let socket = wire.opener()(&cfg, 0).unwrap();
         let status = dr_status(InterfaceState::Dr, &[]);
         let (a, l, s) = (
             Mutex::new(Lsdb::new()),
@@ -8635,7 +8697,7 @@ pub(crate) mod tests {
     async fn retransmission_resend_stays_unicast() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg).unwrap();
+        let socket = wire.opener()(&cfg, 0).unwrap();
         let status = dr_status(InterfaceState::Dr, &[2]);
         let l = crate::lsa::Lsa {
             header: header(),
