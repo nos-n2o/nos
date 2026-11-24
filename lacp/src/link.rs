@@ -15,6 +15,7 @@ use crate::churn_machine::{self, ChurnState};
 use crate::conversation::send_version;
 use crate::conversation::PortAlgorithm;
 use crate::cscd::{Advert, PartnerV2};
+use crate::link_client::{gate, Gate, LinkTable};
 use crate::mux_machine::{self, MuxState};
 use crate::packet::{self, state_bit, ConvDigest, Lacpdu, PortInfo, V2Tlvs};
 use crate::periodic_tx_machine::interval_for;
@@ -47,6 +48,8 @@ pub struct LinkConfig {
     /// whenever it re-runs `selection::select` (on any port's observation
     /// change).
     pub selected_rx: watch::Receiver<bool>,
+    /// `nos-interfaced`'s link table: ends the task when the device is recreated.
+    pub links: watch::Receiver<LinkTable>,
     /// 802.1AX `Churn_Detection_Time` (60s; shortened only by tests/e2e via
     /// `NOS_LACP_CHURN_SECS`, see `aggregate.rs`).
     pub churn_time: Duration,
@@ -131,16 +134,7 @@ trait FrameSink {
 /// A [`FrameSink`] that also yields the next received PDU.
 trait FrameLink: FrameSink {
     async fn recv(&self) -> io::Result<Vec<u8>>;
-    /// The netdev was recreated: the socket is bound to the old ifindex and
-    /// will never see a frame again (the task must end, `reconcile` respawns).
-    fn is_stale(&self) -> bool {
-        false
-    }
 }
-
-/// How often [`drive`] checks [`FrameLink::is_stale`] (a lost `sk_err`, or a
-/// MAC-only change, is invisible to `recv`).
-const STALE_POLL: Duration = Duration::from_secs(5);
 
 impl FrameSink for LacpSocket {
     fn send(&self, pdu: &[u8]) -> io::Result<()> {
@@ -152,9 +146,12 @@ impl FrameLink for LacpSocket {
     async fn recv(&self) -> io::Result<Vec<u8>> {
         LacpSocket::recv(self).await
     }
-    fn is_stale(&self) -> bool {
-        LacpSocket::is_stale(self)
-    }
+}
+
+/// The device behind a socket opened under `opened_epoch` was removed or
+/// re-added, or is gone now.
+fn recreated(table: &LinkTable, name: &str, opened_epoch: u64) -> bool {
+    table.epoch(name) != opened_epoch || gate(table, name) == Gate::Down("absent")
 }
 
 /// Runs one member port's LACP engine until its socket dies or the
@@ -169,6 +166,8 @@ pub async fn run(
     observations: Arc<Mutex<HashMap<String, PortObservation>>>,
     changed: Arc<Notify>,
 ) {
+    // Read before the open: a bump racing it only causes a spare respawn.
+    let opened_epoch = config.links.borrow().epoch(&config.interface);
     let socket = match crate::socket::open(&config.interface) {
         Ok(s) => s,
         Err(e) => {
@@ -179,19 +178,26 @@ pub async fn run(
     let port_number = config.actor_port_number;
     let selected_rx = config.selected_rx.clone();
     let p = Port::new(config, observations, changed, port_number);
-    drive(p, selected_rx, &socket).await;
+    drive(p, selected_rx, &socket, opened_epoch).await;
 }
 
 /// The event loop of one port: timers, Selection Logic verdicts and received
 /// PDUs, until the aggregate is gone or the link's receive side fails.
-async fn drive<L: FrameLink>(mut p: Port, mut selected_rx: watch::Receiver<bool>, link: &L) {
+async fn drive<L: FrameLink>(
+    mut p: Port,
+    mut selected_rx: watch::Receiver<bool>,
+    link: &L,
+    opened_epoch: u64,
+) {
+    let mut links_rx = p.config.links.clone();
     let mut advert_rx = p.config.advert_rx.clone();
     let mut active_rx = p.config.active_rx.clone();
-    let mut stale_poll = tokio::time::interval(STALE_POLL);
     loop {
         tokio::select! {
-            _ = stale_poll.tick() => {
-                if link.is_stale() {
+            // The netdev was recreated (#1431): the socket is bound to the old
+            // ifindex; `reconcile` respawns the task.
+            Ok(()) = links_rx.changed() => {
+                if recreated(&links_rx.borrow_and_update(), &p.config.interface, opened_epoch) {
                     warn!(interface = %p.config.interface, "lacp interface recreated, link task exiting");
                     p.detach();
                     return;

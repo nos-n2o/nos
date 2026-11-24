@@ -62,6 +62,11 @@ fn config(active: bool, rate: LacpRate, selected_rx: watch::Receiver<bool>) -> L
         },
         rate,
         selected_rx,
+        links: {
+            let (tx, rx) = watch::channel(LinkTable::default());
+            std::mem::forget(tx);
+            rx
+        },
         churn_time: Duration::from_secs(5),
         version_pref: 1,
         link_number: Some(1),
@@ -466,7 +471,6 @@ async fn run_returns_when_the_interface_cannot_be_opened() {
 struct ChanLink {
     sink: VecSink,
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<io::Result<Vec<u8>>>>,
-    stale: std::sync::atomic::AtomicBool,
 }
 
 impl FrameSink for ChanLink {
@@ -484,29 +488,110 @@ impl FrameLink for ChanLink {
             .await
             .unwrap_or_else(|| Err(io::Error::other("closed")))
     }
-    fn is_stale(&self) -> bool {
-        self.stale.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn lsx(name: &str, ifindex: u32, carrier: bool) -> nos_proto::LinkState {
+    nos_proto::LinkState {
+        name: name.into(),
+        ifindex,
+        admin_up: true,
+        carrier,
+        port_aggregate: None,
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn drive_exits_and_forgets_its_observation_when_the_link_goes_stale() {
+/// A driver on `eth1` with a link table the test controls; returns whether
+/// it has exited after the table is poked.
+async fn drive_with_table(
+    events: Vec<nos_proto::InterfaceEvent>,
+    opened_epoch: u64,
+) -> (bool, Arc<Mutex<HashMap<String, PortObservation>>>) {
+    use crate::link_client::apply;
     let (_sel_tx, sel_rx) = watch::channel(false);
     let (_frames_tx, frames_rx) = mpsc::unbounded_channel();
+    let (links_tx, links_rx) = watch::channel(LinkTable::default());
     let observations = Arc::new(Mutex::new(HashMap::new()));
-    let port = Port::new(
-        config(true, LacpRate::Fast, sel_rx.clone()),
-        observations.clone(),
-        Arc::new(Notify::new()),
-        3,
-    );
+    let mut c = config(true, LacpRate::Fast, sel_rx.clone());
+    c.links = links_rx;
+    let port = Port::new(c, observations.clone(), Arc::new(Notify::new()), 3);
     let link = ChanLink {
         sink: VecSink::default(),
         rx: tokio::sync::Mutex::new(frames_rx),
-        stale: true.into(),
     };
-    drive(port, sel_rx, &link).await;
-    assert!(observations.lock().unwrap().get("eth1").is_none());
+    let mut driver = Box::pin(drive(port, sel_rx, &link, opened_epoch));
+    for e in events {
+        links_tx.send_if_modified(|t| apply(t, e));
+        tokio::select! {
+            () = &mut driver => return (true, observations),
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+    }
+    (false, observations)
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_exits_and_forgets_its_observation_when_the_device_is_recreated() {
+    use nos_proto::InterfaceEvent as E;
+    let (done, obs) = drive_with_table(
+        vec![
+            E::LinkRemoved {
+                name: "eth1".into(),
+            },
+            E::LinkAdded(lsx("eth1", 9, true)),
+        ],
+        0,
+    )
+    .await;
+    assert!(done);
+    assert!(obs.lock().unwrap().get("eth1").is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_exits_on_an_add_alone_and_on_a_removal_alone() {
+    use nos_proto::InterfaceEvent as E;
+    assert!(
+        drive_with_table(vec![E::LinkAdded(lsx("eth1", 9, true))], 0)
+            .await
+            .0
+    );
+    let snap = E::LinkSnapshot {
+        observed: true,
+        links: vec![lsx("eth1", 2, true)],
+    };
+    // Snapshot first (epoch 1 = opened), then the device vanishes.
+    assert!(
+        drive_with_table(
+            vec![
+                snap,
+                E::LinkRemoved {
+                    name: "eth1".into()
+                }
+            ],
+            1
+        )
+        .await
+        .0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_keeps_running_on_a_carrier_flap_or_an_unchanged_snapshot() {
+    use nos_proto::InterfaceEvent as E;
+    let snap = || E::LinkSnapshot {
+        observed: true,
+        links: vec![lsx("eth1", 2, true)],
+    };
+    let (done, _) = drive_with_table(
+        vec![
+            snap(),
+            E::LinkChanged(lsx("eth1", 2, false)),
+            snap(),
+            E::LinkChanged(lsx("eth1", 2, true)),
+        ],
+        1,
+    )
+    .await;
+    assert!(!done);
 }
 
 #[tokio::test(start_paused = true)]
@@ -523,10 +608,9 @@ async fn drive_follows_timers_selection_and_frames_until_the_link_fails() {
     let link = ChanLink {
         sink: VecSink::default(),
         rx: tokio::sync::Mutex::new(frames_rx),
-        stale: false.into(),
     };
     let observed = || *observations.lock().unwrap().get("eth1").unwrap();
-    let mut driver = Box::pin(drive(port, sel_rx, &link));
+    let mut driver = Box::pin(drive(port, sel_rx, &link, 0));
     let settle = |secs: u64| async move {
         tokio::time::sleep(Duration::from_secs(secs)).await;
     };
@@ -581,10 +665,9 @@ async fn drive_exits_when_the_aggregate_manager_is_gone() {
     let link = ChanLink {
         sink: VecSink::default(),
         rx: tokio::sync::Mutex::new(frames_rx),
-        stale: false.into(),
     };
     drop(sel_tx);
-    drive(port, sel_rx, &link).await;
+    drive(port, sel_rx, &link, 0).await;
 }
 
 #[tokio::test(start_paused = true)]

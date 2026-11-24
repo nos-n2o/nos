@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 
 use nos_proto::LldpLinkStats;
 
+use crate::link_client::{gate, Gate, LinkTable};
 use crate::neighbor::{NeighborTable, Update, MAX_NEIGHBORS_PER_LINK};
 use crate::packet::{
     self, Capabilities, Id, LinkAggregation, Lldpdu, ManagementAddress, OrgTlvs, CAP_BRIDGE,
@@ -411,6 +412,74 @@ fn spend_tx(credit: &mut u8, fast: &mut u8, tx_interval: Duration, now: Instant)
     now + if *fast > 0 { MSG_FAST_TX } else { tx_interval }
 }
 
+/// What a link-table update means for the socket of one link (#1431).
+#[derive(Debug, PartialEq, Eq)]
+enum Reopen {
+    Keep,
+    /// The device is gone: drop the socket, keep the task.
+    Close,
+    /// A socket opened under another epoch, or none yet: (re)open it.
+    Open,
+}
+
+fn needs_reopen(opened_epoch: u64, has_socket: bool, table: &LinkTable, name: &str) -> Reopen {
+    if gate(table, name) == Gate::Down("absent") {
+        if has_socket {
+            Reopen::Close
+        } else {
+            Reopen::Keep
+        }
+    } else if !has_socket || table.epoch(name) != opened_epoch {
+        Reopen::Open
+    } else {
+        Reopen::Keep
+    }
+}
+
+/// Applies [`needs_reopen`]; true when a fresh socket was opened (the caller
+/// restarts the fast-start burst). A closed or failed open leaves `socket`
+/// `None`, retried on the next link event or transmit tick.
+fn follow_link(
+    cfg: &LinkConfig,
+    ports: &SharedPorts,
+    table: &LinkTable,
+    socket: &mut Option<LldpSocket>,
+    opened_epoch: &mut u64,
+) -> bool {
+    let clear = || {
+        if let Some(port) = ports.lock().unwrap().get_mut(&cfg.interface) {
+            port.neighbors = NeighborTable::default();
+        }
+    };
+    match needs_reopen(*opened_epoch, socket.is_some(), table, &cfg.interface) {
+        Reopen::Keep => false,
+        Reopen::Close => {
+            // Neighbor TTLs mean nothing on a dead link.
+            *socket = None;
+            clear();
+            info!(interface = %cfg.interface, "lldp socket closed, device gone");
+            false
+        }
+        Reopen::Open => {
+            *socket = None;
+            clear();
+            let epoch = table.epoch(&cfg.interface);
+            match socket::open(&cfg.interface, cfg.destination) {
+                Ok(s) => {
+                    *socket = Some(s);
+                    *opened_epoch = epoch;
+                    info!(interface = %cfg.interface, "lldp socket reopened");
+                    true
+                }
+                Err(e) => {
+                    warn!(interface = %cfg.interface, error = %e, "lldp socket reopen failed");
+                    false
+                }
+            }
+        }
+    }
+}
+
 /// Runs one interface's LLDP until `stop` fires (or its sender is dropped).
 /// Returns `Err` only when the socket can't be opened or a read fails hard —
 /// `reconcile` respawns a link that ended on its own.
@@ -418,6 +487,7 @@ pub async fn run(
     cfg: LinkConfig,
     ports: SharedPorts,
     mut stop: watch::Receiver<bool>,
+    mut links: watch::Receiver<LinkTable>,
 ) -> io::Result<()> {
     // Listed (with its counters, kept across restarts) even before the socket
     // opens; the neighbor table starts empty.
@@ -427,7 +497,9 @@ pub async fn run(
         .entry(cfg.interface.clone())
         .or_default()
         .neighbors = NeighborTable::default();
-    let socket = socket::open(&cfg.interface, cfg.destination)?;
+    // Read before the open: a bump racing it only causes a spare reopen.
+    let mut opened_epoch = links.borrow().epoch(&cfg.interface);
+    let mut socket = Some(socket::open(&cfg.interface, cfg.destination)?);
     info!(
         interface = %cfg.interface, transmit = cfg.transmit, receive = cfg.receive,
         tx_interval_secs = cfg.tx_interval.as_secs(), ttl_secs = cfg.ttl_secs,
@@ -448,8 +520,21 @@ pub async fn run(
         let deadline = next_expiry(&cfg, &ports);
         tokio::select! {
             _ = stop.changed() => break Ok(()),
+            Ok(()) = links.changed() => {
+                let table = links.borrow_and_update().clone();
+                if follow_link(&cfg, &ports, &table, &mut socket, &mut opened_epoch) && cfg.transmit {
+                    tx_fast = TX_FAST_INIT;
+                    next_tx = Instant::now();
+                }
+            }
             () = sleep_until(tokio::time::Instant::from_std(next_tx)), if cfg.transmit => {
                 let now = Instant::now();
+                if socket.is_none() {
+                    let table = links.borrow().clone();
+                    if follow_link(&cfg, &ports, &table, &mut socket, &mut opened_epoch) {
+                        tx_fast = TX_FAST_INIT;
+                    }
+                }
                 refill_credit(&mut tx_credit, &mut last_refill, now);
                 // Out of credit, or the link is down: nothing spent, retry in
                 // a second (credit comes back at that rate too).
@@ -458,20 +543,31 @@ pub async fn run(
                 // transmit (<= tx-interval), not as somethingChangedLocal; watch
                 // the master link if anyone needs it faster.
                 let aggregation = cfg.aggregated.then(|| read_aggregation(Path::new(SYS_CLASS_NET), &cfg.interface));
-                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address, aggregation)) {
+                if let (true, Some(socket)) = (tx_credit > 0, &socket)
+                    && send(socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address, aggregation))
+                {
                     if tx_fast > 0 {
                         debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
                     }
                     next_tx = spend_tx(&mut tx_credit, &mut tx_fast, cfg.tx_interval, now);
                 }
             }
-            frame = socket.recv(), if cfg.receive => match frame {
+            frame = async {
+                match &socket {
+                    Some(s) => s.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if cfg.receive => match frame {
                 Ok(payload) => {
                     if handle_rx(&cfg, &ports, &payload, Instant::now(), &mut log_bucket) && cfg.transmit {
                         tx_fast = TX_FAST_INIT;
                         next_tx = Instant::now();
                     }
                 }
+                // The recv path saw the device recreated before the link
+                // table did: drop the socket, `follow_link` reopens it.
+                // ponytail: a receive-only link retries on link events only.
+                Err(e) if e.kind() == io::ErrorKind::NotConnected => socket = None,
                 Err(e) => break Err(e),
             },
             () = sleep_until(tokio::time::Instant::from_std(deadline.unwrap_or_else(Instant::now))),
@@ -482,8 +578,8 @@ pub async fn run(
         }
     };
 
-    if cfg.transmit {
-        send(&socket, &cfg.interface, &ports, &shutdown_pdu(&cfg));
+    if let (true, Some(socket)) = (cfg.transmit, &socket) {
+        send(socket, &cfg.interface, &ports, &shutdown_pdu(&cfg));
     }
     if let Some(port) = ports.lock().unwrap().get_mut(&cfg.interface) {
         port.neighbors = NeighborTable::default();
@@ -513,6 +609,45 @@ mod tests {
             aggregated: false,
             max_frame_size: 1518,
         }
+    }
+
+    #[test]
+    fn needs_reopen_cases() {
+        use nos_proto::{InterfaceEvent as E, LinkState};
+        let ls = |ifindex| LinkState {
+            name: "eth1".into(),
+            ifindex,
+            admin_up: true,
+            carrier: true,
+            port_aggregate: None,
+        };
+        let mut t = LinkTable::default();
+        // No snapshot yet: nothing is known, keep the socket.
+        assert_eq!(needs_reopen(0, true, &t, "eth1"), Reopen::Keep);
+        crate::link_client::apply(
+            &mut t,
+            E::LinkSnapshot {
+                observed: true,
+                links: vec![ls(2)],
+            },
+        );
+        let e = t.epoch("eth1");
+        assert_eq!(needs_reopen(e, true, &t, "eth1"), Reopen::Keep);
+        assert_eq!(needs_reopen(e, false, &t, "eth1"), Reopen::Open);
+        crate::link_client::apply(
+            &mut t,
+            E::LinkRemoved {
+                name: "eth1".into(),
+            },
+        );
+        assert_eq!(needs_reopen(e, true, &t, "eth1"), Reopen::Close);
+        assert_eq!(needs_reopen(e, false, &t, "eth1"), Reopen::Keep);
+        crate::link_client::apply(&mut t, E::LinkAdded(ls(9)));
+        assert_eq!(needs_reopen(e, true, &t, "eth1"), Reopen::Open);
+        assert_eq!(
+            needs_reopen(t.epoch("eth1"), true, &t, "eth1"),
+            Reopen::Keep
+        );
     }
 
     /// `handle_rx` with a fresh log bucket.

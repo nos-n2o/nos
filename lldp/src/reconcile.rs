@@ -16,6 +16,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::link::{self, LinkConfig, SharedPorts};
+use crate::link_client::LinkTable;
 use crate::packet;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -49,6 +50,7 @@ impl LinkHandle {
 
 struct Links {
     ports: SharedPorts,
+    link_table: watch::Receiver<LinkTable>,
     handles: HashMap<String, LinkHandle>,
 }
 
@@ -85,9 +87,10 @@ impl Links {
     fn spawn(&self, cfg: LinkConfig) -> LinkHandle {
         let (stop, stop_rx) = watch::channel(false);
         let ports = self.ports.clone();
+        let links = self.link_table.clone();
         let link_cfg = cfg.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = link::run(link_cfg.clone(), ports, stop_rx).await {
+            if let Err(e) = link::run(link_cfg.clone(), ports, stop_rx, links).await {
                 warn!(interface = %link_cfg.interface, error = %e, "lldp link ended");
             }
         });
@@ -167,7 +170,12 @@ fn max_frame_size(cfg: &Config, i: &Interface) -> u16 {
     u16::try_from(mtu.unwrap_or(DEFAULT_MTU) + 18).unwrap_or(u16::MAX)
 }
 
-pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch::Receiver<bool>) {
+pub async fn run(
+    config_socket: PathBuf,
+    ports: SharedPorts,
+    links: watch::Receiver<LinkTable>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     // Switching profiles (VLAN names) and port aggregates (a member's MTU)
     // feed the org TLVs.
     let scopes = vec![
@@ -180,6 +188,7 @@ pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch
     let chassis_mac = local_system_id();
     let mut links = Links {
         ports,
+        link_table: links,
         handles: HashMap::new(),
     };
 

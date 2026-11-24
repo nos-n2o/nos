@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_daemon::{bootstrap, watchdog};
 use nos_lacp::interface_client::LacpPush;
-use nos_lacp::{interface_client, reconcile, server};
+use nos_lacp::{interface_client, link_client, reconcile, server};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
@@ -62,6 +62,12 @@ async fn main() -> anyhow::Result<()> {
 
     let (push_tx, push_rx) = mpsc::channel::<LacpPush>(16);
 
+    let (links_tx, links_rx) = watch::channel(link_client::LinkTable::default());
+    let link_client_task = tokio::spawn(link_client::run(
+        args.watchdog_socket.clone(),
+        links_tx,
+        shutdown_rx.clone(),
+    ));
     let aggregates = reconcile::SharedAggregates::default();
     let server_task = server::start(&args.listen_socket, aggregates.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start lacp IPC server"))
@@ -70,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         config_socket,
         aggregates,
         push_tx,
+        links_rx,
         shutdown_rx.clone(),
     ));
     let interface_client_task = tokio::spawn(interface_client::run(
@@ -88,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         warn!(error = %e, "reconcile task ended abnormally");
     }
     server_task.abort();
+    let _ = link_client_task.await;
     if let Err(e) = interface_client_task.await {
         warn!(error = %e, "interface_client task ended abnormally");
     }

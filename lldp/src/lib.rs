@@ -4,6 +4,7 @@
 // recording the neighbors it hears. Never touches rtnetlink.
 
 pub mod link;
+pub mod link_client;
 pub mod neighbor;
 pub mod packet;
 pub mod reconcile;

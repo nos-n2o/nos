@@ -36,6 +36,7 @@ A change to any of these restarts the affected links (`LinkConfig` equality): a 
 - Neighbor identity is (chassis id, port id); `NeighborTable` is capped at `MAX_NEIGHBORS_PER_LINK` (32), since input is untrusted.
 - Own frames are dropped twice (source MAC in `socket::payload_of_foreign_frame`, own chassis id in `link::handle_rx`); a down link is retried (`LINK_DOWN_RETRY` 1s), never fatal; never leave an elapsed deadline armed (as in `nos-lacp`).
 - The chassis MAC is derived (FNV-1a of hostname + machine-id, `reconcile::local_system_id`, `ponytail:` collision caveat as in `nos-lacp`).
+- Sockets follow `nos-interfaced`'s `LinkRemoved`/`LinkAdded` (`link_client`, #1431, no polling): `absent` closes the socket and clears neighbors, a new epoch reopens it with a fast-start burst; the task survives.
 - Destination group is one per interface; a different group on each end never sees the other.
 
 ## Modules
@@ -47,6 +48,7 @@ A change to any of these restarts the affected links (`LinkConfig` equality): a 
 | `socket.rs` | `nos-l2-socket` wrapper, ethertype `0x88CC` |
 | `neighbor.rs` | Pure `NeighborTable` (`apply`, `expire`, `snapshot`), `now` passed in |
 | `link.rs` | Per-interface `run()`, `SharedPorts` read by `server.rs` |
+| `link_client.rs` | `SubscribeLinks` table + per-name epochs (copy of `nos-stpd`'s) |
 | `reconcile.rs` | Diff-triggered resync (`desired_links`), 10s tick |
 | `server.rs` | `GetNeighbors`/`GetStatistics` on `--listen-socket` (`ServiceRef::Lldp`) |
 | (no `config_client`/`watchdog_client`) | config, watchdog and `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`) |

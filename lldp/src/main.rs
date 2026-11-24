@@ -62,7 +62,18 @@ async fn main() -> anyhow::Result<()> {
     let server_task = server::start(&args.listen_socket, ports.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start lldp IPC server"))
         .context("starting lldp IPC server")?;
-    let reconcile_task = tokio::spawn(reconcile::run(config_socket, ports, shutdown_rx.clone()));
+    let (links_tx, links_rx) = watch::channel(nos_lldp::link_client::LinkTable::default());
+    let link_client_task = tokio::spawn(nos_lldp::link_client::run(
+        args.watchdog_socket.clone(),
+        links_tx,
+        shutdown_rx.clone(),
+    ));
+    let reconcile_task = tokio::spawn(reconcile::run(
+        config_socket,
+        ports,
+        links_rx,
+        shutdown_rx.clone(),
+    ));
 
     wait_for_shutdown_signal()
         .await
@@ -72,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
     // Every running link sends its shutdown LLDPDU on the way out, so
     // neighbors drop us immediately rather than waiting out our TTL.
     let _ = shutdown_tx.send(true);
+    let _ = link_client_task.await;
     if let Err(e) = reconcile_task.await {
         warn!(error = %e, "reconcile task ended abnormally");
     }
