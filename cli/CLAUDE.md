@@ -22,7 +22,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `command.rs` | `Command::parse` — pure, no I/O, no mode. Show/shell commands go through `spec::parse`; any other `edit`/`set`/`delete`/`move` line becomes `Command::Config(line)` |
 | `config_grammar.rs` | The config half of the grammar (#109), generated from the schema's CLI tree: `parse`/`complete`/`usages`, resolving to `Request::EditTransactionPath` writes (optional list `position`: `set <element> first/last/before k/after k`, `move`; #539). Knows no object or field by name; `tests/config_grammar.rs` pins it on `config_corpus.jsonl` |
 | `session.rs` | `Mode`, `Path` (position as REST segments; `up` drops one list+key pair), `resolve(&Mode, Command) -> Resolved` — the pure semantic layer |
-| `spec.rs` | `COMMAND_SPECS`: one `cmd!` row per show/shell command (tokens, `Doc`, `Availability`, `Command`), so the parser can't accept a command without its doc. `CONFIG_VERBS` documents `edit`/`set`/`delete`/`move` |
+| `spec.rs` | `COMMAND_SPECS`: one `cmd!` row per show/shell command (tokens, `Doc`, `Availability`, `Command`), so the parser can't accept a command without its doc. Trailing `[...]` optional clauses; `walk` is the one matcher for parse and Tab (#1450). `CONFIG_VERBS` documents `edit`/`set`/`delete`/`move` |
 | `completer.rs`, `help_menu.rs` | `NosCompleter` (Tab and live `?`, one injected config source for the tree and `*Name` slots), `HelpMenu` (the `?` menu) |
 | `client.rs` | One-shot calls to `nos-configd`, plus `subscribe`, the one long-lived exception |
 | `*_client.rs` | `watchdog`, `rib`, `interface`, `log` (also long-lived `tail`), `bgp`, `lacp`, `lldp`, `stp`, `bfd`, `fdb`, `ospf`, `ospfv3`: one-shot query per daemon |

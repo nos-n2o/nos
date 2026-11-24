@@ -19,6 +19,10 @@ use crate::session::Mode;
 pub enum Token {
     Literal(&'static str),
     Arg(ArgKind),
+    /// One optional trailing clause (`[--follow]`, `[last <n>]`, `[<source>]`):
+    /// its first token is a `Literal` keyword, or the clause is the lone
+    /// source `Arg`. Only ever after every non-`Opt` token of a row (#1450).
+    Opt(&'static [Token]),
 }
 
 /// What kind of value an argument slot accepts — `BgpInstanceName` and
@@ -42,6 +46,10 @@ pub enum ArgKind {
     /// The rest of the line, verbatim (leading whitespace kept) — only ever
     /// a row's last token.
     Rest,
+    /// A log level (`ArgKind::fixed_values`).
+    LogLevel,
+    /// A log source name; completion comes with the lazy fetch (#1452).
+    LogSource,
 }
 
 impl ArgKind {
@@ -56,6 +64,14 @@ impl ArgKind {
             ArgKind::AclName => "acls",
             _ => return None,
         })
+    }
+
+    /// The closed set of words a slot accepts, for Tab.
+    pub fn fixed_values(self) -> Option<&'static [&'static str]> {
+        match self {
+            ArgKind::LogLevel => Some(&["trace", "debug", "info", "warn", "error"]),
+            _ => None,
+        }
     }
 }
 
@@ -182,6 +198,9 @@ macro_rules! tok {
     (($n:ident : $k:ident)) => {
         Token::Arg(ArgKind::$k)
     };
+    ([$f:tt $($r:tt)*]) => {
+        Token::Opt(&[tok!($f) $(, tok!($r))*])
+    };
 }
 
 /// A token's text in a generated usage string: the keyword, or `<name>`.
@@ -191,6 +210,9 @@ macro_rules! usage_tok {
     };
     (($n:ident : $k:ident)) => {
         concat!("<", stringify!($n), ">")
+    };
+    ([$f:tt $($r:tt)*]) => {
+        concat!("[", usage_tok!($f) $(, " ", usage_tok!($r))*, "]")
     };
 }
 
@@ -746,49 +768,20 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         |name| Command::ShowInterface {
             name: Some(name.to_string()),
         }),
-    cmd!(["show" "log"],
+    cmd!(["show" "log" [(source: LogSource)] ["--follow"]],
         Doc::Local {
-            summary: "Show the most recent collected log entries from every daemon.",
+            summary: "Show the most recent collected log entries, optionally of one source, or live-tail them.",
             detail: "Queries nos-logd (resolved via nos-watchdogd) for its current buffer of \
-                     log entries pushed by every other component process.",
+                     log entries pushed by every other component process. `<source>` comes \
+                     first and keeps only entries whose source exactly matches (e.g. \
+                     `nos-ribd[rt1]`, `nos-interfaced`, `nos-configd`). With `--follow` it \
+                     prints the buffer, then streams new entries as they're pushed until \
+                     Ctrl-C is pressed or the connection is lost.",
         },
         Always,
-        Command::ShowLog {
-            source: None,
-            follow: false,
-        }),
-    cmd!(["show" "log" "--follow"],
-        Doc::Local {
-            summary: "Live-tail collected log entries from every daemon.",
-            detail: "Prints the current buffer, then streams new entries as they're pushed to \
-                     nos-logd until Ctrl-C is pressed or the connection is lost.",
-        },
-        Always,
-        Command::ShowLog {
-            source: None,
-            follow: true,
-        }),
-    cmd!(["show" "log" (source: Plain)],
-        Doc::Local {
-            summary: "Show the most recent collected log entries from one source.",
-            detail: "Same as `show log`, filtered to entries whose source exactly matches \
-                     <source> (e.g. `nos-ribd[rt1]`, `nos-interfaced`, `nos-configd`).",
-        },
-        Always,
-        |source| Command::ShowLog {
-            source: Some(source.to_string()),
-            follow: false,
-        }),
-    cmd!(["show" "log" (source: Plain) "--follow"],
-        Doc::Local {
-            summary: "Live-tail collected log entries from one source.",
-            detail: "Same as `show log --follow`, filtered to entries whose source exactly \
-                     matches <source>.",
-        },
-        Always,
-        |source| Command::ShowLog {
-            source: Some(source.to_string()),
-            follow: true,
+        |source, follow| Command::ShowLog {
+            source: (!source.is_empty()).then(|| source.to_string()),
+            follow: !follow.is_empty(),
         }),
     cmd!(["show" "bgp" "brief"],
         Doc::Local {
@@ -1086,6 +1079,130 @@ pub(crate) fn tokenize_with_offsets(line: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// Where a row's walk over the typed words ended (see `walk`).
+#[derive(Debug)]
+pub struct Walk<'a> {
+    /// Argument words in `build` order; an absent optional clause is `""`.
+    pub args: Vec<&'a str>,
+    /// What may come at the next position (Tab and `?`).
+    pub next: Vec<Token>,
+    /// Every required token is bound and no clause awaits its argument.
+    pub complete: bool,
+}
+
+/// The one matcher behind `parse` and Tab: walks `words` (with their offsets
+/// in `line`) over a row's fixed tokens, then its trailing `Opt` clauses —
+/// the source `Arg` clause first (only as the first tail word), keyword
+/// clauses in any order, each once. `None`: the words do not fit the row.
+pub fn walk<'a>(spec: &CommandSpec, line: &'a str, words: &[(usize, &'a str)]) -> Option<Walk<'a>> {
+    // Everything after the one separator that follows the previous word, so
+    // leading whitespace survives.
+    let rest_from = |j: usize| {
+        let (start, prev) = words[j - 1];
+        let mut rest = line[start + prev.len()..].chars();
+        rest.next();
+        rest.as_str()
+    };
+    let fixed = spec
+        .tokens
+        .iter()
+        .position(|t| matches!(t, Token::Opt(_)))
+        .unwrap_or(spec.tokens.len());
+    let mut args = Vec::new();
+    for (j, token) in spec.tokens[..fixed].iter().enumerate() {
+        let Some(&(_, word)) = words.get(j) else {
+            return Some(Walk {
+                args,
+                next: vec![*token],
+                complete: false,
+            });
+        };
+        match token {
+            Token::Literal(lit) if *lit == word => {}
+            Token::Literal(_) => return None,
+            Token::Arg(ArgKind::Rest) => {
+                args.push(rest_from(j));
+                return Some(Walk {
+                    args,
+                    next: vec![],
+                    complete: true,
+                });
+            }
+            Token::Arg(_) => args.push(word),
+            Token::Opt(_) => unreachable!("the fixed prefix has no Opt"),
+        }
+    }
+    let clauses: Vec<&'static [Token]> = spec.tokens[fixed..]
+        .iter()
+        .map(|t| match t {
+            Token::Opt(c) => *c,
+            _ => unreachable!("Opt tokens are trailing"),
+        })
+        .collect();
+    // One build slot per arg token, or one for a flag clause; "" if absent.
+    let mut offsets = Vec::new();
+    for c in &clauses {
+        offsets.push(args.len());
+        let n = c.iter().filter(|t| matches!(t, Token::Arg(_))).count();
+        args.extend(std::iter::repeat_n("", n.max(1)));
+    }
+    let keyword = |c: &[Token]| match c[0] {
+        Token::Literal(l) => Some(l),
+        _ => None,
+    };
+    let mut used = vec![false; clauses.len()];
+    let mut i = fixed;
+    while let Some(&(_, word)) = words.get(i) {
+        let c = match clauses.iter().position(|c| keyword(c) == Some(word)) {
+            Some(c) if used[c] => return None,
+            Some(c) => c,
+            // The source is only ever the first tail word.
+            None => match clauses.iter().position(|c| keyword(c).is_none()) {
+                Some(c) if i == fixed => c,
+                _ => return None,
+            },
+        };
+        used[c] = true;
+        let slot = offsets[c];
+        i += 1;
+        if keyword(clauses[c]).is_none() || clauses[c].len() == 1 {
+            args[slot] = word;
+            continue;
+        }
+        for (k, tok) in clauses[c][1..].iter().enumerate() {
+            let Some(&(_, w)) = words.get(i) else {
+                return Some(Walk {
+                    args,
+                    next: vec![*tok],
+                    complete: false,
+                });
+            };
+            if matches!(tok, Token::Arg(ArgKind::Rest)) {
+                args[slot + k] = rest_from(i);
+                return Some(Walk {
+                    args,
+                    next: vec![],
+                    complete: true,
+                });
+            }
+            args[slot + k] = w;
+            i += 1;
+        }
+    }
+    let typed_tail = i > fixed;
+    let next = clauses
+        .iter()
+        .zip(&used)
+        .filter(|(c, u)| !**u && (keyword(c).is_some() || !typed_tail))
+        .map(|(c, _)| c[0])
+        .collect();
+    Some(Walk {
+        args,
+        next,
+        complete: true,
+    })
+}
+
 /// Parses `line` against the `cmd!` rows: the index of the first row whose
 /// token shape fits, and what its `build` made of the argument words
 /// (`None` — an argument that doesn't parse — is final, never a reason to
@@ -1093,26 +1210,8 @@ pub(crate) fn tokenize_with_offsets(line: &str) -> Vec<(usize, &str)> {
 pub fn parse(line: &str) -> Option<(usize, Option<Command>)> {
     let words = tokenize_with_offsets(line);
     COMMAND_SPECS.iter().enumerate().find_map(|(i, spec)| {
-        let build = spec.build;
-        let mut args = Vec::new();
-        for (j, token) in spec.tokens.iter().enumerate() {
-            let &(_, word) = words.get(j)?;
-            match token {
-                Token::Literal(lit) if *lit == word => {}
-                Token::Literal(_) => return None,
-                // Everything after the one separator that follows the
-                // previous word, so leading whitespace survives.
-                Token::Arg(ArgKind::Rest) => {
-                    let (prev_start, prev) = words[j - 1];
-                    let mut rest = line[prev_start + prev.len()..].chars();
-                    rest.next();
-                    args.push(rest.as_str());
-                    return Some((i, build(&args)));
-                }
-                Token::Arg(_) => args.push(word),
-            }
-        }
-        (words.len() == spec.tokens.len()).then(|| (i, build(&args)))
+        let w = walk(spec, line, &words)?;
+        w.complete.then(|| (i, (spec.build)(&w.args)))
     })
 }
 
@@ -1165,30 +1264,206 @@ mod tests {
         ));
     }
 
+    fn sample(t: &Token, out: &mut Vec<&'static str>) {
+        match t {
+            Token::Literal(lit) => out.push(lit),
+            Token::Arg(ArgKind::IpAddr) => out.push("192.0.2.1"),
+            Token::Arg(ArgKind::Number) => out.push("1"),
+            Token::Arg(ArgKind::Rest) => out.push("  some text"),
+            Token::Arg(ArgKind::LogLevel) => out.push("info"),
+            Token::Arg(_) => out.push("sample"),
+            Token::Opt(clause) => clause.iter().for_each(|t| sample(t, out)),
+        }
+    }
+
     /// Every `cmd!` row, filled with a sample word per argument, parses back
     /// through `parse` to a command built by that same row — so no row is
     /// shadowed by an earlier one, and each `build` binds as many words as
-    /// the row has argument slots.
+    /// the row has argument slots. Once without, once with every optional
+    /// clause.
     #[test]
     fn every_cmd_row_round_trips() {
         for (i, spec) in COMMAND_SPECS.iter().enumerate() {
-            let line = spec
-                .tokens
-                .iter()
-                .map(|t| match t {
-                    Token::Literal(lit) => *lit,
-                    Token::Arg(ArgKind::IpAddr) => "192.0.2.1",
-                    Token::Arg(ArgKind::Number) => "1",
-                    Token::Arg(ArgKind::Rest) => "  some text",
-                    Token::Arg(_) => "sample",
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            match parse(&line) {
-                Some((j, Some(_))) if j == i => {}
-                other => panic!("{:?} ({line:?}) parsed to {other:?}", spec.usage),
+            for with_opt in [false, true] {
+                let mut words = Vec::new();
+                for t in spec
+                    .tokens
+                    .iter()
+                    .filter(|t| with_opt || !matches!(t, Token::Opt(_)))
+                {
+                    sample(t, &mut words);
+                }
+                let line = words.join(" ");
+                match parse(&line) {
+                    Some((j, Some(_))) if j == i => {}
+                    other => panic!("{:?} ({line:?}) parsed to {other:?}", spec.usage),
+                }
             }
         }
+    }
+
+    #[test]
+    fn opt_tokens_are_trailing() {
+        for spec in COMMAND_SPECS {
+            if let Some(first) = spec.tokens.iter().position(|t| matches!(t, Token::Opt(_))) {
+                assert!(
+                    spec.tokens[first..]
+                        .iter()
+                        .all(|t| matches!(t, Token::Opt(_))),
+                    "{}: Opt not trailing",
+                    spec.usage
+                );
+            }
+        }
+    }
+
+    /// The final `show log` grammar (#1412), proven on a fixture: the real
+    /// row only has `[<source>] [--follow]` until #1452.
+    const FIXTURE: CommandSpec = CommandSpec {
+        tokens: &[
+            tok!("show"),
+            tok!("log"),
+            tok!([(source: LogSource)]),
+            tok!(["last" (n: Number)]),
+            tok!(["level" (l: LogLevel)]),
+            tok!(["--follow"]),
+            tok!(["match" (text: Rest)]),
+        ],
+        usage: concat!(
+            "show log ",
+            usage_tok!([(source: LogSource)]),
+            " ",
+            usage_tok!(["last" (n: Number)]),
+            " ",
+            usage_tok!(["level" (l: LogLevel)]),
+            " ",
+            usage_tok!(["--follow"]),
+            " ",
+            usage_tok!(["match" (text: Rest)])
+        ),
+        doc: Doc::Local {
+            summary: "",
+            detail: "",
+        },
+        availability: Availability::Always,
+        build: |_| None,
+    };
+
+    fn fixture(line: &str) -> Option<Walk<'_>> {
+        walk(&FIXTURE, line, &tokenize_with_offsets(line))
+    }
+
+    #[test]
+    fn fixture_usage_is_generated() {
+        assert_eq!(
+            FIXTURE.usage,
+            "show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]"
+        );
+    }
+
+    #[test]
+    fn fixture_accepts_every_subset_and_order_of_the_simple_clauses() {
+        // (words, build slot, bound value)
+        let clauses = [
+            ("last 5", 1, "5"),
+            ("level warn", 2, "warn"),
+            ("--follow", 3, "--follow"),
+        ];
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for order in orders {
+            for mask in 0..8u8 {
+                let chosen: Vec<usize> = order.into_iter().filter(|b| mask >> b & 1 == 1).collect();
+                for source in [false, true] {
+                    let mut line = "show log".to_string();
+                    if source {
+                        line.push_str(" nos-ribd");
+                    }
+                    for &b in &chosen {
+                        line.push(' ');
+                        line.push_str(clauses[b].0);
+                    }
+                    let w = fixture(&line).unwrap_or_else(|| panic!("{line:?} did not fit"));
+                    assert!(w.complete, "{line:?}");
+                    assert_eq!(w.args[0], if source { "nos-ribd" } else { "" }, "{line:?}");
+                    for (b, (_, slot, want)) in clauses.iter().enumerate() {
+                        let present = chosen.contains(&b);
+                        assert_eq!(
+                            w.args[*slot],
+                            [*want, ""][usize::from(!present)],
+                            "{line:?}"
+                        );
+                    }
+                    assert_eq!(w.args[4], "");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_match_is_last_verbatim_and_swallows_clause_words() {
+        let w = fixture("show log nos-x last 3 match   a  --follow  b").unwrap();
+        assert_eq!(w.args[4], "  a  --follow  b");
+        assert_eq!(w.args[3], "");
+        assert!(w.next.is_empty() && w.complete);
+    }
+
+    #[test]
+    fn fixture_rejects_misplaced_and_repeated_clauses() {
+        assert!(fixture("show log --follow --follow").is_none());
+        assert!(fixture("show log last 1 last 2").is_none());
+        assert!(fixture("show log last 1 nos-x").is_none());
+        assert!(fixture("show log --follow nos-x").is_none());
+        assert!(fixture("show log nos-x nos-y").is_none());
+        // a missing clause argument leaves the row incomplete
+        assert!(!fixture("show log last").unwrap().complete);
+        assert!(!fixture("show log match").unwrap().complete);
+        // a malformed one is left to `build`
+        assert_eq!(fixture("show log last x").unwrap().args[1], "x");
+    }
+
+    #[test]
+    fn fixture_next_offers_only_what_is_still_valid() {
+        let next = |line| fixture(line).unwrap().next;
+        let n = next("show log ");
+        assert_eq!(n.len(), 5);
+        assert!(n.contains(&Token::Arg(ArgKind::LogSource)));
+        assert_eq!(
+            next("show log nos-x last 2 "),
+            vec![
+                Token::Literal("level"),
+                Token::Literal("--follow"),
+                Token::Literal("match")
+            ]
+        );
+        assert_eq!(next("show log level "), vec![Token::Arg(ArgKind::LogLevel)]);
+        assert_eq!(next("show log last "), vec![Token::Arg(ArgKind::Number)]);
+        assert_eq!(next("show log match x"), Vec::<Token>::new());
+        assert_eq!(
+            next("show log nos-x last 1 level info --follow "),
+            vec![Token::Literal("match")]
+        );
+    }
+
+    #[test]
+    fn log_level_values_match_the_wire_enum() {
+        let want: Vec<String> = [
+            nos_proto::LogLevel::Trace,
+            nos_proto::LogLevel::Debug,
+            nos_proto::LogLevel::Info,
+            nos_proto::LogLevel::Warn,
+            nos_proto::LogLevel::Error,
+        ]
+        .iter()
+        .map(|l| format!("{l:?}").to_lowercase())
+        .collect();
+        assert_eq!(ArgKind::LogLevel.fixed_values().unwrap(), want);
     }
 
     #[test]
@@ -1198,6 +1473,7 @@ mod tests {
         assert!(usages.contains(&"clear bgp <instance> <peer> soft-in"));
         assert!(usages.contains(&"clear bgp <instance> <peer>"));
         assert!(usages.contains(&"set source line <line> <text>"));
+        assert!(usages.contains(&"show log [<source>] [--follow]"));
     }
 
     #[test]
