@@ -178,7 +178,10 @@ pub enum Resolved {
     ShowOspfNeigh,
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowOspfNeigh`.
-    ShowOspfDatabase,
+    ShowOspfDatabase {
+        lsa_type: Option<String>,
+        adv_router: Option<String>,
+    },
     /// `show ospf segment-routing` — mirrors `ShowOspfDatabase`.
     ShowOspfSegmentRouting,
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
@@ -186,7 +189,10 @@ pub enum Resolved {
     ShowOspfv3Neigh,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
-    ShowOspfv3Database,
+    ShowOspfv3Database {
+        lsa_type: Option<String>,
+        adv_router: Option<String>,
+    },
     /// `clear bgp <instance> <peer> soft-in` — data-plane action, valid in
     /// any mode.
     ClearBgpSoftIn {
@@ -301,10 +307,22 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpVpn { family, rd } => Resolved::ShowBgpVpn { family, rd },
         Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
-        Command::ShowOspfDatabase => Resolved::ShowOspfDatabase,
+        Command::ShowOspfDatabase {
+            lsa_type,
+            adv_router,
+        } => Resolved::ShowOspfDatabase {
+            lsa_type,
+            adv_router,
+        },
         Command::ShowOspfSegmentRouting => Resolved::ShowOspfSegmentRouting,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
-        Command::ShowOspfv3Database => Resolved::ShowOspfv3Database,
+        Command::ShowOspfv3Database {
+            lsa_type,
+            adv_router,
+        } => Resolved::ShowOspfv3Database {
+            lsa_type,
+            adv_router,
+        },
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::ClearBgpPeer { instance, peer } => Resolved::ClearBgpPeer { instance, peer },
         Command::ClearStpMcheck { interface } => Resolved::ClearStpMcheck { interface },
@@ -424,10 +442,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBgpVpn { .. }
         | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh
-        | Command::ShowOspfDatabase
+        | Command::ShowOspfDatabase { .. }
         | Command::ShowOspfSegmentRouting
         | Command::ShowOspfv3Neigh
-        | Command::ShowOspfv3Database
+        | Command::ShowOspfv3Database { .. }
         | Command::ClearBgpSoftIn { .. }
         | Command::ClearBgpPeer { .. }
         | Command::ClearStpMcheck { .. }

@@ -1526,31 +1526,152 @@ fn render_ip_or_dash(addr: Option<Ipv4Addr>) -> String {
     addr.map_or_else(|| "-".to_string(), |a| a.to_string())
 }
 
-/// Render one OSPF instance's installed-LSA headers, one line per LSA —
-/// used for `show ospf database`. Mirrors `render_ospf_neighbors`' shape.
-pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
-    sanitize(&render_ospf_database_raw(instance, entries)).into_owned()
+/// `OSPFv2` LS type name (RFC 2328 A.4.1, RFC 5250 opaque); unknown = the number.
+pub fn ospf_lsa_type_name(t: u8) -> Cow<'static, str> {
+    match t {
+        1 => "router".into(),
+        2 => "network".into(),
+        3 => "summary".into(),
+        4 => "asbr-summary".into(),
+        5 => "external".into(),
+        7 => "nssa".into(),
+        9 => "opaque-link".into(),
+        10 => "opaque-area".into(),
+        11 => "opaque-as".into(),
+        n => n.to_string().into(),
+    }
 }
 
-fn render_ospf_database_raw(instance: &str, entries: &[LsaSummary]) -> String {
-    if entries.is_empty() {
-        return format!("ospf instance {instance}: no LSAs installed");
+const OSPF_TYPE_NAMES: &str =
+    "router, network, summary, asbr-summary, external, nssa, opaque-link, opaque-area, opaque-as";
+
+/// A `show ospf database <type>` argument: a type name or a decimal number.
+pub fn parse_ospf_lsa_type(s: &str) -> Result<u8, String> {
+    let l = s.to_ascii_lowercase();
+    (0..=u8::MAX)
+        .find(|&t| ospf_lsa_type_name(t) == l)
+        .or_else(|| l.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "unknown LSA type '{}' (use {OSPF_TYPE_NAMES} or a number)",
+                sanitize_line(s)
+            )
+        })
+}
+
+/// Router-LSA flags as `B`/`E`/`V` letters (Nt/H are not shown).
+fn router_flag_letters(flags: Option<u8>) -> String {
+    let f = flags.unwrap_or(0);
+    [(0x01, "B"), (0x02, "E"), (0x04, "V")]
+        .iter()
+        .filter(|(bit, _)| f & bit != 0)
+        .map(|(_, l)| *l)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn lsa_info(parts: &[String]) -> String {
+    if parts.is_empty() {
+        "-".into()
+    } else {
+        parts.join(" ")
     }
-    let mut lines = vec![format!("ospf instance {instance}:")];
-    for lsa in entries {
-        lines.push(format!(
-            "  area {} type {} link-state-id {} advertising-router {} \
-             sequence 0x{:08x} age {} checksum 0x{:04x}",
-            lsa.area_id,
-            lsa.lsa_type,
-            lsa.link_state_id,
-            lsa.advertising_router,
-            lsa.sequence_number,
-            lsa.age,
-            lsa.checksum,
-        ));
+}
+
+fn router_info(flags: Option<u8>, vlinks: &[Ipv4Addr]) -> Vec<String> {
+    let mut parts = Vec::new();
+    let letters = router_flag_letters(flags);
+    if !letters.is_empty() {
+        parts.push(letters);
     }
-    lines.join("\n")
+    parts.extend(vlinks.iter().map(|v| format!("vlink {v}")));
+    parts
+}
+
+fn ospf_info(lsa: &LsaSummary) -> String {
+    let mut parts = Vec::new();
+    if let Some(m) = lsa.external_metric {
+        let e = if lsa.external_type2 { "E2" } else { "E1" };
+        parts.push(format!("metric {m} {e}"));
+    }
+    parts.extend(router_info(lsa.router_flags, &lsa.virtual_links));
+    lsa_info(&parts)
+}
+
+/// Keep the LSAs of one type and/or one advertising router.
+pub fn filter_ospf_database(
+    entries: &[LsaSummary],
+    ty: Option<u8>,
+    router: Option<Ipv4Addr>,
+) -> Vec<LsaSummary> {
+    entries
+        .iter()
+        .filter(|l| ty.is_none_or(|t| l.lsa_type == t))
+        .filter(|l| router.is_none_or(|r| l.advertising_router == r))
+        .cloned()
+        .collect()
+}
+
+const DB_COLS_HEAD: [Col; 7] = [
+    Col::left("Area"),
+    Col::left("Type"),
+    Col::left("Link-State-ID"),
+    Col::left("Adv-Router"),
+    Col::right("Seq"),
+    Col::right("Age"),
+    Col::right("Checksum"),
+];
+
+/// Render one OSPF instance's installed-LSA headers as a table, for
+/// `show ospf database`. Empty means nothing installed.
+pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
+    sanitize(&render_ospf_database_raw(instance, entries, false)).into_owned()
+}
+
+/// `render_ospf_database` over a list already narrowed by
+/// `filter_ospf_database`: empty means "no LSAs match".
+pub fn render_ospf_database_filtered(instance: &str, entries: &[LsaSummary]) -> String {
+    sanitize(&render_ospf_database_raw(instance, entries, true)).into_owned()
+}
+
+fn db_wrap(
+    proto: &str,
+    instance: &str,
+    filtered: bool,
+    rows: &[Vec<String>],
+    cols: &[Col],
+) -> String {
+    let instance = sanitize_line(instance);
+    if rows.is_empty() {
+        let what = if filtered {
+            "no LSAs match"
+        } else {
+            "no LSAs installed"
+        };
+        return format!("{proto} instance {instance}: {what}");
+    }
+    format!("{proto} instance {instance}:\n{}", table(cols, rows))
+}
+
+fn render_ospf_database_raw(instance: &str, entries: &[LsaSummary], filtered: bool) -> String {
+    let mut cols = DB_COLS_HEAD.to_vec();
+    cols.push(Col::left("Info"));
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|l| {
+            vec![
+                l.area_id.to_string(),
+                ospf_lsa_type_name(l.lsa_type).into_owned(),
+                l.link_state_id.to_string(),
+                l.advertising_router.to_string(),
+                format!("0x{:08x}", l.sequence_number),
+                l.age.to_string(),
+                format!("0x{:04x}", l.checksum),
+                ospf_info(l),
+            ]
+        })
+        .collect();
+    db_wrap("ospf", instance, filtered, &rows, &cols)
 }
 
 /// `show ospf segment-routing` (#1382): one line per SRGB, Prefix-SID and
@@ -1592,32 +1713,108 @@ pub fn render_ospf_segment_routing(instance: &str, sr: &nos_proto::SrSummary) ->
     sanitize(&lines.join("\n")).into_owned()
 }
 
-/// Render one `Ospfv3Instance`'s installed-LSA headers, one line per LSA —
-/// used for `show ospfv3 database`. Mirrors `render_ospf_database` exactly.
-pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
-    sanitize(&render_ospfv3_database_raw(instance, entries)).into_owned()
+const OSPFV3_TYPES: &[(u16, &str)] = &[
+    (0x2001, "router"),
+    (0x2002, "network"),
+    (0x2003, "inter-area-prefix"),
+    (0x2004, "inter-area-router"),
+    (0x4005, "as-external"),
+    (0x2007, "nssa"),
+    (0x0008, "link"),
+    (0x2009, "intra-area-prefix"),
+    (0x000b, "grace"),
+    (0xa021, "e-router"),
+    (0xa022, "e-network"),
+    (0xa023, "e-inter-area-prefix"),
+    (0xa024, "e-inter-area-router"),
+    (0xc025, "e-as-external"),
+    (0xa027, "e-nssa"),
+    (0x8028, "e-link"),
+    (0xa029, "e-intra-area-prefix"),
+];
+
+/// `OSPFv3` LS type name from its function code (RFC 5340 A.4.2.1, RFC 8362
+/// E-LSAs, RFC 5187 grace); unknown = `0x%04x`.
+pub fn ospfv3_lsa_type_name(t: u16) -> Cow<'static, str> {
+    match OSPFV3_TYPES.iter().find(|(c, _)| *c == t) {
+        Some((_, n)) => (*n).into(),
+        None => format!("0x{t:04x}").into(),
+    }
 }
 
-fn render_ospfv3_database_raw(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
-    if entries.is_empty() {
-        return format!("ospfv3 instance {instance}: no LSAs installed");
-    }
-    let mut lines = vec![format!("ospfv3 instance {instance}:")];
-    for lsa in entries {
-        lines.push(format!(
-            "  area {} type {} link-state-id {} advertising-router {} \
-             sequence 0x{:08x} age {} checksum 0x{:04x} link {}",
-            lsa.area_id,
-            lsa.lsa_type,
-            lsa.link_state_id,
-            lsa.advertising_router,
-            lsa.sequence_number,
-            lsa.age,
-            lsa.checksum,
-            lsa.link.as_deref().unwrap_or("-"),
-        ));
-    }
-    lines.join("\n")
+/// A `show ospfv3 database <type>` argument: a type name, a decimal number or
+/// `0x` hex.
+pub fn parse_ospfv3_lsa_type(s: &str) -> Result<u16, String> {
+    let l = s.to_ascii_lowercase();
+    OSPFV3_TYPES
+        .iter()
+        .find(|(_, n)| *n == l)
+        .map(|(c, _)| *c)
+        .or_else(|| match l.strip_prefix("0x") {
+            Some(h) => u16::from_str_radix(h, 16).ok(),
+            None => l.parse().ok(),
+        })
+        .ok_or_else(|| {
+            let names: Vec<&str> = OSPFV3_TYPES.iter().map(|(_, n)| *n).collect();
+            format!(
+                "unknown LSA type '{}' (use {}, a number or 0x hex)",
+                sanitize_line(s),
+                names.join(", ")
+            )
+        })
+}
+
+/// Keep the LSAs of one type and/or one advertising router.
+pub fn filter_ospfv3_database(
+    entries: &[Ospfv3LsaSummary],
+    ty: Option<u16>,
+    router: Option<Ipv4Addr>,
+) -> Vec<Ospfv3LsaSummary> {
+    entries
+        .iter()
+        .filter(|l| ty.is_none_or(|t| l.lsa_type == t))
+        .filter(|l| router.is_none_or(|r| l.advertising_router == r))
+        .cloned()
+        .collect()
+}
+
+/// Render one `Ospfv3Instance`'s installed-LSA headers as a table, for
+/// `show ospfv3 database`: `render_ospf_database` plus a `Link` column.
+pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
+    sanitize(&render_ospfv3_database_raw(instance, entries, false)).into_owned()
+}
+
+/// `render_ospfv3_database` over a list already narrowed by
+/// `filter_ospfv3_database`: empty means "no LSAs match".
+pub fn render_ospfv3_database_filtered(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
+    sanitize(&render_ospfv3_database_raw(instance, entries, true)).into_owned()
+}
+
+fn render_ospfv3_database_raw(
+    instance: &str,
+    entries: &[Ospfv3LsaSummary],
+    filtered: bool,
+) -> String {
+    let mut cols = DB_COLS_HEAD.to_vec();
+    cols.push(Col::left("Link"));
+    cols.push(Col::left("Info"));
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|l| {
+            vec![
+                l.area_id.to_string(),
+                ospfv3_lsa_type_name(l.lsa_type).into_owned(),
+                l.link_state_id.to_string(),
+                l.advertising_router.to_string(),
+                format!("0x{:08x}", l.sequence_number),
+                l.age.to_string(),
+                format!("0x{:04x}", l.checksum),
+                l.link.clone().unwrap_or_else(|| "-".into()),
+                lsa_info(&router_info(l.router_flags, &l.virtual_links)),
+            ]
+        })
+        .collect();
+    db_wrap("ospfv3", instance, filtered, &rows, &cols)
 }
 
 /// Render a full running-config snapshot as human-readable text: the
@@ -2651,11 +2848,96 @@ mod tests {
             router_flags: Some(0),
             virtual_links: Vec::new(),
         };
+        let out = render_ospf_database("o1", &[lsa]);
+        assert!(out.starts_with("ospf instance o1:\nArea "), "{out}");
+        assert!(out.contains("router  1.1.1.1"), "{out}");
+        assert!(out.contains("0x80000001"), "{out}");
+    }
+
+    fn v2(t: u8, rid: &str) -> LsaSummary {
+        LsaSummary {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsa_type: t,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: rid.parse().unwrap(),
+            sequence_number: 1,
+            age: 1,
+            checksum: 1,
+            external_metric: None,
+            external_type2: false,
+            router_flags: None,
+            virtual_links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ospf_lsa_type_names_and_parse() {
+        assert_eq!(ospf_lsa_type_name(5), "external");
+        assert_eq!(ospf_lsa_type_name(99), "99");
+        assert_eq!(parse_ospf_lsa_type("Router"), Ok(1));
+        assert_eq!(parse_ospf_lsa_type("opaque-as"), Ok(11));
+        assert_eq!(parse_ospf_lsa_type("42"), Ok(42));
+        let e = parse_ospf_lsa_type("bogus\n").unwrap_err();
+        assert!(e.contains("asbr-summary") && !e.contains('\n'), "{e}");
+    }
+
+    #[test]
+    fn ospfv3_lsa_type_names_and_parse() {
+        assert_eq!(ospfv3_lsa_type_name(0x2001), "router");
+        assert_eq!(ospfv3_lsa_type_name(0xa029), "e-intra-area-prefix");
+        assert_eq!(ospfv3_lsa_type_name(0x1234), "0x1234");
+        assert_eq!(parse_ospfv3_lsa_type("LINK"), Ok(8));
+        assert_eq!(parse_ospfv3_lsa_type("0x2001"), Ok(0x2001));
+        assert_eq!(parse_ospfv3_lsa_type("8193"), Ok(0x2001));
+        assert!(parse_ospfv3_lsa_type("nope").is_err());
+        assert!(parse_ospfv3_lsa_type("0xzz").is_err());
+    }
+
+    #[test]
+    fn ospf_database_info_cell() {
+        let mut ext = v2(5, "1.1.1.1");
+        ext.external_metric = Some(20);
+        ext.external_type2 = true;
+        let mut rtr = v2(1, "1.1.1.1");
+        rtr.router_flags = Some(0x07 | 0x10);
+        rtr.virtual_links = vec!["3.3.3.3".parse().unwrap()];
+        assert_eq!(ospf_info(&ext), "metric 20 E2");
+        assert_eq!(ospf_info(&rtr), "B,E,V vlink 3.3.3.3");
+        assert_eq!(ospf_info(&v2(2, "1.1.1.1")), "-");
+    }
+
+    #[test]
+    fn ospf_database_filter() {
+        let all = [v2(1, "1.1.1.1"), v2(2, "1.1.1.1"), v2(1, "2.2.2.2")];
+        let r1: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        assert_eq!(filter_ospf_database(&all, None, None).len(), 3);
+        assert_eq!(filter_ospf_database(&all, Some(1), None).len(), 2);
+        assert_eq!(filter_ospf_database(&all, None, Some(r1)).len(), 2);
+        assert_eq!(filter_ospf_database(&all, Some(1), Some(r1)).len(), 1);
         assert_eq!(
-            render_ospf_database("o1", &[lsa]),
-            "ospf instance o1:\n  area 0.0.0.0 type 1 link-state-id 1.1.1.1 \
-             advertising-router 1.1.1.1 sequence 0x80000001 age 42 checksum 0xabcd"
+            render_ospf_database_filtered("o", &filter_ospf_database(&all, Some(9), None)),
+            "ospf instance o: no LSAs match"
         );
+    }
+
+    #[test]
+    fn ospf_database_cannot_forge_rows() {
+        let mut l = Ospfv3LsaSummary {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsa_type: 8,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: Ipv4Addr::UNSPECIFIED,
+            sequence_number: 1,
+            age: 1,
+            checksum: 1,
+            link: Some("eth0\n0.0.0.0 forged\x1b[31m".into()),
+            router_flags: None,
+            virtual_links: Vec::new(),
+        };
+        l.link_state_id = Ipv4Addr::UNSPECIFIED;
+        let out = render_ospfv3_database("v3\nforged", &[l]);
+        assert_eq!(out.lines().count(), 4, "{out}");
+        assert!(!out.contains('\x1b'), "{out}");
     }
 
     #[test]
@@ -3023,13 +3305,9 @@ mod tests {
             router_flags: None,
             virtual_links: Vec::new(),
         };
-        assert_eq!(
-            render_ospfv3_database("v3", &[lsa(Some("eth0.0")), lsa(None)]),
-            "ospfv3 instance v3:\n  area 0.0.0.0 type 8193 link-state-id 0.0.0.0 advertising-router 2.2.2.2 \
-             sequence 0x00000001 age 3 checksum 0x1234 link eth0.0\n  \
-             area 0.0.0.0 type 8193 link-state-id 0.0.0.0 advertising-router 2.2.2.2 \
-             sequence 0x00000001 age 3 checksum 0x1234 link -"
-        );
+        let out = render_ospfv3_database("v3", &[lsa(Some("eth0.0")), lsa(None)]);
+        assert!(out.contains("router  0.0.0.0        2.2.2.2"), "{out}");
+        assert!(out.contains("eth0.0"), "{out}");
     }
 
     #[test]

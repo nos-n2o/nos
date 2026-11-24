@@ -109,7 +109,10 @@ pub enum Command {
     ShowOspfNeigh,
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
-    ShowOspfDatabase,
+    ShowOspfDatabase {
+        lsa_type: Option<String>,
+        adv_router: Option<String>,
+    },
     /// `show ospf segment-routing` (#1382): SRGBs, Prefix-SIDs and Adj-SIDs
     /// across every configured OSPF instance.
     ShowOspfSegmentRouting,
@@ -118,7 +121,10 @@ pub enum Command {
     ShowOspfv3Neigh,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
-    ShowOspfv3Database,
+    ShowOspfv3Database {
+        lsa_type: Option<String>,
+        adv_router: Option<String>,
+    },
     /// `clear bgp <instance> <peer> soft-in` — ask `<peer>`'s live session
     /// on `<instance>` to resend its routes (RFC 2918 route refresh).
     ClearBgpSoftIn {
@@ -673,6 +679,36 @@ mod tests {
     #[test]
     fn show_ospf_neigh() {
         assert_eq!(Command::parse("show ospf neigh"), Command::ShowOspfNeigh);
+        assert_eq!(Command::parse("show ospf neighbor"), Command::ShowOspfNeigh);
+        assert_eq!(
+            Command::parse("show ospf neighbors"),
+            Command::ShowOspfNeigh
+        );
+    }
+
+    #[test]
+    fn show_ospf_database_filters() {
+        assert_eq!(
+            Command::parse("show ospf database"),
+            Command::ShowOspfDatabase {
+                lsa_type: None,
+                adv_router: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show ospf database router"),
+            Command::ShowOspfDatabase {
+                lsa_type: Some("router".into()),
+                adv_router: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show ospf database router 1.1.1.1"),
+            Command::ShowOspfDatabase {
+                lsa_type: Some("router".into()),
+                adv_router: Some("1.1.1.1".into())
+            }
+        );
     }
 
     #[test]
@@ -727,7 +763,21 @@ mod tests {
         );
         assert_eq!(
             Command::parse("show ospfv3 database"),
-            Command::ShowOspfv3Database
+            Command::ShowOspfv3Database {
+                lsa_type: None,
+                adv_router: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show ospfv3 database link 1.1.1.1"),
+            Command::ShowOspfv3Database {
+                lsa_type: Some("link".into()),
+                adv_router: Some("1.1.1.1".into())
+            }
+        );
+        assert_eq!(
+            Command::parse("show ospfv3 neighbors"),
+            Command::ShowOspfv3Neigh
         );
     }
 
