@@ -42,6 +42,11 @@ enum Input {
     Transaction(p::TransactionSnapshot, Vec<String>),
     Source(String),
     Fdb(p::FdbTable),
+    FdbFlat(
+        Vec<(String, p::MacEntry)>,
+        Vec<(String, p::NeighEntry)>,
+        Option<String>,
+    ),
     Diff(p::ConfigDiff, bool),
 }
 
@@ -120,6 +125,7 @@ fuzz_target!(|input: Input| {
         Input::Transaction(t, path) => outs.push(f::render_transaction(&t, &path.into())),
         Input::Source(s) => outs.push(f::render_policy_source(&s)),
         Input::Fdb(x) => outs.push(nos_cli::view::render(&x, "")),
+        Input::FdbFlat(m, n, mac) => outs.push(f::render_fdb_flat(&m, &n, mac.as_deref())),
         Input::Diff(d, color) => {
             diff_color = color;
             outs.push(f::render_diff(&d, color));

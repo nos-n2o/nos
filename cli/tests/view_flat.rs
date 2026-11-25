@@ -292,6 +292,50 @@ fn fdb_views() {
 }
 
 #[test]
+fn fdb_flat_views() {
+    let t = fdb();
+    let rows = |t: &FdbTable| -> Vec<(String, MacEntry)> {
+        t.macs
+            .iter()
+            .map(|m| (t.domain.clone(), m.clone()))
+            .collect()
+    };
+    let neighs = |t: &FdbTable| -> Vec<(String, NeighEntry)> {
+        t.neighbours
+            .iter()
+            .map(|n| (t.domain.clone(), n.clone()))
+            .collect()
+    };
+    let mut two = rows(&t);
+    two.push(("bd2".into(), t.macs[1].clone()));
+    check(
+        "fdb_all_populated",
+        &nos_cli::format::render_fdb_flat(&two, &[], None),
+    );
+    check(
+        "fdb_all_empty",
+        &nos_cli::format::render_fdb_flat(&[], &[], None),
+    );
+    let mut forged = rows(&t);
+    forged[0].0 = BAD.into();
+    forged[0].1.mac = BAD.into();
+    forged[0].1.interface = Some(BAD.into());
+    check(
+        "fdb_all_forged",
+        &nos_cli::format::render_fdb_flat(&forged, &[], None),
+    );
+    let hit = (rows(&t)[1..].to_vec(), neighs(&t));
+    check(
+        "fdb_mac_hit",
+        &nos_cli::format::render_fdb_flat(&hit.0, &hit.1, Some("02:00:00:00:00:02")),
+    );
+    check(
+        "fdb_mac_miss",
+        &nos_cli::format::render_fdb_flat(&[], &[], Some("02:00:00:00:00:09")),
+    );
+}
+
+#[test]
 fn version_block() {
     let v = nos_proto::version::VersionInfo {
         version: "0.1.0".into(),

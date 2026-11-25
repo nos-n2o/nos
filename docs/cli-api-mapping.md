@@ -40,6 +40,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show ospf segment-routing` | `GET /v1/ospf/segment-routing` |
 | `show ospfv3 neigh` / `show ospfv3 database` | `GET /v1/ospfv3/neighbors` / `GET /v1/ospfv3/database` |
 | `show fdb <domain>` | `GET /v1/fdb/{domain}` |
+| `show fdb` / `show fdb [<domain>] mac <mac>` | client-side: running config, then one `GET /v1/fdb/{domain}` per domain with a `vni`; the MAC filter is applied in the CLI |
 | `show log [<source>] [last <n>] [level <l>]` | `GET /v1/logs[?source=<source>][&limit=<n>][&level=<l>]` |
 | `show log … match <text>` | `GET /v1/logs?match=<text>`: REST matches the entry's source, target, message and fields; the CLI matches the whole printed line (time and level name too) |
 | `show log [<source>] [last <n>] [level <l>] --follow [match <text>]` | `GET /v1/logs/follow[?source=<source>&level=<l>&match=<text>]` (Server-Sent Events) |

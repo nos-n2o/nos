@@ -1,0 +1,4 @@
+Domain            Mac                Source  Interface         Age  Vtep       Esi
+----------------  -----------------  ------  ----------------  ---  ---------  -----------------------------
+x\nFORGED\x1b[2J  x\nFORGED\x1b[2J   Local   x\nFORGED\x1b[2J   7s  -          00:11:22:33:44:55:66:77:88:99
+bd                02:00:00:00:00:02  Remote  -                   -  192.0.2.9  -
