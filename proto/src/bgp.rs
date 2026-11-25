@@ -61,6 +61,68 @@ pub struct PrefixCounts {
     pub evpn: u32,
 }
 
+/// BGP messages by type, one direction (RFC 4271 section 4, RFC 2918). An
+/// RFC 4724 End-of-RIB is an UPDATE on the wire and counts as one.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, View)]
+pub struct MessageCounts {
+    /// OPEN messages.
+    #[view(unit = count)]
+    pub open: u64,
+    /// UPDATE messages.
+    #[view(unit = count)]
+    pub update: u64,
+    /// NOTIFICATION messages.
+    #[view(unit = count)]
+    pub notification: u64,
+    /// KEEPALIVE messages.
+    #[view(unit = count)]
+    pub keepalive: u64,
+    /// ROUTE-REFRESH messages.
+    #[view(unit = count)]
+    pub route_refresh: u64,
+}
+
+/// The last NOTIFICATION a peer sent or received (wire code and subcode: an
+/// RFC 8538 Hard Reset shows as 6/9).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct NotificationInfo {
+    /// Error code.
+    #[view(unit = count)]
+    pub code: u8,
+    /// Error subcode.
+    #[view(unit = count)]
+    pub subcode: u8,
+    /// Seconds since it was sent or received.
+    #[view(unit = secs)]
+    pub seconds_ago: u64,
+}
+
+/// Why an `Established` session last ended (`FsmOutcome` without payload).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResetReason {
+    /// The TCP connection failed.
+    TcpError,
+    /// The peer closed the connection.
+    PeerClosed,
+    /// We sent a NOTIFICATION.
+    NotificationSent,
+    /// We received a NOTIFICATION.
+    NotificationReceived,
+    /// The hold timer expired.
+    HoldTimerExpired,
+    /// Lost a connection collision (RFC 4271 section 6.8).
+    CollisionLost,
+    /// Replaced by a new connection during graceful restart.
+    GrReplaced,
+}
+
 /// One configured peer's summary, for `show bgp summary`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -143,6 +205,39 @@ pub struct PeerSummary {
     #[serde(default)]
     #[view(brief, order = 4, header = "Status", text)]
     pub status: PeerIdleStatus,
+    /// Messages received, by type; cumulative for the peer's lifetime in this
+    /// daemon (reset when a config change replaces the peer).
+    #[serde(default)]
+    #[view(nested)]
+    pub msg_received: MessageCounts,
+    /// Messages sent, by type; cumulative like `msg_received`.
+    #[serde(default)]
+    #[view(nested)]
+    pub msg_sent: MessageCounts,
+    /// Total messages received.
+    #[serde(default)]
+    #[view(brief, order = 11, header = "MsgRcvd", unit = count)]
+    pub messages_received: u64,
+    /// Total messages sent.
+    #[serde(default)]
+    #[view(brief, order = 12, header = "MsgSent", unit = count)]
+    pub messages_sent: u64,
+    /// The last NOTIFICATION we sent.
+    #[serde(default)]
+    #[view(nested)]
+    pub last_notification_sent: Option<NotificationInfo>,
+    /// The last NOTIFICATION we received.
+    #[serde(default)]
+    #[view(nested)]
+    pub last_notification_received: Option<NotificationInfo>,
+    /// Why the last `Established` session ended.
+    #[serde(default)]
+    #[view(text)]
+    pub last_reset_reason: Option<ResetReason>,
+    /// Times an `Established` session ended.
+    #[serde(default)]
+    #[view(unit = count)]
+    pub flap_count: u64,
 }
 
 /// A peer's RFC 4724 / RFC 8538 graceful restart capability.

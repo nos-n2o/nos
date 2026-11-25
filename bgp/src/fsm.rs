@@ -28,6 +28,7 @@ use tracing::{debug, info, warn};
 use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 
 use crate::collision::{self, FsmCommand, PeerSlot};
+use crate::counters::{MsgKind, PeerCounters};
 use crate::gr::{self, Disconnect, PeerGr};
 use crate::message::{
     self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, FsmSubcode, NotificationMessage,
@@ -936,12 +937,33 @@ async fn resend_loc_rib(
     }
 }
 
+/// The one way a message reaches the wire: counted only once the write
+/// succeeded (#1441). The BMP re-encode in `write_update` is not a send.
+async fn send_counted(
+    counters: &PeerCounters,
+    writer: &mut FramedWrite<OwnedWriteHalf, BgpCodec>,
+    msg: BgpMessage,
+) -> Result<(), WireError> {
+    let counted = match &msg {
+        BgpMessage::Notification(n) => Some((n.error_code, n.error_subcode)),
+        _ => None,
+    };
+    let kind = MsgKind::of(&msg);
+    writer.send(msg).await?;
+    counters.count_sent(kind);
+    if let Some((code, subcode)) = counted {
+        counters.note_notification(true, code, subcode);
+    }
+    Ok(())
+}
+
 /// RFC 2918 outbound: request a refresh for every address family this
 /// session actually negotiated.
 async fn send_route_refresh(
     writer: &mut FramedWrite<OwnedWriteHalf, BgpCodec>,
     state: &State,
     peer: &PeerContext,
+    counters: &PeerCounters,
 ) {
     let State::Established(remote) = state else {
         return;
@@ -970,13 +992,16 @@ async fn send_route_refresh(
             .then_some((AFI_IPV4, message::SAFI_RTC)),
     ];
     for (afi, safi) in families.into_iter().flatten() {
-        let _ = writer
-            .send(BgpMessage::RouteRefresh(RouteRefreshMessage {
+        let _ = send_counted(
+            counters,
+            writer,
+            BgpMessage::RouteRefresh(RouteRefreshMessage {
                 afi,
                 subtype: message::REFRESH_REQUEST,
                 safi,
-            }))
-            .await;
+            }),
+        )
+        .await;
     }
     info!(peer = %peer.remote_address, "bgp: sent route refresh request to peer");
 }
@@ -1212,6 +1237,7 @@ async fn send_outbound(
     mrai: &mut crate::mrai::Mrai,
     update: OutboundUpdate,
     out: (&crate::bmp::Hub, IpAddr),
+    counters: &PeerCounters,
 ) {
     // RFC 7313 EoRR and RFC 4724 End-of-RIB must follow every
     // route they close, so release anything MRAI holds first.
@@ -1223,11 +1249,11 @@ async fn send_outbound(
         } | OutboundUpdate::EndOfRib(_)
     ) {
         for held in mrai.drain() {
-            write_update(writer, out, held).await;
+            write_update(writer, out, held, counters).await;
         }
     }
     if let Some(update) = mrai.push(update, Instant::now()) {
-        write_update(writer, out, update).await;
+        write_update(writer, out, update, counters).await;
     }
 }
 
@@ -1239,6 +1265,7 @@ async fn write_update(
     writer: &mut SessionWriter,
     (hub, peer): (&crate::bmp::Hub, IpAddr),
     update: OutboundUpdate,
+    counters: &PeerCounters,
 ) {
     let msg = outbound_update_to_message(update);
     if hub.out_enabled(true) && matches!(msg, BgpMessage::Update(_) | BgpMessage::EndOfRib { .. }) {
@@ -1249,7 +1276,7 @@ async fn write_update(
             hub.route_out_wire(peer, a, &buf);
         }
     }
-    if let Err(e) = writer.send(msg).await {
+    if let Err(e) = send_counted(counters, writer, msg).await {
         warn!(error = %e, "could not send update");
     }
 }
@@ -1326,7 +1353,7 @@ async fn handle_command(
     match cmd {
         FsmCommand::UpdateAo(_) => unreachable!("handled above"),
         FsmCommand::SendRouteRefresh => {
-            send_route_refresh(writer, state, peer).await;
+            send_route_refresh(writer, state, peer, cx.slot.counters()).await;
             None
         }
         FsmCommand::Cease { .. } | FsmCommand::BfdDown { .. } => {
@@ -1347,13 +1374,16 @@ async fn handle_command(
             } else {
                 (subcode as u8, data)
             };
-            let _ = writer
-                .send(BgpMessage::Notification(NotificationMessage {
+            let _ = send_counted(
+                cx.slot.counters(),
+                writer,
+                BgpMessage::Notification(NotificationMessage {
                     error_code: ErrorCode::Cease as u8,
                     error_subcode: wire_subcode,
                     data,
-                }))
-                .await;
+                }),
+            )
+            .await;
             info!(
                 peer = %peer.remote_address, subcode = subcode as u8, hard_reset,
                 "sent cease notification"
@@ -1632,7 +1662,7 @@ async fn run_actions(
     for action in actions {
         match action {
             Action::SendKeepalive => {
-                let _ = writer.send(BgpMessage::Keepalive).await;
+                let _ = send_counted(cx.slot.counters(), writer, BgpMessage::Keepalive).await;
             }
             Action::SendNotification(..) | Action::SendNotificationData(..) => {
                 let (code, subcode, data) = match action {
@@ -1641,13 +1671,16 @@ async fn run_actions(
                     _ => unreachable!(),
                 };
                 let data_len = data.len();
-                let _ = writer
-                    .send(BgpMessage::Notification(NotificationMessage {
+                let _ = send_counted(
+                    cx.slot.counters(),
+                    writer,
+                    BgpMessage::Notification(NotificationMessage {
                         error_code: code,
                         error_subcode: subcode,
                         data,
-                    }))
-                    .await;
+                    }),
+                )
+                .await;
                 notification_sent = Some((code, subcode));
                 info!(
                     peer = %cx.peer.remote_address, code, subcode, data_len,
@@ -1668,13 +1701,16 @@ async fn run_actions(
             }
             Action::ReportEstablished { .. } => {
                 if !report_established(cx, reader, writer, timers, action).await {
-                    let _ = writer
-                        .send(BgpMessage::Notification(NotificationMessage {
+                    let _ = send_counted(
+                        cx.slot.counters(),
+                        writer,
+                        BgpMessage::Notification(NotificationMessage {
                             error_code: ErrorCode::Cease as u8,
                             error_subcode: CeaseSubcode::ConnectionCollisionResolution as u8,
                             data: Bytes::new(),
-                        }))
-                        .await;
+                        }),
+                    )
+                    .await;
                     return (notification_sent, false, true);
                 }
                 registered = true;
@@ -1787,7 +1823,10 @@ pub async fn run(
     // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
     // this block, rather than returning directly.
     let outcome = 'session: {
-        if writer.send(BgpMessage::Open(open)).await.is_err() {
+        if send_counted(slot.counters(), &mut writer, BgpMessage::Open(open))
+            .await
+            .is_err()
+        {
             break 'session FsmOutcome::TcpError;
         }
 
@@ -1795,6 +1834,7 @@ pub async fn run(
             let event = tokio::select! {
                 msg = reader.next() => match msg {
                     Some(Ok(bgp_msg)) => {
+                        slot.counters().count_received(&bgp_msg);
                         // Any well-formed inbound message proves liveness —
                         // reset the hold timer regardless of type (RFC 4271 §4.4).
                         if let Some(period) = timers.hold_period {
@@ -1822,7 +1862,7 @@ pub async fn run(
                     break 'session FsmOutcome::GrReplaced;
                 }
                 Some(update) = outbox_rx.recv() => {
-                    send_outbound(&mut writer, &mut mrai, update, (bgp_rib.bmp(), peer.remote_address)).await;
+                    send_outbound(&mut writer, &mut mrai, update, (bgp_rib.bmp(), peer.remote_address), slot.counters()).await;
                     resync_outbox(&cx, &outbox_rx).await;
                     continue;
                 }
@@ -1838,7 +1878,7 @@ pub async fn run(
                 }
                 () = sleep_until_opt(mrai.deadline()) => {
                     for update in mrai.flush(Instant::now()) {
-                        write_update(&mut writer, (bgp_rib.bmp(), peer.remote_address), update).await;
+                        write_update(&mut writer, (bgp_rib.bmp(), peer.remote_address), update, slot.counters()).await;
                     }
                     continue;
                 }
@@ -1862,6 +1902,8 @@ pub async fn run(
             let notification_received = match &event {
                 Event::NotificationReceived(n) => {
                     log_notification(peer.remote_address, n);
+                    slot.counters()
+                        .note_notification(false, n.error_code, n.error_subcode);
                     Some((n.error_code, n.error_subcode))
                 }
                 _ => None,
@@ -1924,6 +1966,7 @@ pub async fn run(
     };
 
     if registered {
+        slot.counters().note_reset(&outcome);
         // Only the session that reported Established owns the caps: a
         // collision loser ending must not clear the winner's.
         slot.set_refresh_caps(false, false);

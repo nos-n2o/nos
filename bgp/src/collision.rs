@@ -192,6 +192,8 @@ pub struct PeerSlot {
     refresh_caps: std::sync::atomic::AtomicU8,
     /// The running re-evaluation pass, if any (see `reeval_begin`).
     reeval: std::sync::Mutex<ReevalState>,
+    /// Message counters and session history (#1441): outlive `status` resets.
+    counters: crate::counters::PeerCounters,
 }
 
 /// A peer's (unicast/VPN, Flowspec) export policies.
@@ -240,6 +242,7 @@ impl PeerSlot {
             soft_reconfig: std::sync::atomic::AtomicBool::new(peer.soft_reconfiguration_inbound),
             refresh_caps: std::sync::atomic::AtomicU8::new(0),
             reeval: std::sync::Mutex::new(ReevalState::default()),
+            counters: crate::counters::PeerCounters::default(),
             peer,
         })
     }
@@ -248,6 +251,10 @@ impl PeerSlot {
     pub fn stop(&self) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn counters(&self) -> &crate::counters::PeerCounters {
+        &self.counters
     }
 
     pub fn is_stopping(&self) -> bool {
