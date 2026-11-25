@@ -81,6 +81,8 @@ pub enum Resolved {
     ShowRunningConfig,
     /// `show config admin` — only the keystore, values `<hidden>`.
     ShowAdminConfig,
+    /// `show config <path>` — the running config scoped to `path` (#1459).
+    ShowConfigPath(String),
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
@@ -274,6 +276,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
+        Command::ShowConfigPath(p) => Resolved::ShowConfigPath(p),
         Command::ShowHistory => Resolved::ShowHistory,
         Command::ShowAaaUsers => Resolved::ShowAaaUsers,
         Command::AllocateAaaUser { name } => Resolved::AllocateAaaUser { name },
@@ -411,6 +414,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::Help
         | Command::ShowConfig
         | Command::ShowConfigAdmin
+        | Command::ShowConfigPath(_)
         | Command::ShowHistory
         | Command::ShowAaaUsers
         | Command::AllocateAaaUser { .. }

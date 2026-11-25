@@ -322,6 +322,7 @@ hostname: draft
   lab-1> help
   Available commands:
     show config                                   Show the daemon's current running configuration.
+    show config <path>                            Show the running configuration of one object.
     show route <table>                            Show every route in a routing table, best to worst per prefix.
     show route <table> <address>                  Look up the best route(s) for one destination address.
     …
@@ -339,6 +340,7 @@ The descriptions come from the router itself, so they always match the version y
 These work in both modes. Only `clear` acts on anything, and it never changes configuration. The REST equivalent of each is in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
 - `show config`: the whole running config, and `show this` the object you are in. Both are written in the same words you type to set things, indented under their parent, so any line can be copied back after `set`. Only what is configured appears: a field left at its default is not shown, and an empty config prints `nothing configured`. Secrets (a user's password) show as `<hidden>`. The admin keystore is left out of `show config`: `show config admin` prints it, with every secret as `<hidden>`. The output is generated from the same schema as `edit`/`set`/`delete`, so a field you can set always shows.
+- `show config <path>` (any mode): the running config scoped to one object, named with the words `edit` accepts (`show config bgp instance b1`, aliases and REST spellings too), always from the root, and Tab completes it. Same header-and-children output as `show this` at that position. A path that names no existing object (unknown word, missing list element, scalar field) prints `error: no such object: <words>`; it never creates anything.
   ```
   ospf instance o1
     router-id 1.1.1.1
@@ -429,6 +431,7 @@ Optional clauses in a `cmd!` row (#1450):
 | Command | Behavior |
 |---------|----------|
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned running config as an indented hierarchy in the `set` words, only what is configured (works in any mode) |
+| `show config <path>` | Same `Request::Get`, then `config_grammar::resolve_path` turns the words into REST segments and `render_at` prints that object (works in any mode) |
 | `show config admin` | Same fetch, prints only the admin keystore (`key <label>` / `secret <hidden>`), or `no admin keys configured` (works in any mode) |
 | `edit admin` / `set admin key <label> secret <value>` / `delete admin key <label>` | The keystore edits, through the generic grammar. A secret is write-only: `show this` inside the transaction prints `<hidden>`, and `diff` prints `<hidden>`/`<changed>`. At the transaction root `show this` omits the section like `show config` |
 | `set <list element> first\|last\|before <key>\|after <key>` / `move <list element> first\|last\|before <key>\|after <key>` | Inserts or moves a list element: one `EditTransactionPath` write of the element with `position` set (`move` re-sends the element as it is). Handled in `config_grammar.rs` (`Walk::positioned`, `parse_move`) |
@@ -578,7 +581,7 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 |--------|------|
 | `main.rs` | Arg parsing (`--watchdog-socket` only with `dev-args`), login (stdin/`rpassword`) and certificate renewal, the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, and the stdin commit/discard/leave question on `exit` — only the interactive glue |
 | `actions.rs` | What every `session::Resolved` action does (`handle_action`): each `show`, the transaction flow, policy-source editing, `help`, plus `resolve_config_socket` (broker lookup with the default-socket fallback), `subscribe_hostname_task` and `DocCache`/`doc_for`/`doc_for_blocking`. `handle_action` takes the exit question as a `fn(&str) -> LeaveChoice`, so `tests/actions.rs` drives every action against fake daemons (#131) |
-| `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness. Show/shell commands are parsed by `spec::parse` over the `cmd!` rows; any other `edit`/`set`/`delete` line becomes `Command::Config(line)`, resolved later by `config_grammar` (it needs the position and the config) |
+| `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness. Show/shell commands are parsed by `spec::parse` over the `cmd!` rows; any other `edit`/`set`/`delete` line becomes `Command::Config(line)`, resolved later by `config_grammar` (it needs the position and the config); `show config <path>` is a `Rest` row (`Command::ShowConfigPath`) resolved by `config_grammar::resolve_path` |
 | `config_grammar.rs` | The config half of the grammar (#109), generated from the schema's CLI tree (`nos_proto::cli`, `#[derive(Cli)]` with a mandatory `#[cli(...)]` per field): `parse(line, context, config_json) -> Option<ConfigEdit>` resolves an `edit`/`set`/`delete` line at the current position first, then from the root, into `Request::EditTransactionPath` writes (plus, for `edit` and a bare `delete`, where to navigate); `complete` gives Tab/`?` their next words (canonical `words` spelling, list keys from the transaction, enum options); `usages` gives `help` every edit reachable from the position, in tree order. Knows no object or field by name. `tests/config_grammar.rs` pins its output on every line the old hand-written parser was tested with and one per old help row (`config_corpus.jsonl`, recorded while both parsers existed and agreed on the resulting `Config`) |
 | `session.rs` | `Mode` (`Operational` / `Configuration { transaction, path, dirty }`), `Path` (the navigation position as REST segments, `["bgp-instance", "r1", "peer-group", "pg1"]`; `up` drops one list+key pair), and `resolve(&Mode, Command) -> Resolved` — the pure semantic layer; a config line resolves to `Resolved::ConfigEdit(line)`, which `main.rs::config_edit` runs through `config_grammar` against the fetched transaction and sends as `edit_transaction_path` writes, then reads the transaction once to check the position |
 | `spec.rs` | `COMMAND_SPECS` — the show/shell half of the grammar: one `cmd!` row per command (tokens, `Doc`, `Availability`, and the `Command` it builds), so `spec::parse` *is* the parser for them and a command can't be accepted without its doc; usage strings are generated from the tokens. `CONFIG_VERBS` documents `edit`/`set`/`delete`, whose words come from the tree |

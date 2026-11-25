@@ -173,6 +173,10 @@ pub enum LeaveChoice {
 /// `ask_leave` answers the commit/discard/leave-open question on `exit` with
 /// uncommitted changes — a stdin prompt in `main.rs`, a canned answer in
 /// tests.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm per action; query arms live in run_query"
+)]
 pub async fn handle_action(
     action: Resolved,
     mode: Mode,
@@ -294,6 +298,7 @@ pub async fn handle_action(
         }
         action @ (Resolved::ShowRunningConfig
         | Resolved::ShowAdminConfig
+        | Resolved::ShowConfigPath(_)
         | Resolved::ShowTransaction
         | Resolved::ShowRoute { .. }
         | Resolved::ShowFdb { .. }
@@ -339,6 +344,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
     match action {
         Resolved::ShowRunningConfig => {
             show_running_config(socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowConfigPath(path) => {
+            show_config_path(socket, &path).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowAdminConfig => {
@@ -570,6 +579,17 @@ pub fn navigate_to(mode: &Mode, path: session::Path) -> Mode {
 async fn show_running_config(socket: &Path) {
     match client::fetch_running_config(socket).await {
         Ok(cfg) => println!("{}", format::render_config(&cfg)),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+async fn show_config_path(socket: &Path, path: &str) {
+    let words: Vec<&str> = path.split_whitespace().collect();
+    match client::fetch_running_config(socket).await {
+        Ok(cfg) => match format::render_config_path(&cfg, &words) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
