@@ -89,7 +89,7 @@ pub use fdb::{
 pub use interface::{
     BfdAggregateMembers, BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus,
     LacpAggregateConversations, LacpAggregateMembers, LacpLinkConversations, LacpLinkSteering,
-    LinkState, PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
+    LinkOper, LinkState, PortAggregateStatus, StpPortAssignment, StpPortState, SubinterfaceStatus,
 };
 pub use ipc::{
     safe_name, Actor, Event, HistoryEntry, Request, TransactionBase, TransactionSnapshot,

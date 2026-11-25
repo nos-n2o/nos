@@ -166,11 +166,13 @@ fn if_status(name: &str, flat: &[&str], tag0: &[&str]) -> InterfaceStatus {
                 addresses: tag0.iter().map(|a| addr(a, None)).collect(),
                 routing_table: Some("rt1".into()),
                 link_local_address: None,
+                link: None,
             }]
         },
         link_local_address: None,
         err_disabled: false,
         speed_mbps: None,
+        link: None,
     }
 }
 
@@ -805,6 +807,7 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
             err_disabled: false,
             steering: Vec::new(),
             speed_mbps: None,
+            link: None,
         },
     );
     ifaced.set_broadcast_domain(

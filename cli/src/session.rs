@@ -101,6 +101,8 @@ pub enum Resolved {
     ShowInterface {
         name: Option<String>,
     },
+    /// `show interface brief` — data-plane, valid in any mode.
+    ShowInterfaceBrief,
     /// `show port-aggregate` (every aggregate) or `show port-aggregate
     /// <name>` (one) — data-plane, valid in any mode.
     ShowPortAggregate {
@@ -286,6 +288,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
+        Command::ShowInterfaceBrief => Resolved::ShowInterfaceBrief,
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
         Command::ShowLacp { name } => Resolved::ShowLacp { name },
         Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
@@ -424,6 +427,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowRoute { .. }
         | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }
+        | Command::ShowInterfaceBrief
         | Command::ShowPortAggregate { .. }
         | Command::ShowLacp { .. }
         | Command::ShowLldpNeighbors { .. }

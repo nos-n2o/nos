@@ -213,6 +213,15 @@ mod tests {
             echo_only: false,
             tx_pdu_bytes: 0,
             kind: BfdSessionKind::Classical,
+            uptime_secs: Some(60),
+            last_change_secs: 61,
+            down_count: 2,
+            tx_packets: 100,
+            rx_packets: 99,
+            remote_min_rx_us: Some(300_000),
+            remote_desired_min_tx_us: Some(300_000),
+            remote_detect_mult: Some(3),
+            clients: vec!["bgp".into()],
         }
     }
 
@@ -222,7 +231,7 @@ mod tests {
         let keys: Vec<_> = n.fields.iter().map(|f| f.key).collect();
         assert_eq!(keys[0], "key");
         assert_eq!(keys[1], "state");
-        assert_eq!(keys.len(), 15);
+        assert_eq!(keys.len(), 24);
         let key = &n.fields[0];
         assert!(key.brief);
         let sk = key.nested_node().expect("key is nested");
@@ -241,7 +250,7 @@ mod tests {
         assert_eq!((tx.unit, tx.header), (Unit::Micros, "Tx-Interval"));
         let col_keys: Vec<_> = n.columns().iter().map(|f| f.key).collect();
         assert_eq!(col_keys[..3], ["key", "state", "diag"]);
-        assert_eq!(*col_keys.last().unwrap(), "tx_pdu_bytes");
+        assert_eq!(*col_keys.last().unwrap(), "uptime_secs");
     }
 
     #[test]
@@ -313,6 +322,7 @@ mod tests {
 
     const GOLDEN: &[u8] = &[
         3, 114, 116, 49, 0, 192, 0, 2, 1, 1, 0, 192, 0, 2, 2, 1, 4, 101, 116, 104, 48, 0, 1, 3, 97,
-        101, 48, 3, 0, 1, 2, 224, 167, 18, 160, 247, 54, 1, 1, 1, 7, 3, 1, 208, 134, 3, 0, 0, 0,
+        101, 48, 3, 0, 1, 2, 224, 167, 18, 160, 247, 54, 1, 1, 1, 7, 3, 1, 208, 134, 3, 0, 0, 0, 1,
+        60, 61, 2, 100, 99, 1, 224, 167, 18, 1, 224, 167, 18, 1, 3, 1, 3, 98, 103, 112,
     ];
 }

@@ -12,6 +12,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show route <table>` | `GET /v1/routes/{table}` |
 | `show route <table> <address>` | `GET /v1/routes/{table}/{addr}` |
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
+| `show interface brief` | `GET /v1/interfaces` + `GET /v1/port-aggregates` |
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
 | `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show acl` / `show acl <name>` | `GET /v1/acl` / `GET /v1/acl/{name}` |
@@ -38,8 +39,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show ospf segment-routing` | `GET /v1/ospf/segment-routing` |
 | `show ospfv3 neigh` / `show ospfv3 database` | `GET /v1/ospfv3/neighbors` / `GET /v1/ospfv3/database` |
 | `show fdb <domain>` | `GET /v1/fdb/{domain}` |
-| `show log` / `show log <source>` | `GET /v1/logs` / `GET /v1/logs?source=<source>` (also `&limit=<n>`) |
-| `show log [<source>] --follow` | `GET /v1/logs/follow[?source=<source>]` (Server-Sent Events) |
+| `show log` / `show log <source>` | `GET /v1/logs` / `GET /v1/logs?source=<source>` (also `&limit=<n>&level=<l>&match=<text>`) |
+| `show log [<source>] --follow` | `GET /v1/logs/follow[?source=<source>&level=<l>&match=<text>]` (Server-Sent Events) |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` |
 | `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` |
 

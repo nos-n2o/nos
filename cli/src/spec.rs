@@ -756,17 +756,29 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         }),
     cmd!(["show" "interface"],
         Doc::Local {
-            summary: "Show every interface's reconciled status.",
+            summary: "Show every interface's link state and reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every configured \
-                     interface's addresses and routing-table assignment.",
+                     interface: admin/oper state, last change, speed, MTU, addresses, \
+                     routing table and subinterfaces, one block per interface.",
         },
         Always,
         Command::ShowInterface { name: None }),
+    cmd!(["show" "interface" "brief"],
+        Doc::Local {
+            summary: "Show a one-line-per-interface table: state, speed, MTU, VRF, addresses.",
+            detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every interface, \
+                     tagged subinterface and port aggregate: admin and oper state, speed, MTU, \
+                     routing table, port-aggregate membership and addresses. An interface \
+                     literally named `brief` is only reachable over REST.",
+        },
+        Always,
+        Command::ShowInterfaceBrief),
     cmd!(["show" "interface" (name: InterfaceName)],
         Doc::Local {
-            summary: "Show one interface's reconciled status.",
+            summary: "Show one interface's link state and reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named \
-                     interface's addresses and routing-table assignment.",
+                     interface: admin/oper state, last change, speed, MTU, addresses, \
+                     routing table and subinterfaces.",
         },
         Always,
         |name| Command::ShowInterface {

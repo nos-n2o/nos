@@ -534,6 +534,13 @@
               }
             ]
           },
+          "clients": {
+            "description": "Role labels of the clients using the session (sorted, deduplicated); empty when unsolicited.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "detection_time_us": {
             "description": "Detection time, microseconds.",
             "format": "int32",
@@ -543,6 +550,12 @@
           "diag": {
             "$ref": "#/components/schemas/BfdDiag",
             "description": "Diagnostic for the last state change."
+          },
+          "down_count": {
+            "description": "Transitions from Up to any other state since the session was created.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "echo_active": {
             "description": "The Echo function is running (RFC 5880 §6.4).",
@@ -566,15 +579,54 @@
             "$ref": "#/components/schemas/BfdSessionKind",
             "description": "RFC 7880 S-BFD: which end of which protocol this session is."
           },
+          "last_change_secs": {
+            "description": "Age of the last state change in seconds (from session creation when there was none).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "local_discriminator": {
             "description": "My Discriminator (RFC 5880 section 6.8.1).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
+          "remote_desired_min_tx_us": {
+            "description": "The peer's advertised Desired Min TX, microseconds; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remote_detect_mult": {
+            "description": "The peer's Detect Mult; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "remote_discriminator": {
             "description": "Your Discriminator learned from the peer; zero until heard.",
             "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remote_min_rx_us": {
+            "description": "The peer's advertised Required Min RX, microseconds; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rx_packets": {
+            "description": "Packets that passed authentication; for an S-BFD initiator or an unaffiliated-echo loop, what that loop accepted. Per session lifetime.",
+            "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
@@ -588,11 +640,26 @@
             "minimum": 0,
             "type": "integer"
           },
+          "tx_packets": {
+            "description": "Control packets sent (echo-only sessions send none). Per session lifetime.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "tx_pdu_bytes": {
             "description": "RFC 9764: the UDP payload size Control packets are padded to, 0 when not padded.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "uptime_secs": {
+            "description": "Seconds since the session last went Up; `None` while not Up. Per session lifetime in the daemon: resets on re-creation, mode switch or `nos-bfdd` restart.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3100,7 +3167,7 @@
         "type": "object"
       },
       "InterfaceStatus": {
-        "description": "One interface's current desired state, as reconciled by `nos-interfaced`\nfrom the running config. This reflects *desired* state — `nos-interfaced`\ndoes not yet apply it to the OS (see `interface/CLAUDE.md`), so it is not\nnecessarily what the kernel actually has configured.\n\n`addresses`/`routing_table` are populated only for a loopback interface\n(flat L3 config, unchanged); every other interface's L3 config lives in\n`subinterfaces` instead — see `schema::Subinterface`.",
+        "description": "One interface's current state, as reconciled by `nos-interfaced` from the\nrunning config. Most fields reflect *desired* config; the observed kernel\nstate is in `link_local_address`, `speed_mbps` and `link`.\n\n`addresses`/`routing_table` are populated only for a loopback interface\n(flat L3 config, unchanged); every other interface's L3 config lives in\n`subinterfaces` instead — see `schema::Subinterface`.",
         "properties": {
           "addresses": {
             "description": "Configured addresses.",
@@ -3112,6 +3179,17 @@
           "err_disabled": {
             "description": "Observed: held administratively down by `nos-stpd`'s BPDU guard\n(err-disabled). Read back by a restarting `nos-stpd`.",
             "type": "boolean"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkOper",
+                "description": "Observed link state; `None` = not observed (noop driver). Appended last."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "link_local_address": {
             "description": "This interface's kernel-assigned IPv6 link-local address (`fe80::/10`\nscope), if the Linux driver has observed one — `None` until the\nkernel auto-assigns it (or under the `noop` driver, always). Unlike\nevery other field here, this reflects **observed kernel state**, not\ndesired config: `nos-interfaced` never writes a link-local address\nitself (see `interface/CLAUDE.md`'s \"never touch kernel-auto-assigned\naddresses\" note) — it only surfaces what the kernel already assigned,\npurely so a consumer like `nos-ospfv3d` can source real RFC 5340\nHello/Link-LSA traffic from it without its own kernel access.",
@@ -3429,6 +3507,40 @@
           "DrOther"
         ],
         "type": "string"
+      },
+      "LinkOper": {
+        "description": "Observed admin/oper state of one kernel device, with the age of its last\ntransition.",
+        "properties": {
+          "admin_up": {
+            "description": "`IFF_UP`: administratively up.",
+            "type": "boolean"
+          },
+          "down_reason": {
+            "description": "Why it is not operationally up: `admin-down`, `no-carrier` or\n`absent` (unknown kernel device); `None` when up.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_change_secs": {
+            "description": "Age in seconds since `nos-interfaced` last saw an admin/carrier\ntransition; restarts at 0 after an interfaced restart (no flap count).",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "oper_up": {
+            "description": "Administratively up with carrier.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "admin_up",
+          "oper_up"
+        ],
+        "type": "object"
       },
       "LinkType": {
         "description": "The link type for the RSTP rapid transitions (`AdminPointToPointMAC`).",
@@ -5166,6 +5278,17 @@
           "err_disabled": {
             "description": "Observed: held administratively down by `nos-stpd`'s BPDU guard\n(err-disabled). Read back by a restarting `nos-stpd`.",
             "type": "boolean"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkOper",
+                "description": "Observed link state of the bond device; `None` = not observed.\nAppended last."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "link_local_address": {
             "description": "See `InterfaceStatus.link_local_address` — same observed-kernel-state\nsemantics, scoped to this bond's own kernel device.",
@@ -7213,6 +7336,17 @@
             },
             "type": "array"
           },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkOper",
+                "description": "Observed link state of this sub-link's kernel device; `None` = not\nobserved (noop driver). Appended last."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "link_local_address": {
             "description": "See `InterfaceStatus.link_local_address` — same observed-kernel-state\nsemantics, scoped to this subinterface's own kernel device.",
             "type": [
@@ -9158,13 +9292,31 @@
             }
           },
           {
-            "description": "most recent N entries",
+            "description": "most recent N entries (after filtering)",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "minimum severity: trace, debug, info, warn or error",
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "case-insensitive substring of source, target, message or a field",
+            "in": "query",
+            "name": "match",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -9181,6 +9333,16 @@
               }
             },
             "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown level"
           },
           "503": {
             "content": {
@@ -9213,13 +9375,31 @@
             }
           },
           {
-            "description": "trim the initial backlog to the most recent N entries",
+            "description": "trim the initial backlog to the most recent N entries (after filtering)",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "minimum severity: trace, debug, info, warn or error",
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "case-insensitive substring of source, target, message or a field",
+            "in": "query",
+            "name": "match",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -9233,6 +9413,16 @@
               }
             },
             "description": "`event: log` per entry, data = a JSON LogEntry"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown level"
           },
           "503": {
             "content": {

@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use nos_proto::{
     BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff,
     FlowspecRouteSummary, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate,
-    LacpReceiveState, LogEntry, LogLevel, LsaSummary, Ospfv3LsaSummary, PeerSummary,
+    LacpReceiveState, LinkOper, LogEntry, LogLevel, LsaSummary, Ospfv3LsaSummary, PeerSummary,
     PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RouteSourceKind, SectionDiff,
     SubinterfaceStatus, TransactionSnapshot,
 };
@@ -139,59 +139,215 @@ fn render_subinterface_status_raw(status: &SubinterfaceStatus) -> String {
     )
 }
 
-/// Render one interface's daemon-reported status (from `nos-interfaced`'s
-/// `InterfaceRequest::GetInterfaces`/`GetInterface`) as human-readable text
-/// — for `show interface`, distinct from `render_interface`'s config-only
-/// view since it reflects what the daemon has reconciled.
-pub fn render_interface_status(status: &InterfaceStatus) -> String {
-    sanitize(&render_interface_status_raw(status)).into_owned()
+/// `show interface <name>`: a hand-written link-state header, then the view
+/// engine's detail block of the status.
+pub fn render_interface_detail(status: &InterfaceStatus) -> String {
+    sanitize(&render_interface_detail_raw(status)).into_owned()
 }
 
-fn render_interface_status_raw(status: &InterfaceStatus) -> String {
-    let addresses = if status.addresses.is_empty() {
-        "none".to_string()
-    } else {
-        status
-            .addresses
-            .iter()
-            .map(format_address)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let routing_table = sanitize_line(status.routing_table.as_deref().unwrap_or("unset"));
-    let switching_profile = sanitize_line(status.switching_profile.as_deref().unwrap_or("unset"));
-    let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}, mtu {}",
-        sanitize_line(&status.name), status.mtu
-    )];
-    if status.err_disabled {
-        lines.push("  Err-disabled: yes".to_string());
-    }
-    for sub in &status.subinterfaces {
-        lines.push(format!("  {}", render_subinterface_status(sub)));
-    }
-    lines.join("\n")
-}
-
-/// Render every interface's daemon-reported status, one per line — used for
-/// both `show interface` (many entries) and `show interface <name>` (one).
-pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
-    sanitize(&render_interface_statuses_raw(statuses)).into_owned()
-}
-
-fn render_interface_statuses_raw(statuses: &[InterfaceStatus]) -> String {
+/// Bare `show interface`: the detail of every interface, blank-line separated.
+pub fn render_interface_details(statuses: &[InterfaceStatus]) -> String {
     if statuses.is_empty() {
         return "no interfaces".to_string();
     }
-    statuses
+    let all = statuses
         .iter()
-        .map(render_interface_status)
+        .map(render_interface_detail)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n\n");
+    sanitize(&all).into_owned()
+}
+
+/// `eth0 is up, oper up (last change 2d03h ago)`; `-` when unobserved.
+fn interface_header(name: &str, link: Option<&LinkOper>) -> String {
+    let name = sanitize_line(name);
+    let Some(l) = link else {
+        return format!("{name} is -, oper -");
+    };
+    let admin = if l.down_reason.as_deref() == Some("absent") {
+        "absent"
+    } else if l.admin_up {
+        "up"
+    } else {
+        "administratively down"
+    };
+    let oper = if l.oper_up { "up" } else { "down" };
+    let mut notes = Vec::new();
+    if let Some(r) = &l.down_reason {
+        notes.push(sanitize_line(r).into_owned());
+    }
+    if let Some(secs) = l.last_change_secs {
+        notes.push(format!("last change {} ago", human_duration(secs)));
+    }
+    if notes.is_empty() {
+        format!("{name} is {admin}, oper {oper}")
+    } else {
+        format!("{name} is {admin}, oper {oper} ({})", notes.join(", "))
+    }
+}
+
+fn address_strings(v: &serde_json::Value) -> serde_json::Value {
+    let list: Vec<InterfaceAddress> = serde_json::from_value(v.clone()).unwrap_or_default();
+    if list.is_empty() {
+        return serde_json::Value::Null;
+    }
+    list.iter().map(format_address).collect()
+}
+
+fn render_interface_detail_raw(status: &InterfaceStatus) -> String {
+    let mut value = crate::view::to_value(status);
+    // The engine prints an array of objects as JSON: hand it display strings.
+    let mut link_local = value["link_local_address"].clone();
+    value["addresses"] = address_strings(&value["addresses"]);
+    if let Some(subs) = value["subinterfaces"].as_array_mut() {
+        for sub in subs {
+            if link_local.is_null() {
+                link_local = sub["link_local_address"].clone();
+            }
+            sub["addresses"] = address_strings(&sub["addresses"]);
+        }
+    }
+    value["link_local_address"] = link_local;
+    let head = interface_header(&status.name, status.link.as_ref());
+    match nos_proto::view::view_of::<InterfaceStatus>() {
+        Some(node) => format!("{head}\n{}", crate::view::render_detail(node, &value)),
+        None => head,
+    }
+}
+
+fn brief_row(
+    name: String,
+    link: Option<&LinkOper>,
+    speed_mbps: Option<u32>,
+    mtu: u32,
+    vrf: Option<&str>,
+    member: Option<&str>,
+    addresses: &[InterfaceAddress],
+) -> Vec<String> {
+    let (admin, oper) = match link {
+        None => ("-".to_string(), "-".to_string()),
+        Some(l) => {
+            let oper = if l.oper_up { "up" } else { "down" };
+            (
+                (if l.admin_up { "up" } else { "down" }).to_string(),
+                match &l.down_reason {
+                    Some(r) => format!("{oper} ({r})"),
+                    None => oper.to_string(),
+                },
+            )
+        }
+    };
+    let dash = |s: Option<&str>| s.map_or("-".to_string(), str::to_string);
+    vec![
+        name,
+        admin,
+        oper,
+        speed_mbps.map_or("-".to_string(), |n| format!("{n} Mb/s")),
+        mtu.to_string(),
+        dash(vrf),
+        dash(member),
+        if addresses.is_empty() {
+            "-".to_string()
+        } else {
+            addresses
+                .iter()
+                .map(format_address)
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    ]
+}
+
+/// Rows of one device: the device itself (merged with its untagged tag-0
+/// sub-link, which carries the L3 config of the same kernel device), then one
+/// row per tagged subinterface as `<name>.<tag>`.
+fn brief_rows(
+    name: &str,
+    link: Option<&LinkOper>,
+    speed_mbps: Option<u32>,
+    mtu: u32,
+    flat: (Option<&str>, &[InterfaceAddress]),
+    member: Option<&str>,
+    subs: &[SubinterfaceStatus],
+) -> Vec<Vec<String>> {
+    let tag0 = subs.iter().find(|s| s.tag == 0);
+    let mut addresses = flat.1.to_vec();
+    if let Some(t) = tag0 {
+        addresses.extend(t.addresses.iter().cloned());
+    }
+    let vrf = flat
+        .0
+        .or_else(|| tag0.and_then(|t| t.routing_table.as_deref()));
+    let mut rows = vec![brief_row(
+        name.to_string(),
+        link,
+        speed_mbps,
+        mtu,
+        vrf,
+        member,
+        &addresses,
+    )];
+    for s in subs.iter().filter(|s| s.tag != 0) {
+        rows.push(brief_row(
+            format!("{name}.{}", s.tag),
+            s.link.as_ref(),
+            None,
+            s.mtu,
+            s.routing_table.as_deref(),
+            None,
+            &s.addresses,
+        ));
+    }
+    rows
+}
+
+/// `show interface brief`: one table of every interface, tagged
+/// subinterface and port aggregate.
+pub fn render_interface_brief(
+    interfaces: &[InterfaceStatus],
+    aggregates: &[PortAggregateStatus],
+) -> String {
+    let mut rows = Vec::new();
+    for i in interfaces {
+        rows.extend(brief_rows(
+            &i.name,
+            i.link.as_ref(),
+            i.speed_mbps,
+            i.mtu,
+            (i.routing_table.as_deref(), &i.addresses),
+            i.port_aggregate.as_deref(),
+            &i.subinterfaces,
+        ));
+    }
+    for a in aggregates {
+        rows.extend(brief_rows(
+            &a.name,
+            a.link.as_ref(),
+            a.speed_mbps,
+            a.mtu,
+            (None, &[]),
+            None,
+            &a.subinterfaces,
+        ));
+    }
+    if rows.is_empty() {
+        return "no interfaces".to_string();
+    }
+    let cols = [
+        Col::left("Interface"),
+        Col::left("Admin"),
+        Col::left("Oper"),
+        Col::right("Speed"),
+        Col::right("MTU"),
+        Col::left("VRF"),
+        Col::left("Member"),
+        Col::left("Addresses"),
+    ];
+    sanitize(&table(&cols, &rows)).into_owned()
 }
 
 /// Render one port aggregate's daemon-reported status — the `PortAggregate`
-/// counterpart of `render_interface_status`.
+/// counterpart of `render_interface_detail`.
 pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
     sanitize(&render_port_aggregate_status_raw(status)).into_owned()
 }
@@ -3151,15 +3307,22 @@ mod tests {
             addresses,
             routing_table: (tag == 0).then(|| "rt1".to_string()),
             link_local_address: None,
+            link: None,
         }
     }
 
-    #[test]
-    fn render_interface_and_port_aggregate_statuses() {
-        assert_eq!(render_interface_statuses(&[]), "no interfaces");
-        assert_eq!(render_port_aggregate_statuses(&[]), "no port aggregates");
-        let iface = InterfaceStatus {
-            name: "eth0".to_string(),
+    fn oper(admin_up: bool, oper_up: bool, reason: Option<&str>, age: Option<u64>) -> LinkOper {
+        LinkOper {
+            admin_up,
+            oper_up,
+            down_reason: reason.map(str::to_string),
+            last_change_secs: age,
+        }
+    }
+
+    fn iface(name: &str) -> InterfaceStatus {
+        InterfaceStatus {
+            name: name.to_string(),
             addresses: vec![addr("10.9.0.1/32", None)],
             routing_table: None,
             switching_profile: Some("trunk".to_string()),
@@ -3171,18 +3334,13 @@ mod tests {
             ],
             link_local_address: None,
             err_disabled: false,
-            speed_mbps: None,
-        };
-        let out = render_interface_statuses(&[iface.clone(), iface.clone()]);
-        assert_eq!(
-            out.lines().take(3).collect::<Vec<_>>(),
-            [
-                "interface eth0: address [10.9.0.1/32], routing-table unset, switching-profile trunk, mtu 1500",
-                "  subinterface 0: address [10.0.0.1/24], routing-table rt1, mtu 1500",
-                "  subinterface 5: address [none], routing-table unset, mtu 1500",
-            ]
-        );
-        let agg = PortAggregateStatus {
+            speed_mbps: Some(1000),
+            link: Some(oper(true, true, None, Some(2 * 86400 + 3 * 3600))),
+        }
+    }
+
+    fn agg() -> PortAggregateStatus {
+        PortAggregateStatus {
             name: "bond1".to_string(),
             mode: nos_proto::PortAggregateMode::Xor,
             switching_profile: None,
@@ -3193,25 +3351,128 @@ mod tests {
             err_disabled: false,
             steering: Vec::new(),
             speed_mbps: None,
-        };
+            link: None,
+        }
+    }
+
+    #[test]
+    fn render_port_aggregate_statuses_golden() {
+        assert_eq!(render_port_aggregate_statuses(&[]), "no port aggregates");
         assert_eq!(
-            render_port_aggregate_statuses(std::slice::from_ref(&agg)),
+            render_port_aggregate_statuses(std::slice::from_ref(&agg())),
             "port-aggregate bond1: mode xor, switching-profile unset, mtu 9000\n  \
              subinterface 0: address [none], routing-table rt1, mtu 1500"
         );
         let held = PortAggregateStatus {
             err_disabled: true,
-            ..agg.clone()
+            ..agg()
         };
         assert!(render_port_aggregate_status(&held).contains("\n  Err-disabled: yes"));
-        let held = InterfaceStatus {
-            err_disabled: true,
-            ..iface.clone()
+    }
+
+    #[test]
+    fn interface_detail_header_variants() {
+        let hdr = |link| {
+            let st = InterfaceStatus {
+                link,
+                ..iface("eth0")
+            };
+            render_interface_detail(&st)
+                .lines()
+                .next()
+                .unwrap()
+                .to_string()
         };
         assert_eq!(
-            render_interface_status(&held).lines().nth(1),
-            Some("  Err-disabled: yes")
+            hdr(Some(oper(true, true, None, Some(2 * 86400 + 3 * 3600)))),
+            "eth0 is up, oper up (last change 2d03h00m ago)"
         );
+        assert_eq!(
+            hdr(Some(oper(false, false, Some("admin-down"), None))),
+            "eth0 is administratively down, oper down (admin-down)"
+        );
+        assert_eq!(
+            hdr(Some(oper(true, false, Some("no-carrier"), None))),
+            "eth0 is up, oper down (no-carrier)"
+        );
+        assert_eq!(hdr(None), "eth0 is -, oper -");
+    }
+
+    #[test]
+    fn interface_detail_body_golden() {
+        let mut st = iface("eth0");
+        st.subinterfaces[1].link_local_address = Some("fe80::1".parse().unwrap());
+        let out = render_interface_detail(&st);
+        assert!(
+            out.starts_with("eth0 is up, oper up (last change 2d03h00m ago)\n"),
+            "{out}"
+        );
+        assert!(out.contains("10.9.0.1/32"), "{out}");
+        assert!(!out.contains("\"address\""), "no JSON leaks: {out}");
+        assert!(out.contains("1000 Mb/s"), "{out}");
+        // link-local comes from the first subinterface that has one
+        assert!(out.matches("fe80::1").count() >= 1, "{out}");
+        assert!(out.contains("10.0.0.1/24"), "{out}");
+    }
+
+    #[test]
+    fn bare_show_interface_is_every_detail() {
+        assert_eq!(render_interface_details(&[]), "no interfaces");
+        let out = render_interface_details(&[iface("eth0"), iface("eth1")]);
+        assert_eq!(out.matches("\n\neth1 is up").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn interface_brief_golden() {
+        assert_eq!(render_interface_brief(&[], &[]), "no interfaces");
+        let mut down = iface("eth1");
+        down.link = Some(oper(true, false, Some("no-carrier"), None));
+        down.speed_mbps = None;
+        down.subinterfaces = Vec::new();
+        down.port_aggregate = Some("bond1".to_string());
+        down.addresses = Vec::new();
+        let mut unobserved = iface("lo");
+        unobserved.link = None;
+        unobserved.subinterfaces = Vec::new();
+        let mut bond = agg();
+        bond.link = Some(oper(true, true, None, Some(1)));
+        bond.subinterfaces
+            .push(sub_status(7, vec![addr("10.7.0.1/24", None)]));
+        let out = render_interface_brief(&[iface("eth0"), down, unobserved], &[bond]);
+        // Column widths are the table module's business: compare cells.
+        let rows: Vec<Vec<&str>> = out
+            .lines()
+            .skip(2)
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(rows.len(), 6, "{out}");
+        assert_eq!(rows[0][..3], ["eth0", "up", "up"]);
+        assert!(out.contains("eth0.5"), "{out}");
+        assert!(rows[2].contains(&"(no-carrier)"), "{out}");
+        assert_eq!(rows[2][1], "up");
+        assert!(rows[2].contains(&"bond1"), "{out}");
+        assert_eq!(rows[3][..3], ["lo", "-", "-"]);
+        assert_eq!(rows[4][..3], ["bond1", "up", "up"]);
+        assert!(
+            out.contains("bond1.7") && out.contains("10.7.0.1/24"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn interface_renderers_neutralize_forged_values() {
+        let mut st = iface(EVIL);
+        st.routing_table = Some(EVIL.to_string());
+        st.port_aggregate = Some(EVIL.to_string());
+        st.link = Some(oper(true, false, Some(EVIL), None));
+        st.subinterfaces[0].routing_table = Some(EVIL.to_string());
+        let detail = render_interface_detail(&st);
+        assert!(!has_raw_control(&detail.replace('\n', "")), "{detail:?}");
+        let mut bond = agg();
+        bond.name = EVIL.to_string();
+        let brief = render_interface_brief(&[st.clone()], &[bond]);
+        assert!(!has_raw_control(&brief.replace('\n', "")), "{brief:?}");
+        assert_eq!(brief.lines().count(), 2 + 3);
     }
 
     #[test]
@@ -3627,10 +3888,10 @@ mod tests {
             speed_mbps: None,
             subinterfaces: Vec::new(),
             err_disabled: false,
+            link: None,
         };
-        let out = render_interface_status(&status);
-        assert!(!has_raw_control(&out), "{out}");
-        assert_eq!(out.lines().count(), 1);
+        let out = render_interface_detail(&status);
+        assert!(!has_raw_control(&out.replace('\n', "")), "{out:?}");
     }
 
     #[test]

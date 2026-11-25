@@ -68,3 +68,4 @@ Auth (POST): `/login` (no certificate needed), `/renew`. Show (GET, the daemon's
 - 502 and 503 carry a fixed `detail` (`a backend daemon returned an unexpected reply` / `a backend daemon is unavailable`); the specific string (socket path, daemon reply variant) is logged with `warn!` to nos-logd only.
 - A per-instance `show` report entry that failed carries `daemon error`, not the error's `Debug`.
 - `security_headers` (outermost layer) adds `X-Content-Type-Options: nosniff` to every response and a `Content-Security-Policy` to `/swagger-ui*` only.
+- **Log filters (#1451).** `GET /v1/logs` and `/v1/logs/follow` take `level` (minimum severity, case-insensitive) and `match` (`LogEntry::matches`). `LogFilter::new` validates before nos-logd is contacted, so a bad level is a `400` even with logd down. When filtering, `GetLogs` is sent with `limit: None` and `limit` trims the survivors; follow filters the backlog (then trims) and each live line.

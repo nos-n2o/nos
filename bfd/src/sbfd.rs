@@ -9,6 +9,7 @@
 //! - The reflector keeps nothing per initiator: one packet in, at most one out.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
@@ -226,6 +227,7 @@ impl Initiator {
             echo_only: false,
             tx_pdu_bytes: 0,
             kind: BfdSessionKind::SbfdInitiator,
+            remote: None,
         }
     }
 
@@ -368,6 +370,7 @@ pub async fn run(
     mut min_ttl: u8,
     mut cmds: mpsc::Receiver<session::Cmd>,
     status: watch::Sender<Status>,
+    counters: Arc<session::Stats>,
 ) {
     let mut last = core.status();
     loop {
@@ -376,6 +379,7 @@ pub async fn run(
             p = path.rx.recv() => match p {
                 Some((p, ttl)) => {
                     if ttl_ok(key.multihop, ttl, min_ttl) {
+                        counters.count_rx();
                         core.on_packet(now(), &p);
                     } else {
                         debug!(peer = %key.peer, ttl = ?ttl, "bfd sbfd reply discarded: ttl");
@@ -395,14 +399,16 @@ pub async fn run(
             },
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), session::jitter_pct()),
         };
-        if let Some(p) = out
-            && let Err(e) = path.tx.send(&p.encode())
-        {
-            debug!(peer = %key.peer, error = %e, "bfd sbfd send failed");
+        if let Some(p) = out {
+            match path.tx.send(&p.encode()) {
+                Ok(()) => counters.count_tx(),
+                Err(e) => debug!(peer = %key.peer, error = %e, "bfd sbfd send failed"),
+            }
         }
         let s = core.status();
         if s != last {
             if s.state != last.state {
+                counters.on_transition(last.state, s.state, now());
                 session::log_transition(&key, &s);
             }
             last = s;
