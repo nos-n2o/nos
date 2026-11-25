@@ -2297,6 +2297,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Restores the configuration as it was before the pending `commit confirmed`, \
              as a normal commit recorded in the history, without waiting for the timeout.",
         ),
+        Topic::ShowLog => (
+            "Show the log lines the daemons pushed to nos-logd.",
+            "`show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]`. \
+             `<source>` is an exact daemon identity such as `nos-ribd[rt1]`. `last <n>` \
+             keeps the most recent n lines (default 200; 0 is refused). `level <l>` is a \
+             minimum severity: `warn` shows warn and error. `match <text>` is a \
+             case-insensitive substring and takes the rest of the line, so it comes last; \
+             the CLI matches against the whole rendered line (timestamp and level name \
+             included). `--follow` streams new lines after the backlog; the filters apply \
+             to them too.",
+        ),
     };
     CommandDoc {
         topic,

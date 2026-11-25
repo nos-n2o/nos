@@ -713,6 +713,8 @@ topics! {
     ConfirmCommit,
     /// `Request::CancelCommit`
     CancelCommit,
+    /// the `show log` command (`GetLogs`/`Tail`)
+    ShowLog,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
