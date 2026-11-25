@@ -251,6 +251,68 @@ impl LinuxFdbDriver {
     }
 
     /// The name of the link with `index` (`None` if it vanished meanwhile).
+    /// The bridge's local MACs: `(port name, seconds since last frame)`.
+    async fn local_entries(
+        &self,
+        bridge: &str,
+        vni: u32,
+    ) -> Result<BTreeMap<Mac, (String, Option<u32>)>, DriverError> {
+        let bridge_idx = self
+            .find_link(bridge)
+            .await?
+            .ok_or_else(|| DriverError::Other(format!("bridge {bridge} does not exist yet")))?
+            .header
+            .index;
+        let vxlan_idx = self.ifindex.lock().unwrap().get(&vni).copied();
+        let mut dump = self
+            .handle
+            .neighbours()
+            .get()
+            .set_address_family(AddressFamily::Bridge)
+            .execute();
+        let mut out = BTreeMap::new();
+        let mut names: HashMap<u32, String> = HashMap::new();
+        while let Some(m) = dump.try_next().await? {
+            let mut mac = None;
+            let mut master = None;
+            for a in &m.attributes {
+                match a {
+                    NeighbourAttribute::LinkLayerAddress(b) => {
+                        mac = Mac::try_from(b.as_slice()).ok();
+                    }
+                    NeighbourAttribute::Controller(i) => master = Some(*i),
+                    _ => {}
+                }
+            }
+            let Some(mac) = mac else { continue };
+            if is_local_mac(
+                mac,
+                m.header.state == NeighbourState::Permanent,
+                m.header.flags.contains(NeighbourFlags::ExtLearned),
+                fdb_activity(&m),
+                m.header.ifindex,
+                master,
+                bridge_idx,
+                vxlan_idx,
+            ) {
+                let port = m.header.ifindex;
+                if let std::collections::hash_map::Entry::Vacant(v) = names.entry(port)
+                    && let Some(name) = self.link_name(port).await?
+                {
+                    v.insert(name);
+                }
+                out.insert(
+                    mac,
+                    (
+                        names.get(&port).cloned().unwrap_or_default(),
+                        used_of(&m).map(used_secs),
+                    ),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     async fn link_name(&self, index: u32) -> Result<Option<String>, DriverError> {
         let mut links = self.handle.link().get().match_index(index).execute();
         match links.try_next().await {
@@ -501,6 +563,22 @@ fn segment_mac_msg(port: u32, mac: Mac, active: bool) -> NeighbourMessage {
         )),
     ];
     m
+}
+
+/// Kernel `USER_HZ`: the unit of `NDA_CACHEINFO` times.
+const USER_HZ: u32 = 100;
+
+/// `NDA_CACHEINFO` ticks to whole seconds.
+fn used_secs(ticks: u32) -> u32 {
+    ticks / USER_HZ
+}
+
+/// The `used` field of the entry's `NDA_CACHEINFO`, when it carries one.
+fn used_of(m: &NeighbourMessage) -> Option<u32> {
+    m.attributes.iter().find_map(|a| match a {
+        NeighbourAttribute::CacheInfo(c) => Some(c.used),
+        _ => None,
+    })
 }
 
 /// `Some(active)` for an FDB entry that tracks activity, `None` otherwise.
@@ -954,54 +1032,19 @@ impl FdbDriver for LinuxFdbDriver {
         bridge: &str,
         vni: u32,
     ) -> Result<BTreeMap<Mac, String>, DriverError> {
-        let bridge_idx = self
-            .find_link(bridge)
-            .await?
-            .ok_or_else(|| DriverError::Other(format!("bridge {bridge} does not exist yet")))?
-            .header
-            .index;
-        let vxlan_idx = self.ifindex.lock().unwrap().get(&vni).copied();
-        let mut dump = self
-            .handle
-            .neighbours()
-            .get()
-            .set_address_family(AddressFamily::Bridge)
-            .execute();
-        let mut out = BTreeMap::new();
-        let mut names: HashMap<u32, String> = HashMap::new();
-        while let Some(m) = dump.try_next().await? {
-            let mut mac = None;
-            let mut master = None;
-            for a in &m.attributes {
-                match a {
-                    NeighbourAttribute::LinkLayerAddress(b) => {
-                        mac = Mac::try_from(b.as_slice()).ok();
-                    }
-                    NeighbourAttribute::Controller(i) => master = Some(*i),
-                    _ => {}
-                }
-            }
-            let Some(mac) = mac else { continue };
-            if is_local_mac(
-                mac,
-                m.header.state == NeighbourState::Permanent,
-                m.header.flags.contains(NeighbourFlags::ExtLearned),
-                fdb_activity(&m),
-                m.header.ifindex,
-                master,
-                bridge_idx,
-                vxlan_idx,
-            ) {
-                let port = m.header.ifindex;
-                if let std::collections::hash_map::Entry::Vacant(v) = names.entry(port)
-                    && let Some(name) = self.link_name(port).await?
-                {
-                    v.insert(name);
-                }
-                out.insert(mac, names.get(&port).cloned().unwrap_or_default());
-            }
-        }
-        Ok(out)
+        let e = self.local_entries(bridge, vni).await?;
+        Ok(e.into_iter().map(|(m, (port, _))| (m, port)).collect())
+    }
+
+    async fn local_mac_ages(
+        &self,
+        bridge: &str,
+        vni: u32,
+    ) -> Result<BTreeMap<Mac, u32>, DriverError> {
+        let e = self.local_entries(bridge, vni).await?;
+        Ok(e.into_iter()
+            .filter_map(|(m, (_, a))| a.map(|a| (m, a)))
+            .collect())
     }
 
     async fn local_neighbours(&self, bridge: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
@@ -1175,5 +1218,25 @@ mod tests {
             InfoBridgePort::Learning(false),
             InfoBridgePort::NeighSupress(true),
         ])));
+    }
+
+    #[test]
+    fn used_ticks_become_seconds() {
+        assert_eq!(used_secs(0), 0);
+        assert_eq!(used_secs(99), 0);
+        assert_eq!(used_secs(100), 1);
+        assert_eq!(used_secs(12345), 123);
+        assert_eq!(used_secs(u32::MAX), 42_949_672);
+    }
+
+    #[test]
+    fn used_of_reads_the_cacheinfo() {
+        let mut m = NeighbourMessage::default();
+        assert_eq!(used_of(&m), None);
+        let mut b = vec![0u8; 16];
+        b[4..8].copy_from_slice(&500u32.to_ne_bytes());
+        let info = rtnetlink::packet_route::neighbour::NeighbourCacheInfo::parse(&b).unwrap();
+        m.attributes.push(NeighbourAttribute::CacheInfo(info));
+        assert_eq!(used_of(&m), Some(500));
     }
 }

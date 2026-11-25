@@ -843,16 +843,33 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             level: if level.is_empty() { None } else { Some(parse_log_level(level)?) },
             needle: if text.is_empty() { None } else { Some(text.to_string()) },
         }),
-    cmd!(["show" "bgp" "brief"],
+    cmd!(["show" "bgp" "summary"],
         Doc::Local {
-            summary: "Show a one-line-per-peer BGP session summary across every instance.",
+            summary: "Show a one-line-per-peer BGP session summary, per instance.",
             detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
-                     nos-watchdogd) for its peers' current session state, remote AS, uptime, \
-                     and negotiated hold-time. An instance whose nos-bgpd isn't running is \
-                     reported individually rather than aborting the whole command.",
+                     nos-watchdogd) for its peers' current session: Neighbor, AS, Remote-Id, \
+                     State, Status (Admin-Shutdown, Max-Prefix, Gr-Stale), Up/Down, Hold, \
+                     Keepalive, Peer-group and the accepted prefixes per family (PfxRcd). \
+                     An instance whose nos-bgpd isn't running is reported individually \
+                     rather than aborting the whole command; TCP-AO counters and graceful \
+                     restart state are in `| json`.",
         },
         Always,
-        Command::ShowBgpBrief),
+        Command::ShowBgpSummary { instance: None }),
+    cmd!(["show" "bgp" "summary" "instance" (name: Plain)],
+        Doc::Local {
+            summary: "Show the BGP session summary of one instance.",
+            detail: "Same as show bgp summary, restricted to the instance <name>.",
+        },
+        Always,
+        |name| Command::ShowBgpSummary { instance: Some(name.to_string()) }),
+    cmd!(["show" "bgp" "brief"],
+        Doc::Local {
+            summary: "The old name of show bgp summary.",
+            detail: "Same as show bgp summary.",
+        },
+        Always,
+        Command::ShowBgpSummary { instance: None }),
     cmd!(["show" "bgp" "evpn"],
         Doc::Local {
             summary: "Show every EVPN route received from BGP peers, across every instance.",

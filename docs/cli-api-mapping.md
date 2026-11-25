@@ -28,7 +28,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
 | `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
-| `show bgp brief` | `GET /v1/bgp/summary` |
+| `show bgp summary` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` |
 | `show bgp vpnv4` / `show bgp vpnv4 rd <rd>` | `GET /v1/bgp/vpnv4` / `GET /v1/bgp/vpnv4?rd=<rd>` |
@@ -46,10 +46,10 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` |
 | `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` |
 
-The shell formats the data as text and REST returns it as JSON, but the data is the same. For example, `show bgp brief`'s line
+The shell formats the data as text and REST returns it as JSON, but the data is the same. For example, `show bgp summary`'s row
 
 ```
-  10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:02:21 hold-time 90
+10.50.0.3  65002  2.2.2.2  Established  None  2m21s  1m30s  30s  pg1
 ```
 
 comes from the same record that `GET /v1/bgp/summary` returns as `{"remote_address":"10.50.0.3","remote_as":65002,"peer_group":"pg1","state":"Established","uptime_secs":…,"negotiated_hold_time":90,…}`.

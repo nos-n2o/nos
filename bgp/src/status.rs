@@ -2,7 +2,7 @@
 //! `State` doesn't fill, since it's entirely local to that async task's
 //! stack and never persisted anywhere else. `server.rs`'s `GetSummary`
 //! handler reads this (via `SessionManager::peer_summaries`) to answer
-//! `nos-cli`'s `show bgp brief`.
+//! `nos-cli`'s `show bgp summary`.
 
 use std::net::Ipv4Addr;
 use std::os::fd::RawFd;

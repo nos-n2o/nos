@@ -118,7 +118,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '"r1"' $B/v1/transactions/bgp/r
 $C -X PUT -H 'Content-Type: application/json' -d '"o1"' $B/v1/transactions/bgp/routing-table/rt1/ospf-instance
 ```
 
-An instance can feed only one routing table, and a table has at most one instance of each kind. A BGP instance that no routing table names opens no session at all: it has no VRF to run in. `show bgp brief` still lists it, but its peers stay down.
+An instance can feed only one routing table, and a table has at most one instance of each kind. A BGP instance that no routing table names opens no session at all: it has no VRF to run in. `show bgp summary` still lists it, but its peers stay down.
 
 ### Redistribute static routes into BGP, OSPF or OSPFv3
 
@@ -341,7 +341,7 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | Field | CLI | REST path and body | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
 | name | `edit routing-table <table>` | `routing-table/{table}`, body `{"name":"rt2"}` | string | 1-64 characters, unique | Creates the VRF | `show config` |
-| bgp-instance | `set routing-table <t> bgp-instance <i>` / `delete routing-table <t> bgp-instance` | `routing-table/{t}/bgp-instance`, `"r1"` | name, unset | instance exists; used by one table only | Runs the BGP instance in this VRF and installs its best routes | `show bgp brief`, `show route <t>` |
+| bgp-instance | `set routing-table <t> bgp-instance <i>` / `delete routing-table <t> bgp-instance` | `routing-table/{t}/bgp-instance`, `"r1"` | name, unset | instance exists; used by one table only | Runs the BGP instance in this VRF and installs its best routes | `show bgp summary`, `show route <t>` |
 | ospf-instance | `set routing-table <t> ospf-instance <i>` / `delete … ospf-instance` | `routing-table/{t}/ospf-instance`, `"o1"` | name, unset | as above | Runs the OSPF instance in this VRF | `show ospf neigh`, `show route <t>` |
 | ospfv3-instance | `set routing-table <t> ospfv3-instance <i>` / `delete … ospfv3-instance <i>` | `routing-table/{t}/ospfv3-instance`, `["o3"]` | list of names, empty | each exists, listed once, claimed by one table only | Runs the OSPFv3 instance in this VRF | `show ospfv3 neigh`, `show route <t>` |
 | static-routing-instance | `set routing-table <t> static-routing-instance <s>` / `delete … static-routing-instance` | `routing-table/{t}/static-routing-instance`, `"s1"` | name, unset | as above | Installs the instance's routes | `show route <t>` |

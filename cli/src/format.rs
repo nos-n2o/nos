@@ -2,11 +2,11 @@ use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 
 use nos_proto::{
-    BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff,
-    FlowspecRouteSummary, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate,
-    LacpReceiveState, LinkOper, LogEntry, LogLevel, LsaSummary, Ospfv3LsaSummary, PeerSummary,
-    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RouteSourceKind, SectionDiff,
-    SubinterfaceStatus, TransactionSnapshot,
+    Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, FlowspecRouteSummary,
+    InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkOper,
+    LogEntry, LogLevel, LsaSummary, Ospfv3LsaSummary, PortAggregateLacpSummary,
+    PortAggregateStatus, PrefixRoutes, RouteSourceKind, SectionDiff, SubinterfaceStatus,
+    TransactionSnapshot,
 };
 use time::OffsetDateTime;
 
@@ -1317,104 +1317,6 @@ fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
     lines.join("\n")
 }
 
-fn render_bgp_session_state(state: BgpSessionState) -> &'static str {
-    match state {
-        BgpSessionState::Idle => "Idle",
-        BgpSessionState::OpenSent => "OpenSent",
-        BgpSessionState::OpenConfirm => "OpenConfirm",
-        BgpSessionState::Established => "Established",
-    }
-}
-
-/// Render one BGP instance's peer summaries, one line per peer — used for
-/// `show bgp brief`.
-pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
-    sanitize(&render_bgp_summary_raw(instance, peers)).into_owned()
-}
-
-fn render_bgp_summary_raw(instance: &str, peers: &[PeerSummary]) -> String {
-    if peers.is_empty() {
-        return format!(
-            "bgp instance {}: no peers configured",
-            sanitize_line(instance)
-        );
-    }
-    let mut lines = vec![format!("bgp instance {}:", sanitize_line(instance))];
-    for peer in peers {
-        let remote_as = peer
-            .remote_as
-            .map_or_else(|| "-".to_string(), |asn| asn.to_string());
-        let uptime = peer
-            .uptime_secs
-            .map_or_else(|| "-".to_string(), human_duration);
-        let hold_time = peer
-            .negotiated_hold_time
-            .map_or_else(|| "-".to_string(), |h| h.to_string());
-        let ao = match (peer.ao_current_key, peer.ao_rnext_key) {
-            (Some(current), Some(rnext)) => format!(
-                " ao-current {current} ao-rnext {rnext} ao-good {} ao-bad {} ao-no-key {}",
-                peer.ao_packets_good.unwrap_or(0),
-                peer.ao_packets_bad.unwrap_or(0),
-                peer.ao_packets_key_not_found.unwrap_or(0),
-            ),
-            _ => String::new(),
-        };
-        let mut counts = String::new();
-        for (af, n) in ["v4", "v6", "evpn"]
-            .iter()
-            .zip(peer.accepted_prefixes.unwrap_or_default())
-        {
-            if n > 0 {
-                let _ = write!(counts, " {af} {n}");
-            }
-        }
-        let prefixes = if counts.is_empty() {
-            String::new()
-        } else {
-            format!(" prefixes{counts}")
-        };
-        // RFC 4724 / RFC 8538: the peer's restart time, N, and the families
-        // it keeps forwarding state for (F).
-        let gr = match &peer.graceful_restart {
-            Some(g) if peer.state == BgpSessionState::Established => {
-                let f: Vec<&str> = g
-                    .families
-                    .iter()
-                    .filter(|(_, f)| *f)
-                    .map(|(af, _)| af.as_str())
-                    .collect();
-                format!(
-                    " gr {}s{}{}",
-                    g.restart_time,
-                    if g.notification { " N" } else { "" },
-                    if f.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" F:{}", f.join(","))
-                    }
-                )
-            }
-            _ => String::new(),
-        };
-        lines.push(format!(
-            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}{}{gr}",
-            peer.remote_address,
-            sanitize_line(&peer.peer_group),
-            if peer.shutdown {
-                "Idle (shutdown)".to_string()
-            } else if peer.max_prefix_held {
-                "Idle (max-prefix)".to_string()
-            } else if peer.stale_prefixes > 0 && peer.state != BgpSessionState::Established {
-                format!("Idle (gr-stale {})", peer.stale_prefixes)
-            } else {
-                render_bgp_session_state(peer.state).to_string()
-            },
-            prefixes,
-        ));
-    }
-    lines.join("\n")
-}
-
 /// Render one BGP instance's received EVPN routes, one line per route — used
 /// for `show bgp evpn`.
 pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
@@ -2645,65 +2547,6 @@ mod tests {
         );
     }
 
-    fn idle_peer(addr: &str) -> PeerSummary {
-        PeerSummary {
-            remote_address: addr.parse().unwrap(),
-            peer_group: "pg1".to_string(),
-            remote_as: None,
-            remote_bgp_id: None,
-            state: BgpSessionState::Idle,
-            uptime_secs: None,
-            negotiated_hold_time: None,
-            negotiated_keepalive: None,
-            shutdown: false,
-            ao_current_key: None,
-            ao_rnext_key: None,
-            ao_packets_good: None,
-            ao_packets_bad: None,
-            ao_packets_key_not_found: None,
-            max_prefix_held: false,
-            accepted_prefixes: None,
-            graceful_restart: None,
-            stale_prefixes: 0,
-        }
-    }
-
-    #[test]
-    fn render_bgp_summary_shows_max_prefix_hold_and_prefix_counts() {
-        let mut held = idle_peer("10.0.0.1");
-        held.max_prefix_held = true;
-        let mut up = idle_peer("10.0.0.2");
-        up.state = BgpSessionState::Established;
-        up.accepted_prefixes = Some([3, 0, 2]);
-        assert_eq!(
-            render_bgp_summary("r1", &[held, up]),
-            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle (max-prefix) uptime - hold-time -\n  \
-             10.0.0.2 AS - peer-group pg1 Established uptime - hold-time - prefixes v4 3 evpn 2"
-        );
-    }
-
-    #[test]
-    fn render_bgp_summary_shows_graceful_restart() {
-        let mut stale = idle_peer("10.0.0.1");
-        stale.stale_prefixes = 4;
-        let mut up = idle_peer("10.0.0.2");
-        up.state = BgpSessionState::Established;
-        up.graceful_restart = Some(nos_proto::GrSummary {
-            restart_time: 120,
-            notification: true,
-            restarting: false,
-            families: vec![
-                (nos_proto::AddressFamily::Ipv4Unicast, true),
-                (nos_proto::AddressFamily::Ipv6Unicast, false),
-            ],
-        });
-        assert_eq!(
-            render_bgp_summary("r1", &[stale, up]),
-            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle (gr-stale 4) uptime - hold-time -\n  \
-             10.0.0.2 AS - peer-group pg1 Established uptime - hold-time - gr 120s N F:ipv4"
-        );
-    }
-
     #[test]
     fn render_bgp_bmp_lists_two_lines_per_station() {
         use nos_proto::{BmpFrameCounts, BmpMonitor, BmpStationState, BmpStationStatus};
@@ -2900,54 +2743,6 @@ mod tests {
         };
         assert!(
             render_bgp_flowspec("r1", &[best]).ends_with("actions: discard dataplane: installed")
-        );
-    }
-
-    #[test]
-    fn render_bgp_summary_empty_list() {
-        assert_eq!(
-            render_bgp_summary("r1", &[]),
-            "bgp instance r1: no peers configured"
-        );
-    }
-
-    #[test]
-    fn render_bgp_summary_one_established_peer_shows_uptime_and_hold_time() {
-        let mut peer = idle_peer("10.0.0.1");
-        peer.remote_as = Some(65002);
-        peer.state = BgpSessionState::Established;
-        peer.uptime_secs = Some(3725);
-        peer.negotiated_hold_time = Some(90);
-        assert_eq!(
-            render_bgp_summary("r1", &[peer]),
-            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 1h02m hold-time 90"
-        );
-    }
-
-    #[test]
-    fn render_bgp_summary_idle_peer_shows_dashes() {
-        assert_eq!(
-            render_bgp_summary("r1", &[idle_peer("10.0.0.1")]),
-            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle uptime - hold-time -"
-        );
-    }
-
-    #[test]
-    fn render_bgp_summary_with_ao_info_appends_key_and_counters() {
-        let mut peer = idle_peer("10.0.0.1");
-        peer.remote_as = Some(65002);
-        peer.state = BgpSessionState::Established;
-        peer.uptime_secs = Some(5);
-        peer.negotiated_hold_time = Some(90);
-        peer.ao_current_key = Some(1);
-        peer.ao_rnext_key = Some(2);
-        peer.ao_packets_good = Some(42);
-        peer.ao_packets_bad = Some(1);
-        peer.ao_packets_key_not_found = Some(0);
-        assert_eq!(
-            render_bgp_summary("r1", &[peer]),
-            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 5s \
-             hold-time 90 ao-current 1 ao-rnext 2 ao-good 42 ao-bad 1 ao-no-key 0"
         );
     }
 
@@ -3611,14 +3406,6 @@ mod tests {
 
     #[test]
     fn render_small_enums_and_edge_cases() {
-        assert_eq!(
-            render_bgp_session_state(BgpSessionState::OpenSent),
-            "OpenSent"
-        );
-        assert_eq!(
-            render_bgp_session_state(BgpSessionState::OpenConfirm),
-            "OpenConfirm"
-        );
         for (s, want) in [
             (RouteSourceKind::Static, "static"),
             (RouteSourceKind::Bgp, "bgp"),
@@ -3898,10 +3685,6 @@ mod tests {
 
     #[test]
     fn names_in_bgp_and_interface_output_are_escaped() {
-        let mut peer = idle_peer("10.0.0.1");
-        peer.peer_group = EVIL.to_string();
-        let out = render_bgp_summary(EVIL, &[peer]);
-        assert!(!has_raw_control(&out), "{out}");
         let status = InterfaceStatus {
             link_local_address: None,
             name: EVIL.to_string(),
