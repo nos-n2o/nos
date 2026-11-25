@@ -227,6 +227,7 @@ $ $C -X POST $B/v1/config/save -o /dev/null -w '%{http_code}\n'
 ## Commit history and rollback
 
 - `GET /v1/history` lists the configs recent commits replaced, newest first: `[{"index":1,"time":<unix seconds>,"actor":"<user>","kind":"commit"|"rollback"|"commit-confirmed"|"auto-rollback"|"cancel-rollback"}]`. `nos-configd` keeps the last 20 on disk next to its config file (`config.yaml.history/`, mode 0700, files 0600) and they survive a restart; without a config file it keeps none and answers `502`.
+- `GET /v1/history/{index}` returns the `Config` as it was `index` commits back (`1` = what the latest commit replaced, `0` = the running config), role-projected like `GET /v1/config`. `404` if `index` is beyond the history, `502` without a config file.
 - `POST /v1/rollback/{n}` restores the config as it was `n` commits ago (`1` undoes the latest commit) and replies like a commit (`{"committed":"rollback 1","warnings":[],"unsaved":true}`). Admin role only (`403` otherwise; listing is open to every role). It is a normal commit: `422` if the old config no longer validates or would leave no user or admin, `404` if `n` is beyond the history, `n = 0` does nothing. The rollback is itself a history entry.
 - Neither is a save: `POST /v1/config/save` still persists the result.
 

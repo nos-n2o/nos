@@ -4079,6 +4079,22 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         &a.rest_expect(Method::GET, "/v1/history", None, 200).await?,
         "\"index\":1",
     )?;
+    // #1458: the config `n` commits back, before the rollback moves it.
+    let running_now = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+    let old = a
+        .rest_expect(Method::GET, "/v1/history/1", None, 200)
+        .await?;
+    if !old.contains("\"rest-pl\"") || running_now.contains("rest-pl") {
+        bail!("GET /v1/history/1 is not the config the undo replaced: {old}");
+    }
+    let zero = a
+        .rest_expect(Method::GET, "/v1/history/0", None, 200)
+        .await?;
+    if zero != running_now {
+        bail!("GET /v1/history/0 differs from GET /v1/config:\n{zero}\n{running_now}");
+    }
+    a.rest_expect(Method::GET, "/v1/history/999", None, 404)
+        .await?;
     let audit = "config rollback audit index=1";
     let before = a.count(audit);
     expect_body(
@@ -4107,7 +4123,7 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     {
         bail!("the second rollback 1 did not undo the first");
     }
-    log("router-a: GET /v1/history and POST /v1/rollback/N re-apply and undo a commit");
+    log("router-a: GET /v1/history, GET /v1/history/N and POST /v1/rollback/N re-apply and undo a commit");
     // Confirmed commit (#1144): unconfirmed it rolls back on its own, a
     // second one is refused (409), a confirmed one stays. 30s is the minimum.
     for (host, confirm) in [("expire-host", false), ("keep-host", true)] {

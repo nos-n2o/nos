@@ -787,6 +787,18 @@ impl ConfigStore {
         Ok(entries.into_iter().map(|(e, _)| e).collect())
     }
 
+    /// The config `index` commits back (#1458): `0` is the running config
+    /// (served even without a history), otherwise `History::get`.
+    pub async fn history_config(&self, index: u32) -> Result<Arc<Config>, ConfigError> {
+        if index == 0 {
+            return Ok(self.running_snapshot().await);
+        }
+        let h = self.history_handle()?;
+        tokio::task::spawn_blocking(move || h.get(index))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+    }
+
     fn history_handle(&self) -> Result<Arc<History>, ConfigError> {
         self.0
             .history
@@ -3281,6 +3293,20 @@ mod tests {
             Err(ConfigError::HistoryOutOfRange { .. })
         ));
 
+        // #1458: history_config.
+        assert_eq!(
+            *store.history_config(0).await.unwrap(),
+            *store.running_snapshot().await
+        );
+        assert_eq!(
+            store.history_config(1).await.unwrap().bgp_instances.len(),
+            0
+        );
+        assert!(matches!(
+            store.history_config(99).await,
+            Err(ConfigError::HistoryOutOfRange { .. })
+        ));
+
         // A new daemon on the same config path still has the history.
         let again = ConfigStore::new(Config::default(), Some(path));
         assert_eq!(again.history().await.unwrap().len(), 4);
@@ -3309,6 +3335,11 @@ mod tests {
             none.rollback(1, "x").await,
             Err(ConfigError::HistoryUnavailable)
         ));
+        assert!(matches!(
+            none.history_config(1).await,
+            Err(ConfigError::HistoryUnavailable)
+        ));
+        assert!(none.history_config(0).await.is_ok());
     }
 
     #[tokio::test]

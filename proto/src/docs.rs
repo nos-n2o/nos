@@ -715,6 +715,8 @@ topics! {
     CancelCommit,
     /// the `show log` command (`GetLogs`/`Tail`)
     ShowLog,
+    /// `Request::GetHistoryConfig`
+    ShowConfigurationDiff,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

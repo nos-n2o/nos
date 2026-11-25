@@ -256,6 +256,14 @@ pub enum Request {
     },
     /// Admin-only `show aaa users` (#1374). Replies `Event::ExternalUsers`.
     ListExternalUsers,
+    /// The config `index` commits back (`1` = what the latest commit
+    /// replaced, `0` = the running config; #1458). Replies `Event::Config`,
+    /// role-projected like `Get`; an `index` beyond the history is an
+    /// `Event::Error`.
+    GetHistoryConfig {
+        /// How many commits to go back.
+        index: u32,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
