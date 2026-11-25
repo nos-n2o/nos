@@ -341,11 +341,16 @@ async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
 async fn status_with_steering(ctx: &Context, agg: PortAggregateState) -> PortAggregateStatus {
     let steering = ctx.driver.steering_stats(&agg.name).await;
     let speed_mbps = sample_speed(ctx, agg.bond_name.as_deref()).await;
-    PortAggregateStatus {
+    let link = sample_oper(ctx, agg.bond_name.as_deref()).await;
+    let bond = agg.bond_name.clone();
+    let mut st = PortAggregateStatus {
         steering,
         speed_mbps,
+        link,
         ..to_port_aggregate_status(agg)
-    }
+    };
+    fill_sub_links(ctx, bond.as_deref(), &mut st.subinterfaces).await;
+    st
 }
 
 /// Brings the tc steering of `aggregate` in line with the current state (#895).
@@ -372,6 +377,26 @@ fn sub_status(s: crate::state::SubinterfaceState, parent_mtu: u32) -> Subinterfa
         routing_table: s.routing_table,
         mtu: s.mtu.unwrap_or(parent_mtu),
         link_local_address: s.link_local_address,
+        link: None,
+    }
+}
+
+/// Observed admin/oper state sampled now, like `sample_speed`.
+async fn sample_oper(ctx: &Context, kernel_name: Option<&str>) -> Option<nos_proto::LinkOper> {
+    ctx.driver.link_oper(kernel_name?).await
+}
+
+/// Fills each subinterface's `link` from its kernel device: `<base>.<tag>`,
+/// or `base` itself for the untagged tag 0 (same naming as `build_subinterfaces`).
+async fn fill_sub_links(ctx: &Context, base: Option<&str>, subs: &mut [SubinterfaceStatus]) {
+    let Some(base) = base else { return };
+    for s in subs {
+        let dev = if s.tag == 0 {
+            base.to_string()
+        } else {
+            format!("{base}.{}", s.tag)
+        };
+        s.link = sample_oper(ctx, Some(&dev)).await;
     }
 }
 
@@ -383,10 +408,15 @@ async fn sample_speed(ctx: &Context, kernel_name: Option<&str>) -> Option<u32> {
 
 async fn status_with_speed(ctx: &Context, iface: InterfaceState) -> InterfaceStatus {
     let speed_mbps = sample_speed(ctx, Some(&iface.name)).await;
-    InterfaceStatus {
+    let link = sample_oper(ctx, Some(&iface.name)).await;
+    let name = iface.name.clone();
+    let mut st = InterfaceStatus {
         speed_mbps,
+        link,
         ..to_status(iface)
-    }
+    };
+    fill_sub_links(ctx, Some(&name), &mut st.subinterfaces).await;
+    st
 }
 
 fn to_status(iface: InterfaceState) -> InterfaceStatus {
@@ -409,6 +439,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         link_local_address: None,
         err_disabled: iface.stp.err_disabled,
         speed_mbps: None,
+        link: None,
     }
 }
 
@@ -441,6 +472,7 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
         err_disabled: agg.stp.err_disabled,
         steering: Vec::new(),
         speed_mbps: None,
+        link: None,
     }
 }
 

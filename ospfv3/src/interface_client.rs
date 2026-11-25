@@ -84,6 +84,7 @@ mod tests {
                 subinterfaces: vec![],
                 err_disabled: false,
                 speed_mbps: None,
+                link: None,
             }))
         });
 

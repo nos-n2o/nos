@@ -52,11 +52,13 @@ fn status(
                 addresses: addresses.clone(),
                 routing_table: Some("rt1".into()),
                 link_local_address: None,
+                link: None,
             })
             .collect(),
         link_local_address: None,
         err_disabled: false,
         speed_mbps: None,
+        link: None,
     }
 }
 

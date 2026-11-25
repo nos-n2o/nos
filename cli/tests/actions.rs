@@ -280,6 +280,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show fdb bd1",
             "show interface",
             "show interface eth9",
+            "show interface brief",
             "show port-aggregate",
             "show port-aggregate bond9",
             "show lacp",
