@@ -385,6 +385,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::ShowHistory
     ),
     cmd!(
+        ["show" "configuration" "diff" (n: Number)],
+        Doc::FromConfig(Topic::ShowConfigurationDiff),
+        Always,
+        |n| Command::ShowConfigDiff { from: n.parse().ok()?, to: 0 }
+    ),
+    cmd!(
+        ["show" "configuration" "diff" (n: Number) (m: Number)],
+        Doc::FromConfig(Topic::ShowConfigurationDiff),
+        Always,
+        |n, m| Command::ShowConfigDiff { from: n.parse().ok()?, to: m.parse().ok()? }
+    ),
+    cmd!(
         ["rollback" (n: Number)],
         Doc::FromConfig(Topic::Rollback),
         Configuration,

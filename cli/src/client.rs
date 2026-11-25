@@ -296,6 +296,21 @@ pub async fn list_history(socket_path: &Path) -> Result<Vec<nos_proto::HistoryEn
     }
 }
 
+/// `Request::GetHistoryConfig`: the running config `index` commits ago (0 = running).
+pub async fn get_history_config(socket_path: &Path, index: u32) -> Result<Config, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(Request::GetHistoryConfig { index }).await?;
+    match reader.next().await {
+        Some(Ok(Event::Config(c))) => Ok(c),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to GetHistoryConfig".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
 /// `Request::Rollback`: the commit's warnings and whether running is unsaved.
 pub async fn rollback(socket_path: &Path, index: u32) -> Result<(Vec<String>, bool), ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;

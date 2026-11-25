@@ -225,6 +225,10 @@ pub enum Resolved {
         name: String,
     },
     ShowHistory,
+    ShowConfigDiff {
+        from: u32,
+        to: u32,
+    },
     Rollback {
         n: u32,
     },
@@ -280,6 +284,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
         Command::ShowConfigPath(p) => Resolved::ShowConfigPath(p),
         Command::ShowHistory => Resolved::ShowHistory,
+        Command::ShowConfigDiff { from, to } => Resolved::ShowConfigDiff { from, to },
         Command::ShowAaaUsers => Resolved::ShowAaaUsers,
         Command::AllocateAaaUser { name } => Resolved::AllocateAaaUser { name },
         Command::ClearAaaUser { name } => Resolved::ClearAaaUser { name },
@@ -419,6 +424,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowConfigAdmin
         | Command::ShowConfigPath(_)
         | Command::ShowHistory
+        | Command::ShowConfigDiff { .. }
         | Command::ShowAaaUsers
         | Command::AllocateAaaUser { .. }
         | Command::ClearAaaUser { .. }
