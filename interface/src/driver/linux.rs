@@ -1592,6 +1592,20 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         self.links.oper(kernel_interface)
     }
 
+    async fn link_counters(&self, kernel_interface: &str) -> Option<nos_proto::LinkCounters> {
+        let link = match self.find_link(kernel_interface).await {
+            Ok(l) => l?,
+            Err(e) => {
+                debug!(interface = %kernel_interface, error = %e, "link counters read failed");
+                return None;
+            }
+        };
+        link.attributes.iter().find_map(|a| match a {
+            LinkAttribute::Stats64(s) => Some(counters_from_stats64(s)),
+            _ => None,
+        })
+    }
+
     async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32> {
         let path = format!("/sys/class/net/{kernel_interface}/speed");
         let raw = tokio::fs::read_to_string(path).await.ok()?;
@@ -2109,6 +2123,19 @@ mod tests {
             .unwrap();
         assert!(is_up("pa"), "{}", flags("pa"));
         assert!(is_up("pa.10"), "{}", flags("pa.10"));
+    }
+}
+
+fn counters_from_stats64(s: &rtnetlink::packet_route::link::Stats64) -> nos_proto::LinkCounters {
+    nos_proto::LinkCounters {
+        rx_packets: s.rx_packets,
+        rx_bytes: s.rx_bytes,
+        rx_errors: s.rx_errors,
+        rx_dropped: s.rx_dropped,
+        tx_packets: s.tx_packets,
+        tx_bytes: s.tx_bytes,
+        tx_errors: s.tx_errors,
+        tx_dropped: s.tx_dropped,
     }
 }
 

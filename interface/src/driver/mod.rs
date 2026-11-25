@@ -178,6 +178,10 @@ pub trait InterfaceDriver: Send + Sync {
     /// per query. `None` = nothing observed (noop).
     async fn link_oper(&self, kernel_interface: &str) -> Option<nos_proto::LinkOper>;
 
+    /// Kernel `IFLA_STATS64` counters of `kernel_interface`, a pure read
+    /// sampled per query, never cached. `None` = noop or the read failed.
+    async fn link_counters(&self, kernel_interface: &str) -> Option<nos_proto::LinkCounters>;
+
     /// Puts one bridge port in `state` right now (`InterfaceRequest::
     /// SetStpPortStates`). The port must exist and be a bridge port. A
     /// resync keeps the state through `InterfaceState.stp`.

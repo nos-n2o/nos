@@ -237,6 +237,8 @@ async fn expect_sub_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+const COUNTER_KEYS: [&str; 4] = ["rx_packets", "tx_packets", "rx_bytes", "tx_bytes"];
+
 /// #1368: `speed_mbps` on the interface status is the kernel's
 /// `/sys/class/net/<dev>/speed` read at query time (null when it reads -1/0),
 /// and never set for `lo`. What a veth really reports is logged, not assumed.
@@ -267,6 +269,29 @@ pub async fn interface_speed(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a: eth0 link is not up with an age: {link}");
     }
     log(format!("router-a: rest reports eth0 link {link}"));
+    // #1455: kernel counters, non-zero after the BGP session, then monotonic.
+    let first: Vec<u64> = COUNTER_KEYS
+        .iter()
+        .map(|k| link["counters"][k].as_u64().unwrap_or(0))
+        .collect();
+    if first.contains(&0) {
+        bail!(
+            "router-a: eth0 counters missing or zero: {}",
+            link["counters"]
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let again: serde_json::Value = serde_json::from_str(&body)?;
+    for (k, f) in COUNTER_KEYS.iter().zip(&first) {
+        let n = again["link"]["counters"][k].as_u64().unwrap_or(0);
+        if n < *f {
+            bail!("router-a: eth0 {k} went backwards: {f} -> {n}");
+        }
+    }
+    log(format!("router-a: rest reports eth0 counters {first:?}"));
     // `lo` is not a configured interface (404), or if listed has no speed.
     let (code, text) = a.rest(Method::GET, "/v1/interfaces/lo", None).await?;
     if code == 200 {

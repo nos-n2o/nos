@@ -3317,6 +3317,7 @@ mod tests {
             oper_up,
             down_reason: reason.map(str::to_string),
             last_change_secs: age,
+            counters: None,
         }
     }
 
@@ -3413,6 +3414,30 @@ mod tests {
         // link-local comes from the first subinterface that has one
         assert!(out.matches("fe80::1").count() >= 1, "{out}");
         assert!(out.contains("10.0.0.1/24"), "{out}");
+    }
+
+    #[test]
+    fn interface_detail_counters() {
+        let mut st = iface("eth0");
+        let mut l = oper(true, true, None, Some(5));
+        l.counters = Some(nos_proto::LinkCounters {
+            rx_packets: 1_234_567,
+            rx_bytes: 840_300_000,
+            rx_errors: 0,
+            rx_dropped: 3,
+            tx_packets: 12,
+            tx_bytes: 2_500_000_000,
+            tx_errors: 0,
+            tx_dropped: 0,
+        });
+        st.link = Some(l);
+        let out = render_interface_detail(&st);
+        assert!(out.contains("MB") && out.contains("GB"), "{out}");
+        st.link.as_mut().unwrap().counters = None;
+        let out = render_interface_detail(&st);
+        assert!(!out.contains("MB"), "{out}");
+        st.link = None;
+        assert!(render_interface_detail(&st).contains("oper -"));
     }
 
     #[test]
