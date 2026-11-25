@@ -79,11 +79,16 @@ pub enum Command {
     },
     /// `show bfd reflector` — the S-BFD reflector's discriminators and counters.
     ShowBfdReflector,
-    /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
-    /// optionally filtered to one source, or a live tail with `--follow`.
+    /// `show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]`
+    /// — a buffer snapshot (default last 200), optionally of one source, at
+    /// least `level`, whose rendered line contains `match`; or a live tail
+    /// with `--follow`. The clauses come in any order, `match` last.
     ShowLog {
         source: Option<String>,
         follow: bool,
+        last: Option<usize>,
+        level: Option<nos_proto::LogLevel>,
+        needle: Option<String>,
     },
     /// `show bgp brief` — a one-line-per-peer session summary across every
     /// configured BGP instance.
@@ -655,40 +660,151 @@ mod tests {
         );
     }
 
+    fn log(
+        source: Option<&str>,
+        follow: bool,
+        last: Option<usize>,
+        level: Option<nos_proto::LogLevel>,
+        needle: Option<&str>,
+    ) -> Command {
+        Command::ShowLog {
+            source: source.map(str::to_string),
+            follow,
+            last,
+            level,
+            needle: needle.map(str::to_string),
+        }
+    }
+
     #[test]
     fn show_log_variants() {
+        use nos_proto::LogLevel::Warn;
         assert_eq!(
             Command::parse("show log"),
-            Command::ShowLog {
-                source: None,
-                follow: false,
-            }
+            log(None, false, None, None, None)
         );
         assert_eq!(
             Command::parse("show log --follow"),
-            Command::ShowLog {
-                source: None,
-                follow: true,
-            }
-        );
-        assert_eq!(
-            Command::parse("show log nos-ribd[rt1]"),
-            Command::ShowLog {
-                source: Some("nos-ribd[rt1]".to_string()),
-                follow: false,
-            }
+            log(None, true, None, None, None)
         );
         assert_eq!(
             Command::parse("show log nos-ribd[rt1] --follow"),
-            Command::ShowLog {
-                source: Some("nos-ribd[rt1]".to_string()),
-                follow: true,
-            }
+            log(Some("nos-ribd[rt1]"), true, None, None, None)
+        );
+        assert_eq!(
+            Command::parse("show log nos-ribd[rt1]"),
+            log(Some("nos-ribd[rt1]"), false, None, None, None)
+        );
+        assert_eq!(
+            Command::parse("show log last 5"),
+            log(None, false, Some(5), None, None)
+        );
+        assert_eq!(
+            Command::parse("show log level warn"),
+            log(None, false, None, Some(Warn), None)
         );
         assert!(matches!(
             Command::parse("show log --follow nos-ribd"),
             Command::Unknown(_)
         ));
+    }
+
+    /// Every subset and order of `last`/`level`/`--follow`, with and without a
+    /// source, parses to the same fields.
+    #[test]
+    fn show_log_clauses_any_order() {
+        use nos_proto::LogLevel::Error;
+        let clauses = [["last", "7"], ["level", "error"], ["--follow", ""]];
+        for mask in 0..8u8 {
+            let picked: Vec<_> = (0..3).filter(|i| mask >> i & 1 == 1).collect();
+            let perms: Vec<Vec<usize>> = match picked.len() {
+                0 => vec![vec![]],
+                1 => vec![picked.clone()],
+                2 => vec![picked.clone(), vec![picked[1], picked[0]]],
+                _ => vec![
+                    vec![0, 1, 2],
+                    vec![0, 2, 1],
+                    vec![1, 0, 2],
+                    vec![1, 2, 0],
+                    vec![2, 0, 1],
+                    vec![2, 1, 0],
+                ],
+            };
+            for perm in perms {
+                for src in [None, Some("nos-x")] {
+                    let mut words = vec!["show", "log"];
+                    words.extend(src);
+                    for i in &perm {
+                        words.extend(clauses[*i].iter().filter(|w| !w.is_empty()));
+                    }
+                    let line = words.join(" ");
+                    let want = log(
+                        src,
+                        mask & 4 != 0,
+                        (mask & 1 != 0).then_some(7),
+                        (mask & 2 != 0).then_some(Error),
+                        None,
+                    );
+                    assert_eq!(Command::parse(&line), want, "{line}");
+                    // `match` last, whatever came before.
+                    let with = Command::parse(&format!("{line} match  a b"));
+                    let want = match want {
+                        Command::ShowLog {
+                            source,
+                            follow,
+                            last,
+                            level,
+                            ..
+                        } => Command::ShowLog {
+                            source,
+                            follow,
+                            last,
+                            level,
+                            needle: Some(" a b".into()),
+                        },
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(with, want, "{line} match");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn show_log_match_swallows_the_rest() {
+        assert_eq!(
+            Command::parse("show log match last 5"),
+            log(None, false, None, None, Some("last 5"))
+        );
+        assert_eq!(
+            Command::parse("show log last 2 match  --follow  x"),
+            log(None, false, Some(2), None, Some(" --follow  x"))
+        );
+    }
+
+    #[test]
+    fn show_log_rejects_bad_clauses() {
+        for line in [
+            "show log last",
+            "show log last x",
+            "show log last -1",
+            "show log level",
+            "show log level loud",
+            "show log match",
+            "show log last 1 last 2",
+            "show log level info level warn",
+            "show log --follow --follow",
+            "show log match a match b nos-x",
+            "show log last 5 nos-x",
+        ] {
+            let c = Command::parse(line);
+            // `match a match b ...` is valid (needle "a match b ...").
+            if line.starts_with("show log match a") {
+                assert!(matches!(c, Command::ShowLog { .. }), "{line}");
+            } else {
+                assert!(matches!(c, Command::Unknown(_)), "{line}: {c:?}");
+            }
+        }
     }
 
     #[test]

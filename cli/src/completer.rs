@@ -25,6 +25,9 @@ pub struct NosCompleter {
     /// transaction's, else the running one. Called at most once per
     /// completion.
     config_source: Box<dyn FnMut() -> Option<Value> + Send>,
+    /// The log sources `nos-logd` holds, for `show log <source>`: production
+    /// caches them for the session (#1452); called at most once per completion.
+    log_sources: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
@@ -32,11 +35,13 @@ impl NosCompleter {
         mode: Mode,
         doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send>,
         config_source: Box<dyn FnMut() -> Option<Value> + Send>,
+        log_sources: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
             doc_source,
             config_source,
+            log_sources,
         }
     }
 
@@ -100,6 +105,7 @@ impl Completer for NosCompleter {
             config.get_or_insert_with(source).clone()
         };
 
+        let mut sources: Option<Vec<String>> = None;
         let typed_words: Vec<(usize, &str)> = typed.to_vec();
         for spec in spec::COMMAND_SPECS {
             if !spec::availability_matches(spec.availability, &self.mode) {
@@ -137,6 +143,10 @@ impl Completer for NosCompleter {
                                     .iter()
                                     .filter_map(|e| e["name"].as_str().map(str::to_string)),
                             );
+                        }
+                        if kind == spec::ArgKind::LogSource {
+                            let src = sources.get_or_insert_with(&mut self.log_sources);
+                            words.extend(src.iter().cloned());
                         }
                         words.retain(|w| w.starts_with(partial));
                         words.retain(|w| !out.iter().any(|s| &s.value == w));
@@ -217,8 +227,20 @@ mod tests {
         })
     }
 
+    fn log_sources() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(|| vec!["nos-bgpd[r1]".into(), "nos-ribd[rt1]".into()])
+    }
+
     fn values(mode: Mode, line: &str) -> Vec<String> {
-        let mut completer = NosCompleter::new(mode, doc_source(), config());
+        values_with(mode, line, log_sources())
+    }
+
+    fn values_with(
+        mode: Mode,
+        line: &str,
+        sources: Box<dyn FnMut() -> Vec<String> + Send>,
+    ) -> Vec<String> {
+        let mut completer = NosCompleter::new(mode, doc_source(), config(), sources);
         let result = completer.complete(line, line.len());
         let mut v: Vec<String> = result
             .suggestions()
@@ -298,22 +320,62 @@ mod tests {
         );
     }
 
+    fn show_log(line: &str) -> Vec<String> {
+        values(Mode::Operational, line)
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
     #[test]
-    fn show_log_offers_only_the_clauses_not_yet_typed() {
-        for line in ["show log ", "show log nos-x "] {
-            assert_eq!(
-                values(Mode::Operational, line),
-                vec!["--follow".to_string()]
-            );
-        }
+    fn show_log_offers_the_clauses_and_sources() {
         assert_eq!(
-            values(Mode::Operational, "show log --follow "),
-            Vec::<String>::new()
+            show_log("show log "),
+            strs(&[
+                "--follow",
+                "last",
+                "level",
+                "match",
+                "nos-bgpd[r1]",
+                "nos-ribd[rt1]"
+            ])
         );
         assert_eq!(
-            values(Mode::Operational, "show log nos-x --follow "),
+            show_log("show log nos-x "),
+            strs(&["--follow", "last", "level", "match"])
+        );
+        assert_eq!(show_log("show log nos-r"), strs(&["nos-ribd[rt1]"]));
+        assert_eq!(
+            show_log("show log level "),
+            strs(&["debug", "error", "info", "trace", "warn"])
+        );
+        assert_eq!(
+            show_log("show log last 5 level warn "),
+            strs(&["--follow", "match"])
+        );
+        assert_eq!(
+            show_log("show log --follow last 5 level warn match "),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn log_sources_are_fetched_once_and_may_be_empty() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = calls.clone();
+        let v = values_with(
+            Mode::Operational,
+            "show log ",
+            Box::new(move || {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                vec!["nos-a".into()]
+            }),
+        );
+        assert!(v.contains(&"nos-a".to_string()));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let v = values_with(Mode::Operational, "show log ", Box::new(Vec::new));
+        assert_eq!(v, strs(&["--follow", "last", "level", "match"]));
     }
 
     #[test]
@@ -325,8 +387,12 @@ mod tests {
 
     #[test]
     fn extra_carries_usage_and_detail_for_help_menu() {
-        let mut completer =
-            NosCompleter::new(configuring(&["bgp-instance", "r1"]), doc_source(), config());
+        let mut completer = NosCompleter::new(
+            configuring(&["bgp-instance", "r1"]),
+            doc_source(),
+            config(),
+            log_sources(),
+        );
         let result = completer.complete("set as", 6);
         let s = &result.suggestions()[0];
         assert_eq!(s.value, "asn");

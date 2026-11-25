@@ -75,6 +75,19 @@ impl ArgKind {
     }
 }
 
+/// A `level` clause's word (`ArgKind::LogLevel::fixed_values`).
+pub fn parse_log_level(word: &str) -> Option<nos_proto::LogLevel> {
+    use nos_proto::LogLevel::{Debug, Error, Info, Trace, Warn};
+    Some(match word {
+        "trace" => Trace,
+        "debug" => Debug,
+        "info" => Info,
+        "warn" => Warn,
+        "error" => Error,
+        _ => return None,
+    })
+}
+
 /// Where a command's summary/detail text comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Doc {
@@ -820,12 +833,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         |name| Command::ShowInterface {
             name: Some(name.to_string()),
         }),
-    cmd!(["show" "log" [(source: LogSource)] ["--follow"]],
+    cmd!(["show" "log" [(source: LogSource)] ["last" (n: Number)] ["level" (l: LogLevel)] ["--follow"] ["match" (text: Rest)]],
         Doc::FromConfig(Topic::ShowLog),
         Always,
-        |source, follow| Command::ShowLog {
+        |source, last, level, follow, text| Command::ShowLog {
             source: (!source.is_empty()).then(|| source.to_string()),
             follow: !follow.is_empty(),
+            last: if last.is_empty() { None } else { Some(last.parse().ok()?) },
+            level: if level.is_empty() { None } else { Some(parse_log_level(level)?) },
+            needle: if text.is_empty() { None } else { Some(text.to_string()) },
         }),
     cmd!(["show" "bgp" "brief"],
         Doc::Local {
@@ -1517,7 +1533,8 @@ mod tests {
         assert!(usages.contains(&"clear bgp <instance> <peer> soft-in"));
         assert!(usages.contains(&"clear bgp <instance> <peer>"));
         assert!(usages.contains(&"set source line <line> <text>"));
-        assert!(usages.contains(&"show log [<source>] [--follow]"));
+        assert!(usages
+            .contains(&"show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]"));
     }
 
     #[test]

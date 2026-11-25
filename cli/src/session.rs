@@ -148,10 +148,14 @@ pub enum Resolved {
     },
     /// `show bfd reflector` — data-plane, valid in any mode.
     ShowBfdReflector,
-    /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
+    /// `show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]`
+    /// — data-plane, valid in any mode.
     ShowLog {
         source: Option<String>,
         follow: bool,
+        last: Option<usize>,
+        level: Option<nos_proto::LogLevel>,
+        needle: Option<String>,
     },
     /// `show bgp brief` — data-plane, valid in any mode. Router-wide (no
     /// instance argument): the caller iterates every `BgpInstance` in the
@@ -310,7 +314,19 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         }
         Command::ShowBfdSessions { peer, detail } => Resolved::ShowBfdSessions { peer, detail },
         Command::ShowBfdReflector => Resolved::ShowBfdReflector,
-        Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
+        Command::ShowLog {
+            source,
+            follow,
+            last,
+            level,
+            needle,
+        } => Resolved::ShowLog {
+            source,
+            follow,
+            last,
+            level,
+            needle,
+        },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
         Command::ShowBgpFlowspec { family, vrf } => Resolved::ShowBgpFlowspec { family, vrf },

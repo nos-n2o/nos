@@ -22,6 +22,9 @@ use nos_proto::{
     WatchdogRequest,
 };
 
+/// Every request the fake `nos-logd` received (tests tell theirs apart by source).
+static LOG_REQUESTS: Mutex<Vec<LogRequest>> = Mutex::new(Vec::new());
+
 /// A `nos-configd` that keeps one in-progress config and applies edits to it.
 fn fake_configd(path: &Path) {
     let running = common::base_running();
@@ -185,7 +188,8 @@ fn lab() -> Lab {
                 vec![BfdEvent::Sessions(Vec::new())]
             }),
             // A tail replies once, then the fake closes the stream.
-            "log" => serve_with(role, name, &path, true, |_: LogRequest| {
+            "log" => serve_with(role, name, &path, true, |r: LogRequest| {
+                LOG_REQUESTS.lock().unwrap().push(r);
                 vec![LogEvent::Logs(Vec::new())]
             }),
             "bgp" => serve(role, name, &path, |r: BgpRequest| {
@@ -306,6 +310,11 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bfd sessions 192.0.2.1 detail",
             "show log",
             "show log configd --follow",
+            "show log last 5",
+            "show log level warn match foo",
+            "show log last 0",
+            "show log last 3 level error --follow match x y",
+            "show log configd --follow level info last 2",
             "show bgp brief",
             "show bgp evpn",
             "show bgp flowspec",
@@ -552,4 +561,43 @@ fn navigation_keeps_transaction_and_dirtiness() {
     assert!(matches!(top, Mode::Configuration { ref path, dirty: true, .. } if path.is_root()));
     let doc = actions::unavailable_doc(Topic::Save);
     assert!(doc.summary.contains("could not reach nos-configd"));
+}
+
+/// `show log` asks the daemon for the last 200 by default, `last <n>` for n,
+/// and fetches everything (`limit: None`) when it has to filter itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn show_log_forwards_the_limit() {
+    let lab = lab();
+    run(
+        &lab,
+        Mode::Operational,
+        &[
+            "show log lg-default",
+            "show log lg-five last 5",
+            "show log lg-level level warn",
+            "show log lg-match match x",
+            "show log lg-zero last 0",
+        ],
+        discard,
+    )
+    .await;
+    let got = |src: &str| -> Vec<Option<usize>> {
+        LOG_REQUESTS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| match r {
+                LogRequest::GetLogs { source, limit } if source.as_deref() == Some(src) => {
+                    Some(*limit)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(got("lg-default"), [Some(200)]);
+    assert_eq!(got("lg-five"), [Some(5)]);
+    assert_eq!(got("lg-level"), [None]);
+    assert_eq!(got("lg-match"), [None]);
+    // `last 0` is rejected before any IPC.
+    assert_eq!(got("lg-zero"), Vec::<Option<usize>>::new());
 }

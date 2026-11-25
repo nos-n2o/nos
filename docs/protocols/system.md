@@ -138,7 +138,12 @@ edge-1> show log --follow
 edge-1> show log nos-fdbd[bd100] --follow
 ```
 
-Each line is: time (UTC), level, source, the component inside it, the message, and extra fields in parentheses. `show log` prints the whole buffer; `show log <source>` only one source; `--follow` then keeps printing new entries until Ctrl-C.
+Each line is: time (UTC), level, source, the component inside it, the message, and extra fields in parentheses. `show log` prints the last 200 entries; `show log <source>` only one source. Clauses, in any order, `match` last: `last <n>` (at least 1) changes the count; `level <l>` keeps that severity and above; `match <text>` keeps lines containing the text (ignoring case) anywhere in the printed line, time and level name included; `--follow` prints the backlog the same way, then new matching entries until Ctrl-C. Filters apply before `last`. Tab completes sources from `nos-logd`, fetched once per session (a source that starts logging later shows up in a new session). The REST `match` differs: see `GET /v1/logs`.
+
+```
+edge-1> show log last 20 level error
+edge-1> show log nos-bgpd[r1] --follow match established
+```
 
 The sources are:
 
@@ -285,6 +290,6 @@ REST paths are relative to `/v1/transactions/{tx}/`.
 | logging syslog tls allow-tls12 | `set logging syslog <name> tls allow-tls12` | `logging/syslog/{name}/tls/allow_tls12`, `true` | off | none | Also allows classical TLS 1.2 for this collector | `docker logs`: `syslog tls12 classical key exchange` |
 | routing-table rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete routing-table <t> rest-api` | `routing-table/{t}/rest-api`, `{"address":"192.0.2.10","port":8443}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address | `show log nos-restd[<t>]` |
 
-The operational commands on this page have no configuration: `save` (shell only), `show log [<source>] [--follow]` (`GET /v1/logs`, `GET /v1/logs/follow`).
+The operational commands on this page have no configuration: `save` (shell only), `show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]` (`GET /v1/logs`, `GET /v1/logs/follow`).
 
 How users, certificates and the log work inside the router is described in [`CLAUDE.md`](../../CLAUDE.md), [`pki/CLAUDE.md`](../../pki/CLAUDE.md) and [`rest/CLAUDE.md`](../../rest/CLAUDE.md).
