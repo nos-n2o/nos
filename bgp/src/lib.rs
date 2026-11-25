@@ -5,6 +5,7 @@ pub mod as_path;
 pub mod bfd_client;
 pub mod bmp;
 pub mod collision;
+pub mod counters;
 pub mod damping;
 pub mod evpn;
 pub mod fdb_push_client;

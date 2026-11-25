@@ -4156,6 +4156,49 @@
         ],
         "type": "object"
       },
+      "MessageCounts": {
+        "description": "BGP messages by type, one direction (RFC 4271 section 4, RFC 2918). An\nRFC 4724 End-of-RIB is an UPDATE on the wire and counts as one.",
+        "properties": {
+          "keepalive": {
+            "description": "KEEPALIVE messages.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "notification": {
+            "description": "NOTIFICATION messages.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "open": {
+            "description": "OPEN messages.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_refresh": {
+            "description": "ROUTE-REFRESH messages.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "update": {
+            "description": "UPDATE messages.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "open",
+          "update",
+          "notification",
+          "keepalive",
+          "route_refresh"
+        ],
+        "type": "object"
+      },
       "MstInstance": {
         "description": "One MST instance and this bridge's priority in it.",
         "properties": {
@@ -4233,6 +4276,35 @@
           "Unchanged"
         ],
         "type": "string"
+      },
+      "NotificationInfo": {
+        "description": "The last NOTIFICATION a peer sent or received (wire code and subcode: an\nRFC 8538 Hard Reset shows as 6/9).",
+        "properties": {
+          "code": {
+            "description": "Error code.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seconds_ago": {
+            "description": "Seconds since it was sent or received.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subcode": {
+            "description": "Error subcode.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "subcode",
+          "seconds_ago"
+        ],
+        "type": "object"
       },
       "OspfArea": {
         "description": "One OSPF area within an `OspfInstance`, keyed by its dotted-quad area id\n(e.g. `0.0.0.0` for the backbone). Unique only within its owning\ninstance — never referenced from outside `OspfInstance`, unlike\n`OspfProfile.name` — so uniqueness is enforced on the parent's `areas`\nfield (`ospf_instance::unique_area_ids`), not here.",
@@ -5806,6 +5878,19 @@
           "csr"
         ],
         "type": "object"
+      },
+      "ResetReason": {
+        "description": "Why an `Established` session last ended (`FsmOutcome` without payload).",
+        "enum": [
+          "tcp-error",
+          "peer-closed",
+          "notification-sent",
+          "notification-received",
+          "hold-timer-expired",
+          "collision-lost",
+          "gr-replaced"
+        ],
+        "type": "string"
       },
       "RestApi": {
         "description": "Where `nos-restd` listens for a routing table: one specific address\ninside the table's VRF. There is deliberately no wildcard — an\nunauthenticated management API must be pinned to one reachable address.\nWhether the address is actually configured on an interface in the VRF is\noperational state, not validated at commit: `nos-restd` retries the bind.",

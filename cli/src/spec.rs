@@ -41,6 +41,8 @@ pub enum ArgKind {
     AclName,
     /// An IPv4 or IPv6 address.
     IpAddr,
+    /// A unicast MAC address, `aa:bb:cc:dd:ee:ff` in either case.
+    Mac,
     /// A non-negative integer.
     Number,
     /// The rest of the line, verbatim (leading whitespace kept) — only ever
@@ -76,6 +78,14 @@ impl ArgKind {
 }
 
 /// A `level` clause's word (`ArgKind::LogLevel::fixed_values`).
+/// A `show fdb ... mac` argument: a unicast `aa:bb:cc:dd:ee:ff`, normalised to
+/// lower case (the daemons spell MACs that way).
+fn fdb_mac(s: &str) -> Option<String> {
+    let s = s.to_ascii_lowercase();
+    nos_proto::evpn_id::parse_mac(&s)?;
+    Some(s)
+}
+
 pub fn parse_log_level(word: &str) -> Option<nos_proto::LogLevel> {
     use nos_proto::LogLevel::{Debug, Error, Info, Trace, Warn};
     Some(match word {
@@ -357,6 +367,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             table: table.to_string(),
             address: Some(address.parse().ok()?),
         }),
+    cmd!(["show" "fdb"],
+        Doc::Local {
+            summary: "Show every EVPN broadcast domain's MACs in one table.",
+            detail: "Queries each broadcast domain with a vni (config order) and prints one \
+                     table: Domain, Mac, Source, Interface, Age, Vtep, Esi. A domain whose \
+                     nos-fdbd is not running is reported on stderr and skipped.",
+        },
+        Always,
+        Command::ShowFdb { domain: None, mac: None }),
+    cmd!(["show" "fdb" "mac" (mac: Mac)],
+        Doc::Local {
+            summary: "Find a MAC in every broadcast domain's forwarding database.",
+            detail: "Like `show fdb`, keeping only the entries for the MAC, plus the IP \
+                     bindings that resolve to it. A broadcast domain named `mac` is shown \
+                     with `show fdb mac mac <mac>`.",
+        },
+        Always,
+        |mac| Command::ShowFdb { domain: None, mac: Some(fdb_mac(mac)?) }),
     cmd!(["show" "fdb" (domain: BroadcastDomainName)],
         Doc::Local {
             summary: "Show a broadcast domain's forwarding database.",
@@ -367,7 +395,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         |domain| Command::ShowFdb {
-            domain: domain.to_string(),
+            domain: Some(domain.to_string()),
+            mac: None,
+        }),
+    cmd!(["show" "fdb" (domain: BroadcastDomainName) "mac" (mac: Mac)],
+        Doc::Local {
+            summary: "Find a MAC in one broadcast domain's forwarding database.",
+            detail: "Keeps only the entries for the MAC, plus the IP bindings that resolve \
+                     to it.",
+        },
+        Always,
+        |domain, mac| Command::ShowFdb {
+            domain: Some(domain.to_string()),
+            mac: Some(fdb_mac(mac)?),
         }),
     cmd!(
         ["save"],
@@ -1364,6 +1404,7 @@ mod tests {
             Token::Literal(lit) => out.push(lit),
             Token::Arg(ArgKind::IpAddr) => out.push("192.0.2.1"),
             Token::Arg(ArgKind::Number) => out.push("1"),
+            Token::Arg(ArgKind::Mac) => out.push("02:00:00:00:00:01"),
             Token::Arg(ArgKind::Rest) => out.push("  some text"),
             Token::Arg(ArgKind::LogLevel) => out.push("info"),
             Token::Arg(_) => out.push("sample"),

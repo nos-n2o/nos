@@ -1242,6 +1242,81 @@ fn render_log_entries_raw(entries: &[LogEntry]) -> String {
         .join("\n")
 }
 
+fn mac_source_word(s: nos_proto::MacSource) -> &'static str {
+    match s {
+        nos_proto::MacSource::Local => "Local",
+        nos_proto::MacSource::Remote => "Remote",
+    }
+}
+
+/// `show fdb` without a domain, or with `mac <mac>`: one flat table of MACs
+/// tagged with their domain and, when `mac` is given, the IP bindings that
+/// resolve to it as a second table (#1464). `mac` is only a label for the
+/// miss line: the caller already filtered the rows.
+pub fn render_fdb_flat(
+    macs: &[(String, nos_proto::MacEntry)],
+    neighbours: &[(String, nos_proto::NeighEntry)],
+    mac: Option<&str>,
+) -> String {
+    if macs.is_empty() && neighbours.is_empty() {
+        return match mac {
+            Some(m) => format!("no fdb entry for {}", sanitize(m)),
+            None => "no fdb entries".to_string(),
+        };
+    }
+    let dash = |o: Option<String>| o.unwrap_or_else(|| "-".to_string());
+    let mac_rows: Vec<Vec<String>> = macs
+        .iter()
+        .map(|(d, e)| {
+            vec![
+                d.clone(),
+                e.mac.clone(),
+                mac_source_word(e.source).to_string(),
+                dash(e.interface.clone()),
+                dash(e.age_secs.map(|s| human_duration(u64::from(s)))),
+                dash(e.vtep.map(|v| v.to_string())),
+                dash(e.esi.clone()),
+            ]
+        })
+        .collect();
+    let mut parts = vec![table(
+        &[
+            Col::left("Domain"),
+            Col::left("Mac"),
+            Col::left("Source"),
+            Col::left("Interface"),
+            Col::right("Age"),
+            Col::left("Vtep"),
+            Col::left("Esi"),
+        ],
+        &mac_rows,
+    )];
+    let neigh_rows: Vec<Vec<String>> = neighbours
+        .iter()
+        .map(|(d, n)| {
+            vec![
+                d.clone(),
+                n.ip.to_string(),
+                n.mac.clone(),
+                mac_source_word(n.source).to_string(),
+                dash(n.vtep.map(|v| v.to_string())),
+            ]
+        })
+        .collect();
+    parts.push(table(
+        &[
+            Col::left("Domain"),
+            Col::left("Ip"),
+            Col::left("Mac"),
+            Col::left("Source"),
+            Col::left("Vtep"),
+        ],
+        &neigh_rows,
+    ));
+    parts.retain(|p| !p.is_empty());
+    parts.join("\n\n")
+}
+
 fn render_route_source(source: RouteSourceKind) -> &'static str {
     match source {
         RouteSourceKind::Static => "static",

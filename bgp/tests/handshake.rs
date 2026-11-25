@@ -366,6 +366,7 @@ async fn established_session_reports_status_via_peer_slot() {
         graceful_restart: None,
     });
     let mut status = slot_a.status_receiver();
+    let counted = slot_a.clone();
 
     let a_fut = fsm::run(
         a_stream,
@@ -412,6 +413,12 @@ async fn established_session_reports_status_via_peer_slot() {
     assert_eq!(reported.negotiated_hold_time, Some(90));
     assert_eq!(reported.negotiated_keepalive, Some(30));
     assert!(reported.established_since.is_some());
+
+    // #1441: one OPEN and at least one KEEPALIVE each way, no flap yet.
+    let c = counted.counters().snapshot();
+    assert_eq!((c.sent.open, c.received.open), (1, 1));
+    assert!(c.sent.keepalive >= 1 && c.received.keepalive >= 1);
+    assert_eq!((c.flaps, c.last_reset), (0, None));
 
     fake_b.abort();
 }
@@ -1096,4 +1103,119 @@ async fn unknown_message_type_is_answered_with_bad_message_type() {
         .unwrap();
     assert_eq!((n.error_code, n.error_subcode), (1, 3));
     assert_eq!(&n.data[..], &[6]);
+}
+
+/// A peer that establishes, then sends Cease/Administrative Shutdown (#1441).
+async fn fake_peer_cease(stream: TcpStream, asn: u32, router_id: Ipv4Addr) {
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, BgpCodec::default());
+    let mut writer = FramedWrite::new(w, BgpCodec::default());
+    let _ = writer
+        .send(BgpMessage::Open(message::build_open(asn, router_id, 90)))
+        .await;
+    while let Some(Ok(m)) = reader.next().await {
+        if matches!(m, BgpMessage::Open(_)) {
+            let _ = writer.send(BgpMessage::Keepalive).await;
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _ = writer
+        .send(BgpMessage::Notification(message::NotificationMessage {
+            error_code: 6,
+            error_subcode: 2,
+            data: bytes::Bytes::new(),
+        }))
+        .await;
+}
+
+#[tokio::test]
+async fn received_cease_counts_a_flap_and_the_notification() {
+    let (a_stream, b_stream) = loopback_pair().await;
+    let slot = PeerSlot::new(ResolvedPeer {
+        remote_address: "10.0.0.2".parse().unwrap(),
+        source_address: None,
+        remote_as: 65002,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+        mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
+        damping: None,
+        max_hops: None,
+        auth: None,
+        next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
+        import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        evpn_import_policy: None,
+        flowspec_import_policy: None,
+        flowspec_export_policy: None,
+        enforce_first_as: true,
+        flowspec_validation: nos_proto::BgpFlowspecValidation::default(),
+        shutdown: None,
+        maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
+        blackhole: None,
+        soft_reconfiguration_inbound: false,
+        local_as: None,
+        add_path: None,
+        add_path_send_count: None,
+        role: None,
+        strict_mode: false,
+        confed_id: None,
+        confed_member: false,
+        graceful_restart: None,
+    });
+    let counted = slot.clone();
+    let b = tokio::spawn(fake_peer_cease(b_stream, 65002, Ipv4Addr::new(2, 2, 2, 2)));
+    let outcome = fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: 65001,
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            cluster_id: Ipv4Addr::new(1, 1, 1, 1),
+            confed_id: None,
+        },
+        PeerContext {
+            remote_address: "10.0.0.2".parse().unwrap(),
+            expected_remote_as: 65002,
+            local_hold_time: 90,
+            keepalive_override: None,
+            mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
+            damping: None,
+            next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
+            import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        },
+        slot,
+        new_bgp_rib(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        FsmOutcome::NotificationReceived {
+            code: 6,
+            subcode: 2
+        }
+    ));
+    let c = counted.counters().snapshot();
+    assert_eq!(c.received.notification, 1);
+    assert_eq!(c.flaps, 1);
+    assert_eq!(
+        c.last_reset,
+        Some(nos_proto::ResetReason::NotificationReceived)
+    );
+    let n = c.last_received.unwrap();
+    assert_eq!((n.code, n.subcode), (6, 2));
+    assert!(c.last_sent.is_none());
+    b.abort();
 }

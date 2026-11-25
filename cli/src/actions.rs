@@ -369,8 +369,8 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_route(watchdog_socket, &table, address).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowFdb { domain } => {
-            show_fdb(watchdog_socket, &domain).await;
+        Resolved::ShowFdb { domain, mac } => {
+            show_fdb(socket, watchdog_socket, domain.as_deref(), mac.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowInterfaceBrief => {
@@ -679,8 +679,11 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
 }
 
 /// Resolves the domain's `nos-fdbd` instance (one per domain that has a VNI)
-/// via the watchdog broker and prints its forwarding database.
-async fn show_fdb(watchdog_socket: &Path, domain: &str) {
+/// via the watchdog broker and fetches its forwarding database.
+async fn fdb_table(
+    watchdog_socket: &Path,
+    domain: &str,
+) -> Result<Option<nos_proto::FdbTable>, String> {
     let fdb_socket = match watchdog_client::resolve(
         watchdog_socket,
         nos_proto::ServiceRef::FdbDomain(domain.to_string()),
@@ -688,19 +691,82 @@ async fn show_fdb(watchdog_socket: &Path, domain: &str) {
     .await
     {
         Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("nos-fdbd is not running for broadcast domain '{domain}' (needs a vni)");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
     };
-    match fdb_client::get_table(&fdb_socket).await {
-        Ok(t) => emit(&t, ""),
-        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    fdb_client::get_table(&fdb_socket)
+        .await
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// `show fdb [<domain>] [mac <mac>]`. A named domain without a MAC prints its
+/// full block; every other form is the flat table across domains (#1464).
+async fn show_fdb(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    domain: Option<&str>,
+    mac: Option<&str>,
+) {
+    let domains: Vec<String> = match domain {
+        Some(d) => vec![d.to_string()],
+        None => match client::fetch_running_config(config_socket).await {
+            Ok(cfg) => cfg
+                .broadcast_domains
+                .iter()
+                .filter(|d| d.vni.is_some())
+                .map(|d| d.name.clone())
+                .collect(),
+            Err(e) => {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+        },
+    };
+    if let (Some(d), None) = (domain, mac) {
+        match fdb_table(watchdog_socket, d).await {
+            Ok(Some(t)) => emit(&t, ""),
+            Ok(None) => eprintln!(
+                "nos-fdbd is not running for broadcast domain '{}' (needs a vni)",
+                format::sanitize(d)
+            ),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e)),
+        }
+        return;
     }
+    let mut macs = Vec::new();
+    let mut neighbours = Vec::new();
+    for d in &domains {
+        match fdb_table(watchdog_socket, d).await {
+            Ok(Some(t)) => {
+                let mut rows: Vec<_> = t
+                    .macs
+                    .into_iter()
+                    .filter(|e| mac.is_none_or(|m| e.mac == m))
+                    .collect();
+                rows.sort_by(|a, b| a.mac.cmp(&b.mac));
+                macs.extend(rows.into_iter().map(|e| (d.clone(), e)));
+                if let Some(m) = mac {
+                    neighbours.extend(
+                        t.neighbours
+                            .into_iter()
+                            .filter(|n| n.mac == m)
+                            .map(|n| (d.clone(), n)),
+                    );
+                }
+            }
+            Ok(None) => eprintln!(
+                "fdb domain '{}': nos-fdbd is not running",
+                format::sanitize(d)
+            ),
+            Err(e) => eprintln!(
+                "fdb domain '{}': {}",
+                format::sanitize(d),
+                format::sanitize(&e)
+            ),
+        }
+    }
+    println!("{}", format::render_fdb_flat(&macs, &neighbours, mac));
 }
 
 /// Resolves the single `nos-interfaced` instance fresh (not cached — it's

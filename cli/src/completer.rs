@@ -313,6 +313,11 @@ mod tests {
     }
 
     #[test]
+    fn show_fdb_offers_mac() {
+        assert!(values(Mode::Operational, "show fdb ").contains(&"mac".to_string()));
+    }
+
+    #[test]
     fn named_show_arguments_complete_from_the_config() {
         assert_eq!(
             values(Mode::Operational, "show route "),

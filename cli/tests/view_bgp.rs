@@ -3,7 +3,8 @@
 
 use nos_cli::view::{render, render_detail_list};
 use nos_proto::{
-    AddressFamily, BgpSessionState, GrFamily, GrSummary, PeerIdleStatus, PeerSummary, PrefixCounts,
+    AddressFamily, BgpSessionState, GrFamily, GrSummary, MessageCounts, NotificationInfo,
+    PeerIdleStatus, PeerSummary, PrefixCounts, ResetReason,
 };
 
 fn base(addr: &str) -> PeerSummary {
@@ -27,6 +28,14 @@ fn base(addr: &str) -> PeerSummary {
         graceful_restart: None,
         stale_prefixes: 0,
         status: PeerIdleStatus::None,
+        msg_received: MessageCounts::default(),
+        msg_sent: MessageCounts::default(),
+        messages_received: 0,
+        messages_sent: 0,
+        last_notification_sent: None,
+        last_notification_received: None,
+        last_reset_reason: None,
+        flap_count: 0,
     }
 }
 
@@ -53,6 +62,29 @@ fn established() -> PeerSummary {
         ipv6: 0,
         evpn: 2,
     });
+    p.msg_received = MessageCounts {
+        open: 1,
+        update: 4,
+        notification: 0,
+        keepalive: 120,
+        route_refresh: 0,
+    };
+    p.msg_sent = MessageCounts {
+        open: 1,
+        update: 3,
+        notification: 0,
+        keepalive: 121,
+        route_refresh: 1,
+    };
+    p.messages_received = 125;
+    p.messages_sent = 126;
+    p.last_notification_sent = Some(NotificationInfo {
+        code: 6,
+        subcode: 9,
+        seconds_ago: 3800,
+    });
+    p.last_reset_reason = Some(ResetReason::NotificationSent);
+    p.flap_count = 2;
     p
 }
 

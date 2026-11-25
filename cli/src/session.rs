@@ -92,9 +92,10 @@ pub enum Resolved {
         table: String,
         address: Option<IpAddr>,
     },
-    /// `show fdb <domain>` — data-plane, valid in any mode.
+    /// `show fdb [<domain>] [mac <mac>]` — data-plane, valid in any mode.
     ShowFdb {
-        domain: String,
+        domain: Option<String>,
+        mac: Option<String>,
     },
     /// `show interface` (every interface) or `show interface <name>` (one)
     /// — data-plane, valid in any mode.
@@ -301,7 +302,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ConfirmCommit => Resolved::ConfirmCommit,
         Command::CancelCommit => Resolved::CancelCommit,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
-        Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
+        Command::ShowFdb { domain, mac } => Resolved::ShowFdb { domain, mac },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowInterfaceBrief => Resolved::ShowInterfaceBrief,
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },

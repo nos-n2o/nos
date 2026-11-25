@@ -310,7 +310,13 @@ async fn route_refresh_requests_cover_rtc_when_negotiated() {
     rem.negotiated_ipv4_unicast = false;
     rem.negotiated_ipv6_unicast = false;
     rem.negotiated_rtc = true;
-    send_route_refresh(&mut w, &State::Established(rem), &peer).await;
+    send_route_refresh(
+        &mut w,
+        &State::Established(rem),
+        &peer,
+        &PeerCounters::default(),
+    )
+    .await;
     let m = within("refresh", r.next()).await.unwrap().unwrap();
     assert_eq!(
         m,
@@ -1072,15 +1078,27 @@ async fn route_refresh_requests_follow_the_negotiated_capability() {
     let (mut w, mut r) = script_pair().await;
 
     // Not established, then established without the capability: silent.
-    send_route_refresh(&mut w, &State::OpenSent, &peer).await;
+    send_route_refresh(&mut w, &State::OpenSent, &peer, &PeerCounters::default()).await;
     let mut no_cap = remote(true, false);
     no_cap.negotiated_ipv6_unicast = false;
-    send_route_refresh(&mut w, &State::Established(no_cap), &peer).await;
+    send_route_refresh(
+        &mut w,
+        &State::Established(no_cap),
+        &peer,
+        &PeerCounters::default(),
+    )
+    .await;
     let nothing = tokio::time::timeout(Duration::from_millis(150), r.next()).await;
     assert!(nothing.is_err(), "nothing was sent");
 
     // Both families negotiated: one request each.
-    send_route_refresh(&mut w, &State::Established(remote(true, true)), &peer).await;
+    send_route_refresh(
+        &mut w,
+        &State::Established(remote(true, true)),
+        &peer,
+        &PeerCounters::default(),
+    )
+    .await;
     for afi in [AFI_IPV4, AFI_IPV6] {
         let m = within("refresh", r.next()).await.unwrap().unwrap();
         assert_eq!(
@@ -1104,7 +1122,13 @@ async fn route_refresh_requests_cover_evpn_and_flowspec_when_negotiated() {
     rem.negotiated_ipv6_unicast = false;
     rem.negotiated_evpn = true;
     rem.negotiated_flowspec = [true, true];
-    send_route_refresh(&mut w, &State::Established(rem), &peer).await;
+    send_route_refresh(
+        &mut w,
+        &State::Established(rem),
+        &peer,
+        &PeerCounters::default(),
+    )
+    .await;
     for (afi, safi) in [
         (message::AFI_L2VPN, message::SAFI_EVPN),
         (AFI_IPV4, message::SAFI_FLOWSPEC),

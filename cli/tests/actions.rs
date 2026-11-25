@@ -120,10 +120,33 @@ fn fake_configd(path: &Path) {
     });
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one fake daemon arm per request family"
-)]
+fn fdb_table() -> FdbEvent {
+    FdbEvent::Table(nos_proto::FdbTable {
+        domain: "bd1".to_string(),
+        vni: 1,
+        bridge: None,
+        vxlan: None,
+        macs: vec![nos_proto::MacEntry {
+            mac: "02:00:00:00:00:01".to_string(),
+            source: nos_proto::MacSource::Local,
+            vtep: None,
+            vteps: Vec::new(),
+            esi: None,
+            interface: Some("eth1".to_string()),
+            age_secs: Some(3),
+        }],
+        neighbours: vec![nos_proto::NeighEntry {
+            ip: "10.0.0.1".parse().unwrap(),
+            mac: "02:00:00:00:00:01".to_string(),
+            source: nos_proto::MacSource::Local,
+            vtep: None,
+        }],
+        flood: Vec::new(),
+        segments: Vec::new(),
+        neigh_suppress: false,
+    })
+}
+
 fn lab() -> Lab {
     shared().install("user", "admin");
     let dir = tempfile::tempdir().unwrap();
@@ -157,19 +180,7 @@ fn lab() -> Lab {
                     },
                 }]
             }),
-            "fdb" => serve(role, name, &path, |_: FdbRequest| {
-                vec![FdbEvent::Table(nos_proto::FdbTable {
-                    domain: "bd1".to_string(),
-                    vni: 1,
-                    bridge: None,
-                    vxlan: None,
-                    macs: Vec::new(),
-                    neighbours: Vec::new(),
-                    flood: Vec::new(),
-                    segments: Vec::new(),
-                    neigh_suppress: false,
-                })]
-            }),
+            "fdb" => serve(role, name, &path, |_: FdbRequest| vec![fdb_table()]),
             "interfaces" => serve(role, name, &path, |r: InterfaceRequest| {
                 vec![match r {
                     InterfaceRequest::GetInterfaces => InterfaceEvent::Interfaces(Vec::new()),
@@ -298,6 +309,10 @@ async fn every_show_command_runs_against_its_daemon() {
             "show route rt1 10.0.0.1",
             "show route gone",
             "show fdb bd1",
+            "show fdb",
+            "show fdb mac 02:00:00:00:00:01",
+            "show fdb mac 02:00:00:00:00:99",
+            "show fdb bd1 mac 02:00:00:00:00:01",
             "show interface",
             "show interface eth9",
             "show interface brief",

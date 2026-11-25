@@ -15,7 +15,9 @@ PfxRcd
   v6    0
   evpn  2
 Ao-Packets-Good           42
+MsgRcvd                   125
 Ao-Packets-Bad            1
+MsgSent                   126
 Ao-Packets-Key-Not-Found  0
 Max-Prefix-Held           no
 Graceful-Restart
@@ -28,3 +30,22 @@ Graceful-Restart
     Ipv4Unicast  yes
     Ipv6Unicast  no
 Stale-Prefixes            0
+Msg-Received
+  Open           1
+  Update         4
+  Notification   0
+  Keepalive      120
+  Route-Refresh  0
+Msg-Sent
+  Open           1
+  Update         3
+  Notification   0
+  Keepalive      121
+  Route-Refresh  1
+Last-Notification-Sent
+  Code         6
+  Subcode      9
+  Seconds-Ago  1h03m
+Last-Notification-Received  -
+Last-Reset-Reason         notification-sent
+Flap-Count                2
