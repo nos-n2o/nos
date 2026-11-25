@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use nos_proto::{
-    CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, Request, ServiceRef, Topic,
-    DEFAULT_CONFIG_SOCKET,
+    CommandDoc, ConfigOp, Event, LogEntry, LogEvent, LogLevel, PolicyDefinitionOp, Request,
+    ServiceRef, Topic, DEFAULT_CONFIG_SOCKET,
 };
 
 use crate::session::{self, Mode, Resolved};
@@ -418,8 +418,14 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             }
             Outcome::Continue(mode)
         }
-        Resolved::ShowLog { source, follow } => {
-            show_log(watchdog_socket, source, follow).await;
+        Resolved::ShowLog {
+            source,
+            follow,
+            last,
+            level,
+            needle,
+        } => {
+            show_log(watchdog_socket, source, follow, last, level, needle).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpBrief => {
@@ -953,7 +959,20 @@ async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
 /// `show_route`/`show_interface`'s convention) via the watchdog broker, then
 /// either prints a one-shot buffer snapshot or streams a live tail until the
 /// user presses Ctrl-C or the connection is lost.
-async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) {
+async fn show_log(
+    watchdog_socket: &Path,
+    source: Option<String>,
+    follow: bool,
+    last: Option<usize>,
+    level: Option<LogLevel>,
+    needle: Option<String>,
+) {
+    if last == Some(0) {
+        eprintln!("error: last must be at least 1");
+        return;
+    }
+    let n = last.unwrap_or(DEFAULT_LOG_LAST);
+    let filtered = level.is_some() || needle.is_some();
     let log_socket = match watchdog_client::resolve(watchdog_socket, ServiceRef::Log).await {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -967,8 +986,22 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
     };
 
     if !follow {
-        match log_client::get_logs(&log_socket, source, None).await {
-            Ok(logs) => println!("{}", format::render_log_entries(&logs)),
+        // Unfiltered: the daemon caps the reply. Filtered: fetch all, filter,
+        // then trim, so `last 20 level error` returns 20 errors.
+        let limit = (!filtered).then_some(n);
+        match log_client::get_logs(&log_socket, source, limit).await {
+            Ok(logs) => {
+                let logs = if filtered {
+                    let kept = logs
+                        .into_iter()
+                        .filter(|e| wanted(e, level, needle.as_deref()))
+                        .collect();
+                    trim(kept, n)
+                } else {
+                    logs
+                };
+                println!("{}", format::render_log_entries(&logs));
+            }
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
         return;
@@ -985,8 +1018,15 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
     loop {
         tokio::select! {
             event = reader.next() => match event {
-                Some(Ok(LogEvent::Logs(logs))) => println!("{}", format::render_log_entries(&logs)),
-                Some(Ok(LogEvent::Line(entry))) => println!("{}", format::render_log_entry(&entry)),
+                Some(Ok(LogEvent::Logs(logs))) => {
+                    let kept = logs.into_iter().filter(|e| wanted(e, level, needle.as_deref())).collect();
+                    println!("{}", format::render_log_entries(&trim(kept, n)));
+                }
+                Some(Ok(LogEvent::Line(entry))) => {
+                    if wanted(&entry, level, needle.as_deref()) {
+                        println!("{}", format::render_log_entry(&entry));
+                    }
+                }
                 Some(Ok(LogEvent::Error(msg))) => {
                     eprintln!("error: {}", format::sanitize(&msg));
                     break;
@@ -1006,6 +1046,26 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
             }
         }
     }
+}
+
+/// `show log` shows this many entries unless `last <n>` says otherwise.
+const DEFAULT_LOG_LAST: usize = 200;
+
+/// Level (minimum severity) and `match` (case-insensitive, over the rendered
+/// line the user sees: time, level name and all).
+fn wanted(entry: &LogEntry, level: Option<LogLevel>, needle: Option<&str>) -> bool {
+    entry.matches(level, None)
+        && needle.is_none_or(|n| {
+            format::render_log_entry(entry)
+                .to_lowercase()
+                .contains(&n.to_lowercase())
+        })
+}
+
+/// The last `n` entries.
+fn trim(mut entries: Vec<LogEntry>, n: usize) -> Vec<LogEntry> {
+    entries.drain(..entries.len().saturating_sub(n));
+    entries
 }
 
 /// Router-wide, no instance argument: fetches the running config fresh (like
@@ -2110,5 +2170,58 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
             None => String::new(),
         };
         println!("  {usage:<45} {summary}");
+    }
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::*;
+
+    fn entry(level: LogLevel, msg: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 1_700_000_000_123,
+            level,
+            source: "nos-ribd[rt1]".into(),
+            target: "nos_rib".into(),
+            message: msg.into(),
+            fields: vec![("peer".into(), "192.0.2.9".into())],
+        }
+    }
+
+    #[test]
+    fn wanted_level_is_a_minimum() {
+        let e = entry(LogLevel::Warn, "x");
+        assert!(wanted(&e, None, None));
+        assert!(wanted(&e, Some(LogLevel::Info), None));
+        assert!(wanted(&e, Some(LogLevel::Warn), None));
+        assert!(!wanted(&e, Some(LogLevel::Error), None));
+    }
+
+    #[test]
+    fn wanted_needle_covers_the_rendered_line() {
+        let e = entry(LogLevel::Warn, "Session Established");
+        // timestamp text, level name, source, message (any case), field value
+        for n in [
+            "2023-11-14T22:13:20",
+            "warn",
+            "RIBD[rt1]",
+            "established",
+            "192.0.2.9",
+        ] {
+            assert!(wanted(&e, None, Some(n)), "{n}");
+        }
+        assert!(!wanted(&e, None, Some("nosuchthing")));
+        assert!(!wanted(&e, Some(LogLevel::Error), Some("warn")));
+    }
+
+    #[test]
+    fn trim_keeps_the_last_n() {
+        let es: Vec<_> = (0..5)
+            .map(|i| entry(LogLevel::Info, &i.to_string()))
+            .collect();
+        let msgs = |v: Vec<LogEntry>| v.into_iter().map(|e| e.message).collect::<Vec<_>>();
+        assert_eq!(msgs(trim(es.clone(), 2)), ["3", "4"]);
+        assert_eq!(msgs(trim(es.clone(), 9)).len(), 5);
+        assert_eq!(trim(es, 0).len(), 0);
     }
 }

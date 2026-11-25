@@ -15,9 +15,9 @@ use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
 use nos_cli::login;
 use nos_cli::session::{self, Mode};
-use nos_cli::{client, watchdog_client};
+use nos_cli::{client, log_client, watchdog_client};
 use nos_pki::Identity;
-use nos_proto::{CommandDoc, Topic};
+use nos_proto::{CommandDoc, ServiceRef, Topic};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
     Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -176,7 +176,13 @@ fn keybindings() -> reedline::Keybindings {
 /// iteration (mirroring `NosPrompt::for_mode`, already rebuilt every
 /// iteration) so completions/`?`/`help` always reflect the mode the last
 /// command actually landed in.
-fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Completer + Send> {
+fn completer_for(
+    socket: &Path,
+    watchdog_socket: &Path,
+    cache: DocCache,
+    log_cache: LogSourceCache,
+    mode: &Mode,
+) -> Box<dyn Completer + Send> {
     let doc_socket = socket.to_path_buf();
     let doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send> =
         Box::new(move |topic| doc_for_blocking(&doc_socket, &cache, topic));
@@ -200,8 +206,40 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         });
         serde_json::to_value(config.ok()?).ok()
     });
-    Box::new(NosCompleter::new(mode.clone(), doc_source, config_source))
+    let watchdog_socket = watchdog_socket.to_path_buf();
+    // Fetched on the first Tab after `show log `, then kept for the session;
+    // a failure caches nothing, so the next Tab retries.
+    let log_sources: Box<dyn FnMut() -> Vec<String> + Send> = Box::new(move || {
+        if let Some(v) = log_cache.lock().unwrap().clone() {
+            return v;
+        }
+        let fetched = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let sock = watchdog_client::resolve(&watchdog_socket, ServiceRef::Log)
+                    .await
+                    .ok()??;
+                log_client::get_logs(&sock, None, None).await.ok()
+            })
+        });
+        let Some(entries) = fetched else {
+            return Vec::new();
+        };
+        let mut v: Vec<String> = entries.into_iter().map(|e| e.source).collect();
+        v.sort();
+        v.dedup();
+        *log_cache.lock().unwrap() = Some(v.clone());
+        v
+    });
+    Box::new(NosCompleter::new(
+        mode.clone(),
+        doc_source,
+        config_source,
+        log_sources,
+    ))
 }
+
+/// The session's log sources for Tab (`show log <source>`), fetched once.
+type LogSourceCache = Arc<Mutex<Option<Vec<String>>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -216,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow::Result<()> {
     let mut mode = Mode::Operational;
     let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
+    let log_cache: LogSourceCache = Arc::new(Mutex::new(None));
 
     // Trust the watchdog's CA, log in through it (it checks the password and
     // certifies a key we generate here), and only then talk to any daemon.
@@ -234,7 +273,13 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
     let mut line_editor = Reedline::create()
-        .with_completer(completer_for(&config_socket, doc_cache.clone(), &mode))
+        .with_completer(completer_for(
+            &config_socket,
+            &watchdog_socket,
+            doc_cache.clone(),
+            log_cache.clone(),
+            &mode,
+        ))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(HelpMenu::new())))
         .with_edit_mode(Box::new(Emacs::new(keybindings())));
@@ -284,7 +329,9 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
                 }
                 line_editor = line_editor.with_completer(completer_for(
                     &config_socket,
+                    &watchdog_socket,
                     doc_cache.clone(),
+                    log_cache.clone(),
                     &mode,
                 ));
             }
