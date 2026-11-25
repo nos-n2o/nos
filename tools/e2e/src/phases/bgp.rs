@@ -3328,8 +3328,9 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     let held_since = a.count(est);
     a.assert_quiet(est, held_since, 12).await?;
     anyhow::ensure!(
-        summary().await?.contains("\"max_prefix_held\":true"),
-        "show bgp brief does not report the max-prefix hold"
+        summary().await?.contains("\"max_prefix_held\":true")
+            && summary().await?.contains("\"status\":\"MaxPrefix\""),
+        "show bgp summary does not report the max-prefix hold"
     );
 
     log("a REST clear releases the hold; ExaBGP still sends 3, so it trips again");
@@ -3367,7 +3368,10 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(est, est_before, 30).await?;
     let mut counted = false;
     for _ in 0..30 {
-        if summary().await?.contains("\"accepted_prefixes\":[3,0,0]") {
+        if summary()
+            .await?
+            .contains("\"accepted_prefixes\":{\"ipv4\":3,\"ipv6\":0,\"evpn\":0}")
+        {
             counted = true;
             break;
         }
@@ -3375,7 +3379,7 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     }
     anyhow::ensure!(
         counted,
-        "show bgp brief never counted the 3 accepted prefixes"
+        "show bgp summary never counted the 3 accepted prefixes"
     );
     a.assert_quiet(cease1, ceases, 8).await?;
 
@@ -9447,7 +9451,7 @@ fn chunked_prefix(t: usize, i: u32) -> nos_proto::IpNet {
 }
 
 /// Polls `GET /v1/bgp/summary` until some peer's accepted EVPN prefixes
-/// (`accepted_prefixes[2]`) reach `want`.
+/// (`accepted_prefixes.evpn`) reach `want`.
 async fn wait_evpn_accepted(r: &Router, want: usize, secs: u64) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
@@ -9460,7 +9464,7 @@ async fn wait_evpn_accepted(r: &Router, want: usize, secs: u64) -> anyhow::Resul
         while let Some(n) = stack.pop() {
             match n {
                 serde_json::Value::Object(m) => {
-                    if let Some(c) = m.get("accepted_prefixes").and_then(|a| a.get(2)) {
+                    if let Some(c) = m.get("accepted_prefixes").and_then(|a| a.get("evpn")) {
                         best = best.max(c.as_u64().unwrap_or(0));
                     }
                     stack.extend(m.values());

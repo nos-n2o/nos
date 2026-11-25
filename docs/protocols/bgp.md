@@ -51,9 +51,11 @@ edge-1(bgp1/bgp-instance:r1)> top
 edge-1(bgp1)> set routing-table rt1 bgp-instance r1
 edge-1(bgp1)> commit
 transaction 'bgp1' committed
-edge-1> show bgp brief
-bgp instance r1:
-  10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:00:04 hold-time 90
+edge-1> show bgp summary
+bgp instance r1, router-id 1.1.1.1, AS 65001
+Neighbor   AS     Remote-Id  State        Status  Up/Down   Hold  Keepalive  Peer-group  v4  v6  evpn
+---------  -----  ---------  -----------  ------  -------  -----  ---------  ----------  --  --  ----
+10.50.0.3  65002  2.2.2.2    Established  None              4s  1m30s        30s  pg1          0   0     0
 ```
 
 Router-b needs the mirror image (AS 65002, router ID 2.2.2.2, remote AS 65001, peer 10.50.0.3 replaced by 10.50.0.2). NOS both connects to the peer and accepts its connection on TCP port 179, in the routing table's VRF; whichever connection wins RFC 4271 collision resolution becomes the session.
@@ -90,12 +92,14 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 ## Checking sessions and routes
 
-`show bgp brief` (REST: `GET /v1/bgp/summary`) lists every peer of every instance: its state, the AS it announced, how long it has been up, and the negotiated hold time. The states are `Idle` (no OPEN exchanged yet: not connected, or retrying), `OpenSent`, `OpenConfirm` and `Established`. A shut-down peer shows as `Idle (shutdown)`, and a peer held down by its [maximum-prefix](#limiting-the-prefixes-a-peer-sends) limit as `Idle (max-prefix)`. An Established line ends with the accepted prefixes per address family, for example `prefixes v4 3`.
+`show bgp summary` (REST: `GET /v1/bgp/summary`) lists every peer of every instance: its state, the AS it announced, how long it has been up, and the negotiated hold time. The states are `Idle` (no OPEN exchanged yet: not connected, or retrying), `OpenSent`, `OpenConfirm` and `Established`. The `Status` column says why an `Idle` peer is idle: `AdminShutdown` for a shut-down peer, `MaxPrefix` for a peer held down by its [maximum-prefix](#limiting-the-prefixes-a-peer-sends) limit, `GrStale` while its routes are kept stale for graceful restart, else `None`. An Established row shows the accepted prefixes per address family (`v4`, `v6`, `evpn`). `show bgp summary instance <name>` restricts the output to one instance; `show bgp brief` is the old name.
 
 ```
-edge-1> show bgp brief
-bgp instance r1:
-  10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:02:21 hold-time 90
+edge-1> show bgp summary
+bgp instance r1, router-id 1.1.1.1, AS 65001
+Neighbor   AS     Remote-Id  State        Status  Up/Down   Hold  Keepalive  Peer-group  v4  v6  evpn
+---------  -----  ---------  -----------  ------  -------  -----  ---------  ----------  --  --  ----
+10.50.0.3  65002  2.2.2.2    Established  None           2m21s  1m30s        30s  pg1          0   0     0
 ```
 
 The JSON form has more detail: the peer's BGP identifier, the negotiated keepalive, and, for TCP-AO sessions, the key state (see [TCP-AO](#tcp-ao-rfc-5925)):
@@ -185,7 +189,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '10' $B/v1/transactions/t1/bgp-
 $C -X DELETE $B/v1/transactions/t1/bgp-instance/r1/peer-group/pg1/hold-time      # back to the default
 ```
 
-`show bgp brief` shows the negotiated hold time once the session is back up. A keepalive interval that no longer fits under the negotiated hold time (because the peer proposed a lower one) is replaced by a third of the negotiated value.
+`show bgp summary` shows the negotiated hold time once the session is back up. A keepalive interval that no longer fits under the negotiated hold time (because the peer proposed a lower one) is replaced by a third of the negotiated value.
 
 ## Shutting a session down
 
@@ -195,9 +199,11 @@ $C -X DELETE $B/v1/transactions/t1/bgp-instance/r1/peer-group/pg1/hold-time     
 edge-1(t2/bgp-instance:r1/peer-group:pg1)> set shutdown maintenance until 18:00, ticket 4711
 edge-1(t2/bgp-instance:r1/peer-group:pg1)> commit
 transaction 't2' committed
-edge-1> show bgp brief
-bgp instance r1:
-  10.50.0.3 AS - peer-group pg1 Idle (shutdown) uptime - hold-time -
+edge-1> show bgp summary
+bgp instance r1, router-id 1.1.1.1, AS 65001
+Neighbor   AS  Remote-Id  State  Status         Up/Down  Hold  Keepalive  Peer-group
+---------  --  ---------  -----  -------------  -------  ----  ---------  ----------
+10.50.0.3  -   -          Idle   AdminShutdown        -     -          -  pg1
 ```
 
 The peer logs the message:
@@ -295,9 +301,11 @@ $C -X PUT -H 'Content-Type: application/json' -d 'true' \
 edge-1(t3/bgp-instance:r1/peer-group:pg1)> set maximum-prefix ipv4 limit 1000
 edge-1(t3/bgp-instance:r1/peer-group:pg1)> commit
 transaction 't3' committed
-edge-1> show bgp brief
-bgp instance r1:
-  10.50.0.3 AS - peer-group pg1 Idle (max-prefix) uptime - hold-time -
+edge-1> show bgp summary
+bgp instance r1, router-id 1.1.1.1, AS 65001
+Neighbor   AS  Remote-Id  State  Status         Up/Down  Hold  Keepalive  Peer-group
+---------  --  ---------  -----  -------------  -------  ----  ---------  ----------
+10.50.0.3  -   -          Idle   MaxPrefix            -     -          -  pg1
 ```
 
 ```sh
@@ -779,13 +787,17 @@ edge-1(t5/bgp-instance:r1/peer-group:pg1)> commit
 
 `set ao-key <send-id> <recv-id> <algorithm> <label>` adds a key, or replaces the key with that send ID. `set ao-key <send-id> current` and `set ao-key <send-id> rnext` move the flags, and `delete ao-key <send-id>` removes one key.
 
-Once the session is up, `show bgp brief` adds the key state read from the kernel: the key ID this router is sending with, the key ID this router asks the peer to send with, and the counts of good segments, bad segments and segments for an unknown key:
+Once the session is up, `show bgp summary` adds the key state read from the kernel: the key ID this router is sending with, the key ID this router asks the peer to send with, and the counts of good segments, bad segments and segments for an unknown key:
 
 ```
-  10.50.0.2 AS 65001 peer-group pg1 Established uptime 00:00:15 hold-time 90 ao-current 1 ao-rnext 1 ao-good 7 ao-bad 0 ao-no-key 0
+  "ao_current_key": 1,
+  "ao_rnext_key": 1,
+  "ao_packets_good": 7,
+  "ao_packets_bad": 0,
+  "ao_packets_key_not_found": 0
 ```
 
-(That line is from router-b, whose peer is router-a.) During the rollover below, `ao-current` moves to key 2 as soon as both sides have key 2 as `rnext`.
+(From `show bgp summary | json` on router-b, whose peer is router-a. The table has no TCP-AO columns; `show bgp neighbor` will print them.) During the rollover below, `ao_current_key` moves to key 2 as soon as both sides have key 2 as `rnext`.
 
 To roll over to a new key without dropping the session (RFC 5925 §7.5), on both routers:
 
@@ -1194,7 +1206,7 @@ Graceful restart is **on by default**. It lets a peer's routes stay in use while
 
 - Every OPEN carries the graceful restart capability, with the RFC 8538 N bit and one entry per configured address family. A peer that doesn't advertise it is not affected: its session ending withdraws its routes at once, as before.
 - When a session with a peer that advertised it ends, its routes of every family it listed are kept and marked stale, for up to its restart time. They stay best paths, stay in the kernel and keep being advertised.
-- The router logs `peer down, retaining routes as stale peer=…`, and `show bgp brief` shows the peer as `Idle (gr-stale <n>)` meanwhile.
+- The router logs `peer down, retaining routes as stale peer=…`, and `show bgp summary` shows the peer with `Status` `GrStale` meanwhile.
 - When the peer comes back, the routes it re-announces lose their stale mark. Its End-of-RIB removes the rest (`purged stale routes after end-of-rib`), or `stale-time` does if no End-of-RIB comes.
 - A peer that comes back without the capability, or without its forwarding state for a family (F bit clear), has that family's stale routes removed at once (`flushing stale routes … reason=no-capability|forwarding-not-preserved`).
 - NOS sends End-of-RIB after the initial routes of each family, to peers that advertised graceful restart.
@@ -1234,9 +1246,11 @@ Settings, on the BGP instance:
 
 ```
 edge-1(t8/bgp-instance:r1)> set graceful-restart restart-time 60
-edge-1> show bgp brief
-bgp instance r1:
-  10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:01:12 hold-time 90 gr 120s N F:ipv4
+edge-1> show bgp summary
+bgp instance r1, router-id 1.1.1.1, AS 65001
+Neighbor   AS     Remote-Id  State        Status  Up/Down   Hold  Keepalive  Peer-group  v4  v6  evpn
+---------  -----  ---------  -----------  ------  -------  -----  ---------  ----------  --  --  ----
+10.50.0.3  65002  2.2.2.2    Established  None           1m12s  1m30s        30s  pg1          0   0     0
 ```
 
 ```sh
@@ -1276,10 +1290,10 @@ Created with `edit bgp instance <name>`; deleted with `delete bgp instance <name
 | aggregate-address as-set | `… aggregate-address <prefix> as-set` / `set aggregate-address <prefix> as-set`; `delete aggregate-address <prefix> as-set` | `as_set` in the aggregate | boolean; default `false` | none | Keeps the more specific routes' ASes in an `AS_SET` | `show log nos-bgpd[<i>]` (`as_path`) |
 | aggregate-address summary-only | `… aggregate-address <prefix> summary-only` / `set aggregate-address <prefix> summary-only`; `delete aggregate-address <prefix> summary-only` | `summary_only` in the aggregate | boolean; default `false` | none | Withdraws the more specific routes from peers | `show log nos-bgpd[<i>]` |
 | graceful-restart disable | `set bgp instance <i> graceful-restart disable` / `set graceful-restart disable`; `delete … graceful-restart disable` | `…/graceful-restart/disabled`, boolean | default `false` (graceful restart on) | none | Turns graceful restart off; see [Graceful restart](#graceful-restart-rfc-4724-rfc-8538). Restarts the sessions | `GET /v1/bgp/summary` on the peer (`graceful_restart`) |
-| graceful-restart restart-time | `set bgp instance <i> graceful-restart restart-time <s>` / `set graceful-restart restart-time <s>`; `delete … graceful-restart restart-time` | `…/graceful-restart/restart-time`, number or `null` | seconds; default 120 | at most 4095 | The restart time we advertise. Restarts the sessions | `show bgp brief` on the peer (`gr <s>s`) |
+| graceful-restart restart-time | `set bgp instance <i> graceful-restart restart-time <s>` / `set graceful-restart restart-time <s>`; `delete … graceful-restart restart-time` | `…/graceful-restart/restart-time`, number or `null` | seconds; default 120 | at most 4095 | The restart time we advertise. Restarts the sessions | `show bgp summary` on the peer (`| json`, `graceful_restart`) |
 | graceful-restart stale-time | `set bgp instance <i> graceful-restart stale-time <s>` / `set graceful-restart stale-time <s>`; `delete … graceful-restart stale-time` | `…/graceful-restart/stale-time`, number or `null` | seconds; default 180 | at least 1 | How long a returned peer's stale routes wait for its End-of-RIB | `show log nos-bgpd[<i>]` |
 | graceful-restart selection-deferral-time | `set bgp instance <i> graceful-restart selection-deferral-time <s>`; `delete … graceful-restart selection-deferral-time` | `…/graceful-restart/selection-deferral-time`, number or `null` | seconds; default 360 | at least 1 | How long a restarted `nos-bgpd` waits for its peers' End-of-RIB before sending its routes | `show config` |
-| routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp brief` |
+| routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp summary` |
 
 `bgp-instance/<name>/routing-table` and `bgp-instance/<name>/redistribute-policy` also appear in the REST tree. They are read-only copies of the routing table's settings, recomputed at every commit; set the routing table's fields instead.
 
@@ -1290,14 +1304,14 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | Field | CLI (absolute / relative) | REST path and JSON | Type, range, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
 | name | `edit peer-group <g>` | `…/peer-group/<g>`, `"name"` | string, 1 to 64 characters | unique across all instances | Names the group, as referenced by peers | `show config` |
-| remote-as | `set bgp instance <i> peer-group <g> remote-as <n>` / `set remote-as <n>` | `…/remote-as`, number | 1 to 4294967294; required | not 0 or 4294967295 | The AS its peers must announce; equal to `asn` makes it iBGP | `show bgp brief` |
+| remote-as | `set bgp instance <i> peer-group <g> remote-as <n>` / `set remote-as <n>` | `…/remote-as`, number | 1 to 4294967294; required | not 0 or 4294967295 | The AS its peers must announce; equal to `asn` makes it iBGP | `show bgp summary` |
 | flowspec-import-policy | `… flowspec-import-policy <policy>` / `set flowspec-import-policy <policy>`; `delete flowspec-import-policy` | `…/flowspec-import-policy`, a policy name or `null` | policy name; default: accept every rule | `accept-all`, `deny-all` or an existing policy-definition | Accepts, rejects or rewrites received Flowspec rules; applied in place (a route refresh) | `show bgp flowspec` |
 | flowspec-export-policy | `… flowspec-export-policy <policy>` / `set flowspec-export-policy <policy>`; `delete flowspec-export-policy` | `…/flowspec-export-policy`, a policy name or `null` | policy name; default: advertise every rule | `accept-all`, `deny-all` or an existing policy-definition | Accepts, rejects or rewrites Flowspec rules advertised to the peers; applied in place | peer's `show bgp flowspec` |
 | flowspec-validation | `… flowspec-validation disable-dest-prefix-rule <bool>` / `set flowspec-validation disable-dest-prefix-rule <bool>` | `…/flowspec-validation`, `{"disable_dest_prefix_rule":false}` | bool; default false | none | Accepts Flowspec rules without a destination prefix (RFC 8955 section 6 rule (a)); changing it restarts the sessions | `show bgp flowspec` |
 | flowspec-validation rfc8955-strict | `… flowspec-validation rfc8955-strict <bool>` / `set flowspec-validation rfc8955-strict <bool>` | `…/flowspec-validation`, `{"rfc8955_strict":false}` | bool; default false (RFC 9117) | none | Validates as RFC 8955 section 6 is written; changing it restarts the sessions | `show bgp flowspec` |
 | address-family | `… address-family ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec\|vpnv4\|vpnv6` / `set address-family <af>`; `delete address-family <af>` | `…/address-family/<af>`, `"Ipv4Unicast"`, `"Ipv6Unicast"`, `"L2vpnEvpn"`, `"Ipv4Flowspec"`, `"Ipv6Flowspec"`, `"Vpnv4Unicast"`, `"Vpnv6Unicast"` | list; at least one required | not empty, no duplicates | Address families negotiated with the peer | `show config` |
 | source-address | `… source-address interface <if> [label <l>]` or `… source-address loopback [label <l>]` / `set source-address …`; `delete source-address` | `…/source-address`, `{"Interface":{"interface":"eth0","label":null}}` or `{"Loopback":{"label":null}}` | default: chosen by the kernel | none at commit; resolved when connecting | Local address of the session | `show log nos-bgpd[<i>]` |
-| hold-time | `… hold-time <s>` / `set hold-time <s>`; `delete hold-time` | `…/hold-time`, number or `null` | 0 to 65535 seconds; default 90 | 0 or ≥ 3 | Proposed hold time; the lower of both sides is used; 0 disables keepalives | `show bgp brief` (`hold-time`) |
+| hold-time | `… hold-time <s>` / `set hold-time <s>`; `delete hold-time` | `…/hold-time`, number or `null` | 0 to 65535 seconds; default 90 | 0 or ≥ 3 | Proposed hold time; the lower of both sides is used; 0 disables keepalives | `show bgp summary` (`Hold`) |
 | keepalive-interval | `… keepalive-interval <s>` / `set keepalive-interval <s>`; `delete keepalive-interval` | `…/keepalive-interval`, number or `null` | seconds; default: negotiated hold time / 3 | < hold-time when both are set | Interval between KEEPALIVEs | `GET /v1/bgp/summary` (`negotiated_keepalive`) |
 | connect-retry-time | `… connect-retry-time <s>` / `set connect-retry-time <s>`; `delete connect-retry-time` | `…/connect-retry-time`, number or `null` | 1 to 65535 seconds; default 120 | ≥ 1 | Wait between two connection attempts | `show config` |
 | mrai | `… mrai <s>` / `set mrai <s>`; `delete mrai` | `…/mrai`, number or `null` | 0 to 65535 seconds; default: unset (no pacing) | none | Minimum interval between advertisements of one prefix to one peer | `show config` |
@@ -1308,11 +1322,11 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | role | `… role provider\|route-server\|route-server-client\|customer\|peer` / `set role …`; `delete role` | `…/role`, `"Provider"`, `"RouteServer"`, `"RouteServerClient"`, `"Customer"`, `"Peer"` or `null` | default: none | eBGP peer-group outside the confederation; on a route-server-client group only route-server or route-server-client | Role of the peers, announced in the OPEN; see [BGP roles](#bgp-roles-rfc-9234) | `bgp role negotiated` in the logs |
 | strict-mode | `… strict-mode` / `set strict-mode`; `delete strict-mode` | `…/strict-mode`, boolean | default `false` | needs a role | Refuse a peer that sends no role | Role Mismatch NOTIFICATION in the logs |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
-| md5-password | `… md5-password <label>` / `set md5-password <label>`; `delete auth` | `…/auth`, `{"Md5":{"key_ref":"<label>"}}` | admin key label; default: no authentication | the label exists and its secret is 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
-| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <label>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key_ref":"<label>","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; label of an admin key with a 1 to 80 byte secret | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
-| ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key a new connection starts signing with; a live session follows the peer's choice | `show bgp brief` (`ao-current`) |
-| ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key this router asks the peer to switch to; applied to the live session in place | `show bgp brief` (`ao-rnext`) |
-| exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
+| md5-password | `… md5-password <label>` / `set md5-password <label>`; `delete auth` | `…/auth`, `{"Md5":{"key_ref":"<label>"}}` | admin key label; default: no authentication | the label exists and its secret is 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp summary` (session up) |
+| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <label>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key_ref":"<label>","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; label of an admin key with a 1 to 80 byte secret | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp summary | json` (`ao_*`) |
+| ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key a new connection starts signing with; a live session follows the peer's choice | `show bgp summary | json` (`ao_current_key`) |
+| ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key this router asks the peer to switch to; applied to the live session in place | `show bgp summary | json` (`ao_rnext_key`) |
+| exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp summary` (session up) |
 | rpki-cache auth | `set bgp instance <i> rpki-cache <addr> md5-password <label>` or `… ao-key …`; `delete … auth` | `…/rpki-cache/<addr>/auth`, as a peer-group's `auth` | default: none (plain TCP) | as a peer-group's `auth` | TCP-MD5 or TCP-AO on the RTR session; see [Authenticating the cache session](#authenticating-the-cache-session-rfc-8210-9) | `show bgp rpki` (`auth yes`) |
 | next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |
@@ -1320,8 +1334,8 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | import-policy | `… import-policy <policy>` / `set import-policy <policy>`; `delete import-policy` | `…/import-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | `accept-all`, `deny-all` or an existing policy-definition | Filters and modifies received routes | `show config`; `show route` |
 | export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `show config`; `show route` on the peer |
 | evpn-import-policy | `… evpn-import-policy <policy>` / `set evpn-import-policy <policy>`; `delete evpn-import-policy` | `…/evpn-import-policy`, a policy name or `null` | policy name; default: accept every EVPN route | `accept-all`, `deny-all` or an existing policy-definition | Accepts or rejects received EVPN routes (types 1, 2, 3, 5), see [EVPN](evpn-vxlan.md#filter-received-evpn-routes-trust-model) | `show config`; `show bgp evpn` |
-| shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp brief` (`Idle (shutdown)`) |
-| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec\|vpnv4\|vpnv6 limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 0 (uncapped) to 4294967295; default: no limit; restart-interval 0 (stay down) | the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
+| shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp summary` (`Status` `AdminShutdown`) |
+| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn\|ipv4-flowspec\|ipv6-flowspec\|vpnv4\|vpnv6 limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 0 (uncapped) to 4294967295; default: no limit; restart-interval 0 (stay down) | the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp summary` (`Status` `MaxPrefix`, `PfxRcd`) |
 
 `show config` and `show this` end each peer-group line with its `import-policy` and `export-policy` (`default (deny-all)` when unset). Over REST, `GET …/peer-group/<g>/import-policy`.
 
@@ -1331,15 +1345,15 @@ Created with `set bgp instance <i> peer <address> peer-group <g>` (or `set peer 
 
 | Field | CLI (absolute / relative) | REST path and JSON | Type, range, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
-| remote-address | `… peer <address> …` | `…/peer/<address>`, `"remote_address":"10.50.0.3"` | IPv4 or IPv6 address | unique across all instances | The neighbour's address | `show bgp brief` |
-| peer-group | `set bgp instance <i> peer <a> peer-group <g>` / `set peer <a> peer-group <g>` | `…/peer/<a>/peer-group`, `"pg1"` | name; required | the peer-group must exist | Settings used for this peer | `show bgp brief` |
-| shutdown | `set bgp instance <i> peer <a> shutdown [<message>]` / `set peer <a> shutdown [<message>]`; `delete bgp instance <i> peer <a> shutdown` / `delete peer <a> shutdown` | `…/peer/<a>/shutdown`, `{"message":"…"}` or `null` | message up to 255 bytes; default: follow the peer-group | message ≤ 255 bytes | Shuts this peer only; overrides the peer-group | `show bgp brief` |
+| remote-address | `… peer <address> …` | `…/peer/<address>`, `"remote_address":"10.50.0.3"` | IPv4 or IPv6 address | unique across all instances | The neighbour's address | `show bgp summary` |
+| peer-group | `set bgp instance <i> peer <a> peer-group <g>` / `set peer <a> peer-group <g>` | `…/peer/<a>/peer-group`, `"pg1"` | name; required | the peer-group must exist | Settings used for this peer | `show bgp summary` |
+| shutdown | `set bgp instance <i> peer <a> shutdown [<message>]` / `set peer <a> shutdown [<message>]`; `delete bgp instance <i> peer <a> shutdown` / `delete peer <a> shutdown` | `…/peer/<a>/shutdown`, `{"message":"…"}` or `null` | message up to 255 bytes; default: follow the peer-group | message ≤ 255 bytes | Shuts this peer only; overrides the peer-group | `show bgp summary` |
 
 ### Operational commands
 
 | CLI | REST | Effect |
 |---|---|---|
-| `show bgp brief` | `GET /v1/bgp/summary` | Every peer of every instance, with state, remote AS, uptime, hold time and TCP-AO state |
+| `show bgp summary` | `GET /v1/bgp/summary` | Every peer of every instance (`show bgp summary [instance <name>]`, alias `brief`), with state, status, remote AS, uptime, hold time and keepalive; TCP-AO and graceful restart state in `| json` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` | EVPN routes received, per instance |
 | `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` | Flowspec rules received, per instance (SAFI 133; `family`/`vrf` for SAFI 134) |
 | `show bgp vpnv4\|vpnv6 [rd <rd>]` | `GET /v1/bgp/vpnv4\|vpnv6[?rd=<rd>]` | VPN routes received, per instance |

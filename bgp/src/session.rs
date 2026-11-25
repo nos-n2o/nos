@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ipnet::IpNet;
-use nos_proto::bgp::{BgpSessionState, PeerSummary};
+use nos_proto::bgp::{BgpSessionState, PeerIdleStatus, PeerSummary};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, Config, NextHopMode, RpkiCache,
 };
@@ -925,7 +925,7 @@ impl SessionManager {
 
     /// Every currently-configured peer's current session summary, for
     /// `server.rs`'s `BgpRequest::GetSummary` handler — backs `nos-cli`'s
-    /// `show bgp brief`.
+    /// `show bgp summary`.
     pub async fn peer_summaries(&self) -> Vec<PeerSummary> {
         let peers = self.peers.read().await;
         let rib = self.bgp_rib.lock().await;
@@ -1722,6 +1722,19 @@ fn listener_fd_for(addr: IpAddr, v4_fd: RawFd, v6_fd: RawFd) -> RawFd {
     }
 }
 
+/// The `Status` column, by precedence: shutdown, maximum-prefix hold, stale routes.
+fn idle_status(shutdown: bool, max_prefix_held: bool, stale: bool) -> PeerIdleStatus {
+    if shutdown {
+        PeerIdleStatus::AdminShutdown
+    } else if max_prefix_held {
+        PeerIdleStatus::MaxPrefix
+    } else if stale {
+        PeerIdleStatus::GrStale
+    } else {
+        PeerIdleStatus::None
+    }
+}
+
 /// Snapshots one peer's current status into the wire-serializable
 /// `PeerSummary` — `PeerStatus.established_since` (a `tokio::time::Instant`)
 /// isn't itself meaningful to another process, so it's converted to an
@@ -1738,10 +1751,13 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
         (Some(ResolvedAuth::Ao(_)), Some(fd)) => nos_tcp_auth::get_ao_info(fd).ok(),
         _ => None,
     };
+    let shutdown = slot.peer.shutdown.is_some();
+    let max_prefix_held = slot.max_prefix_held();
+    let stale_prefixes = rib.stale_count(slot.peer.remote_address);
     PeerSummary {
         remote_address: slot.peer.remote_address,
         peer_group: slot.peer.peer_group.clone(),
-        shutdown: slot.peer.shutdown.is_some(),
+        shutdown,
         remote_as: status.remote_asn,
         remote_bgp_id: status.remote_bgp_id,
         state: match status.state {
@@ -1760,9 +1776,11 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
         ao_packets_good: ao_info.as_ref().map(|i| i.pkt_good),
         ao_packets_bad: ao_info.as_ref().map(|i| i.pkt_bad),
         ao_packets_key_not_found: ao_info.as_ref().map(|i| i.pkt_key_not_found),
-        max_prefix_held: slot.max_prefix_held(),
-        accepted_prefixes: (status.state == PeerState::Established)
-            .then(|| rib.accepted_prefixes(slot.peer.remote_address)),
+        max_prefix_held,
+        accepted_prefixes: (status.state == PeerState::Established).then(|| {
+            let [ipv4, ipv6, evpn] = rib.accepted_prefixes(slot.peer.remote_address);
+            nos_proto::PrefixCounts { ipv4, ipv6, evpn }
+        }),
         graceful_restart: rib
             .peer_gr(slot.peer.remote_address)
             .map(|g| nos_proto::GrSummary {
@@ -1772,10 +1790,18 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
                 families: g
                     .families()
                     .into_iter()
-                    .map(|f| (f, g.forwarding(f)))
+                    .map(|f| nos_proto::GrFamily {
+                        family: f,
+                        forwarding: g.forwarding(f),
+                    })
                     .collect(),
             }),
-        stale_prefixes: rib.stale_count(slot.peer.remote_address),
+        stale_prefixes,
+        status: idle_status(
+            shutdown,
+            max_prefix_held,
+            stale_prefixes > 0 && status.state != PeerState::Established,
+        ),
     }
 }
 
@@ -2424,6 +2450,15 @@ mod tests {
         assert_eq!(summary.ao_packets_key_not_found, None);
         assert!(!summary.max_prefix_held);
         assert_eq!(summary.accepted_prefixes, None);
+    }
+
+    #[test]
+    fn idle_status_precedence() {
+        use PeerIdleStatus::*;
+        assert_eq!(idle_status(true, true, true), AdminShutdown);
+        assert_eq!(idle_status(false, true, true), MaxPrefix);
+        assert_eq!(idle_status(false, false, true), GrStale);
+        assert_eq!(idle_status(false, false, false), None);
     }
 
     /// A TCP-AO peer with no `fd` recorded yet (e.g. `OpenSent`, before

@@ -1,0 +1,7 @@
+Neighbor  AS     Remote-Id  State        Status         Up/Down   Hold  Keepalive  Peer-group  v4  v6  evpn
+--------  -----  ---------  -----------  -------------  -------  -----  ---------  ----------  --  --  ----
+10.0.0.1  -      -          Idle         AdminShutdown        -      -          -  pg1          -   -     -
+10.0.0.2  65002  2.2.2.2    Established  None             1h02m  1m30s        30s  pg1          3   0     2
+10.0.0.3  -      -          Idle         MaxPrefix            -      -          -  pg1          -   -     -
+10.0.0.4  -      -          Idle         GrStale              -      -          -  pg1          -   -     -
+10.0.0.5  -      -          Idle         None                 -      -          -  x\ny         -   -     -

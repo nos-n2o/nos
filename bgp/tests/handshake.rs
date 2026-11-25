@@ -316,7 +316,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
 /// Exercises the shared `PeerSlot::status` reporting path end to end: once a
 /// real session reaches `Established`, the slot's status (read via
 /// `status_receiver`, the same way `session::to_peer_summary` does for
-/// `show bgp brief`) must reflect it, including the negotiated hold-time and
+/// `show bgp summary`) must reflect it, including the negotiated hold-time and
 /// keepalive derived during the handshake.
 #[tokio::test]
 async fn established_session_reports_status_via_peer_slot() {

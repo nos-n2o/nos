@@ -407,7 +407,10 @@ async fn maximum_prefix_trips_holds_and_clears() {
     b.apply(vec![limited(5)]).await;
     b.wait_for(BgpSessionState::Established).await;
     eventually("b counts both routes", || async {
-        b.manager.peer_summaries().await[0].accepted_prefixes == Some([2, 0, 0])
+        b.manager.peer_summaries().await[0]
+            .accepted_prefixes
+            .map(|c| [c.ipv4, c.ipv6, c.evpn])
+            == Some([2, 0, 0])
     })
     .await;
     a.manager.shutdown().await;
@@ -586,7 +589,11 @@ async fn soft_reconfiguration_inbound_applies_policy_changes_in_place() {
     b.wait_for(BgpSessionState::Established).await;
     // Nothing to re-evaluate without the flag: soft-in is a Route Refresh.
     assert!(b.manager.soft_in_local(IpAddr::V4(A)).await.is_none());
-    let accepted = || async { b.manager.peer_summaries().await[0].accepted_prefixes };
+    let accepted = || async {
+        b.manager.peer_summaries().await[0]
+            .accepted_prefixes
+            .map(|c| [c.ipv4, c.ipv6, c.evpn])
+    };
     // The "no restart" checks below need an uptime of at least a second.
     eventually("b's session is a second old", || async {
         b.manager.peer_summaries().await[0].uptime_secs >= Some(1)
@@ -1122,7 +1129,10 @@ async fn bmp_adj_rib_out_dump_increments_and_mode_change() {
     b.wait_for(BgpSessionState::Established).await;
     a.wait_for(BgpSessionState::Established).await;
     eventually("b learns the route", || async {
-        b.manager.peer_summaries().await[0].accepted_prefixes == Some([1, 0, 0])
+        b.manager.peer_summaries().await[0]
+            .accepted_prefixes
+            .map(|c| [c.ipv4, c.ipv6, c.evpn])
+            == Some([1, 0, 0])
     })
     .await;
 

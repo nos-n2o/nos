@@ -157,12 +157,13 @@ pub enum Resolved {
         level: Option<nos_proto::LogLevel>,
         needle: Option<String>,
     },
-    /// `show bgp brief` — data-plane, valid in any mode. Router-wide (no
-    /// instance argument): the caller iterates every `BgpInstance` in the
-    /// running config itself.
-    ShowBgpBrief,
+    /// `show bgp summary [instance <name>]` — data-plane, valid in any mode.
+    /// The caller iterates the `BgpInstance`s of the running config itself.
+    ShowBgpSummary {
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — data-plane, valid in any mode. Router-wide like
-    /// `ShowBgpBrief`.
+    /// `ShowBgpSummary`.
     ShowBgpEvpn,
     /// `show bgp flowspec [family <f> | vrf <table>]` — data-plane, valid in
     /// any mode, router-wide.
@@ -182,7 +183,7 @@ pub enum Resolved {
     /// `show bgp routes` — data-plane, valid in any mode, router-wide.
     ShowBgpRoutes,
     /// `show ospf neigh` — data-plane, valid in any mode. Router-wide (no
-    /// instance argument), mirroring `ShowBgpBrief`: the caller iterates
+    /// instance argument), mirroring `ShowBgpSummary`: the caller iterates
     /// every `OspfInstance` in the running config itself.
     ShowOspfNeigh,
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
@@ -327,7 +328,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
             level,
             needle,
         },
-        Command::ShowBgpBrief => Resolved::ShowBgpBrief,
+        Command::ShowBgpSummary { instance } => Resolved::ShowBgpSummary { instance },
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
         Command::ShowBgpFlowspec { family, vrf } => Resolved::ShowBgpFlowspec { family, vrf },
         Command::ShowBgpRpki => Resolved::ShowBgpRpki,
@@ -465,7 +466,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBfdSessions { .. }
         | Command::ShowBfdReflector
         | Command::ShowLog { .. }
-        | Command::ShowBgpBrief
+        | Command::ShowBgpSummary { .. }
         | Command::ShowBgpEvpn
         | Command::ShowBgpFlowspec { .. }
         | Command::ShowBgpRpki

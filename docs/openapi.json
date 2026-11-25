@@ -2923,35 +2923,31 @@
         ],
         "type": "object"
       },
+      "GrFamily": {
+        "description": "One family of a peer's graceful restart capability.",
+        "properties": {
+          "family": {
+            "$ref": "#/components/schemas/AddressFamily",
+            "description": "The address family."
+          },
+          "forwarding": {
+            "description": "Its F bit: forwarding state was preserved.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "family",
+          "forwarding"
+        ],
+        "type": "object"
+      },
       "GrSummary": {
         "description": "A peer's RFC 4724 / RFC 8538 graceful restart capability.",
         "properties": {
           "families": {
             "description": "The families it keeps forwarding state for, and each one's F bit.",
             "items": {
-              "items": false,
-              "prefixItems": [
-                {
-                  "description": "Which NLRI (AFI/SAFI) is exchanged over a peer-group's session —\nindependent of whatever address family `source_address` resolves to at\nruntime, or a peer's `remote_address`. RFC 8950's extended next-hop\nencoding allows an IPv6-transport session to carry IPv4 unicast NLRI, so\nthis must never be derived from, or cross-validated against, either\naddress's IP version.",
-                  "enum": [
-                    "Ipv4Unicast",
-                    "Ipv6Unicast",
-                    "L2vpnEvpn",
-                    "Ipv4Flowspec",
-                    "Ipv6Flowspec",
-                    "Vpnv4Unicast",
-                    "Vpnv6Unicast",
-                    "RtConstraint",
-                    "Vpnv4Flowspec",
-                    "Vpnv6Flowspec"
-                  ],
-                  "type": "string"
-                },
-                {
-                  "type": "boolean"
-                }
-              ],
-              "type": "array"
+              "$ref": "#/components/schemas/GrFamily"
             },
             "type": "array"
           },
@@ -5081,6 +5077,16 @@
         ],
         "type": "object"
       },
+      "PeerIdleStatus": {
+        "description": "Why a peer is `Idle` in a way the FSM state does not say (`show bgp summary`).",
+        "enum": [
+          "None",
+          "AdminShutdown",
+          "MaxPrefix",
+          "GrStale"
+        ],
+        "type": "string"
+      },
       "PolicyDefinition": {
         "description": "A named RPL script (see `docs/architecture/rpl.md`), referenced by name from a `BgpPeerGroup`'s `import_policy`/\n`export_policy`. Only the source text crosses the wire/IPC — each\nconsumer (`nos-bgpd`) compiles and caches its own bytecode locally,\nmatching the existing \"each daemon re-resolves its own state from config\ndiffs\" idiom, rather than `nos-proto` carrying a bytecode wire format.",
         "properties": {
@@ -5424,6 +5430,35 @@
           "subinterfaces",
           "err_disabled",
           "steering"
+        ],
+        "type": "object"
+      },
+      "PrefixCounts": {
+        "description": "Accepted prefixes per address family.",
+        "properties": {
+          "evpn": {
+            "description": "L2VPN EVPN.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ipv4": {
+            "description": "IPv4 unicast.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ipv6": {
+            "description": "IPv6 unicast.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ipv4",
+          "ipv6",
+          "evpn"
         ],
         "type": "object"
       },

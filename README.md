@@ -68,7 +68,7 @@ set asn 65000
 set router-id 1.1.1.1
 top
 commit
-show bgp brief
+show bgp summary
 ```
 
 User documentation (concepts, the `nos` shell, the REST API and how they map to each other) is in [`docs/`](docs/README.md).
