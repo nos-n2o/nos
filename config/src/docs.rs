@@ -2314,12 +2314,6 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              the CLI matches against the whole rendered line (timestamp and level name \
              included). `--follow` streams new lines after the backlog; the filters apply \
              to them too.",
-        ),        Topic::DisplaySet => (
-            "Show the output as flat `set` lines.",
-            "`<show command> | display set` writes the shown configuration as one absolute \
-             `set` line per value, each pasteable from the root. A secret is written as a \
-             `# ... <hidden>` comment, never a `set` line. A multi-line text (a policy's \
-             source) is an `edit` block of `set source line <n> <text>` lines ended by `top`.",
         ),
     };
     CommandDoc {

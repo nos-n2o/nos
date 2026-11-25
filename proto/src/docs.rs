@@ -717,8 +717,6 @@ topics! {
     ShowLog,
     /// `Request::GetHistoryConfig`
     ShowConfigurationDiff,
-    /// the `| display set` output filter
-    DisplaySet,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
