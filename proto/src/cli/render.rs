@@ -15,7 +15,7 @@
 
 use serde_json::Value;
 
-use super::{field_spellings, root, variant_spellings, Field, Kind, Payload};
+use super::{field_spellings, root, variant_spellings, Field, Kind, Node, Payload};
 
 /// The text standing in for a secret's value.
 pub const HIDDEN: &str = "<hidden>";
@@ -37,12 +37,16 @@ pub fn render_root(config: &Value) -> Vec<Line> {
     out
 }
 
-/// The object at `path` (REST segments), headed by its own words
-/// (`bgp instance r1`) — `None` if nothing is there.
-pub fn render_at(config: &Value, path: &[String]) -> Option<Vec<Line>> {
+/// Walks `path` (REST segments) to its node and value, with the last header
+/// (`bgp instance r1`) and every header word on the way.
+fn resolve<'a>(
+    config: &'a Value,
+    path: &[String],
+) -> Option<(&'static Node, &'a Value, Option<String>, Vec<String>)> {
     let mut node = root();
     let mut value = config;
     let mut header = None;
+    let mut prefix = Vec::new();
     let mut segs = path.iter();
     while let Some(seg) = segs.next() {
         let f = node.fields.iter().find(|f| segment(f) == *seg)?;
@@ -57,15 +61,24 @@ pub fn render_at(config: &Value, path: &[String]) -> Option<Vec<Line>> {
                     .iter()
                     .find(|e| words(&(key.kind)(), &e[key.name]).first() == Some(want))?;
                 header = Some(format!("{} {want}", name(f)));
+                prefix.extend([name(f), want.clone()]);
                 node = n;
             }
             Kind::Struct(n) => {
                 header = Some(name(f));
+                prefix.push(name(f));
                 node = n;
             }
             _ => return None,
         }
     }
+    Some((node, value, header, prefix))
+}
+
+/// The object at `path` (REST segments), headed by its own words
+/// (`bgp instance r1`) — `None` if nothing is there.
+pub fn render_at(config: &Value, path: &[String]) -> Option<Vec<Line>> {
+    let (node, value, header, _) = resolve(config, path)?;
     let mut out = Vec::new();
     let depth = usize::from(header.is_some());
     if let Some(h) = header {
@@ -79,6 +92,105 @@ pub fn render_at(config: &Value, path: &[String]) -> Option<Vec<Line>> {
         &mut out,
     );
     Some(out)
+}
+
+/// The object at `path` as flat, absolute `set` lines (`| display set`):
+/// each pasteable from the root. A secret is a `# ...` comment; a multi-line
+/// text (a policy's source) is an `edit` block of `set source line <n>`.
+/// Nothing at `path`: no lines.
+pub fn render_set(config: &Value, path: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some((node, value, _, prefix)) = resolve(config, path) {
+        set_object(
+            node.fields,
+            node.default.map(|d| d()).as_ref(),
+            value,
+            &prefix,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn set_object(
+    fields: &[Field],
+    default: Option<&Value>,
+    obj: &Value,
+    prefix: &[String],
+    out: &mut Vec<String>,
+) {
+    for f in fields.iter().filter(|f| !skipped(f)) {
+        let v = &obj[f.name];
+        if !is_unset(default, f, v) {
+            set_field(f, v, prefix, out);
+        }
+    }
+}
+
+/// `set <prefix> <tail>`; a line that would carry a hidden value is a comment.
+fn set_line(out: &mut Vec<String>, prefix: &[String], tail: &str) {
+    let text = prefix
+        .iter()
+        .map(String::as_str)
+        .chain(Some(tail).filter(|t| !t.is_empty()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lead = if text.contains(HIDDEN) { "#" } else { "set" };
+    out.push(format!("{lead} {text}"));
+}
+
+fn set_field(f: &Field, v: &Value, prefix: &[String], out: &mut Vec<String>) {
+    if f.secret {
+        return set_line(out, prefix, &format!("{} {HIDDEN}", name(f)));
+    }
+    if let Some(render) = f.render {
+        return render(v).iter().for_each(|l| set_line(out, prefix, l));
+    }
+    let kind = unwrap_option((f.kind)());
+    let longer = |words: Vec<String>| [prefix, &words].concat();
+    match &kind {
+        Kind::List(elem) => match elem() {
+            Kind::Struct(n) if n.fields.iter().any(|k| k.key) => {
+                let key = n.fields.iter().find(|k| k.key).expect("checked above");
+                for e in v.as_array().into_iter().flatten() {
+                    let mut head = vec![name(f)];
+                    head.extend(words(&(key.kind)(), &e[key.name]));
+                    set_object(
+                        n.fields,
+                        n.default.map(|d| d()).as_ref(),
+                        e,
+                        &longer(head),
+                        out,
+                    );
+                }
+            }
+            elem => {
+                for e in v.as_array().into_iter().flatten() {
+                    set_line(out, prefix, &join(name(f), words(&elem, e)));
+                }
+            }
+        },
+        Kind::Struct(n) if matches!((f.kind)(), Kind::Struct(_)) => set_object(
+            n.fields,
+            n.default.map(|d| d()).as_ref(),
+            v,
+            &longer(vec![name(f)]),
+            out,
+        ),
+        Kind::Str if v.as_str().is_some_and(|s| s.contains('\n')) => {
+            out.push(format!("edit {}", prefix.join(" ")));
+            for (i, l) in v.as_str().into_iter().flat_map(str::lines).enumerate() {
+                let text = if l.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {l}")
+                };
+                out.push(format!("set {} line {}{text}", name(f), i + 1));
+            }
+            out.push("top".to_string());
+        }
+        kind => set_line(out, prefix, &join(name(f), words(kind, v))),
+    }
 }
 
 /// The lines as text, two spaces per depth.
@@ -106,6 +218,14 @@ fn skipped(f: &Field) -> bool {
     f.hidden || f.key
 }
 
+/// Equal to its struct's default (or, without one, null/false/empty).
+fn is_unset(default: Option<&Value>, f: &Field, v: &Value) -> bool {
+    match default {
+        Some(d) => d.get(f.name) == Some(v),
+        None => v.is_null() || *v == Value::Bool(false) || v.as_array().is_some_and(Vec::is_empty),
+    }
+}
+
 fn object(
     fields: &[Field],
     default: Option<&Value>,
@@ -115,13 +235,7 @@ fn object(
 ) {
     for f in fields.iter().filter(|f| !skipped(f)) {
         let v = &obj[f.name];
-        let unset = match default {
-            Some(d) => d.get(f.name) == Some(v),
-            None => {
-                v.is_null() || *v == Value::Bool(false) || v.as_array().is_some_and(Vec::is_empty)
-            }
-        };
-        if !unset {
+        if !is_unset(default, f, v) {
             field(f, v, depth, out);
         }
     }
@@ -622,6 +736,89 @@ mod tests {
         assert_eq!(render_at(&c, &p(&["nope"])), None);
         // The empty path is the whole config, with no header.
         assert_eq!(render_at(&c, &[]), Some(render_root(&c)));
+    }
+
+    fn set_fields(fields: &[Field], default: Option<&Value>, v: &Value) -> Vec<String> {
+        let mut out = Vec::new();
+        set_object(fields, default, v, &[], &mut out);
+        out
+    }
+
+    #[test]
+    fn render_set_shapes() {
+        let all = json!([{"name":"a","derived":"x","n":1,"on":true,"opt":2}]);
+        let mut out = Vec::new();
+        set_field(&fld("elems", list_elem), &all, &["top".into()], &mut out);
+        assert_eq!(
+            out,
+            [
+                "set top elem a n 1",
+                "set top elem a on",
+                "set top elem a opt 2"
+            ]
+        );
+        let f: &[Field] = &[
+            fld("sec", k_inner),
+            fld("o", k_opt_inner),
+            fld("l", list_s),
+            SEC,
+        ];
+        let v = json!({"sec":{"x":4},"o":{"x":5},"l":["a","b"],"pw":"p"});
+        assert_eq!(
+            set_fields(f, None, &v),
+            [
+                "set sec x 4",
+                "set o x 5",
+                "set l a",
+                "set l b",
+                "# pw <hidden>"
+            ]
+        );
+        assert!(set_fields(f, None, &json!({"sec":{"x":null}})).is_empty());
+    }
+
+    #[test]
+    fn render_set_multiline_source_with_blank_line() {
+        let mut out = Vec::new();
+        let p = ["policy-definition".to_string(), "p".to_string()];
+        set_field(&fld("source", s), &json!("a\n\nb"), &p, &mut out);
+        assert_eq!(
+            out,
+            [
+                "edit policy-definition p",
+                "set source line 1 a",
+                "set source line 2",
+                "set source line 3 b",
+                "top"
+            ]
+        );
+    }
+
+    #[test]
+    fn render_set_real_config() {
+        let c = cfg(|v| {
+            v["hostname"] = json!("r1");
+            v["lldp"]["tx_interval_secs"] = json!(10);
+            v["community_aliases"] = json!([
+                {"name":"a1","value":"65000:1"},
+                {"name":"a2","value":"65000:2"},
+            ]);
+            v["users"] = json!([{"name":"admin","password":"$argon2id$x","role":"Admin"}]);
+        });
+        let p = |s: &[&str]| s.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        let got = render_set(&c, &[]);
+        assert_eq!(got.len(), 5, "{got:?}");
+        assert_eq!(got[0], "set community-alias a1 value 65000:1");
+        assert!(got.contains(&"set hostname r1".to_string()));
+        assert!(got.contains(&"set lldp tx-interval 10".to_string()));
+        assert!(got.contains(&"# user admin password <hidden>".to_string()));
+        assert!(got.iter().all(|l| !l.contains("argon2")));
+        assert_eq!(
+            render_set(&c, &p(&["community-alias", "a2"])),
+            ["set community-alias a2 value 65000:2"]
+        );
+        assert!(render_set(&c, &p(&["community-alias", "zz"])).is_empty());
+        assert!(render_set(&default_json::<Config>(), &[]).is_empty());
     }
 
     #[test]
