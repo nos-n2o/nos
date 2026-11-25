@@ -1731,6 +1731,19 @@ impl BgpRib {
         [v4, v6, evpn]
     }
 
+    /// Prefixes currently advertised to `peer`, `[ipv4, ipv6, evpn]`.
+    // ponytail: counts `adj_rib_out` per call (O(advertised) under the RIB
+    // lock, only for an `Established` peer in `show bgp summary`); upgrade
+    // to counters kept at each `adj_rib_out` mutation site if it shows up.
+    pub fn advertised_prefixes(&self, peer: IpAddr) -> [u32; 3] {
+        let len = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let sent = self.adj_rib_out.get(&peer).into_iter().flatten();
+        let v4 = sent.clone().filter(|p| matches!(p, IpNet::V4(_))).count();
+        let v6 = sent.count() - v4;
+        let evpn = self.evpn_adj_rib_out.get(&peer).map_or(0, HashMap::len);
+        [len(v4), len(v6), len(evpn)]
+    }
+
     /// Flowspec routes held from `peer`, `[ipv4, ipv6]`.
     fn accepted_flowspec(&self, peer: IpAddr) -> [u32; 2] {
         let mut n = [0u32; 2];

@@ -63,13 +63,13 @@ pub use bfd::{
     ReflectorView, SessionKey,
 };
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState, BmpFrameCounts,
-    BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary, FamilyReeval,
-    FlowspecRouteCursor, FlowspecRouteSummary, GrFamily, GrSummary, MessageCounts,
-    NotificationInfo, PeerIdleStatus, PeerSummary, PrefixCounts, RedistributeUpdate,
-    RedistributedRoute, ReevalFamily, ResetReason, RpkiCacheStatus, RpkiSessionState,
-    RpkiValidationState, UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate, VpnRouteCursor,
-    VpnRouteSummary, BGP_PAGE_MAX,
+    BgpBfdState, BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState,
+    BmpFrameCounts, BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary,
+    FamilyReeval, FlowspecRouteCursor, FlowspecRouteSummary, GrFamily, GrSummary, MessageCounts,
+    NegotiatedSummary, NotificationInfo, PeerIdleStatus, PeerSummary, PrefixCounts,
+    RedistributeUpdate, RedistributedRoute, ReevalFamily, ResetReason, RpkiCacheStatus,
+    RpkiSessionState, RpkiValidationState, UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate,
+    VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
 };
 pub use broker::{
     ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,

@@ -38,6 +38,7 @@ mod retain;
 mod rpl_path;
 mod rtc;
 mod stats;
+mod summary_counts;
 mod unknown_attr;
 mod unnegotiated;
 mod vpn;
