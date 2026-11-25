@@ -284,6 +284,78 @@ pub enum Resolved {
 }
 
 impl Resolved {
+    /// Does `| json` (#1415) work on this command? Exhaustive on purpose: a
+    /// new variant must be classified. Keep in step with
+    /// `actions::handle_action_out`; a flat view's migration flips its arm.
+    pub fn json_capable(&self) -> bool {
+        match self {
+            Resolved::ShowBfdSessions { .. }
+            | Resolved::ShowRoute { .. }
+            | Resolved::ShowBgpRoutes => true,
+            Resolved::Nothing
+            | Resolved::Help
+            | Resolved::ExitShell
+            | Resolved::LeaveConfigPrompt
+            | Resolved::NavigateTop
+            | Resolved::Navigate(_)
+            | Resolved::ShowRunningConfig
+            | Resolved::ShowAdminConfig
+            | Resolved::ShowConfigPath(_)
+            | Resolved::ShowTransaction
+            | Resolved::ShowFdb { .. }
+            | Resolved::ShowInterface { .. }
+            | Resolved::ShowInterfaceBrief
+            | Resolved::ShowPortAggregate { .. }
+            | Resolved::ShowLacp { .. }
+            | Resolved::ShowLldpNeighbors { .. }
+            | Resolved::ShowLldpStatistics
+            | Resolved::ShowVersion
+            | Resolved::ShowAcl { .. }
+            | Resolved::ShowSpanningTree
+            | Resolved::ShowSpanningTreeInstance { .. }
+            | Resolved::ShowSpanningTreeMstConfig
+            | Resolved::ShowSpanningTreeDomain { .. }
+            | Resolved::ShowSpanningTreeDetail { .. }
+            | Resolved::ShowBfdReflector
+            | Resolved::ShowLog { .. }
+            | Resolved::ShowBgpSummary { .. }
+            | Resolved::ShowBgpEvpn
+            | Resolved::ShowBgpFlowspec { .. }
+            | Resolved::ShowBgpRpki
+            | Resolved::ShowBgpBmp
+            | Resolved::ShowBgpVpn { .. }
+            | Resolved::ShowOspfNeigh
+            | Resolved::ShowOspfDatabase { .. }
+            | Resolved::ShowOspfSegmentRouting
+            | Resolved::ShowOspfv3Neigh
+            | Resolved::ShowOspfv3Database { .. }
+            | Resolved::ClearBgpSoftIn { .. }
+            | Resolved::ClearBgpPeer { .. }
+            | Resolved::ClearStpMcheck { .. }
+            | Resolved::ClearStpErrDisabled { .. }
+            | Resolved::SaveRunningConfig
+            | Resolved::ShowAaaUsers
+            | Resolved::AllocateAaaUser { .. }
+            | Resolved::ClearAaaUser { .. }
+            | Resolved::ShowHistory
+            | Resolved::ShowConfigDiff { .. }
+            | Resolved::Rollback { .. }
+            | Resolved::OpenTransaction { .. }
+            | Resolved::ConfigEdit(_)
+            | Resolved::Commit
+            | Resolved::CommitConfirmed { .. }
+            | Resolved::ConfirmCommit
+            | Resolved::CancelCommit
+            | Resolved::Discard
+            | Resolved::Diff
+            | Resolved::EditPolicySource { .. }
+            | Resolved::ShowPolicySource { .. }
+            | Resolved::SetPolicySourceLine { .. }
+            | Resolved::DeletePolicySourceLine { .. }
+            | Resolved::Error(_) => false,
+        }
+    }
+
     /// Is this a show/ops command to account (#1155)? Everything but
     /// navigation and the config edit/commit/save family, which `nos-configd`
     /// accounts itself. Deny-list: a new command is accounted by default.

@@ -6,6 +6,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 
 ## Operational commands
 
+`show <command> | json` prints the REST body of the same reply (same keys, same order). The paged walks (`show route <table>`, `show bgp routes`) print the bare element array, not REST's `{items, pagination}` envelope, because the CLI walks every page itself. Supported commands: [`| json`](cli.md#-json-on-show-commands-1415).
+
 | CLI | REST |
 |---|---|
 | `show config` | `GET /v1/config` |
