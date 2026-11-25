@@ -1443,14 +1443,17 @@ impl BgpRib {
             .filter_map(|(prefix, route)| {
                 route.next_hop.map(|next_hop| {
                     if self.is_blackhole(*prefix, route) {
-                        return (*prefix, (vec![], None, true));
+                        return (*prefix, (vec![], None, true, None));
                     }
                     let hops = self
                         .multipaths
                         .get(prefix)
                         .cloned()
                         .unwrap_or_else(|| vec![next_hop]);
-                    (*prefix, (hops, self.backups.get(prefix).copied(), false))
+                    (
+                        *prefix,
+                        (hops, self.backups.get(prefix).copied(), false, route.med),
+                    )
                 })
             })
             .collect();

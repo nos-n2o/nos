@@ -75,8 +75,9 @@ pub(super) fn peer_rank(route: &RibRoute) -> u8 {
 
 /// A route's next hops (its multipath set, sorted, at least one) plus its
 /// backup (runner-up path's next hop), as pushed to `nos-ribd`; the `bool` is
-/// an RFC 7999 blackhole (no hops, a discard route).
-pub type Hops = (Vec<IpAddr>, Option<IpAddr>, bool);
+/// an RFC 7999 blackhole (no hops, a discard route); the last is the best
+/// path's MED.
+pub type Hops = (Vec<IpAddr>, Option<IpAddr>, bool, Option<u32>);
 
 /// The next hop of the best candidate whose real next hop is none of
 /// `primary` (the winner's multipath set) — the backup path. `None` when

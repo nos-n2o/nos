@@ -44,7 +44,7 @@ fn pushed(rib: &BgpRib, p: &str) -> Option<crate::rib::Hops> {
 fn covered_tagged_host_route_is_a_discard_with_no_export() {
     let mut rib = setup(Some(list(&[("192.0.2.0/24", Some((32, 32)))])));
     learn(&mut rib, &update(HOST, true), &nos_rpl::ACCEPT_ALL);
-    assert_eq!(pushed(&rib, HOST), Some((vec![], None, true)));
+    assert_eq!(pushed(&rib, HOST), Some((vec![], None, true, None)));
     let stored = &rib.loc_rib[&prefix(HOST)];
     assert!(stored.communities.contains(&BH) && stored.communities.contains(&NO_EXPORT));
 }

@@ -75,6 +75,11 @@ pub trait RibDriver: Send + Sync {
     /// The default does nothing.
     fn keep_stale(&self, _on: bool) {}
 
+    /// The kernel name of interface `ifindex`, for `show route`.
+    fn interface_name(&self, _ifindex: u32) -> Option<String> {
+        None
+    }
+
     /// Deletes every route in `table_name`'s kernel table and the VRF
     /// device itself. Leaves any persisted table-id registry entry
     /// untouched, so a later `apply` for the same `table_name` (an

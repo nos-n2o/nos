@@ -230,6 +230,11 @@ impl KernelGate {
         self.notify.notified().await;
     }
 
+    /// A kernel write failed and is not yet re-applied.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::SeqCst)
+    }
+
     fn take_dirty(&self, _held: &GateGuard<'_>) -> bool {
         self.dirty.swap(false, Ordering::SeqCst)
     }
@@ -412,9 +417,10 @@ async fn resync(
             let mut guard = rib.write().await;
             guard.replace_source(RouteSource::Static, static_entries);
             match connected {
-                Some(entries) => {
+                Some((entries, ifaces)) => {
                     debug!(table = %table, connected = entries.len(), "resolved connected prefixes");
                     guard.replace_source(RouteSource::Connected, entries);
+                    guard.connected_iface = ifaces;
                 }
                 // Same "keep the last good set on a transient failure" rule
                 // as nos-bgpd's `igp_client`.
@@ -685,7 +691,7 @@ async fn fetch_connected(
     watchdog_socket: &Path,
     cfg: &Config,
     table: &str,
-) -> Option<Vec<RibEntry>> {
+) -> Option<(Vec<RibEntry>, HashMap<IpNet, String>)> {
     let socket = watchdog::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let interfaces = interface_client::get_interfaces(&socket).await?;
     let aggregates = if cfg.port_aggregates.iter().any(|a| {
@@ -703,7 +709,10 @@ async fn fetch_connected(
             domains.push(interface_client::get_broadcast_domain(&socket, &d.name).await?);
         }
     }
-    Some(connected_entries(table, &interfaces, &aggregates, &domains))
+    Some((
+        connected_entries(table, &interfaces, &aggregates, &domains),
+        connected_ifaces(table, &interfaces),
+    ))
 }
 
 /// The `Connected` candidates of `table`: the network of every address on an
@@ -754,6 +763,33 @@ fn connected_entries(
         });
     }
     entries
+}
+
+/// The interface name of each connected prefix of `table` for `show route`:
+/// a physical interface's `name` (tag 0) or `name.<tag>`. Loopback, bond and
+/// SVI prefixes have none. A prefix addressed twice keeps the first.
+fn connected_ifaces(table: &str, interfaces: &[InterfaceStatus]) -> HashMap<IpNet, String> {
+    let mut out = HashMap::new();
+    for i in interfaces
+        .iter()
+        .filter(|i| !i.name.starts_with(nos_proto::LOOPBACK_PREFIX))
+    {
+        for s in i
+            .subinterfaces
+            .iter()
+            .filter(|s| s.routing_table.as_deref() == Some(table))
+        {
+            let name = if s.tag == 0 {
+                i.name.clone()
+            } else {
+                format!("{}.{}", i.name, s.tag)
+            };
+            for a in &s.addresses {
+                out.entry(a.address.trunc()).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Computes the `bgp_client::RedistributeTarget` to publish for `table`,
