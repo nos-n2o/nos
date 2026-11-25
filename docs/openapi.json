@@ -534,6 +534,13 @@
               }
             ]
           },
+          "clients": {
+            "description": "Role labels of the clients using the session (sorted, deduplicated); empty when unsolicited.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "detection_time_us": {
             "description": "Detection time, microseconds.",
             "format": "int32",
@@ -543,6 +550,12 @@
           "diag": {
             "$ref": "#/components/schemas/BfdDiag",
             "description": "Diagnostic for the last state change."
+          },
+          "down_count": {
+            "description": "Transitions from Up to any other state since the session was created.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "echo_active": {
             "description": "The Echo function is running (RFC 5880 §6.4).",
@@ -566,15 +579,54 @@
             "$ref": "#/components/schemas/BfdSessionKind",
             "description": "RFC 7880 S-BFD: which end of which protocol this session is."
           },
+          "last_change_secs": {
+            "description": "Age of the last state change in seconds (from session creation when there was none).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "local_discriminator": {
             "description": "My Discriminator (RFC 5880 section 6.8.1).",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
           },
+          "remote_desired_min_tx_us": {
+            "description": "The peer's advertised Desired Min TX, microseconds; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remote_detect_mult": {
+            "description": "The peer's Detect Mult; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "remote_discriminator": {
             "description": "Your Discriminator learned from the peer; zero until heard.",
             "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remote_min_rx_us": {
+            "description": "The peer's advertised Required Min RX, microseconds; `None` until a packet arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rx_packets": {
+            "description": "Packets that passed authentication; for an S-BFD initiator or an unaffiliated-echo loop, what that loop accepted. Per session lifetime.",
+            "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
@@ -588,11 +640,26 @@
             "minimum": 0,
             "type": "integer"
           },
+          "tx_packets": {
+            "description": "Control packets sent (echo-only sessions send none). Per session lifetime.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "tx_pdu_bytes": {
             "description": "RFC 9764: the UDP payload size Control packets are padded to, 0 when not padded.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "uptime_secs": {
+            "description": "Seconds since the session last went Up; `None` while not Up. Per session lifetime in the daemon: resets on re-creation, mode switch or `nos-bfdd` restart.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [

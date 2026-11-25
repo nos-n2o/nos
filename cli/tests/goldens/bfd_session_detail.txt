@@ -5,17 +5,26 @@ Key
   Interface  eth7
   Aggregate  ae9
   Multihop   no
-State          Up
-Diag           NoDiagnostic
-Local-Disc     1
-Remote-Disc    2
-Tx-Interval    100ms
-Detection      300ms
-Kind           SbfdInitiator
-Auth           MeticulousMd5
-Auth-Key       9
-Auth-Failures  4
-Echo           yes
-Echo-Interval  50ms
-Echo-Only      no
-Pdu            1.4 KB
+State                     Up
+Diag                      NoDiagnostic
+Local-Disc                1
+Remote-Disc               2
+Tx-Interval               100ms
+Detection                 300ms
+Last-Change-Secs          0s
+Down-Count                0
+Tx-Packets                0
+Rx-Packets                0
+Remote-Min-Rx-Us          -
+Remote-Desired-Min-Tx-Us  -
+Remote-Detect-Mult        -
+Clients                   
+Kind                      SbfdInitiator
+Auth                      MeticulousMd5
+Auth-Key                  9
+Auth-Failures             4
+Echo                      yes
+Echo-Interval             50ms
+Echo-Only                 no
+Pdu                       1.4 KB
+Uptime                    -

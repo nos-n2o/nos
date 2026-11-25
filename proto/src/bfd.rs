@@ -216,6 +216,42 @@ pub struct BfdSessionView {
     /// RFC 7880 S-BFD: which end of which protocol this session is.
     #[view(brief, order = 41, header = "Kind", text)]
     pub kind: BfdSessionKind,
+    /// Seconds since the session last went Up; `None` while not Up. Per session lifetime in the daemon: resets on re-creation, mode switch or `nos-bfdd` restart.
+    #[serde(default)]
+    #[view(brief, order = 49, header = "Uptime", unit = secs)]
+    pub uptime_secs: Option<u64>,
+    /// Age of the last state change in seconds (from session creation when there was none).
+    #[serde(default)]
+    #[view(unit = secs)]
+    pub last_change_secs: u64,
+    /// Transitions from Up to any other state since the session was created.
+    #[serde(default)]
+    #[view(unit = count)]
+    pub down_count: u32,
+    /// Control packets sent (echo-only sessions send none). Per session lifetime.
+    #[serde(default)]
+    #[view(unit = count)]
+    pub tx_packets: u64,
+    /// Packets that passed authentication; for an S-BFD initiator or an unaffiliated-echo loop, what that loop accepted. Per session lifetime.
+    #[serde(default)]
+    #[view(unit = count)]
+    pub rx_packets: u64,
+    /// The peer's advertised Required Min RX, microseconds; `None` until a packet arrived.
+    #[serde(default)]
+    #[view(unit = micros)]
+    pub remote_min_rx_us: Option<u32>,
+    /// The peer's advertised Desired Min TX, microseconds; `None` until a packet arrived.
+    #[serde(default)]
+    #[view(unit = micros)]
+    pub remote_desired_min_tx_us: Option<u32>,
+    /// The peer's Detect Mult; `None` until a packet arrived.
+    #[serde(default)]
+    #[view(unit = count)]
+    pub remote_detect_mult: Option<u8>,
+    /// Role labels of the clients using the session (sorted, deduplicated); empty when unsolicited.
+    #[serde(default)]
+    #[view(text)]
+    pub clients: Vec<String>,
 }
 
 /// What a session is: a classical RFC 5880 peer, or an RFC 7880 S-BFD
@@ -387,6 +423,49 @@ mod tests {
             diag: BfdDiag::NoDiagnostic,
             control_plane_independent: true,
         };
+        let mut b = BytesMut::new();
+        c.encode(e.clone(), &mut b).unwrap();
+        assert_eq!(c.decode(&mut b).unwrap(), Some(e));
+    }
+
+    #[test]
+    fn session_view_wire_appends_stats_last() {
+        let mut v = BfdSessionView {
+            key: key(),
+            state: BfdState::Down,
+            diag: BfdDiag::NoDiagnostic,
+            local_discriminator: 0,
+            remote_discriminator: 0,
+            tx_interval_us: 0,
+            detection_time_us: 0,
+            auth_method: None,
+            auth_key_id: None,
+            auth_failures: 0,
+            echo_active: false,
+            echo_interval_us: 0,
+            echo_only: false,
+            tx_pdu_bytes: 0,
+            kind: BfdSessionKind::Classical,
+            uptime_secs: None,
+            last_change_secs: 0,
+            down_count: 0,
+            tx_packets: 0,
+            rx_packets: 0,
+            remote_min_rx_us: None,
+            remote_desired_min_tx_us: None,
+            remote_detect_mult: None,
+            clients: vec![],
+        };
+        // The nine appended fields, all empty, are nine zero bytes at the end.
+        let mut c = IpcCodec::<BfdEvent>::default();
+        let mut b = BytesMut::new();
+        c.encode(BfdEvent::Sessions(vec![v.clone()]), &mut b)
+            .unwrap();
+        assert_eq!(b[b.len() - 9..], [0u8; 9]);
+        v.uptime_secs = Some(5);
+        v.remote_detect_mult = Some(3);
+        v.clients = vec!["bgp".into(), "static".into()];
+        let e = BfdEvent::Sessions(vec![v]);
         let mut b = BytesMut::new();
         c.encode(e.clone(), &mut b).unwrap();
         assert_eq!(c.decode(&mut b).unwrap(), Some(e));
