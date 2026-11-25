@@ -28,7 +28,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
 | `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
-| `show bgp summary` | `GET /v1/bgp/summary` |
+| `show bgp summary [instance <n>]` | `GET /v1/bgp/summary[?instance=<n>]` |
+| `show bgp neighbor [<ip>] [instance <n>]` | `GET /v1/bgp/summary?peer=<ip>[&instance=<n>]` (the detail block is client-side only) |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` |
 | `show bgp vpnv4` / `show bgp vpnv4 rd <rd>` | `GET /v1/bgp/vpnv4` / `GET /v1/bgp/vpnv4?rd=<rd>` |

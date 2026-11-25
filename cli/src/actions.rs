@@ -319,6 +319,7 @@ pub async fn handle_action(
         | Resolved::ShowBfdSessions { .. }
         | Resolved::ShowLog { .. }
         | Resolved::ShowBgpSummary { .. }
+        | Resolved::ShowBgpNeighbor { .. }
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpFlowspec { .. }
         | Resolved::ShowBgpRpki
@@ -450,7 +451,11 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpSummary { instance } => {
-            show_bgp_summary(socket, watchdog_socket, instance.as_deref()).await;
+            show_bgp_summary(socket, watchdog_socket, instance.as_deref(), false, None).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBgpNeighbor { peer, instance } => {
+            show_bgp_summary(socket, watchdog_socket, instance.as_deref(), true, peer).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpEvpn => {
@@ -1237,7 +1242,15 @@ fn trim(mut entries: Vec<LogEntry>, n: usize) -> Vec<LogEntry> {
 /// independently — an unreachable instance prints its own line rather than
 /// aborting the whole command, matching `show_route`/`show_interface`'s
 /// per-command resolve-then-query shape.
-async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Option<&str>) {
+/// `neighbor` is set for `show bgp neighbor` (one detail block per peer, only
+/// `peer`'s when given), clear for the summary table.
+async fn show_bgp_summary(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    only: Option<&str>,
+    neighbor: bool,
+    peer: Option<std::net::IpAddr>,
+) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1257,6 +1270,7 @@ async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Op
         eprintln!("bgp instance '{}' not found", format::sanitize_line(n));
         return;
     }
+    let mut found = false;
     for instance in cfg
         .bgp_instances
         .iter()
@@ -1269,19 +1283,36 @@ async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Op
         .await
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_summary(&bgp_socket).await {
-                Ok(peers) => {
+                Ok(mut peers) => {
                     let name = format::sanitize_line(&instance.name);
+                    if let Some(want) = peer {
+                        peers.retain(|p| p.remote_address == want);
+                        if peers.is_empty() {
+                            continue;
+                        }
+                    }
+                    found = true;
                     println!(
                         "bgp instance {name}, router-id {}, AS {}",
                         instance.router_id, instance.asn
                     );
-                    emit(&peers, &format!("bgp instance {name}: no peers configured"));
+                    let none = format!("bgp instance {name}: no peers configured");
+                    if neighbor {
+                        emit_detail(&peers, &none);
+                    } else {
+                        emit(&peers, &none);
+                    }
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
+    }
+    if let Some(want) = peer
+        && !found
+    {
+        eprintln!("error: no bgp neighbor {want}");
     }
 }
 

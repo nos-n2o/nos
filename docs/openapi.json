@@ -8680,7 +8680,28 @@
     },
     "/v1/bgp/summary": {
       "get": {
+        "description": "`instance` keeps one instance, `peer` keeps the one session with that address (searched in every instance unless `instance` is given).",
         "operationId": "bgp_summary",
+        "parameters": [
+          {
+            "description": "only this BGP instance",
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "only the session with this peer address",
+            "in": "query",
+            "name": "peer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -8691,6 +8712,26 @@
               }
             },
             "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "peer is not an IP address"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance or peer"
           },
           "503": {
             "content": {

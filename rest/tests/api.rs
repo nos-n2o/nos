@@ -1264,6 +1264,18 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let (s, v) = send(app, Method::GET, "/v1/bgp/summary", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
+    let (s, v) = send(
+        app,
+        Method::GET,
+        "/v1/bgp/summary?instance=r1&peer=192.0.2.2",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = send(app, Method::GET, "/v1/bgp/summary?instance=nope", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send(app, Method::GET, "/v1/bgp/summary?peer=nonsense", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, v) = send(app, Method::GET, "/v1/bgp/evpn", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
