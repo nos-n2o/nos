@@ -1946,9 +1946,7 @@ async fn aaa_users(socket: &Path, action: Resolved) {
     match client::external_users(socket, req).await {
         Ok(Event::ExternalUsers(l)) if l.is_empty() => println!("no external users"),
         Ok(Event::ExternalUsers(l)) => {
-            for (name, uid) in l {
-                println!("{name:<32} {uid}");
-            }
+            println!("{}", format::render_aaa_users(&l));
         }
         Ok(Event::ExternalUser { uid }) if clear => {
             println!("{name}: entry removed, uid {uid} stays reserved");

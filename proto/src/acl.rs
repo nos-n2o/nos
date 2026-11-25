@@ -53,7 +53,7 @@ pub struct AclRuleStatus {
     pub dropped: Option<String>,
     /// The priority level the rule's filters were packed into; `None` when
     /// dropped.
-    #[view(unit = count)]
+    #[view(brief, unit = count, header = "Level")]
     pub level: Option<u32>,
     /// Packets matched.
     #[view(brief, unit = count)]

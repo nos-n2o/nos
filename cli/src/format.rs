@@ -361,13 +361,53 @@ fn render_port_aggregate_status_raw(status: &PortAggregateStatus) -> String {
         sanitize_line(switching_profile),
         status.mtu
     )];
+    if let Some(b) = &status.bond_name {
+        lines.push(format!("  Device: {}", sanitize_line(b)));
+    }
+    if let Some(n) = status.speed_mbps {
+        lines.push(format!("  Speed: {}", human_speed(n)));
+    }
+    if let Some(a) = status.link_local_address {
+        lines.push(format!("  Link-local: {a}"));
+    }
     if status.err_disabled {
         lines.push("  Err-disabled: yes".to_string());
     }
     for sub in &status.subinterfaces {
         lines.push(format!("  {}", render_subinterface_status(sub)));
     }
+    if !status.steering.is_empty() {
+        let rows: Vec<Vec<String>> = status
+            .steering
+            .iter()
+            .map(|s| {
+                vec![
+                    s.member.clone(),
+                    crate::table::human_count(s.conversations.into()),
+                    crate::table::human_count(s.redirected_packets),
+                    crate::table::human_count(s.dropped_packets),
+                ]
+            })
+            .collect();
+        let cols = [
+            Col::left("Member"),
+            Col::right("Conversations"),
+            Col::right("Redirected"),
+            Col::right("Dropped"),
+        ];
+        lines.push("  Steering:".to_string());
+        lines.extend(table(&cols, &rows).lines().map(|l| format!("    {l}")));
+    }
     lines.join("\n")
+}
+
+/// `show aaa users`: one row per external user (#1413).
+pub fn render_aaa_users(users: &[(String, u32)]) -> String {
+    let rows: Vec<Vec<String>> = users
+        .iter()
+        .map(|(n, uid)| vec![n.clone(), uid.to_string()])
+        .collect();
+    sanitize(&table(&[Col::left("User"), Col::right("Uid")], &rows)).into_owned()
 }
 
 /// Render every port aggregate's daemon-reported status, one per line — used
@@ -386,6 +426,15 @@ fn render_port_aggregate_statuses_raw(statuses: &[PortAggregateStatus]) -> Strin
         .map(render_port_aggregate_status)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `10 Gb/s` for whole gigabits, else `Mb/s`.
+fn human_speed(mbps: u32) -> String {
+    if mbps >= 1000 && mbps.is_multiple_of(1000) {
+        format!("{} Gb/s", mbps / 1000)
+    } else {
+        format!("{mbps} Mb/s")
+    }
 }
 
 fn format_mac(mac: [u8; 6]) -> String {
@@ -3314,6 +3363,39 @@ mod tests {
             ..agg()
         };
         assert!(render_port_aggregate_status(&held).contains("\n  Err-disabled: yes"));
+    }
+
+    #[test]
+    fn port_aggregate_shows_device_speed_linklocal_steering() {
+        let a = PortAggregateStatus {
+            bond_name: Some("bond1\nFORGED".into()),
+            speed_mbps: Some(10_000),
+            link_local_address: Some("fe80::1".parse().unwrap()),
+            steering: vec![nos_proto::LacpLinkSteering {
+                member: "eth0".into(),
+                conversations: 3,
+                redirected_packets: 1500,
+                dropped_packets: 0,
+            }],
+            ..agg()
+        };
+        let out = render_port_aggregate_status(&a);
+        assert!(out.contains("\n  Device: bond1\\nFORGED"), "{out}");
+        assert!(out.contains("\n  Speed: 10 Gb/s"), "{out}");
+        assert!(out.contains("\n  Link-local: fe80::1"), "{out}");
+        assert!(
+            out.contains("    Member  Conversations  Redirected  Dropped"),
+            "{out}"
+        );
+        assert!(out.contains("eth0"), "{out}");
+        assert_eq!(human_speed(2500), "2500 Mb/s");
+    }
+
+    #[test]
+    fn aaa_users_table_sanitizes() {
+        let t = render_aaa_users(&[("bob\nFORGED 9".into(), 1001)]);
+        assert_eq!(t.lines().count(), 3, "{t}");
+        assert!(t.contains("User") && t.contains("Uid"), "{t}");
     }
 
     #[test]
