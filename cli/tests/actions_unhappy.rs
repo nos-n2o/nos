@@ -436,6 +436,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                 "ospf" => serve(role, name, &path, |r: OspfRequest| {
                     vec![match r {
                         OspfRequest::GetDatabase => OspfEvent::Database(Vec::new()),
+                        OspfRequest::GetInterfaces => OspfEvent::Interfaces(Vec::new()),
                         _ => OspfEvent::Neighbors(Vec::new()),
                     }]
                 }),
@@ -445,6 +446,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                 _ => serve(role, name, &path, |r: Ospfv3Request| {
                     vec![match r {
                         Ospfv3Request::GetDatabase => Ospfv3Event::Database(Vec::new()),
+                        Ospfv3Request::GetInterfaces => Ospfv3Event::Interfaces(Vec::new()),
                         _ => Ospfv3Event::Neighbors(Vec::new()),
                     }]
                 }),
@@ -538,8 +540,10 @@ const QUERIES: &[&str] = &[
     "show bgp vpnv4",
     "show bgp vpnv6 rd 65001:1",
     "show ospf neigh",
+    "show ospf interface",
     "show ospf database",
     "show ospfv3 neigh",
+    "show ospfv3 interface",
     "show ospfv3 database",
     "clear spanning-tree detected-protocols",
     "clear spanning-tree detected-protocols interface eth0",
@@ -630,8 +634,10 @@ async fn configd_is_down_for_every_operational_command() {
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",
+            "show ospf interface",
             "show ospf database",
             "show ospfv3 neigh",
+            "show ospfv3 interface",
             "show ospfv3 database",
             "clear bgp b1 192.0.2.2",
             "save",
@@ -847,8 +853,10 @@ async fn no_protocol_instances_are_configured() {
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",
+            "show ospf interface",
             "show ospf database",
             "show ospfv3 neigh",
+            "show ospfv3 interface",
             "show ospfv3 database",
             "clear bgp b1 192.0.2.2",
         ],

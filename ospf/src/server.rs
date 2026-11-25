@@ -30,7 +30,10 @@ pub fn start(
 /// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
 fn allowed(role: Role, req: &OspfRequest) -> bool {
     match req {
-        OspfRequest::GetNeighbors | OspfRequest::GetDatabase | OspfRequest::GetSegmentRouting => {
+        OspfRequest::GetNeighbors
+        | OspfRequest::GetDatabase
+        | OspfRequest::GetSegmentRouting
+        | OspfRequest::GetInterfaces => {
             matches!(role, Role::User | Role::Restd)
         }
         OspfRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -86,6 +89,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            OspfRequest::GetInterfaces => {
+                let event = OspfEvent::Interfaces(links.interface_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             OspfRequest::GetDatabase => {
                 let event = OspfEvent::Database(links.database_summaries().await);
                 if writer.send(event).await.is_err() {
@@ -126,11 +135,13 @@ mod authz_tests {
         let feed = OspfRequest::RedistributeRoutes(nos_proto::RedistributeUpdate::Full(vec![]));
         for role in Role::ALL {
             assert_eq!(allowed(role, &feed), role == Role::Ribd, "{role:?} feed");
-            assert_eq!(
-                allowed(role, &OspfRequest::GetNeighbors),
-                matches!(role, Role::User | Role::Restd),
-                "{role:?} query"
-            );
+            for q in [OspfRequest::GetNeighbors, OspfRequest::GetInterfaces] {
+                assert_eq!(
+                    allowed(role, &q),
+                    matches!(role, Role::User | Role::Restd),
+                    "{role:?} query"
+                );
+            }
         }
     }
 }

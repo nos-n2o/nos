@@ -248,6 +248,48 @@ async fn assert_neighbor_fields(
     anyhow::bail!("{proto} neighbor {peer} on {link} lacks the #1437 fields: {last}")
 }
 
+/// #1438: `GET /v1/<proto>/interfaces` lists `link` as a running
+/// point-to-point interface with the fixture's timers, one known and one
+/// `Full` neighbor (polled: the counts follow the adjacency).
+async fn assert_interface_row(r: &Router, proto: &str, link: &str) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..15 {
+        let body = r
+            .rest_expect(Method::GET, &format!("/v1/{proto}/interfaces"), None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let row = report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|i| i["link"] == link);
+        if let Some(i) = row {
+            let address_ok = if proto == "ospfv3" {
+                i["address"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("fe80::"))
+            } else {
+                i["address"].as_str().is_some_and(|a| a.contains('/'))
+            };
+            if i["network_type"] == "PointToPoint"
+                && i["state"] == "PointToPoint"
+                && i["hello_interval"] == 10
+                && i["dead_interval"] == 40
+                && i["retransmit_interval"] == 5
+                && i["cost"].as_u64().is_some_and(|c| c >= 1)
+                && i["neighbor_count"] == 1
+                && i["full_neighbor_count"] == 1
+                && address_ok
+            {
+                return Ok(());
+            }
+            last = i.to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("{proto} interface {link} is not the expected running p2p row: {last}")
+}
+
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let age0 = a.count_fresh("ospf lsa installed.*age=0$").await;
@@ -321,6 +363,7 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
         serde_json::Value::Null,
     )
     .await?;
+    assert_interface_row(a, "ospf", "eth0.0").await?;
     // Real LSA content flows and is installed. Not pinned to a link: a
     // router's LSDB is per-area, so which link sees an LSA first is a race.
     a.wait(&format!("ospf lsa installed.*neighbor={OSPF_ROUTER_ID_B}"))
@@ -4404,6 +4447,7 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         serde_json::Value::Null,
     )
     .await?;
+    assert_interface_row(a, "ospfv3", "eth0.0").await?;
     a.wait(&format!(
         "ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID_B}"
     ))
