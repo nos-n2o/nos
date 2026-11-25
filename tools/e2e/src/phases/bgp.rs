@@ -455,6 +455,34 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&withdrawn, withdrawn_b, 30).await?;
     b.wait_new(&loc_rib(), loc_b, 60).await?;
 
+    // #1441: the Hard Reset (6/9) is in the counters and the history, on both
+    // routers; asserted before the next provision, which may replace the slot.
+    wait_peer(a, IP_B.s(), "flap, 6/9 sent, notification-sent", 30, |p| {
+        p["flap_count"].as_u64() >= Some(1)
+            && p["last_notification_sent"]["code"] == 6
+            && p["last_notification_sent"]["subcode"] == 9
+            && p["last_reset_reason"] == "notification-sent"
+            && p["msg_sent"]["open"].as_u64() >= Some(1)
+            && p["msg_sent"]["update"].as_u64() >= Some(1)
+            && p["msg_received"]["keepalive"].as_u64() >= Some(1)
+            && p["messages_sent"].as_u64() >= Some(3)
+    })
+    .await?;
+    wait_peer(
+        b,
+        IP_A.s(),
+        "flap, 6/9 received, notification-received",
+        30,
+        |p| {
+            p["flap_count"].as_u64() >= Some(1)
+                && p["last_notification_received"]["code"] == 6
+                && p["last_notification_received"]["subcode"] == 9
+                && p["last_reset_reason"] == "notification-received"
+                && p["msg_received"]["update"].as_u64() >= Some(1)
+        },
+    )
+    .await?;
+
     log("graceful restart off on router-a: flushed on return, a kill is a hard flap");
     let no_cap = format!("flushing stale routes peer={IP_A} .*reason=.*no-capability");
     let (est_a, est_b, no_cap_b) = (a.count(est), b.count(est), b.count(&no_cap));
@@ -989,6 +1017,41 @@ async fn wait_summary(r: &Router, needles: &[&str], secs: u64) -> anyhow::Result
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("{}: summary never held {needles:?}: {body}", r.name());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Polls `GET /v1/bgp/summary` until the peer's JSON entry satisfies `ok`
+/// (a substring cannot assert "non-zero", #1441).
+async fn wait_peer(
+    r: &Router,
+    peer: &str,
+    what: &str,
+    secs: u64,
+    ok: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let found = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i["result"].as_array())
+            .flatten()
+            .find(|p| p["remote_address"] == peer);
+        if found.is_some_and(&ok) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "{}: peer {peer} summary never showed {what}: {body}",
+                r.name()
+            );
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }

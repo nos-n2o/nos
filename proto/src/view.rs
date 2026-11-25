@@ -288,6 +288,24 @@ mod tests {
             }),
             stale_prefixes: 4,
             status: PeerIdleStatus::AdminShutdown,
+            msg_received: crate::bgp::MessageCounts::default(),
+            msg_sent: crate::bgp::MessageCounts {
+                open: 1,
+                update: 2,
+                notification: 3,
+                keepalive: 4,
+                route_refresh: 5,
+            },
+            messages_received: 0,
+            messages_sent: 15,
+            last_notification_sent: Some(crate::bgp::NotificationInfo {
+                code: 6,
+                subcode: 9,
+                seconds_ago: 7,
+            }),
+            last_notification_received: None,
+            last_reset_reason: Some(crate::bgp::ResetReason::NotificationSent),
+            flap_count: 1,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_keys_match(view_of::<PeerSummary>().unwrap(), &v);

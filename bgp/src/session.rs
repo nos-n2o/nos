@@ -1739,6 +1739,10 @@ fn idle_status(shutdown: bool, max_prefix_held: bool, stale: bool) -> PeerIdleSt
 /// `PeerSummary` — `PeerStatus.established_since` (a `tokio::time::Instant`)
 /// isn't itself meaningful to another process, so it's converted to an
 /// uptime measured right now instead.
+fn total(m: &nos_proto::MessageCounts) -> u64 {
+    m.open + m.update + m.notification + m.keepalive + m.route_refresh
+}
+
 fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
     let status = *slot.status_receiver().borrow();
     // ponytail: a session that ends between fsm::run returning and the next
@@ -1754,6 +1758,7 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
     let shutdown = slot.peer.shutdown.is_some();
     let max_prefix_held = slot.max_prefix_held();
     let stale_prefixes = rib.stale_count(slot.peer.remote_address);
+    let c = slot.counters().snapshot();
     PeerSummary {
         remote_address: slot.peer.remote_address,
         peer_group: slot.peer.peer_group.clone(),
@@ -1797,6 +1802,14 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
                     .collect(),
             }),
         stale_prefixes,
+        messages_received: total(&c.received),
+        messages_sent: total(&c.sent),
+        msg_received: c.received,
+        msg_sent: c.sent,
+        last_notification_sent: c.last_sent,
+        last_notification_received: c.last_received,
+        last_reset_reason: c.last_reset,
+        flap_count: c.flaps,
         status: idle_status(
             shutdown,
             max_prefix_held,
