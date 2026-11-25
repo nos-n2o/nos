@@ -254,6 +254,49 @@ mod tests {
     }
 
     #[test]
+    fn peer_summary_keys_and_round_trip() {
+        use crate::bgp::{GrFamily, GrSummary, PeerIdleStatus, PeerSummary, PrefixCounts};
+        let p = PeerSummary {
+            remote_address: "10.0.0.1".parse().unwrap(),
+            peer_group: "g".into(),
+            shutdown: true,
+            remote_as: Some(65001),
+            remote_bgp_id: Some("1.1.1.1".parse().unwrap()),
+            state: crate::bgp::BgpSessionState::Idle,
+            uptime_secs: Some(1),
+            negotiated_hold_time: Some(90),
+            negotiated_keepalive: Some(30),
+            ao_current_key: Some(1),
+            ao_rnext_key: Some(2),
+            ao_packets_good: Some(3),
+            ao_packets_bad: Some(4),
+            ao_packets_key_not_found: Some(5),
+            max_prefix_held: false,
+            accepted_prefixes: Some(PrefixCounts {
+                ipv4: 1,
+                ipv6: 2,
+                evpn: 3,
+            }),
+            graceful_restart: Some(GrSummary {
+                restart_time: 120,
+                notification: true,
+                restarting: false,
+                families: vec![GrFamily {
+                    family: crate::AddressFamily::Ipv4Unicast,
+                    forwarding: true,
+                }],
+            }),
+            stale_prefixes: 4,
+            status: PeerIdleStatus::AdminShutdown,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_keys_match(view_of::<PeerSummary>().unwrap(), &v);
+        assert_eq!(v["status"], "AdminShutdown");
+        let bytes = postcard::to_vec::<_, 256>(&p).unwrap();
+        assert_eq!(postcard::from_bytes::<PeerSummary>(&bytes).unwrap(), p);
+    }
+
+    #[test]
     fn scalars_and_wrappers() {
         assert!(view_of::<u32>().is_none());
         assert!(view_of::<Option<u32>>().is_none());

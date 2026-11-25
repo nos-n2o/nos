@@ -318,7 +318,7 @@ pub async fn handle_action(
         | Resolved::ShowBfdReflector
         | Resolved::ShowBfdSessions { .. }
         | Resolved::ShowLog { .. }
-        | Resolved::ShowBgpBrief
+        | Resolved::ShowBgpSummary { .. }
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpFlowspec { .. }
         | Resolved::ShowBgpRpki
@@ -447,8 +447,8 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_log(watchdog_socket, source, follow, last, level, needle).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowBgpBrief => {
-            show_bgp_brief(socket, watchdog_socket).await;
+        Resolved::ShowBgpSummary { instance } => {
+            show_bgp_summary(socket, watchdog_socket, instance.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpEvpn => {
@@ -1126,13 +1126,13 @@ fn trim(mut entries: Vec<LogEntry>, n: usize) -> Vec<LogEntry> {
     entries
 }
 
-/// Router-wide, no instance argument: fetches the running config fresh (like
-/// every other one-shot command) for the list of configured `BgpInstance`s,
+/// Fetches the running config fresh (like every other one-shot command) for
+/// the list of configured `BgpInstance`s (only `instance` when given),
 /// resolves each one's `nos-bgpd` via the watchdog broker, and queries each
 /// independently — an unreachable instance prints its own line rather than
 /// aborting the whole command, matching `show_route`/`show_interface`'s
 /// per-command resolve-then-query shape.
-async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
+async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Option<&str>) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1146,7 +1146,17 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
         return;
     }
 
-    for instance in &cfg.bgp_instances {
+    if let Some(n) = only
+        && !cfg.bgp_instances.iter().any(|i| i.name == n)
+    {
+        eprintln!("bgp instance '{}' not found", format::sanitize_line(n));
+        return;
+    }
+    for instance in cfg
+        .bgp_instances
+        .iter()
+        .filter(|i| only.is_none_or(|n| i.name == n))
+    {
         match watchdog_client::resolve(
             watchdog_socket,
             nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
@@ -1154,7 +1164,14 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
         .await
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_summary(&bgp_socket).await {
-                Ok(peers) => println!("{}", format::render_bgp_summary(&instance.name, &peers)),
+                Ok(peers) => {
+                    let name = format::sanitize_line(&instance.name);
+                    println!(
+                        "bgp instance {name}, router-id {}, AS {}",
+                        instance.router_id, instance.asn
+                    );
+                    emit(&peers, &format!("bgp instance {name}: no peers configured"));
+                }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
@@ -1199,7 +1216,7 @@ impl<'a> PagedOut<'a> {
     }
 }
 
-/// `show bgp evpn` — same shape as `show_bgp_brief`, asking each instance
+/// `show bgp evpn` — same shape as `show_bgp_summary`, asking each instance
 /// for its received EVPN routes instead of its peer summaries.
 async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
@@ -1424,7 +1441,7 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
 
 /// `show ospf neigh` — fetches the running config for the list of
 /// `OspfInstance`s, resolves each one's `nos-ospfd` via the watchdog broker,
-/// and queries each independently — mirrors `show_bgp_brief` exactly,
+/// and queries each independently — mirrors `show_bgp_summary` exactly,
 /// including its per-instance "not running" handling.
 async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
     let cfg = match client::fetch_running_config(config_socket).await {
@@ -1664,7 +1681,7 @@ async fn show_ospfv3_database(
 
 /// `clear bgp <instance> <peer> [soft-in]`. Targets one named instance
 /// (errors clearly if it isn't in the running config), unlike
-/// `show_bgp_brief`'s all-instances loop.
+/// `show_bgp_summary`'s all-instances loop.
 async fn clear_bgp(
     config_socket: &Path,
     watchdog_socket: &Path,

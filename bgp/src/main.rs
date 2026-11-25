@@ -30,7 +30,7 @@ struct Args {
     watchdog_socket: PathBuf,
 
     /// Unix socket to listen on for session-summary queries (e.g. from `nos
-    /// show bgp brief`). Defaults to a path derived from `--instance` for
+    /// show bgp summary`). Defaults to a path derived from `--instance` for
     /// standalone/dev runs; nos-watchdog always passes this explicitly for
     /// supervised instances.
     #[arg(long)]

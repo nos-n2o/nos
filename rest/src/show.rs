@@ -576,7 +576,7 @@ pub struct InstanceReport<T> {
 }
 
 /// Asks every named instance's daemon the same question, like `nos-cli`'s
-/// router-wide `show bgp brief`: an instance whose daemon isn't reachable
+/// router-wide `show bgp summary`: an instance whose daemon isn't reachable
 /// gets an `error` entry instead of failing the whole query.
 async fn per_instance<Req, Ev, T>(
     d: &Daemons,

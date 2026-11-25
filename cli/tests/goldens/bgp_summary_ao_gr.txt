@@ -1,0 +1,30 @@
+Neighbor                  10.0.0.2
+AS                        65002
+Shutdown                  no
+Remote-Id                 2.2.2.2
+State                     Established
+Status                    None
+Up/Down                   1h02m
+Hold                      1m30s
+Keepalive                 30s
+Peer-group                pg1
+Ao-Current-Key            1
+Ao-Rnext-Key              2
+PfxRcd
+  v4    3
+  v6    0
+  evpn  2
+Ao-Packets-Good           42
+Ao-Packets-Bad            1
+Ao-Packets-Key-Not-Found  0
+Max-Prefix-Held           no
+Graceful-Restart
+  Restart-Time  2m00s
+  Notification  yes
+  Restarting    no
+  Families
+    Family       Forwarding
+    -----------  ----------
+    Ipv4Unicast  yes
+    Ipv6Unicast  no
+Stale-Prefixes            0

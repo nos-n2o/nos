@@ -90,9 +90,11 @@ pub enum Command {
         level: Option<nos_proto::LogLevel>,
         needle: Option<String>,
     },
-    /// `show bgp brief` — a one-line-per-peer session summary across every
-    /// configured BGP instance.
-    ShowBgpBrief,
+    /// `show bgp summary [instance <name>]` (alias `brief`) — a table of
+    /// peers per configured BGP instance.
+    ShowBgpSummary {
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
@@ -809,7 +811,10 @@ mod tests {
 
     #[test]
     fn show_bgp_brief() {
-        assert_eq!(Command::parse("show bgp brief"), Command::ShowBgpBrief);
+        assert_eq!(
+            Command::parse("show bgp brief"),
+            Command::ShowBgpSummary { instance: None }
+        );
     }
 
     #[test]

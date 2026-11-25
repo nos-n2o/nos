@@ -1,4 +1,4 @@
-//! `nos-bgpd`'s IPC query protocol — backs `nos-cli`'s `show bgp brief`.
+//! `nos-bgpd`'s IPC query protocol — backs `nos-cli`'s `show bgp summary`.
 //! Mirrors `rib`/`interface`'s shape: a request/event pair framed by
 //! `IpcCodec` over a Unix socket resolved via the watchdog broker
 //! (`ServiceRef::BgpInstance`).
@@ -29,32 +29,73 @@ pub enum BgpSessionState {
     Established,
 }
 
-/// One configured peer's one-line summary, for `show bgp brief`.
+/// Why a peer is `Idle` in a way the FSM state does not say (`show bgp summary`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PeerIdleStatus {
+    /// Nothing to add to the state.
+    #[default]
+    None,
+    /// The peer (or its peer-group) is administratively shut.
+    AdminShutdown,
+    /// Held down by an RFC 4486 maximum-prefix trip.
+    MaxPrefix,
+    /// Not established; its routes are kept stale for graceful restart.
+    GrStale,
+}
+
+/// Accepted prefixes per address family.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, View)]
+pub struct PrefixCounts {
+    /// IPv4 unicast.
+    #[view(brief, order = 0, header = "v4", unit = count)]
+    pub ipv4: u32,
+    /// IPv6 unicast.
+    #[view(brief, order = 1, header = "v6", unit = count)]
+    pub ipv6: u32,
+    /// L2VPN EVPN.
+    #[view(brief, order = 2, header = "evpn", unit = count)]
+    pub evpn: u32,
+}
+
+/// One configured peer's summary, for `show bgp summary`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
 pub struct PeerSummary {
     /// The peer's address.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, order = 0, header = "Neighbor", sort)]
     pub remote_address: IpAddr,
     /// Name of the peer group the peer belongs to.
+    #[view(brief, order = 9, header = "Peer-group")]
     pub peer_group: String,
     /// The peer (or its peer-group) is administratively shut.
+    #[view(unit = bool)]
     pub shutdown: bool,
     /// Known only once negotiated (i.e. at least `OpenConfirm`).
+    #[view(brief, order = 1, header = "AS")]
     pub remote_as: Option<u32>,
     /// BGP Identifier from the peer's OPEN (RFC 4271 section 4.2), once received.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, order = 2, header = "Remote-Id")]
     pub remote_bgp_id: Option<Ipv4Addr>,
     /// Session state.
+    #[view(brief, order = 3, text)]
     pub state: BgpSessionState,
     /// Seconds since the session reached `Established`. `None` unless
     /// `state == Established` — computed server-side from an `Instant`,
     /// which isn't itself meaningful to serialize across processes.
+    #[view(brief, order = 5, header = "Up/Down", unit = secs)]
     pub uptime_secs: Option<u64>,
     /// Hold time agreed with the peer, in seconds (RFC 4271 section 4.2).
+    #[view(brief, order = 6, header = "Hold", unit = secs)]
     pub negotiated_hold_time: Option<u16>,
     /// Keepalive interval in effect, in seconds.
+    #[view(brief, order = 7, header = "Keepalive", unit = secs)]
     pub negotiated_keepalive: Option<u16>,
     /// RFC 5925 TCP-AO live per-connection state, from
     /// `getsockopt(TCP_AO_INFO)` — `Some` only for an `Established` session
@@ -66,43 +107,74 @@ pub struct PeerSummary {
     /// `KeyID` signing outgoing segments right now (it follows the peer's
     /// `RNextKeyID`, RFC 5925 §7.5.2); `ao_rnext_key` is the `RecvID` of the key
     /// *this router* asks the peer to send with, not what the peer asked for.
+    #[view(unit = count)]
     pub ao_current_key: Option<u8>,
     /// TCP-AO `RNextKeyID` the peer asks us to send (RFC 5925 section 3.1).
+    #[view(unit = count)]
     pub ao_rnext_key: Option<u8>,
     /// Segments that passed TCP-AO verification.
+    #[view(unit = count)]
     pub ao_packets_good: Option<u64>,
     /// Segments that failed TCP-AO verification.
+    #[view(unit = count)]
     pub ao_packets_bad: Option<u64>,
     /// Segments dropped because no matching TCP-AO key was found.
+    #[view(unit = count)]
     pub ao_packets_key_not_found: Option<u64>,
     /// Held down by an RFC 4486 maximum-prefix trip: no session is opened or
     /// accepted until `ClearPeer`, a shut/no-shut, or the restart interval.
+    #[view(unit = bool)]
     pub max_prefix_held: bool,
     /// Accepted (post-import-policy) prefixes from this peer per address
     /// family: ipv4, ipv6, l2vpn-evpn. `Some` only while `Established`.
-    pub accepted_prefixes: Option<[u32; 3]>,
+    #[view(brief, nested, order = 10, header = "PfxRcd")]
+    pub accepted_prefixes: Option<PrefixCounts>,
     /// The RFC 4724 graceful restart capability the peer last advertised,
     /// while this instance has graceful restart on. Kept after the session
     /// ends, so it shows while its routes are retained.
+    #[view(nested)]
     pub graceful_restart: Option<GrSummary>,
     /// Routes from this peer kept as stale after a graceful restart, waiting
     /// for its End-of-RIB (also RFC 7313 enhanced route refresh's).
+    #[view(unit = count)]
     pub stale_prefixes: u32,
+    /// Why the peer is `Idle` beyond its state: shutdown, maximum-prefix hold,
+    /// or stale graceful-restart routes (in that precedence).
+    #[serde(default)]
+    #[view(brief, order = 4, header = "Status", text)]
+    pub status: PeerIdleStatus,
 }
 
 /// A peer's RFC 4724 / RFC 8538 graceful restart capability.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct GrSummary {
     /// Its Restart Time, in seconds.
+    #[view(unit = secs)]
     pub restart_time: u16,
     /// RFC 8538 N bit: a NOTIFICATION other than a Hard Reset keeps routes.
+    #[view(unit = bool)]
     pub notification: bool,
     /// R bit: the peer has just restarted.
+    #[view(unit = bool)]
     pub restarting: bool,
     /// The families it keeps forwarding state for, and each one's F bit.
-    pub families: Vec<(crate::AddressFamily, bool)>,
+    #[view(nested)]
+    pub families: Vec<GrFamily>,
+}
+
+/// One family of a peer's graceful restart capability.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct GrFamily {
+    /// The address family.
+    #[view(brief, order = 0, text)]
+    pub family: crate::AddressFamily,
+    /// Its F bit: forwarding state was preserved.
+    #[view(brief, order = 1, header = "Forwarding", unit = bool)]
+    pub forwarding: bool,
 }
 
 /// One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the
