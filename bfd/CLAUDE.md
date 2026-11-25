@@ -9,7 +9,7 @@ The pure core (#296) plus the single system-wide daemon `nos-bfdd` (#297), a fix
 | `fsm` | `step(state, event)` state machine, `may_transmit` (passive) |
 | `timers` | Interval negotiation, jitter, Poll/Final, detection time |
 | `authz` | `allowed(role, &BfdRequest)` |
-| `session` | `Core` (pure: packets and clock in, packets out) and `run`, one tokio task per session |
+| `session` | `Core` (pure: packets and clock in, packets out), `run` (one task per session), `Stats` (`Arc`, never in `Status`) |
 | `manager` | Session table, refcount per client, `Demux` (rx packet to session), `Net` trait |
 | `server` | `--listen-socket`: `Register` streams `BfdEvent::State`, `GetSessions` replies once |
 | `echo` | Echo packet build/parse (IP + UDP 3785, TTL 255, source = destination) |

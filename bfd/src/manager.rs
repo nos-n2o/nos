@@ -2,7 +2,7 @@
 //! that registered it and dropped with the last one. Also the receive-side
 //! demultiplexer the sockets feed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -236,7 +236,9 @@ impl Demux {
 }
 
 struct Entry {
-    clients: HashSet<u64>,
+    /// Client id to its role label.
+    clients: HashMap<u64, &'static str>,
+    stats: Arc<session::Stats>,
     /// RFC 9468: created by a packet, no client holds it; a client that
     /// registers the key adopts it.
     unsolicited: bool,
@@ -254,6 +256,8 @@ pub struct Manager {
     demux: Demux,
     sessions: Mutex<HashMap<SessionKey, Entry>>,
     next_client: AtomicU64,
+    /// Role label per live client id (lock order: after `sessions`).
+    client_labels: Mutex<HashMap<u64, &'static str>>,
     reflector: Arc<Reflector>,
     /// The subinterfaces that answer unsolicited BFD (`set_unsolicited`).
     rules: Mutex<Vec<unsolicited::Rule>>,
@@ -270,6 +274,7 @@ impl Manager {
             demux,
             sessions: Mutex::default(),
             next_client: AtomicU64::new(1),
+            client_labels: Mutex::new(HashMap::new()),
             reflector: Arc::default(),
             rules: Mutex::default(),
             last_cap_warn: Mutex::default(),
@@ -316,8 +321,19 @@ impl Manager {
         self.reflector.clone()
     }
 
-    pub fn new_client(&self) -> u64 {
-        self.next_client.fetch_add(1, Ordering::Relaxed)
+    pub fn new_client(&self, label: &'static str) -> u64 {
+        let id = self.next_client.fetch_add(1, Ordering::Relaxed);
+        self.client_labels.lock().unwrap().insert(id, label);
+        id
+    }
+
+    fn label_of(&self, client: u64) -> &'static str {
+        self.client_labels
+            .lock()
+            .unwrap()
+            .get(&client)
+            .copied()
+            .unwrap_or("other")
     }
 
     /// A random discriminator (§6.8.1: not guessable), skipping 0 and any in
@@ -380,7 +396,7 @@ impl Manager {
         }
         if let Some(e) = sessions.get_mut(key) {
             if let Some(c) = client {
-                e.clients.insert(c);
+                e.clients.insert(c, self.label_of(c));
                 e.unsolicited = false;
                 e.idle_since = None;
             }
@@ -392,12 +408,9 @@ impl Manager {
             return e.status.clone();
         }
         let disc = Self::alloc_disc(sessions);
-        let core = Core::new(
-            profile.clone(),
-            self.resolve(profile),
-            disc,
-            tokio::time::Instant::now().into_std(),
-        );
+        let created = tokio::time::Instant::now().into_std();
+        let stats = Arc::new(session::Stats::new(created));
+        let core = Core::new(profile.clone(), self.resolve(profile), disc, created);
         let initiator = sbfd.then(|| {
             Initiator::new(
                 profile,
@@ -420,6 +433,7 @@ impl Manager {
         let net = self.net.clone();
         let k = key.clone();
         let core_profile = profile.clone();
+        let task_stats = stats.clone();
         let task = tokio::spawn(async move {
             // An unaffiliated session has no Demux slot holding the sender: keep
             // it, or `run` sees the closed channel and ends at once.
@@ -445,6 +459,7 @@ impl Manager {
                     core_profile.minimum_ttl,
                     cmd_rx,
                     status_tx,
+                    task_stats,
                 )
                 .await;
                 return;
@@ -470,6 +485,7 @@ impl Manager {
                     pkt_rx,
                     cmd_rx,
                     status_tx,
+                    task_stats,
                 )
                 .await;
                 return;
@@ -488,12 +504,13 @@ impl Manager {
             } else {
                 net.open_echo(&k, disc, false).await
             };
-            session::run(k, core, tx, echo, pkt_rx, cmd_rx, status_tx).await;
+            session::run(k, core, tx, echo, pkt_rx, cmd_rx, status_tx, task_stats).await;
         });
         sessions.insert(
             key.clone(),
             Entry {
-                clients: client.into_iter().collect(),
+                clients: client.into_iter().map(|c| (c, self.label_of(c))).collect(),
+                stats,
                 unsolicited,
                 idle_since: None,
                 profile: profile.clone(),
@@ -597,12 +614,13 @@ impl Manager {
         let mut sessions = self.sessions.lock().unwrap();
         let keys: Vec<SessionKey> = sessions
             .iter()
-            .filter(|(_, e)| e.clients.contains(&client))
+            .filter(|(_, e)| e.clients.contains_key(&client))
             .map(|(k, _)| k.clone())
             .collect();
         for k in keys {
             self.release(&mut sessions, client, &k);
         }
+        self.client_labels.lock().unwrap().remove(&client);
     }
 
     /// RFC 9468: a packet that matched no session. Creates a passive session
@@ -721,11 +739,16 @@ impl Manager {
     /// Every session (or the ones to `peer`), ordered by table then peer.
     pub fn sessions(&self, peer: Option<IpAddr>) -> Vec<BfdSessionView> {
         let sessions = self.sessions.lock().unwrap();
+        let now = tokio::time::Instant::now().into_std();
         let mut all: Vec<BfdSessionView> = sessions
             .iter()
             .filter(|(k, _)| peer.is_none_or(|p| k.peer == p))
             .map(|(k, e)| {
                 let s = *e.status.borrow();
+                let st = e.stats.snapshot(now);
+                let mut clients: Vec<String> = e.clients.values().map(|l| (*l).into()).collect();
+                clients.sort();
+                clients.dedup();
                 BfdSessionView {
                     key: k.clone(),
                     state: s.state,
@@ -746,6 +769,15 @@ impl Manager {
                     } else {
                         s.kind
                     },
+                    uptime_secs: st.uptime_secs,
+                    last_change_secs: st.last_change_secs,
+                    down_count: st.down_count,
+                    tx_packets: st.tx,
+                    rx_packets: st.rx,
+                    remote_min_rx_us: s.remote.map(|r| r.required_min_rx),
+                    remote_desired_min_tx_us: s.remote.map(|r| r.desired_min_tx),
+                    remote_detect_mult: s.remote.map(|r| r.detect_mult),
+                    clients,
                 }
             })
             .collect();
@@ -842,7 +874,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn refcount_shares_one_session() {
         let (m, _, demux) = mgr(false);
-        let (c1, c2) = (m.new_client(), m.new_client());
+        let (c1, c2) = (m.new_client("static"), m.new_client("static"));
         let k = key("192.0.2.1");
         let p = BfdProfile::default();
         let r1 = m.register(c1, &k, &p);
@@ -861,6 +893,64 @@ pub(crate) mod tests {
         assert_eq!(m.sessions(None).len(), 0);
         assert!(demux.0.lock().unwrap().by_disc.is_empty());
         assert!(demux.0.lock().unwrap().by_peer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn view_carries_clients_counters_and_remote_timers() {
+        let (mgr, _, demux) = mgr(false);
+        let (bgp, stat) = (mgr.new_client("bgp"), mgr.new_client("static"));
+        let k = key("192.0.2.1");
+        let prof = BfdProfile::default();
+        mgr.register(bgp, &k, &prof);
+        mgr.register(stat, &k, &prof);
+        mgr.register(mgr.new_client("bgp"), &k, &prof);
+        let view = &mgr.sessions(None)[0];
+        assert_eq!(view.clients, ["bgp", "static"]);
+        assert_eq!(
+            (view.remote_detect_mult, view.remote_min_rx_us),
+            (None, None)
+        );
+        assert_eq!(
+            (view.rx_packets, view.uptime_secs, view.down_count),
+            (0, None, 0)
+        );
+        assert!(until(|| mgr.sessions(None)[0].tx_packets > 0).await);
+        let probe = Packet {
+            diag: 0,
+            state: BfdState::Down,
+            poll: false,
+            final_: false,
+            control_plane_independent: false,
+            demand: false,
+            detect_mult: 5,
+            my_discriminator: 9,
+            your_discriminator: 0,
+            desired_min_tx: 200_000,
+            required_min_rx: 300_000,
+            required_min_echo_rx: 0,
+            auth: None,
+        };
+        assert!(demux.route("rt1", k.peer, false, Some(255), &probe.encode()));
+        assert!(until(|| mgr.sessions(None)[0].rx_packets == 1).await);
+        let view = &mgr.sessions(None)[0];
+        assert_eq!(
+            (
+                view.remote_detect_mult,
+                view.remote_min_rx_us,
+                view.remote_desired_min_tx_us
+            ),
+            (Some(5), Some(300_000), Some(200_000))
+        );
+        mgr.drop_client(bgp);
+        assert_eq!(
+            mgr.sessions(None)[0].clients,
+            ["bgp", "static"],
+            "second bgp client stays"
+        );
+        mgr.drop_client(stat);
+        mgr.drop_client(3);
+        assert_eq!(mgr.sessions(None).len(), 0);
+        assert!(mgr.client_labels.lock().unwrap().is_empty());
     }
 
     async fn until(mut f: impl FnMut() -> bool) -> bool {
@@ -885,7 +975,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn last_deregister_sends_admin_down_then_aborts_after_grace() {
         let (m, sent, demux) = mgr(false);
-        let (c, k) = (m.new_client(), key("192.0.2.1"));
+        let (c, k) = (m.new_client("static"), key("192.0.2.1"));
         m.register(c, &k, &BfdProfile::default());
         assert!(until(|| !sent.0.lock().unwrap().is_empty()).await);
         let old = m.sessions(None)[0].local_discriminator;
@@ -906,7 +996,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn drop_client_and_shutdown_all_announce_admin_down() {
         let (m, sent, _) = mgr(false);
-        let c = m.new_client();
+        let c = m.new_client("static");
         for p in ["192.0.2.1", "192.0.2.2", "192.0.2.3"] {
             m.register(c, &key(p), &BfdProfile::default());
         }
@@ -933,7 +1023,7 @@ pub(crate) mod tests {
             mode: BfdMode::Sbfd,
             ..BfdProfile::default()
         };
-        m.register(m.new_client(), &key("192.0.2.1"), &p);
+        m.register(m.new_client("static"), &key("192.0.2.1"), &p);
         let t = Instant::now();
         m.shutdown_all().await;
         assert!(t.elapsed() < Duration::from_millis(250));
@@ -952,7 +1042,7 @@ pub(crate) mod tests {
             }),
             ..BfdProfile::default()
         };
-        let rx = m.register(m.new_client(), &key("192.0.2.1"), &profile);
+        let rx = m.register(m.new_client("static"), &key("192.0.2.1"), &profile);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(sent.0.lock().unwrap().is_empty(), "nothing is sent unkeyed");
         assert_eq!(rx.borrow().auth_method, None);
@@ -980,7 +1070,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn discriminators_differ_and_peer_filter_works() {
         let (m, _, _) = mgr(false);
-        let c = m.new_client();
+        let c = m.new_client("static");
         m.register(c, &key("192.0.2.1"), &BfdProfile::default());
         m.register(c, &key("192.0.2.2"), &BfdProfile::default());
         let all = m.sessions(None);
@@ -997,7 +1087,7 @@ pub(crate) mod tests {
     async fn session_transmits_once_open_and_demux_routes_replies() {
         let (m, sent, demux) = mgr(false);
         let k = key("192.0.2.1");
-        let rx = m.register(m.new_client(), &k, &BfdProfile::default());
+        let rx = m.register(m.new_client("static"), &k, &BfdProfile::default());
         // The first periodic packet goes out at once.
         for _ in 0..50 {
             if !sent.0.lock().unwrap().is_empty() {
@@ -1054,7 +1144,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn discriminators_are_not_consecutive() {
         let (m, _, _) = mgr(false);
-        let c = m.new_client();
+        let c = m.new_client("static");
         let d: Vec<u32> = (1..=4)
             .map(|i| {
                 m.register(c, &key(&format!("192.0.2.{i}")), &BfdProfile::default())
@@ -1080,7 +1170,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn multihop_sessions_are_separate_and_demuxed_by_port_and_ttl() {
         let (m, _, demux) = mgr(false);
-        let c = m.new_client();
+        let c = m.new_client("static");
         let single = key("192.0.2.1");
         let multi = SessionKey {
             multihop: true,
@@ -1130,7 +1220,7 @@ pub(crate) mod tests {
             }),
             demux.clone(),
         );
-        let (c, k) = (m.new_client(), key("192.0.2.1"));
+        let (c, k) = (m.new_client("static"), key("192.0.2.1"));
         let un = BfdProfile {
             echo_mode: EchoMode::Unaffiliated,
             ..BfdProfile::default()
@@ -1149,6 +1239,11 @@ pub(crate) mod tests {
         let d1 = m.sessions(None)[0].local_discriminator;
         assert_eq!(p.my_discriminator, d1);
         assert!(m.sessions(None)[0].echo_only);
+        assert_eq!(
+            m.sessions(None)[0].tx_packets,
+            0,
+            "echo-only sends no Control"
+        );
 
         m.register(c, &k, &BfdProfile::default());
         let all = m.sessions(None);
@@ -1201,7 +1296,7 @@ pub(crate) mod tests {
             min_tx_interval: 20,
             ..BfdProfile::default()
         };
-        let mut rx = m.register(m.new_client(), &k, &profile);
+        let mut rx = m.register(m.new_client("static"), &k, &profile);
         assert_eq!(rx.borrow().state, BfdState::Down);
         assert!(
             demux.0.lock().unwrap().by_disc.is_empty(),
@@ -1259,7 +1354,11 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn open_failure_retries_without_blocking_register() {
         let (m, sent, _) = mgr(true);
-        let rx = m.register(m.new_client(), &key("192.0.2.1"), &BfdProfile::default());
+        let rx = m.register(
+            m.new_client("static"),
+            &key("192.0.2.1"),
+            &BfdProfile::default(),
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(sent.0.lock().unwrap().is_empty());
         assert_eq!(rx.borrow().state, BfdState::Down);
@@ -1268,7 +1367,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn changed_profile_reaches_the_running_session() {
         let (m, _, _) = mgr(false);
-        let c = m.new_client();
+        let c = m.new_client("static");
         let k = key("192.0.2.1");
         m.register(c, &k, &BfdProfile::default());
         let down = BfdProfile {
@@ -1359,7 +1458,7 @@ pub(crate) mod tests {
             assert!(demux.route("rt1", peer.parse().unwrap(), false, Some(255), &p));
         }
         // A client registering the very key adopts the session.
-        let c = m.new_client();
+        let c = m.new_client("static");
         m.register(c, &unsolicited_key("10.0.0.3"), &BfdProfile::default());
         let t0 = Instant::now();
         m.sweep(t0);
