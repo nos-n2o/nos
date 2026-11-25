@@ -4195,6 +4195,15 @@
         ],
         "type": "object"
       },
+      "NeighborRole": {
+        "description": "A neighbor's role on a broadcast link (RFC 2328 section 9.4).",
+        "enum": [
+          "Dr",
+          "Bdr",
+          "DrOther"
+        ],
+        "type": "string"
+      },
       "NetworkType": {
         "description": "Which RFC 2328 network type an attach point using this profile runs.\n`OspfProfile.network_type` is `Option` — see its doc comment for how an\nunset value is resolved.",
         "enum": [

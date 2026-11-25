@@ -206,6 +206,10 @@ fn ospf_row() -> NeighborSummary {
             lr: true,
             rs: false,
         }),
+        address: Some(Ipv4Addr::new(10, 0, 0, 2)),
+        role: Some(crate::ospf::NeighborRole::Bdr),
+        dead_in_secs: Some(37),
+        uptime_secs: Some(120),
     }
 }
 
@@ -213,7 +217,7 @@ fn ospf_row() -> NeighborSummary {
 fn ospf_neighbor_summary() {
     check(
         &ospf_row(),
-        "06657468302e30000000010201020202020601030a2801010101010101010001030100",
+        "06657468302e30000000010201020202020601030a2801010101010101010001030100010a000002010101250178",
     );
 }
 
@@ -234,8 +238,12 @@ fn ospfv3_neighbor_summary() {
             neighbor_priority: r.neighbor_priority,
             dr: r.dr,
             bdr: r.bdr,
+            address: Some("fe80::2".parse().unwrap()),
+            role: r.role,
+            dead_in_secs: r.dead_in_secs,
+            uptime_secs: r.uptime_secs,
         },
-        "06657468302e30000000010201020202020601030a28010101010101010100",
+        "06657468302e30000000010201020202020601030a2801010101010101010001fe800000000000000000000000000002010101250178",
     );
 }
 
@@ -255,7 +263,18 @@ fn brief_columns_follow_the_decisions() {
     let cols = |n: &crate::view::Node| n.columns().iter().map(|f| f.key).collect::<Vec<_>>();
     let lldp = view_of::<LldpLinkStats>().unwrap();
     assert_eq!(cols(lldp).len(), 9, "all seven counters plus interface");
-    assert!(cols(view_of::<NeighborSummary>().unwrap()).contains(&"lls"));
+    let want = [
+        "neighbor_router_id",
+        "neighbor_priority",
+        "state",
+        "role",
+        "dead_in_secs",
+        "address",
+        "link",
+        "uptime_secs",
+    ];
+    assert_eq!(cols(view_of::<NeighborSummary>().unwrap()), want);
+    assert_eq!(cols(view_of::<Ospfv3NeighborSummary>().unwrap()), want);
     let bmp = view_of::<BmpStationStatus>().unwrap();
     for k in ["frames_sent", "last_error", "connected_since"] {
         assert!(!cols(bmp).contains(&k), "{k} is detail only");

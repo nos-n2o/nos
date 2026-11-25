@@ -586,9 +586,10 @@ pub(super) fn handle_hello(
                 last_crypto_seq: HashMap::new(),
                 grace_deadline: None,
                 oob_deadline: None,
+                full_since: None,
             });
         note_lls(cfg, hello.router_id, entry, hello.lls.as_ref());
-        entry.state = new_state;
+        entry.set_state(new_state);
         entry.priority = hello.router_priority;
         entry.declared_dr = dr_id;
         entry.declared_bdr = bdr_id;
@@ -666,7 +667,7 @@ pub(super) fn advance_adjacencies(
         info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached exstart");
         status.send_modify(|s| {
             if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
-                info.state = new_state;
+                info.set_state(new_state);
                 info.adjacency = Some(adj);
             }
         });
@@ -685,7 +686,7 @@ pub(super) fn mark_oob_started(
     info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf lls resync started");
     status.send_modify(|s| {
         if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
-            n.state = NeighborState::ExStart;
+            n.set_state(NeighborState::ExStart);
             n.adjacency = Some(adj.clone());
             n.oob_deadline = Some(deadline);
         }
@@ -754,7 +755,7 @@ pub(super) fn expire_oob_resync(
         }
         status.send_modify(|s| {
             if let Some(n) = s.neighbors.get_mut(&id) {
-                n.state = NeighborState::ExStart;
+                n.set_state(NeighborState::ExStart);
                 n.adjacency = Some(adj);
                 n.oob_deadline = None;
             }
@@ -1067,7 +1068,7 @@ pub(super) fn finish_neighbor_event(
 
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
-            info.state = new_state;
+            info.set_state(new_state);
             if new_state == NeighborState::Full && old_state != NeighborState::Full {
                 info.grace_deadline = None;
                 // RFC 4811 §2.2: reaching Full ends the out-of-band resync.
@@ -1282,7 +1283,10 @@ fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv4Addr,
                     link = %cfg.attach_point, neighbor = %id, replaced_by = %new_id,
                     "ospf neighbor evicted, same source address under a new router id"
                 );
-                info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                info.set_state(neighbor::step(
+                    info.state,
+                    neighbor::Event::InactivityTimerExpired,
+                ));
                 info.adjacency = None;
                 super::flood::clear_replay_state(info);
             }

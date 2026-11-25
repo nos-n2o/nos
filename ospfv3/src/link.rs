@@ -416,6 +416,22 @@ pub struct NeighborInfo {
     /// a Grace-LSA it sent. Until then its adjacency is held `Full` through
     /// missing Hellos and Hellos that don't list us (see `in_grace`).
     pub grace_deadline: Option<Instant>,
+    /// When the neighbor reached `Full`; `None` otherwise. Written only by `set_state`.
+    pub full_since: Option<Instant>,
+}
+
+impl NeighborInfo {
+    /// Every `state` write goes through here so `full_since` stays in step.
+    pub fn set_state(&mut self, new: NeighborState) {
+        if new == NeighborState::Full {
+            if self.state != NeighborState::Full {
+                self.full_since = Some(Instant::now());
+            }
+        } else {
+            self.full_since = None;
+        }
+        self.state = new;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -954,8 +970,9 @@ fn handle_hello(
                 adjacency: None,
                 last_crypto_seq: HashMap::new(),
                 grace_deadline: None,
+                full_since: None,
             });
-        entry.state = new_state;
+        entry.set_state(new_state);
         entry.priority = hello.router_priority;
         entry.declared_dr = hello.designated_router;
         entry.declared_bdr = hello.backup_designated_router;
@@ -1025,7 +1042,7 @@ fn advance_adjacencies(
         info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospfv3 neighbor reached exstart");
         status.send_modify(|s| {
             if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
-                info.state = new_state;
+                info.set_state(new_state);
                 info.adjacency = Some(adj);
             }
         });
@@ -1302,7 +1319,7 @@ fn finish_neighbor_event(
 
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
-            info.state = new_state;
+            info.set_state(new_state);
             info.adjacency = Some(adj.clone());
             if new_state == NeighborState::Full && old_state != NeighborState::Full {
                 info.grace_deadline = None;
@@ -1699,7 +1716,7 @@ fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address: Ipv6Addr)
         for (id, info) in &mut s.neighbors {
             if info.address == address && info.state != NeighborState::Down {
                 warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospfv3 neighbor");
-                info.state = bfd::on_bfd_down(info.state);
+                info.set_state(bfd::on_bfd_down(info.state));
                 info.adjacency = None;
                 clear_replay_state(info);
             }
@@ -1800,7 +1817,7 @@ fn evict_same_address(cfg: &LinkConfig, status: &StatusHandle, source: Ipv6Addr,
                     link = %cfg.attach_point, neighbor = %id, new_neighbor = %new_id, address = %source,
                     "ospfv3 neighbor evicted, same address new router id"
                 );
-                info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                info.set_state(neighbor::step(info.state, neighbor::Event::InactivityTimerExpired));
                 info.adjacency = None;
                 clear_replay_state(info);
             }
@@ -4112,6 +4129,10 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
             neighbor_priority: None,
             dr: status.dr,
             bdr: status.bdr,
+            address: None,
+            role: None,
+            dead_in_secs: None,
+            uptime_secs: None,
         }];
     }
 
@@ -4131,6 +4152,13 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<Ospfv3NeighborSummary> {
             neighbor_priority: Some(info.priority),
             dr: status.dr,
             bdr: status.bdr,
+            address: Some(info.address),
+            role: nos_proto::NeighborRole::of(*id, status.dr, status.bdr),
+            dead_in_secs: Some(
+                u64::from(entry.config.dead_interval)
+                    .saturating_sub(info.last_heard.elapsed().as_secs()),
+            ),
+            uptime_secs: info.full_since.map(|t| t.elapsed().as_secs()),
         })
         .collect()
 }
@@ -5048,6 +5076,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn set_state_tracks_full_since() {
+        let mut n = neighbor_info(NeighborState::TwoWay, Ipv6Addr::LOCALHOST, 1);
+        assert!(n.full_since.is_none());
+        n.set_state(NeighborState::Full);
+        let t = n.full_since.expect("set on entering Full");
+        n.set_state(NeighborState::Full);
+        assert_eq!(n.full_since, Some(t));
+        n.set_state(NeighborState::Down);
+        assert!(n.full_since.is_none());
+    }
+
+    #[test]
     fn down_clears_crypto_replay_state_init_keeps_it() {
         let mut n = neighbor_info(NeighborState::Init, Ipv6Addr::LOCALHOST, 1);
         n.last_crypto_seq.insert(packet::TYPE_HELLO, 99);
@@ -5071,6 +5111,7 @@ pub(crate) mod tests {
             adjacency: None,
             last_crypto_seq: HashMap::new(),
             grace_deadline: None,
+            full_since: None,
         }
     }
 
@@ -7131,6 +7172,11 @@ pub(crate) mod tests {
             b.neighbor_summaries().await[0].state,
             OspfNeighborState::Full
         );
+
+        let full = b.neighbor_summaries().await;
+        assert_eq!(full[0].address, Some("fe80::1".parse().unwrap()));
+        assert!(full[0].uptime_secs.is_some());
+        assert!(full[0].dead_in_secs.is_some_and(|d| d <= 40));
 
         let a_addr: Ipv6Addr = "fe80::1".parse().unwrap();
         wire.drop_hellos.lock().unwrap().insert(a_addr);

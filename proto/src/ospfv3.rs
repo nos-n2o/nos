@@ -6,12 +6,12 @@
 //! or interface-state ladder — see `nos_ospf_common::neighbor`/`election`'s
 //! doc comments).
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
-use crate::ospf::{LinkInterfaceState, OspfNeighborState};
+use crate::ospf::{LinkInterfaceState, NeighborRole, OspfNeighborState};
 
 /// One neighbor's summary row, for `show ospfv3 neigh` — mirrors
 /// `ospf::NeighborSummary` exactly (nothing in it is an address field beyond
@@ -22,45 +22,62 @@ use crate::ospf::{LinkInterfaceState, OspfNeighborState};
 pub struct Ospfv3NeighborSummary {
     /// The attach point's display name, matching `nos-ospfv3d`'s own
     /// `"<interface>.<tag>"`/`"broadcast-domain:<name>"` convention.
-    #[view(brief, sort)]
+    #[view(brief, sort, order = 6)]
     pub link: String,
     /// Area the interface or LSA belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    #[view(brief, header = "area", text)]
+    #[view(header = "area", text, order = 10)]
     pub area_id: Ipv4Addr,
     /// State of the local interface.
-    #[view(brief, header = "if-state", text)]
+    #[view(header = "if-state", text, order = 11)]
     pub interface_state: LinkInterfaceState,
     /// Neighbor's Router ID, once heard.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, header = "neighbor", text)]
+    #[view(brief, header = "neighbor-id", text, order = 0)]
     pub neighbor_router_id: Option<Ipv4Addr>,
     /// Neighbor state (RFC 5340 section 4.2.1, as RFC 2328 section 10.1).
-    #[view(brief, text)]
+    #[view(brief, text, order = 2)]
     pub state: OspfNeighborState,
     /// Seconds since the last Hello from this neighbor.
-    #[view(brief, header = "last-hello", unit = secs)]
+    #[view(header = "last-hello", unit = secs, order = 12)]
     pub last_hello_secs: Option<u64>,
     /// `HelloInterval` in seconds.
-    #[view(brief, unit = secs)]
+    #[view(unit = secs, order = 13)]
     pub hello_interval: u16,
     /// `RouterDeadInterval` in seconds.
-    #[view(brief, unit = secs)]
+    #[view(unit = secs, order = 14)]
     pub dead_interval: u16,
     /// Our Router Priority on the link.
-    #[view(brief)]
+    #[view(order = 15)]
     pub priority: u8,
     /// Neighbor's Router Priority, once heard.
-    #[view(brief)]
+    #[view(brief, header = "pri", order = 1)]
     pub neighbor_priority: Option<u8>,
     /// Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, text)]
+    #[view(text, order = 16)]
     pub dr: Option<Ipv4Addr>,
     /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, text)]
+    #[view(text, order = 17)]
     pub bdr: Option<Ipv4Addr>,
+    /// The neighbor's address on the link (its source address in Hello).
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, text, order = 5)]
+    pub address: Option<Ipv6Addr>,
+    /// The neighbor's role on a broadcast link; `None` without an election.
+    #[serde(default)]
+    #[view(brief, text, order = 3)]
+    pub role: Option<NeighborRole>,
+    /// Seconds until the neighbor is declared dead (dead interval minus time since last heard).
+    #[serde(default)]
+    #[view(brief, header = "dead", unit = secs, order = 4)]
+    pub dead_in_secs: Option<u64>,
+    /// Seconds since the adjacency reached Full; `None` before.
+    #[serde(default)]
+    #[view(brief, header = "uptime", unit = secs, order = 7)]
+    pub uptime_secs: Option<u64>,
 }
 
 /// One installed LSA's header fields, for `show ospfv3 database` — mirrors

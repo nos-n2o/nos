@@ -111,8 +111,8 @@ pub use ops::{
     StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
-    LinkInterfaceState, LlsSummary, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState,
-    OspfRequest, SrAdjSid, SrPrefixSid, SrSrgb, SrSummary,
+    LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole, NeighborSummary, OspfEvent,
+    OspfNeighborState, OspfRequest, SrAdjSid, SrPrefixSid, SrSrgb, SrSummary,
 };
 pub use ospfv3::{Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
 pub use paths::{

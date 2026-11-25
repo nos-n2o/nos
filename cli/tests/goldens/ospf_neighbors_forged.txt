@@ -1,3 +1,3 @@
-Link              area     if-state      neighbor  State  last-hello  Hello-Interval  Dead-Interval  Priority  Neighbor-Priority  Dr  Bdr
-----------------  -------  ------------  --------  -----  ----------  --------------  -------------  --------  -----------------  --  ---
-x\nFORGED\x1b[2J  0.0.0.0  PointToPoint  -         Down            -             10s            40s  1         -                  -   -
+neighbor-id  pri  State  Role  dead  Address  Link              uptime
+-----------  ---  -----  ----  ----  -------  ----------------  ------
+-            -    Down   -        -  -        x\nFORGED\x1b[2J       -

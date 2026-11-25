@@ -171,6 +171,10 @@ fn nbr(link: &str) -> NeighborSummary {
         dr: None,
         bdr: None,
         lls: None,
+        address: None,
+        role: None,
+        dead_in_secs: None,
+        uptime_secs: None,
     }
 }
 
@@ -188,6 +192,10 @@ fn nbr_up(link: &str) -> NeighborSummary {
             lr: true,
             rs: true,
         }),
+        address: Some("10.0.0.9".parse().unwrap()),
+        role: Some(nos_proto::NeighborRole::Dr),
+        dead_in_secs: Some(37),
+        uptime_secs: Some(125),
         ..nbr(link)
     }
 }
@@ -212,6 +220,10 @@ fn ospf_views() {
         neighbor_priority: Some(1),
         dr: Some("3.3.3.3".parse().unwrap()),
         bdr: None,
+        address: Some("fe80::2".parse().unwrap()),
+        role: Some(nos_proto::NeighborRole::DrOther),
+        dead_in_secs: Some(38),
+        uptime_secs: Some(3600),
     }];
     check("ospfv3_neighbors_populated", &render(&v3, ""));
 }

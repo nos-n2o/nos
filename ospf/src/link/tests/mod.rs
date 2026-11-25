@@ -60,6 +60,7 @@ fn neighbor_info(state: NeighborState, address: Ipv4Addr) -> NeighborInfo {
         last_crypto_seq: HashMap::new(),
         grace_deadline: None,
         oob_deadline: None,
+        full_since: None,
     }
 }
 
