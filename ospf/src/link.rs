@@ -32,8 +32,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    BfdDiag, LinkInterfaceState, LlsSummary, LsaSummary, NeighborSummary, NetworkType,
-    OspfNeighborState, RedistributeUpdate,
+    BfdDiag, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole, NeighborSummary,
+    NetworkType, OspfNeighborState, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -488,9 +488,24 @@ pub struct NeighborInfo {
     /// RFC 4811 §2.4: when an out-of-band resync that started on this
     /// neighbor gives up and falls back to the legacy resync.
     pub oob_deadline: Option<Instant>,
+    /// When the neighbor reached `Full` (strictly, not grace/OOB); `None` otherwise.
+    /// Written only by `set_state`.
+    pub full_since: Option<Instant>,
 }
 
 impl NeighborInfo {
+    /// Every `state` write goes through here so `full_since` stays in step.
+    pub fn set_state(&mut self, new: NeighborState) {
+        if new == NeighborState::Full {
+            if self.state != NeighborState::Full {
+                self.full_since = Some(Instant::now());
+            }
+        } else {
+            self.full_since = None;
+        }
+        self.state = new;
+    }
+
     /// Whether the Router-LSA/DR logic treats this neighbor as fully adjacent:
     /// `Full`, in an RFC 3623/4812 grace, or in an RFC 4811 §2.5 out-of-band
     /// resync (`ExStart`/`Exchange`/`Loading` count as `Full`).
@@ -1994,6 +2009,10 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
             dr: status.dr,
             bdr: status.bdr,
             lls: None,
+            address: None,
+            role: None,
+            dead_in_secs: None,
+            uptime_secs: None,
         }];
     }
 
@@ -2021,6 +2040,13 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
                     rs: eof & lls::EOF_RS != 0,
                 }
             }),
+            address: Some(info.address),
+            role: NeighborRole::of(*id, status.dr, status.bdr),
+            dead_in_secs: Some(
+                u64::from(entry.config.dead_interval)
+                    .saturating_sub(info.last_heard.elapsed().as_secs()),
+            ),
+            uptime_secs: info.full_since.map(|t| t.elapsed().as_secs()),
         })
         .collect()
 }

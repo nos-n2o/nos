@@ -207,6 +207,47 @@ async fn topology_settled(routers: &[&Router]) -> anyhow::Result<()> {
     anyhow::bail!("the ospf topology LSAs never settled for 8s within 64s")
 }
 
+/// #1437: the operator columns of `GET /v1/<proto>/neighbors` for the row of
+/// `peer` on `link`: its address (`addr` exact, or just present when `None`),
+/// `Full`, uptime, dead-in within the 40s dead interval and the DR/BDR role.
+/// Polled: the snapshot may predate the Full transition by a moment.
+async fn assert_neighbor_fields(
+    r: &Router,
+    proto: &str,
+    link: &str,
+    peer: &str,
+    addr: Option<&str>,
+    role: serde_json::Value,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..15 {
+        let body = r
+            .rest_expect(Method::GET, &format!("/v1/{proto}/neighbors"), None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let row = report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|n| n["neighbor_router_id"] == peer && n["link"] == link);
+        if let Some(n) = row {
+            let ok = n["state"] == "Full"
+                && n["address"]
+                    .as_str()
+                    .is_some_and(|a| addr.is_none_or(|w| a == w))
+                && n["uptime_secs"].is_u64()
+                && n["dead_in_secs"].as_u64().is_some_and(|d| d <= 40)
+                && n["role"] == role;
+            if ok {
+                return Ok(());
+            }
+            last = n.to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("{proto} neighbor {peer} on {link} lacks the #1437 fields: {last}")
+}
+
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let age0 = a.count_fresh("ospf lsa installed.*age=0$").await;
@@ -271,6 +312,15 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     both_full_p2p(a, b).await?;
+    assert_neighbor_fields(
+        a,
+        "ospf",
+        "eth0.0",
+        OSPF_ROUTER_ID_B,
+        None,
+        serde_json::Value::Null,
+    )
+    .await?;
     // Real LSA content flows and is installed. Not pinned to a link: a
     // router's LSDB is per-area, so which link sees an LSA first is a race.
     a.wait(&format!("ospf lsa installed.*neighbor={OSPF_ROUTER_ID_B}"))
@@ -313,6 +363,26 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     b.wait(&format!(
         "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID}"
     ))
+    .await?;
+    let bd = format!("broadcast-domain:{BD}");
+    let host = |a: &str| a.split('/').next().unwrap_or(a).to_string();
+    assert_neighbor_fields(
+        a,
+        "ospf",
+        &bd,
+        OSPF_ROUTER_ID_B,
+        Some(&host(OSPF_BROADCAST_ADDRESS_B)),
+        "Dr".into(),
+    )
+    .await?;
+    assert_neighbor_fields(
+        b,
+        "ospf",
+        &bd,
+        OSPF_ROUTER_ID,
+        Some(&host(OSPF_BROADCAST_ADDRESS_A)),
+        "Bdr".into(),
+    )
     .await
 }
 
@@ -4324,6 +4394,15 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     b.wait(&format!(
         "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
     ))
+    .await?;
+    assert_neighbor_fields(
+        a,
+        "ospfv3",
+        "eth0.0",
+        OSPFV3_ROUTER_ID_B,
+        None,
+        serde_json::Value::Null,
+    )
     .await?;
     a.wait(&format!(
         "ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID_B}"

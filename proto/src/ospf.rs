@@ -58,6 +58,62 @@ pub enum LinkInterfaceState {
     DrOther,
 }
 
+/// A neighbor's role on a broadcast link (RFC 2328 section 9.4).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NeighborRole {
+    /// Designated Router.
+    Dr,
+    /// Backup Designated Router.
+    Bdr,
+    /// Neither.
+    DrOther,
+}
+
+impl NeighborRole {
+    /// Role of `neighbor` given the link's elected DR/BDR; `None` when no
+    /// DR is known (point-to-point, still waiting, or no neighbor yet).
+    #[must_use]
+    pub fn of(neighbor: Ipv4Addr, dr: Option<Ipv4Addr>, bdr: Option<Ipv4Addr>) -> Option<Self> {
+        let dr = dr.filter(|d| !d.is_unspecified())?;
+        Some(if neighbor == dr {
+            Self::Dr
+        } else if Some(neighbor) == bdr {
+            Self::Bdr
+        } else {
+            Self::DrOther
+        })
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    #[test]
+    fn neighbor_role_of() {
+        let a = |n| Ipv4Addr::new(n, n, n, n);
+        assert_eq!(
+            NeighborRole::of(a(1), Some(a(1)), Some(a(2))),
+            Some(NeighborRole::Dr)
+        );
+        assert_eq!(
+            NeighborRole::of(a(2), Some(a(1)), Some(a(2))),
+            Some(NeighborRole::Bdr)
+        );
+        assert_eq!(
+            NeighborRole::of(a(3), Some(a(1)), None),
+            Some(NeighborRole::DrOther)
+        );
+        assert_eq!(NeighborRole::of(a(3), None, Some(a(2))), None);
+        assert_eq!(
+            NeighborRole::of(a(3), Some(Ipv4Addr::UNSPECIFIED), None),
+            None
+        );
+    }
+}
+
 /// One neighbor's summary row, for `show ospf neigh` — one row per
 /// currently-known neighbor on a link (see `OspfNeighborState`'s doc
 /// comment for point-to-point vs. broadcast row-count semantics).
@@ -68,56 +124,73 @@ pub struct NeighborSummary {
     /// The attach point's display name, matching
     /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`/
     /// `"broadcast-domain:<name>"` convention.
-    #[view(brief, sort)]
+    #[view(brief, sort, order = 6)]
     pub link: String,
     /// Area the interface belongs to.
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    #[view(brief, header = "area", text)]
+    #[view(header = "area", text, order = 10)]
     pub area_id: Ipv4Addr,
     /// State of the local interface.
-    #[view(brief, header = "if-state", text)]
+    #[view(header = "if-state", text, order = 11)]
     pub interface_state: LinkInterfaceState,
     /// Known once at least one Hello has been received on this link.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, header = "neighbor", text)]
+    #[view(brief, header = "neighbor-id", text, order = 0)]
     pub neighbor_router_id: Option<Ipv4Addr>,
     /// Neighbor state (RFC 2328 section 10.1).
-    #[view(brief, text)]
+    #[view(brief, text, order = 2)]
     pub state: OspfNeighborState,
     /// Seconds since the last Hello was received from this neighbor. `None`
     /// if none has ever been received.
-    #[view(brief, header = "last-hello", unit = secs)]
+    #[view(header = "last-hello", unit = secs, order = 12)]
     pub last_hello_secs: Option<u64>,
     /// `HelloInterval` in seconds (RFC 2328 section 9.5).
-    #[view(brief, unit = secs)]
+    #[view(unit = secs, order = 13)]
     pub hello_interval: u16,
     /// `RouterDeadInterval` in seconds.
-    #[view(brief, unit = secs)]
+    #[view(unit = secs, order = 14)]
     pub dead_interval: u16,
     /// This link's own configured Router Priority — mirrors how
     /// `hello_interval`/`dead_interval` already report the *local* link's
     /// config on every row.
-    #[view(brief)]
+    #[view(order = 15)]
     pub priority: u8,
     /// The remote neighbor's own decoded Router Priority. `None` if no
     /// Hello has been received from it yet.
-    #[view(brief)]
+    #[view(brief, header = "pri", order = 1)]
     pub neighbor_priority: Option<u8>,
     /// This link's currently elected DR/BDR — `None` on a point-to-point
     /// link (no election ever runs) or before a broadcast link's first
     /// election.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, text)]
+    #[view(text, order = 16)]
     pub dr: Option<Ipv4Addr>,
     /// Backup Designated Router on the link, if elected.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[view(brief, text)]
+    #[view(text, order = 17)]
     pub bdr: Option<Ipv4Addr>,
     /// The neighbor's RFC 5613 LLS data. `None` when it sent no valid LLS
     /// block, or LLS is off on this link.
     #[serde(default)]
-    #[view(brief, nested)]
+    #[view(nested, order = 18)]
     pub lls: Option<LlsSummary>,
+    /// The neighbor's address on the link (its source address in Hello).
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, text, order = 5)]
+    pub address: Option<Ipv4Addr>,
+    /// The neighbor's role on a broadcast link; `None` without an election.
+    #[serde(default)]
+    #[view(brief, text, order = 3)]
+    pub role: Option<NeighborRole>,
+    /// Seconds until the neighbor is declared dead (dead interval minus time since last heard).
+    #[serde(default)]
+    #[view(brief, header = "dead", unit = secs, order = 4)]
+    pub dead_in_secs: Option<u64>,
+    /// Seconds since the adjacency reached Full; `None` before.
+    #[serde(default)]
+    #[view(brief, header = "uptime", unit = secs, order = 7)]
+    pub uptime_secs: Option<u64>,
 }
 
 /// A neighbor's RFC 5613 Link-Local Signaling data (EOF TLV).

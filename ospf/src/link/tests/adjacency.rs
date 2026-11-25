@@ -38,6 +38,10 @@ async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
     assert_eq!(n.len(), 1);
     assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
     assert_eq!(n[0].neighbor_router_id, Some(id(2)));
+    assert_eq!(n[0].address, Some(Ipv4Addr::new(10, 0, 0, 2)));
+    assert_eq!(n[0].role, None, "point-to-point has no election");
+    assert!(n[0].uptime_secs.is_some());
+    assert!(n[0].dead_in_secs.is_some_and(|d| d <= 40));
     let routes = a.compute_routes().await;
     for prefix in ["192.0.2.2/32", "198.51.100.0/24", "198.51.100.0/25"] {
         let r = routes
@@ -147,6 +151,19 @@ async fn broadcast_segment_elects_dr_and_bdr_and_dr_others_stay_two_way() {
             OspfNeighborState::Full
         };
         assert_eq!(n.state, want, "{n:?}");
+        let role = match n.neighbor_router_id {
+            x if x == Some(id(4)) => nos_proto::NeighborRole::Dr,
+            x if x == Some(id(3)) => nos_proto::NeighborRole::Bdr,
+            _ => nos_proto::NeighborRole::DrOther,
+        };
+        assert_eq!(n.role, Some(role), "{n:?}");
+        assert_eq!(
+            n.uptime_secs.is_some(),
+            want == OspfNeighborState::Full,
+            "{n:?}"
+        );
+        let last = n.neighbor_router_id.unwrap().octets()[3];
+        assert_eq!(n.address, Some(Ipv4Addr::new(10, 1, 0, last)));
     }
     let routes = segment[0].compute_routes().await;
     let to_four = routes
@@ -546,4 +563,16 @@ async fn lls_is_exchanged_under_every_classic_auth_and_ignored_otherwise() {
     let [a, b] = pair_lls((true, crypto(b"k", true)), (true, crypto(b"k", true))).await;
     assert_eq!((a.state, a.lls), (OspfNeighborState::Full, None));
     assert_eq!((b.state, b.lls), (OspfNeighborState::Full, None));
+}
+
+#[test]
+fn set_state_tracks_full_since_and_dead_in_saturates() {
+    let mut n = neighbor_info(NeighborState::TwoWay, Ipv4Addr::new(10, 0, 0, 2));
+    assert!(n.full_since.is_none());
+    n.set_state(NeighborState::Full);
+    let t = n.full_since.expect("set on entering Full");
+    n.set_state(NeighborState::Full);
+    assert_eq!(n.full_since, Some(t), "Full to Full keeps the start");
+    n.set_state(NeighborState::Down);
+    assert!(n.full_since.is_none());
 }

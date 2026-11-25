@@ -305,7 +305,7 @@ pub(super) fn kill_bfd_neighbor(cfg: &LinkConfig, status: &StatusHandle, address
         for (id, info) in &mut s.neighbors {
             if info.address == address && info.state != NeighborState::Down {
                 warn!(link = %cfg.attach_point, neighbor = %id, "bfd session down, killing ospf neighbor");
-                info.state = bfd::on_bfd_down(info.state);
+                info.set_state(bfd::on_bfd_down(info.state));
                 info.adjacency = None;
                 clear_replay_state(info);
             }
