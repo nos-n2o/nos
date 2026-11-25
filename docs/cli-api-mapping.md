@@ -12,6 +12,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show route <table>` | `GET /v1/routes/{table}` |
 | `show route <table> <address>` | `GET /v1/routes/{table}/{addr}` |
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
+| `show interface brief` | `GET /v1/interfaces` + `GET /v1/port-aggregates` |
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
 | `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show acl` / `show acl <name>` | `GET /v1/acl` / `GET /v1/acl/{name}` |
@@ -40,7 +41,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show fdb <domain>` | `GET /v1/fdb/{domain}` |
 | `show log [<source>] [last <n>] [level <l>]` | `GET /v1/logs[?source=<source>][&limit=<n>][&level=<l>]` |
 | `show log … match <text>` | `GET /v1/logs?match=<text>`: REST matches the entry's source, target, message and fields; the CLI matches the whole printed line (time and level name too) |
-| `show log [<source>] --follow` | `GET /v1/logs/follow[?source=<source>]` (Server-Sent Events) |
+| `show log [<source>] [last <n>] [level <l>] --follow [match <text>]` | `GET /v1/logs/follow[?source=<source>&level=<l>&match=<text>]` (Server-Sent Events) |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` |
 | `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` |
 

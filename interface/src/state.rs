@@ -880,6 +880,10 @@ mod tests {
             self.bridge_mtu
         }
 
+        async fn link_oper(&self, _kernel_interface: &str) -> Option<nos_proto::LinkOper> {
+            None
+        }
+
         async fn link_speed_mbps(&self, _kernel_interface: &str) -> Option<u32> {
             None
         }

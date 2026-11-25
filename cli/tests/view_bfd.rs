@@ -30,6 +30,15 @@ fn base(peer: &str, state: BfdState, diag: BfdDiag, interface: Option<&str>) -> 
         echo_only: false,
         tx_pdu_bytes: 0,
         kind: BfdSessionKind::Classical,
+        uptime_secs: None,
+        last_change_secs: 0,
+        down_count: 0,
+        tx_packets: 0,
+        rx_packets: 0,
+        remote_min_rx_us: None,
+        remote_desired_min_tx_us: None,
+        remote_detect_mult: None,
+        clients: vec![],
     }
 }
 

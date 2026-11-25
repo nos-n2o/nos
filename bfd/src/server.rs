@@ -89,8 +89,20 @@ fn key_of(req: &BfdRequest) -> Option<SessionKey> {
     }
 }
 
+/// The role label shown in `show bfd sessions` clients. The roles that cannot
+/// register are refused by `allowed` before it matters.
+fn client_label(role: Role) -> &'static str {
+    match role {
+        Role::Ribd => "static",
+        Role::Bgpd => "bgp",
+        Role::Ospfd => "ospf",
+        Role::Ospfv3d => "ospfv3",
+        _ => "other",
+    }
+}
+
 async fn handle_connection(stream: Stream, role: Role, name: &str, manager: Arc<Manager>) {
-    let client = manager.new_client();
+    let client = manager.new_client(client_label(role));
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<BfdRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BfdEvent>::default());
@@ -195,6 +207,7 @@ mod tests {
             echo_only: false,
             tx_pdu_bytes: 0,
             kind: BfdSessionKind::Classical,
+            remote: None,
         }
     }
 

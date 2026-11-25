@@ -155,7 +155,7 @@ The sources are:
 
 The source must match exactly. A source that does not exist, or has not logged anything, gives `no log entries`.
 
-Over REST, `GET /v1/logs?source=<source>&limit=<n>` returns entries as JSON and `GET /v1/logs/follow` streams them (see [The REST API](../api.md#following-the-log-server-sent-events)). URL-encode the brackets: `nos-bgpd%5Br1%5D`.
+Over REST, `GET /v1/logs?source=<source>&limit=<n>&level=<l>&match=<text>` returns entries as JSON and `GET /v1/logs/follow` streams them (see [The REST API](../api.md#following-the-log-server-sent-events)). URL-encode the brackets: `nos-bgpd%5Br1%5D`.
 
 How much is logged is set when the router starts, with the `RUST_LOG` environment variable (for example `RUST_LOG=info`, or `RUST_LOG=debug`). The default logs everything, including protocol traces, so on a busy router the 10,000 entries can cover only a few minutes; `RUST_LOG=info` keeps much more history. The same messages also go to the container's standard output (`docker logs`).
 

@@ -83,6 +83,7 @@ fn interface_status() -> InterfaceStatus {
         subinterfaces: Vec::new(),
         err_disabled: false,
         speed_mbps: None,
+        link: None,
     }
 }
 
@@ -314,6 +315,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 err_disabled: false,
                                 steering: Vec::new(),
                                 speed_mbps: None,
+                                link: None,
                             })
                         }
                         _ => InterfaceEvent::NotFound,
@@ -503,6 +505,7 @@ const QUERIES: &[&str] = &[
     "show fdb bd1",
     "show interface",
     "show interface eth0",
+    "show interface brief",
     "show port-aggregate",
     "show port-aggregate bond0",
     "show lacp",

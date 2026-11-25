@@ -25,6 +25,9 @@ pub enum Command {
     ShowInterface {
         name: Option<String>,
     },
+    /// `show interface brief` — one table row per interface, tagged
+    /// subinterface and port aggregate.
+    ShowInterfaceBrief,
     /// `show port-aggregate` (every aggregate) or `show port-aggregate
     /// <name>` (one).
     ShowPortAggregate {
@@ -872,6 +875,11 @@ mod tests {
             Command::ShowInterface {
                 name: Some("eth0".to_string())
             }
+        );
+
+        assert_eq!(
+            Command::parse("show interface brief"),
+            Command::ShowInterfaceBrief
         );
     }
 
