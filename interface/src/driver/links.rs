@@ -197,6 +197,7 @@ impl LinkHub {
                 oper_up: false,
                 down_reason: Some("absent".into()),
                 last_change_secs: None,
+                counters: None,
             });
         };
         Some(LinkOper {
@@ -204,6 +205,7 @@ impl LinkHub {
             oper_up: link.is_up(),
             down_reason: link.down_reason().map(str::to_string),
             last_change_secs: table.changed.get(name).map(|t| t.elapsed().as_secs()),
+            counters: None,
         })
     }
 

@@ -85,6 +85,10 @@ impl InterfaceDriver for NoopInterfaceDriver {
         None
     }
 
+    async fn link_counters(&self, _kernel_interface: &str) -> Option<nos_proto::LinkCounters> {
+        None
+    }
+
     async fn link_speed_mbps(&self, _kernel_interface: &str) -> Option<u32> {
         None
     }

@@ -119,6 +119,44 @@ pub struct LinkOper {
     /// interfaced restart; no flap count). `None` only when not known.
     #[view(unit = secs)]
     pub last_change_secs: Option<u64>,
+    /// Kernel 64-bit counters (`IFLA_STATS64`) sampled when the status is
+    /// served: cumulative since the device was created, never reset by an
+    /// interfaced restart. `None` = unobserved (noop) or the read failed.
+    /// Appended last.
+    #[view(nested)]
+    pub counters: Option<LinkCounters>,
+}
+
+/// Kernel `IFLA_STATS64` subset of one device (software counters: a bond or
+/// VLAN device's own, not the sum of its members' hardware).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct LinkCounters {
+    /// Packets received.
+    #[view(unit = count)]
+    pub rx_packets: u64,
+    /// Bytes received.
+    #[view(unit = bytes)]
+    pub rx_bytes: u64,
+    /// Receive errors.
+    #[view(unit = count)]
+    pub rx_errors: u64,
+    /// Received packets dropped.
+    #[view(unit = count)]
+    pub rx_dropped: u64,
+    /// Packets transmitted.
+    #[view(unit = count)]
+    pub tx_packets: u64,
+    /// Bytes transmitted.
+    #[view(unit = bytes)]
+    pub tx_bytes: u64,
+    /// Transmit errors.
+    #[view(unit = count)]
+    pub tx_errors: u64,
+    /// Transmitted packets dropped.
+    #[view(unit = count)]
+    pub tx_dropped: u64,
 }
 
 /// The wire twin of `schema::BroadcastDomain` — a domain's own bridge
@@ -484,6 +522,7 @@ mod tests {
             oper_up: false,
             down_reason: Some("no-carrier".into()),
             last_change_secs: Some(5),
+            counters: None,
         };
         // ... speed_mbps (None = 0x00), then link (None = trailing 0x00).
         let none = postcard::to_allocvec(&st(None, None)).unwrap();
@@ -492,7 +531,7 @@ mod tests {
         // link: Some, admin_up, oper_up, Some("no-carrier"), Some(5).
         let mut tail = vec![1, 1, 0, 1, 10];
         tail.extend_from_slice(b"no-carrier");
-        tail.extend_from_slice(&[1, 5]);
+        tail.extend_from_slice(&[1, 5, 0]);
         assert_eq!(&some[some.len() - tail.len()..], &tail[..]);
         assert_eq!(
             &some[some.len() - tail.len() - 3..some.len() - tail.len()],
@@ -531,10 +570,11 @@ mod tests {
                 oper_up: false,
                 down_reason: None,
                 last_change_secs: None,
+                counters: None,
             }),
         };
         let b = postcard::to_allocvec(&agg).unwrap();
-        assert_eq!(&b[b.len() - 6..], &[0, 1, 0, 0, 0, 0]);
+        assert_eq!(&b[b.len() - 7..], &[0, 1, 0, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -544,6 +584,16 @@ mod tests {
             oper_up: true,
             down_reason: None,
             last_change_secs: Some(1),
+            counters: Some(LinkCounters {
+                rx_packets: 1,
+                rx_bytes: 2,
+                rx_errors: 3,
+                rx_dropped: 4,
+                tx_packets: 5,
+                tx_bytes: 6,
+                tx_errors: 7,
+                tx_dropped: 8,
+            }),
         };
         let st = InterfaceStatus {
             name: "e".into(),

@@ -142,6 +142,21 @@ impl InterfaceDriver for RecordingDriver {
             oper_up: false,
             down_reason: Some(format!("dev:{k}")),
             last_change_secs: Some(7),
+            counters: None,
+        })
+    }
+    /// Canned: the device name length makes each interface's value distinct.
+    async fn link_counters(&self, k: &str) -> Option<nos_proto::LinkCounters> {
+        let n = k.len() as u64;
+        Some(nos_proto::LinkCounters {
+            rx_packets: n,
+            rx_bytes: n * 100,
+            rx_errors: 0,
+            rx_dropped: 1,
+            tx_packets: n + 1,
+            tx_bytes: n * 200,
+            tx_errors: 2,
+            tx_dropped: 0,
         })
     }
     async fn link_speed_mbps(&self, k: &str) -> Option<u32> {
@@ -743,6 +758,8 @@ async fn get_interface_fills_link_from_the_driver() {
     assert!(link.admin_up && !link.oper_up);
     assert_eq!(link.down_reason.as_deref(), Some("dev:eth0"));
     assert_eq!(link.last_change_secs, Some(7));
+    let c = link.counters.expect("counters");
+    assert_eq!((c.rx_packets, c.rx_bytes, c.tx_packets), (4, 400, 5));
     // the untagged sub-link lives on the parent device itself
     let sub = st.subinterfaces.iter().find(|s| s.tag == 0).unwrap();
     assert_eq!(
@@ -769,4 +786,7 @@ async fn noop_driver_leaves_link_unobserved() {
         panic!("expected Interfaces");
     };
     assert!(all.iter().all(|i| i.link.is_none()));
+    assert!(all
+        .iter()
+        .all(|i| i.link.as_ref().is_none_or(|l| l.counters.is_none())));
 }

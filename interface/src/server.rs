@@ -383,7 +383,12 @@ fn sub_status(s: crate::state::SubinterfaceState, parent_mtu: u32) -> Subinterfa
 
 /// Observed admin/oper state sampled now, like `sample_speed`.
 async fn sample_oper(ctx: &Context, kernel_name: Option<&str>) -> Option<nos_proto::LinkOper> {
-    ctx.driver.link_oper(kernel_name?).await
+    let name = kernel_name?;
+    let mut link = ctx.driver.link_oper(name).await?;
+    // Counters are sampled per query, never kept in `LinkHub` (they would
+    // make every packet a `LinkEvent::Changed`).
+    link.counters = ctx.driver.link_counters(name).await;
+    Some(link)
 }
 
 /// Fills each subinterface's `link` from its kernel device: `<base>.<tag>`,

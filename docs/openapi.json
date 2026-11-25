@@ -3497,6 +3497,70 @@
         ],
         "type": "string"
       },
+      "LinkCounters": {
+        "description": "Kernel `IFLA_STATS64` subset of one device (software counters: a bond or\nVLAN device's own, not the sum of its members' hardware).",
+        "properties": {
+          "rx_bytes": {
+            "description": "Bytes received.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rx_dropped": {
+            "description": "Received packets dropped.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rx_errors": {
+            "description": "Receive errors.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rx_packets": {
+            "description": "Packets received.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tx_bytes": {
+            "description": "Bytes transmitted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tx_dropped": {
+            "description": "Transmitted packets dropped.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tx_errors": {
+            "description": "Transmit errors.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tx_packets": {
+            "description": "Packets transmitted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rx_packets",
+          "rx_bytes",
+          "rx_errors",
+          "rx_dropped",
+          "tx_packets",
+          "tx_bytes",
+          "tx_errors",
+          "tx_dropped"
+        ],
+        "type": "object"
+      },
       "LinkInterfaceState": {
         "description": "RFC 2328 §9.1's interface states, as they apply to this phase's Hello-only\nscope: `PointToPoint` is fixed forever on a point-to-point link (no\nelection ever runs); a broadcast link starts `Waiting`, then becomes\n`Dr`/`Backup`/`DrOther` once RFC 2328 §9.4 election runs (see\n`ospf::election`).",
         "enum": [
@@ -3514,6 +3578,17 @@
           "admin_up": {
             "description": "`IFF_UP`: administratively up.",
             "type": "boolean"
+          },
+          "counters": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkCounters",
+                "description": "Kernel 64-bit counters (`IFLA_STATS64`) sampled when the status is\nserved: cumulative since the device was created, never reset by an\ninterfaced restart. `None` = unobserved (noop) or the read failed.\nAppended last."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "down_reason": {
             "description": "Why it is not operationally up: `admin-down`, `no-carrier` or\n`absent` (unknown kernel device); `None` when up.",
