@@ -32,8 +32,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    BfdDiag, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole, NeighborSummary,
-    NetworkType, OspfNeighborState, RedistributeUpdate,
+    BfdDiag, InterfaceSummary, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole,
+    NeighborSummary, NetworkType, OspfNeighborState, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -1822,6 +1822,21 @@ impl LinkManager {
             .collect()
     }
 
+    /// `show ospf interface` (#1438): one row per running link, sorted by
+    /// name. A virtual link is not an attach point and is skipped.
+    pub async fn interface_summaries(&self) -> Vec<InterfaceSummary> {
+        let mut rows: Vec<_> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .map(to_interface_summary)
+            .collect();
+        rows.sort_by(|a, b| a.link.cmp(&b.link));
+        rows
+    }
+
     /// Every link's type-9 store, with the link's area.
     async fn link_local_lsdbs(&self) -> Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> {
         self.links
@@ -2053,6 +2068,37 @@ fn to_neighbor_state(state: NeighborState) -> OspfNeighborState {
         NeighborState::Exchange => OspfNeighborState::Exchange,
         NeighborState::Loading => OspfNeighborState::Loading,
         NeighborState::Full => OspfNeighborState::Full,
+    }
+}
+
+fn to_interface_summary(entry: &LinkEntry) -> InterfaceSummary {
+    let c = &entry.config;
+    let status = entry.status.borrow();
+    let count = |n| u32::try_from(n).unwrap_or(u32::MAX);
+    InterfaceSummary {
+        link: c.attach_point.clone(),
+        kernel_interface: c.kernel_interface.clone(),
+        area_id: c.area_id,
+        address: format!("{}/{}", c.local_addr, c.local_prefix_len),
+        network_type: c.network_type,
+        state: to_interface_state(status.interface_state),
+        cost: c.cost,
+        hello_interval: c.hello_interval,
+        dead_interval: c.dead_interval,
+        retransmit_interval: u16::try_from(RXMT_INTERVAL.as_secs()).unwrap_or(u16::MAX),
+        priority: c.priority,
+        dr: status.dr,
+        bdr: status.bdr,
+        neighbor_count: count(status.neighbors.len()),
+        full_neighbor_count: count(
+            status
+                .neighbors
+                .values()
+                .filter(|n| n.state == NeighborState::Full)
+                .count(),
+        ),
+        mtu: c.mtu,
+        mtu_ignore: c.mtu_ignore,
     }
 }
 

@@ -61,6 +61,58 @@ pub struct PrefixCounts {
     pub evpn: u32,
 }
 
+/// Whether a peer is guarded by a BFD session, and its state (`nos-bgpd`'s own
+/// BFD client).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BgpBfdState {
+    /// The peer is not BFD-guarded.
+    #[default]
+    None,
+    /// Guarded, no `Up` seen yet (or `nos-bfdd` is unreachable).
+    Down,
+    /// RFC 5880 `Init`.
+    Init,
+    /// RFC 5880 `Up`.
+    Up,
+    /// RFC 5880 `AdminDown`.
+    AdminDown,
+}
+
+/// What an `Established` session negotiated (OPEN capabilities, RFC 5492).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one bool per negotiated capability, a wire shape"
+)]
+pub struct NegotiatedSummary {
+    /// RFC 6793 four-octet AS numbers.
+    #[view(unit = bool)]
+    pub four_octet_as: bool,
+    /// RFC 2918 route refresh.
+    #[view(unit = bool)]
+    pub route_refresh: bool,
+    /// RFC 7313 enhanced route refresh.
+    #[view(unit = bool)]
+    pub enhanced_route_refresh: bool,
+    /// RFC 8654 extended message size.
+    #[view(unit = bool)]
+    pub extended_message: bool,
+    /// RFC 4724 graceful restart (both sides).
+    #[view(unit = bool)]
+    pub graceful_restart: bool,
+    /// Address families both sides carry, by their config name.
+    #[view(text)]
+    pub families: Vec<String>,
+    /// RFC 7911 add-path direction per family, as `<family> <none|receive|send|both>`
+    /// (only families with a direction).
+    #[view(text)]
+    pub add_path: Vec<String>,
+}
+
 /// BGP messages by type, one direction (RFC 4271 section 4, RFC 2918). An
 /// RFC 4724 End-of-RIB is an UPDATE on the wire and counts as one.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -238,6 +290,33 @@ pub struct PeerSummary {
     #[serde(default)]
     #[view(unit = count)]
     pub flap_count: u64,
+    /// Prefixes received from this peer per family, before import policy:
+    /// exact only with the peer-group's soft-reconfiguration inbound (counted
+    /// from the retained Adj-RIB-In), `None` without it or when not `Established`.
+    #[serde(default)]
+    #[view(nested)]
+    pub received_prefixes: Option<PrefixCounts>,
+    /// Prefixes advertised to this peer per family. `Some` only while `Established`.
+    #[serde(default)]
+    #[view(nested)]
+    pub advertised_prefixes: Option<PrefixCounts>,
+    /// What the session negotiated; `Some` only while `Established`.
+    #[serde(default)]
+    #[view(nested)]
+    pub negotiated: Option<NegotiatedSummary>,
+    /// Our address of the session's TCP connection; `Some` only while `Established`.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(text)]
+    pub local_address: Option<IpAddr>,
+    /// Our TCP port of the session; `Some` only while `Established`.
+    #[serde(default)]
+    #[view(text)]
+    pub local_port: Option<u16>,
+    /// BFD state of the peer's guarding session.
+    #[serde(default)]
+    #[view(text)]
+    pub bfd_state: BgpBfdState,
 }
 
 /// A peer's RFC 4724 / RFC 8538 graceful restart capability.

@@ -63,13 +63,13 @@ pub use bfd::{
     ReflectorView, SessionKey,
 };
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState, BmpFrameCounts,
-    BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary, FamilyReeval,
-    FlowspecRouteCursor, FlowspecRouteSummary, GrFamily, GrSummary, MessageCounts,
-    NotificationInfo, PeerIdleStatus, PeerSummary, PrefixCounts, RedistributeUpdate,
-    RedistributedRoute, ReevalFamily, ResetReason, RpkiCacheStatus, RpkiSessionState,
-    RpkiValidationState, UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate, VpnRouteCursor,
-    VpnRouteSummary, BGP_PAGE_MAX,
+    BgpBfdState, BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, BgpSessionState,
+    BmpFrameCounts, BmpStationState, BmpStationStatus, EvpnRouteCursor, EvpnRouteSummary,
+    FamilyReeval, FlowspecRouteCursor, FlowspecRouteSummary, GrFamily, GrSummary, MessageCounts,
+    NegotiatedSummary, NotificationInfo, PeerIdleStatus, PeerSummary, PrefixCounts,
+    RedistributeUpdate, RedistributedRoute, ReevalFamily, ResetReason, RpkiCacheStatus,
+    RpkiSessionState, RpkiValidationState, UnknownAttributeSummary, VpnPrefix, VpnPrefixUpdate,
+    VpnRouteCursor, VpnRouteSummary, BGP_PAGE_MAX,
 };
 pub use broker::{
     ticket_from_env, ticket_to_env, Role, ServiceRef, WatchdogEvent, WatchdogRequest,
@@ -112,11 +112,13 @@ pub use ops::{
     StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
-    AreaSummary, AreaType, InstanceSummary, LinkInterfaceState, LlsSummary, LsaSummary,
-    NeighborRole, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest, SrAdjSid,
+    AreaSummary, AreaType, InstanceSummary, InterfaceSummary, LinkInterfaceState, LlsSummary,
+    LsaSummary, NeighborRole, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest, SrAdjSid,
     SrPrefixSid, SrSrgb, SrSummary,
 };
-pub use ospfv3::{Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
+pub use ospfv3::{
+    Ospfv3Event, Ospfv3InterfaceSummary, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
+};
 pub use paths::{
     DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_CA, DEFAULT_PKI_DIR,
     DEFAULT_WATCHDOG_SOCKET,

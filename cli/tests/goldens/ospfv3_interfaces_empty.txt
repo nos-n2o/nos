@@ -1,0 +1,1 @@
+no ospfv3 interfaces running

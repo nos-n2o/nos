@@ -1118,6 +1118,7 @@ struct SessionCtx<'a> {
     kind: PeerKind,
     remote_is_ibgp: bool,
     local_addr: Option<IpAddr>,
+    local_port: u16,
     outbox_tx: &'a OutboxTx,
     fd: RawFd,
 }
@@ -1446,6 +1447,7 @@ async fn report_established(
         kind,
         remote_is_ibgp,
         local_addr,
+        local_port,
         outbox_tx,
         fd,
     } = *cx;
@@ -1507,6 +1509,17 @@ async fn report_established(
             .filter(|(on, _)| *on)
             .map(|(_, af)| af),
     );
+    let summary_families: Vec<String> = AddressFamily::ALL
+        .into_iter()
+        .filter(|f| negotiated_afs.contains(f))
+        .map(|f| f.as_str().to_owned())
+        .collect();
+    let summary_add_path: Vec<String> = ADD_PATH_FAMILIES
+        .into_iter()
+        .zip(*add_path)
+        .filter(|(_, d)| d.rx || d.tx)
+        .map(|(f, d)| format!("{} {}", f.as_str(), d.as_str()))
+        .collect();
     info!(
         peer = %peer.remote_address,
         families = ?AddressFamily::ALL.into_iter().filter(|f| negotiated_afs.contains(f)).map(|f| f.as_str()).collect::<Vec<_>>(),
@@ -1639,6 +1652,17 @@ async fn report_established(
         s.negotiated_hold_time = timers.negotiated_hold_time;
         s.negotiated_keepalive = timers.negotiated_keepalive;
         s.fd = Some(fd);
+        s.local_addr = local_addr;
+        s.local_port = Some(local_port);
+        s.negotiated = Some(nos_proto::NegotiatedSummary {
+            four_octet_as: *four_octet_as,
+            route_refresh: *route_refresh,
+            enhanced_route_refresh: *enhanced_refresh,
+            extended_message: *extended_message,
+            graceful_restart: gr_negotiated.is_some(),
+            families: summary_families.clone(),
+            add_path: summary_add_path.clone(),
+        });
     });
     info!(
         peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
@@ -1783,6 +1807,7 @@ pub async fn run(
         kind,
         remote_is_ibgp,
         local_addr,
+        local_port,
         outbox_tx: &outbox_tx,
         fd,
     };

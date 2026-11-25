@@ -42,6 +42,12 @@ async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
     assert_eq!(n[0].role, None, "point-to-point has no election");
     assert!(n[0].uptime_secs.is_some());
     assert!(n[0].dead_in_secs.is_some_and(|d| d <= 40));
+    let ifs = a.interface_summaries().await;
+    assert_eq!(ifs.len(), 1, "{ifs:?}");
+    assert_eq!(ifs[0].state, LinkInterfaceState::PointToPoint);
+    assert_eq!((ifs[0].neighbor_count, ifs[0].full_neighbor_count), (1, 1));
+    assert_eq!(ifs[0].retransmit_interval, 5);
+    assert!(ifs[0].address.starts_with("10.0.0.1/"), "{ifs:?}");
     let routes = a.compute_routes().await;
     for prefix in ["192.0.2.2/32", "198.51.100.0/24", "198.51.100.0/25"] {
         let r = routes
@@ -79,6 +85,10 @@ async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
         a.neighbor_summaries().await[0].state,
         OspfNeighborState::Down
     );
+
+    // The interface stays listed with no neighbor left up.
+    let ifs = a.interface_summaries().await;
+    assert_eq!(ifs[0].full_neighbor_count, 0, "{ifs:?}");
 
     // Graceful shutdown flushes A's own LSAs.
     a.shutdown().await;
@@ -165,6 +175,11 @@ async fn broadcast_segment_elects_dr_and_bdr_and_dr_others_stay_two_way() {
         let last = n.neighbor_router_id.unwrap().octets()[3];
         assert_eq!(n.address, Some(Ipv4Addr::new(10, 1, 0, last)));
     }
+    let ifs = segment[0].interface_summaries().await;
+    assert_eq!(ifs.len(), 1, "{ifs:?}");
+    assert_eq!(ifs[0].state, LinkInterfaceState::DrOther);
+    assert_eq!((ifs[0].dr, ifs[0].bdr), (Some(id(4)), Some(id(3))));
+    assert_eq!((ifs[0].neighbor_count, ifs[0].full_neighbor_count), (3, 2));
     let routes = segment[0].compute_routes().await;
     let to_four = routes
         .iter()

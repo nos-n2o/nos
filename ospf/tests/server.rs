@@ -86,23 +86,24 @@ async fn instance_query_is_for_people() {
 async fn only_people_get_the_show_queries_answered() {
     let (_tmp, path, _server) = start();
     for role in Role::ALL {
-        for database in [false, true] {
+        for kind in 0..3 {
             let (mut r, mut w) = connect_as(&path, role).await;
-            let req = if database {
-                OspfRequest::GetDatabase
-            } else {
-                OspfRequest::GetNeighbors
+            let req = match kind {
+                0 => OspfRequest::GetNeighbors,
+                1 => OspfRequest::GetDatabase,
+                _ => OspfRequest::GetInterfaces,
             };
             w.send(req).await.unwrap();
             let reply = next_event(&mut r).await;
             if !matches!(role, Role::User | Role::Restd) {
-                assert!(reply.is_none(), "{role:?} database={database}: no reply");
+                assert!(reply.is_none(), "{role:?} kind={kind}: no reply");
                 continue;
             }
             let empty = match reply {
-                Some(OspfEvent::Neighbors(v)) if !database => v.is_empty(),
-                Some(OspfEvent::Database(v)) if database => v.is_empty(),
-                other => panic!("{role:?} database={database}: unexpected {other:?}"),
+                Some(OspfEvent::Neighbors(v)) if kind == 0 => v.is_empty(),
+                Some(OspfEvent::Database(v)) if kind == 1 => v.is_empty(),
+                Some(OspfEvent::Interfaces(v)) if kind == 2 => v.is_empty(),
+                other => panic!("{role:?} kind={kind}: unexpected {other:?}"),
             };
             assert!(empty);
         }

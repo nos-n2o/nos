@@ -305,6 +305,20 @@ const OSPFV3_NEIGH_DOC: Doc = Doc::Local {
              elected DR/BDR.",
 };
 
+const OSPF_IF_DOC: Doc = Doc::Local {
+    summary: "Show every running OSPF interface across every instance.",
+    detail: "Queries every configured OSPF instance's nos-ospfd for its running links: \
+             area, address, network type, state, cost, timers, elected DR/BDR and the \
+             neighbor counts (known and Full). A passive interface or one without an \
+             address does not run and is not listed.",
+};
+
+const OSPFV3_IF_DOC: Doc = Doc::Local {
+    summary: "Show every running OSPFv3 interface across every instance.",
+    detail: "Mirrors 'show ospf interface' for OSPFv3: link-local address and Interface ID \
+             instead of the IPv4 address.",
+};
+
 const OSPF_DB_DOC: Doc = Doc::Local {
     summary: "Show every installed LSA's header across every OSPF instance, optionally of one type and advertising router.",
     detail: "Queries every configured OSPF instance's daemon (each resolved via nos-watchdogd) for \
@@ -1135,6 +1149,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::ShowOspfNeigh),
     cmd!(["show" "ospf" "neighbor"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
     cmd!(["show" "ospf" "neighbors"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
+    cmd!(["show" "ospf" "interface"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
+    cmd!(["show" "ospf" "interfaces"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
     cmd!(["show" "ospf" "database"],
         OSPF_DB_DOC,
         Always,
@@ -1170,6 +1186,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::ShowOspfv3Neigh),
     cmd!(["show" "ospfv3" "neighbor"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
     cmd!(["show" "ospfv3" "neighbors"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
+    cmd!(["show" "ospfv3" "interface"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
+    cmd!(["show" "ospfv3" "interfaces"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
     cmd!(["show" "ospfv3" "database"],
         OSPFV3_DB_DOC,
         Always,

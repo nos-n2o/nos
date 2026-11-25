@@ -36,6 +36,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show bgp rpki` | `GET /v1/bgp/rpki` |
 | `show bgp bmp` | `GET /v1/bgp/bmp` |
 | `show bgp routes` | `GET /v1/bgp/routes` |
+| `show ospf interface` | `GET /v1/ospf/interfaces` |
+| `show ospfv3 interface` | `GET /v1/ospfv3/interfaces` |
 | `show ospf neigh` / `show ospf database` | `GET /v1/ospf/neighbors` / `GET /v1/ospf/database` |
 | `show ospf` / `show ospf instance` | `GET /v1/ospf/instance` |
 | `show ospfv3` / `show ospfv3 instance` | `GET /v1/ospfv3/instance` |

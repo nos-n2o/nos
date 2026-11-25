@@ -12,6 +12,7 @@ use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 use crate::ospf::{LinkInterfaceState, NeighborRole, OspfNeighborState};
+use crate::schema::NetworkType;
 
 /// One neighbor's summary row, for `show ospfv3 neigh` — mirrors
 /// `ospf::NeighborSummary` exactly (nothing in it is an address field beyond
@@ -80,6 +81,76 @@ pub struct Ospfv3NeighborSummary {
     pub uptime_secs: Option<u64>,
 }
 
+/// One running `OSPFv3` interface, for `show ospfv3 interface` (#1438) —
+/// mirrors `ospf::InterfaceSummary`, with the link-local address, the
+/// Interface ID and the advertised prefixes.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
+pub struct Ospfv3InterfaceSummary {
+    /// The attach point's display name.
+    #[view(brief, sort, header = "link", order = 0)]
+    pub link: String,
+    /// The kernel device the link runs on.
+    #[view(brief, header = "device", text, order = 1)]
+    pub kernel_interface: String,
+    /// RFC 5340 Interface ID (the kernel ifindex).
+    #[view(brief, header = "if-id", order = 2)]
+    pub interface_id: u32,
+    /// Area the interface belongs to.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "area", text, order = 3)]
+    pub area_id: Ipv4Addr,
+    /// The interface's link-local address.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "address", text, order = 4)]
+    pub address: Ipv6Addr,
+    /// The RFC 2328 network type.
+    #[view(brief, header = "type", text, order = 5)]
+    pub network_type: NetworkType,
+    /// State of the interface.
+    #[view(brief, header = "state", text, order = 6)]
+    pub state: LinkInterfaceState,
+    /// Interface output cost.
+    #[view(brief, header = "cost", order = 7)]
+    pub cost: u16,
+    /// `HelloInterval` in seconds.
+    #[view(brief, header = "hello", unit = secs, order = 8)]
+    pub hello_interval: u16,
+    /// `RouterDeadInterval` in seconds.
+    #[view(brief, header = "dead", unit = secs, order = 9)]
+    pub dead_interval: u16,
+    /// `RxmtInterval` in seconds (the fixed protocol constant, not configurable).
+    #[view(brief, header = "rxmt", unit = secs, order = 10)]
+    pub retransmit_interval: u16,
+    /// This link's configured Router Priority.
+    #[view(order = 11)]
+    pub priority: u8,
+    /// The elected Designated Router, if any.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "dr", text, order = 12)]
+    pub dr: Option<Ipv4Addr>,
+    /// The elected Backup Designated Router, if any.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "bdr", text, order = 13)]
+    pub bdr: Option<Ipv4Addr>,
+    /// Known neighbors on the link.
+    #[view(brief, header = "neighbors", unit = count, order = 14)]
+    pub neighbor_count: u32,
+    /// Neighbors that reached `Full`.
+    #[view(brief, header = "full", unit = count, order = 15)]
+    pub full_neighbor_count: u32,
+    /// The link's MTU.
+    #[view(order = 16)]
+    pub mtu: u16,
+    /// Whether the DBD MTU mismatch check is off.
+    #[view(unit = bool, order = 17)]
+    pub mtu_ignore: bool,
+    /// Every prefix the link advertises.
+    #[view(text, order = 18)]
+    pub prefixes: Vec<String>,
+}
+
 /// One installed LSA's header fields, for `show ospfv3 database` — mirrors
 /// `ospf::LsaSummary`, with `lsa_type` widened to `u16`: RFC 5340's LS Type
 /// word carries the U-bit/S2/S1 scope bits alongside the function code.
@@ -135,6 +206,8 @@ pub enum Ospfv3Request {
     /// `OSPFv3` twin, sent by the owning table's `nos-ribd`: the IPv6 routes
     /// to originate as RFC 5340 AS-External-LSAs.
     RedistributeRoutes(crate::bgp::RedistributeUpdate),
+    /// One-shot: every running interface's summary (#1438).
+    GetInterfaces,
     /// One-shot: this instance's own summary (#1439).
     GetInstance,
 }
@@ -146,6 +219,8 @@ pub enum Ospfv3Event {
     Neighbors(Vec<Ospfv3NeighborSummary>),
     /// Reply with the LSDB summary.
     Database(Vec<Ospfv3LsaSummary>),
+    /// Reply with the interfaces.
+    Interfaces(Vec<Ospfv3InterfaceSummary>),
     /// Reply with the instance summary (the same type as `OSPFv2`'s).
     Instance(crate::InstanceSummary),
 }

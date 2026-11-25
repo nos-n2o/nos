@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    InstanceSummary, IpcCodec, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Role, SrSummary,
+    InstanceSummary, InterfaceSummary, IpcCodec, LsaSummary, NeighborSummary, OspfEvent,
+    OspfRequest, Role, SrSummary,
 };
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -52,6 +53,18 @@ pub async fn get_neighbors(ospf_socket: &Path) -> Result<Vec<NeighborSummary>, O
     match reader.next().await {
         Some(Ok(OspfEvent::Neighbors(neighbors))) => Ok(neighbors),
         Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetNeighbors")),
+        Some(Err(e)) => Err(OspfClientError::Io(e)),
+        None => Err(OspfClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches every running interface's summary (#1438).
+pub async fn get_interfaces(ospf_socket: &Path) -> Result<Vec<InterfaceSummary>, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
+    writer.send(OspfRequest::GetInterfaces).await?;
+    match reader.next().await {
+        Some(Ok(OspfEvent::Interfaces(v))) => Ok(v),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetInterfaces")),
         Some(Err(e)) => Err(OspfClientError::Io(e)),
         None => Err(OspfClientError::ConnectionClosed),
     }

@@ -4,7 +4,7 @@
 //! handler reads this (via `SessionManager::peer_summaries`) to answer
 //! `nos-cli`'s `show bgp summary`.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::RawFd;
 
 use tokio::sync::watch;
@@ -23,7 +23,7 @@ pub enum PeerState {
     Established,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PeerStatus {
     pub state: PeerState,
     pub remote_asn: Option<u32>,
@@ -36,6 +36,11 @@ pub struct PeerStatus {
     /// on demand for a `TCP_AO_INFO` readback (`session::to_peer_summary`),
     /// never otherwise inspected here.
     pub fd: Option<RawFd>,
+    /// Our address and port of the `Established` connection.
+    pub local_addr: Option<IpAddr>,
+    pub local_port: Option<u16>,
+    /// What the `Established` session negotiated.
+    pub negotiated: Option<nos_proto::NegotiatedSummary>,
 }
 
 impl Default for PeerStatus {
@@ -48,6 +53,9 @@ impl Default for PeerStatus {
             negotiated_hold_time: None,
             negotiated_keepalive: None,
             fd: None,
+            local_addr: None,
+            local_port: None,
+            negotiated: None,
         }
     }
 }
@@ -72,5 +80,8 @@ mod tests {
         assert_eq!(status.negotiated_hold_time, None);
         assert_eq!(status.negotiated_keepalive, None);
         assert_eq!(status.fd, None);
+        assert_eq!(status.local_addr, None);
+        assert_eq!(status.local_port, None);
+        assert_eq!(status.negotiated, None);
     }
 }

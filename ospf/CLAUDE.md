@@ -64,7 +64,7 @@ Details: behaviour and config in `docs/protocols/ospf.md`; how it is built (func
 ## Wiring and tests
 
 - Config/watchdog clients, the one-shot IPC skeleton and the `main()` tracing bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`); `rib_client`/`interface_client` are thin typed wrappers over `nos_daemon::ipc::one_shot`. `link_client.rs` is shared differently: `nos-ospfv3d` `#[path]`-includes it, log prefix from `crate::DAEMON`.
-- `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
+- `nos-watchdogd` gives each instance `--listen-socket` (`/run/nos/ospf-<name>.sock`, `EndpointKind::OspfInstance`); `server.rs` serves `GetNeighbors`/`GetInterfaces`/`GetDatabase` and takes `ribd`'s fire-and-forget `RedistributeRoutes` (`docs/architecture/endpoint-broker.md`).
 - `tests/server.rs` drives the live IPC role gate over mTLS (#364, deny = closed with no frame; ribd feed = stays open).
 - `reconcile_tests.rs` drives `resync`/`run` against `nos-test-support`'s fake configd/watchdog/ribd/interfaced (`Fakes::start`) and a real `LinkManager` over `link::tests::wire` (#342); a service left out of `Fakes::start` is the "unreachable" branch.
 - `link::tests` run whole `LinkManager`s over an in-memory wire under `start_paused = true`; `socket.rs` is excluded from coverage (`nos-e2e` is its test). Verify kernel, IPC or wire changes with the matching `nos-e2e` phase.

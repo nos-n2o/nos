@@ -493,6 +493,7 @@ pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 /// `GET /v1/bgp/bmp`.
 pub type BgpBmpReport = Vec<InstanceReport<Vec<nos_proto::BmpStationStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
+pub type OspfInterfacesReport = Vec<InstanceReport<Vec<nos_proto::InterfaceSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type OspfSegmentRoutingReport = Vec<InstanceReport<nos_proto::SrSummary>>;
 /// `GET /v1/ospf/instance` (#1439).
@@ -500,6 +501,7 @@ pub type OspfInstanceReport = Vec<InstanceReport<nos_proto::InstanceSummary>>;
 /// `GET /v1/ospfv3/instance` (#1439).
 pub type Ospfv3InstanceReport = OspfInstanceReport;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
+pub type Ospfv3InterfacesReport = Vec<InstanceReport<Vec<nos_proto::Ospfv3InterfaceSummary>>>;
 pub type Ospfv3DatabaseReport = Vec<InstanceReport<Vec<Ospfv3LsaSummary>>>;
 
 #[derive(Deserialize)]
@@ -947,9 +949,31 @@ pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeig
             |_| OspfRequest::GetNeighbors,
             |e| match e {
                 OspfEvent::Neighbors(v) => Some(v),
-                OspfEvent::Database(_) | OspfEvent::SegmentRouting(_) | OspfEvent::Instance(_) => {
-                    None
-                }
+                OspfEvent::Database(_)
+                | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Interfaces(_)
+                | OspfEvent::Instance(_) => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/ospf/interfaces", tag = "show", summary = "OSPF interfaces, per instance", responses((status = 200, body = OspfInterfacesReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn ospf_interfaces(State(d): State<Daemons>) -> ApiResult<Json<OspfInterfacesReport>> {
+    let names = d.ospf_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::OspfInstance,
+            |_| OspfRequest::GetInterfaces,
+            |e| match e {
+                OspfEvent::Interfaces(v) => Some(v),
+                OspfEvent::Neighbors(_)
+                | OspfEvent::Database(_)
+                | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Instance(_) => None,
             },
         )
         .await,
@@ -967,9 +991,10 @@ pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatab
             |_| OspfRequest::GetDatabase,
             |e| match e {
                 OspfEvent::Database(v) => Some(v),
-                OspfEvent::Neighbors(_) | OspfEvent::SegmentRouting(_) | OspfEvent::Instance(_) => {
-                    None
-                }
+                OspfEvent::Neighbors(_)
+                | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Interfaces(_)
+                | OspfEvent::Instance(_) => None,
             },
         )
         .await,
@@ -987,9 +1012,10 @@ pub async fn ospf_instance(State(d): State<Daemons>) -> ApiResult<Json<OspfInsta
             |_| OspfRequest::GetInstance,
             |e| match e {
                 OspfEvent::Instance(v) => Some(v),
-                OspfEvent::Neighbors(_) | OspfEvent::Database(_) | OspfEvent::SegmentRouting(_) => {
-                    None
-                }
+                OspfEvent::Neighbors(_)
+                | OspfEvent::Database(_)
+                | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Interfaces(_) => None,
             },
         )
         .await,
@@ -1009,7 +1035,10 @@ pub async fn ospf_segment_routing(
             |_| OspfRequest::GetSegmentRouting,
             |e| match e {
                 OspfEvent::SegmentRouting(v) => Some(v),
-                OspfEvent::Neighbors(_) | OspfEvent::Database(_) | OspfEvent::Instance(_) => None,
+                OspfEvent::Neighbors(_)
+                | OspfEvent::Database(_)
+                | OspfEvent::Interfaces(_)
+                | OspfEvent::Instance(_) => None,
             },
         )
         .await,
@@ -1027,7 +1056,31 @@ pub async fn ospfv3_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3
             |_| Ospfv3Request::GetNeighbors,
             |e| match e {
                 Ospfv3Event::Neighbors(v) => Some(v),
-                Ospfv3Event::Database(_) | Ospfv3Event::Instance(_) => None,
+                Ospfv3Event::Database(_)
+                | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Instance(_) => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/ospfv3/interfaces", tag = "show", summary = "OSPFv3 interfaces, per instance", responses((status = 200, body = Ospfv3InterfacesReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn ospfv3_interfaces(
+    State(d): State<Daemons>,
+) -> ApiResult<Json<Ospfv3InterfacesReport>> {
+    let names = d.ospfv3_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::Ospfv3Instance,
+            |_| Ospfv3Request::GetInterfaces,
+            |e| match e {
+                Ospfv3Event::Interfaces(v) => Some(v),
+                Ospfv3Event::Neighbors(_) | Ospfv3Event::Database(_) | Ospfv3Event::Instance(_) => {
+                    None
+                }
             },
         )
         .await,
@@ -1045,7 +1098,9 @@ pub async fn ospfv3_database(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3D
             |_| Ospfv3Request::GetDatabase,
             |e| match e {
                 Ospfv3Event::Database(v) => Some(v),
-                Ospfv3Event::Neighbors(_) | Ospfv3Event::Instance(_) => None,
+                Ospfv3Event::Neighbors(_)
+                | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Instance(_) => None,
             },
         )
         .await,
@@ -1063,7 +1118,9 @@ pub async fn ospfv3_instance(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3I
             |_| Ospfv3Request::GetInstance,
             |e| match e {
                 Ospfv3Event::Instance(v) => Some(v),
-                Ospfv3Event::Neighbors(_) | Ospfv3Event::Database(_) => None,
+                Ospfv3Event::Neighbors(_)
+                | Ospfv3Event::Database(_)
+                | Ospfv3Event::Interfaces(_) => None,
             },
         )
         .await,

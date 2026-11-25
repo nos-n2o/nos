@@ -306,6 +306,12 @@ mod tests {
             last_notification_received: None,
             last_reset_reason: Some(crate::bgp::ResetReason::NotificationSent),
             flap_count: 1,
+            received_prefixes: None,
+            advertised_prefixes: None,
+            negotiated: None,
+            local_address: None,
+            local_port: None,
+            bfd_state: crate::bgp::BgpBfdState::None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_keys_match(view_of::<PeerSummary>().unwrap(), &v);
