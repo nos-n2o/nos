@@ -56,6 +56,21 @@ async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
             .unwrap_or_else(|| panic!("no route to {prefix}: {routes:?}"));
         assert_eq!(r.next_hops, [Ipv4Addr::new(10, 0, 0, 2)]);
     }
+    // `show ospf route` (#1453).
+    let rows = a.route_summaries().await;
+    let row = |p: &str| rows.iter().find(|r| r.prefix == p).unwrap();
+    let lo = row("192.0.2.2/32");
+    assert_eq!(lo.class, nos_proto::RoutePathClass::IntraArea);
+    assert_eq!((lo.type2_cost, lo.area), (None, Ipv4Addr::UNSPECIFIED));
+    assert_eq!(lo.advertising_router, Some(id(2)));
+    assert_eq!(lo.next_hops.len(), 1);
+    assert!(lo.next_hops[0].starts_with("10.0.0.2"), "{lo:?}");
+    let ext = row("198.51.100.0/24");
+    assert_eq!(ext.class, nos_proto::RoutePathClass::External1);
+    assert_eq!(ext.type2_cost, None);
+    assert!(rows.windows(2).all(|w| {
+        w[0].prefix.parse::<Ipv4Net>().unwrap() <= w[1].prefix.parse::<Ipv4Net>().unwrap()
+    }));
     assert!(a
         .database_summaries()
         .await

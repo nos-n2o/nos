@@ -33,7 +33,7 @@ use ipnet::{IpNet, Ipv4Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
     BfdDiag, InterfaceSummary, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole,
-    NeighborSummary, NetworkType, OspfNeighborState, RedistributeUpdate,
+    NeighborSummary, NetworkType, OspfNeighborState, RedistributeUpdate, RouteSummary,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -1765,6 +1765,51 @@ impl LinkManager {
         rows
     }
 
+    /// `show ospf route` (#1453): the computed routes, sorted by prefix. A
+    /// next hop's interface is the link whose subnet holds it (none for a
+    /// virtual-link hop: v2 routes carry addresses only).
+    pub async fn route_summaries(&self) -> Vec<RouteSummary> {
+        let routes = self.compute_routes().await;
+        let subnets: Vec<(Ipv4Net, String)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .filter_map(|e| {
+                let c = &e.config;
+                Some((
+                    Ipv4Net::new(c.local_addr, c.local_prefix_len).ok()?,
+                    c.kernel_interface.clone(),
+                ))
+            })
+            .collect();
+        let mut routes = routes;
+        routes.sort_by_key(|r| r.prefix);
+        routes
+            .iter()
+            .map(|r| {
+                let (class, type2_cost) = r.path_class();
+                RouteSummary {
+                    prefix: r.prefix.to_string(),
+                    class,
+                    cost: r.display_cost(),
+                    type2_cost,
+                    area: r.area,
+                    next_hops: r
+                        .next_hops
+                        .iter()
+                        .map(|h| match subnets.iter().find(|(n, _)| n.contains(h)) {
+                            Some((_, dev)) => format!("{h} dev {dev}"),
+                            None => h.to_string(),
+                        })
+                        .collect(),
+                    advertising_router: r.advertising_router(),
+                }
+            })
+            .collect()
+    }
+
     /// Every link's type-9 store, with the link's area.
     async fn link_local_lsdbs(&self) -> Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> {
         self.links
@@ -1882,7 +1927,8 @@ impl LinkManager {
                 virtual_links: &virtual_hops,
                 remote_lfa: self.remote_lfa.load(Ordering::Relaxed),
             };
-            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+            for mut entry in spf::compute_in(router_id, &lsas, &ctx) {
+                entry.area = area_id;
                 let prefix = entry.prefix;
                 match merged.get_mut(&prefix) {
                     None => {

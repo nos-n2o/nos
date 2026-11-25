@@ -129,6 +129,8 @@ pub enum Command {
     ShowOspfNeigh,
     /// `show ospf interface` (#1438): every running OSPF interface.
     ShowOspfInterface,
+    /// `show ospf route` (#1453): the computed routes of every OSPF instance.
+    ShowOspfRoute,
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase {
@@ -143,6 +145,8 @@ pub enum Command {
     ShowOspfv3Neigh,
     /// `show ospfv3 interface` (#1438).
     ShowOspfv3Interface,
+    /// `show ospfv3 route` (#1453).
+    ShowOspfv3Route,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -905,6 +909,15 @@ mod tests {
                 family: nos_proto::AddressFamily::Vpnv4Unicast,
                 rd: Some("65001:1".into())
             }
+        );
+    }
+
+    #[test]
+    fn show_ospf_route() {
+        assert_eq!(Command::parse("show ospf route"), Command::ShowOspfRoute);
+        assert_eq!(
+            Command::parse("show ospfv3 route"),
+            Command::ShowOspfv3Route
         );
     }
 

@@ -31,7 +31,10 @@ pub fn start(
 /// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
 fn allowed(role: Role, req: &Ospfv3Request) -> bool {
     match req {
-        Ospfv3Request::GetNeighbors | Ospfv3Request::GetDatabase | Ospfv3Request::GetInterfaces => {
+        Ospfv3Request::GetNeighbors
+        | Ospfv3Request::GetDatabase
+        | Ospfv3Request::GetInterfaces
+        | Ospfv3Request::GetRoutes => {
             matches!(role, Role::User | Role::Restd)
         }
         Ospfv3Request::RedistributeRoutes(_) => role == Role::Ribd,
@@ -93,6 +96,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ospfv3Request::GetRoutes => {
+                let event = Ospfv3Event::Routes(links.route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             Ospfv3Request::GetDatabase => {
                 let event = Ospfv3Event::Database(links.database_summaries().await);
                 if writer.send(event).await.is_err() {
@@ -127,7 +136,11 @@ mod authz_tests {
         let feed = Ospfv3Request::RedistributeRoutes(nos_proto::RedistributeUpdate::Full(vec![]));
         for role in Role::ALL {
             assert_eq!(allowed(role, &feed), role == Role::Ribd, "{role:?} feed");
-            for q in [Ospfv3Request::GetNeighbors, Ospfv3Request::GetInterfaces] {
+            for q in [
+                Ospfv3Request::GetNeighbors,
+                Ospfv3Request::GetInterfaces,
+                Ospfv3Request::GetRoutes,
+            ] {
                 assert_eq!(
                     allowed(role, &q),
                     matches!(role, Role::User | Role::Restd),

@@ -113,10 +113,12 @@ pub use ops::{
 };
 pub use ospf::{
     InterfaceSummary, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole, NeighborSummary,
-    OspfEvent, OspfNeighborState, OspfRequest, SrAdjSid, SrPrefixSid, SrSrgb, SrSummary,
+    OspfEvent, OspfNeighborState, OspfRequest, RoutePathClass, RouteSummary, SrAdjSid, SrPrefixSid,
+    SrSrgb, SrSummary,
 };
 pub use ospfv3::{
     Ospfv3Event, Ospfv3InterfaceSummary, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
+    Ospfv3RouteSummary,
 };
 pub use paths::{
     DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_CA, DEFAULT_PKI_DIR,

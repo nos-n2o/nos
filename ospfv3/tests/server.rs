@@ -66,12 +66,13 @@ fn start() -> (
 async fn only_people_get_the_show_queries_answered() {
     let (_tmp, path, _server) = start();
     for role in Role::ALL {
-        for kind in 0..3 {
+        for kind in 0..4 {
             let (mut r, mut w) = connect_as(&path, role).await;
             let req = match kind {
                 0 => Ospfv3Request::GetNeighbors,
                 1 => Ospfv3Request::GetDatabase,
-                _ => Ospfv3Request::GetInterfaces,
+                2 => Ospfv3Request::GetInterfaces,
+                _ => Ospfv3Request::GetRoutes,
             };
             w.send(req).await.unwrap();
             let reply = next_event(&mut r).await;
@@ -83,6 +84,7 @@ async fn only_people_get_the_show_queries_answered() {
                 Some(Ospfv3Event::Neighbors(v)) if kind == 0 => v.is_empty(),
                 Some(Ospfv3Event::Database(v)) if kind == 1 => v.is_empty(),
                 Some(Ospfv3Event::Interfaces(v)) if kind == 2 => v.is_empty(),
+                Some(Ospfv3Event::Routes(v)) if kind == 3 => v.is_empty(),
                 other => panic!("{role:?} kind={kind}: unexpected {other:?}"),
             };
             assert!(empty);
