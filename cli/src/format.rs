@@ -3489,6 +3489,30 @@ mod tests {
     }
 
     #[test]
+    fn show_config_path_goldens() {
+        let cfg = ospf_config();
+        assert_eq!(
+            render_config_path(&cfg, &["routing-table", "rt1", "evpn"]).unwrap(),
+            "evpn\n  l3-vni 5000\n  rd 1:1"
+        );
+        let out = render_config_path(&cfg, &["ospf", "instance", "o1"]).unwrap();
+        assert!(
+            out.starts_with("ospf instance o1\n  router-id 1.1.1.1"),
+            "{out}"
+        );
+        // Secrets stay hidden in a scoped print.
+        let out = render_config_path(&cfg, &["user", "admin"]).unwrap();
+        assert_eq!(out, "user admin\n  password <hidden>");
+        assert!(!out.contains("argon2id"), "{out}");
+        // An existing but empty object prints just its header, never a miss.
+        let empty = config_from(&serde_json::json!({
+            "routing_tables": [{"name": "rt1"}]
+        }));
+        let out = render_config_path(&empty, &["routing-table", "rt1"]).unwrap();
+        assert_eq!(out, "routing-table rt1");
+    }
+
+    #[test]
     fn show_this_scopes_to_the_position() {
         let snap = TransactionSnapshot {
             name: "t".to_string(),

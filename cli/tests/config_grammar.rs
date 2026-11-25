@@ -786,3 +786,28 @@ fn lacp_v2_knobs_and_conversation_map() {
     );
     assert_eq!(cfg.interfaces[0].lacp_link_number, Some(4));
 }
+
+/// `show config <path>` (#1459): the lines it prints replay through `parse`:
+/// the header is an `edit` line, the children are `set` lines.
+#[test]
+fn show_config_path_output_replays_through_parse() {
+    let cfg = populated();
+    let doc = serde_json::to_value(&cfg).unwrap();
+    let out = nos_cli::format::render_config_path(&cfg, &["bgp", "instance", "r1"]).unwrap();
+    let mut lines = out.lines();
+    let header = lines.next().unwrap();
+    let edit = config_grammar::parse(&format!("edit {header}"), &[], &doc)
+        .unwrap_or_else(|| panic!("header `{header}` is not an edit line"));
+    let ctx = edit.navigate.expect("edit navigates");
+    assert_eq!(ctx, ["bgp-instance", "r1"]);
+    let mut replayed = 0;
+    for line in lines.filter(|l| l.starts_with("  ") && !l.starts_with("   ")) {
+        // A scalar child is a `set` line, a nested object an `edit` line.
+        let ok = ["set", "edit"]
+            .iter()
+            .any(|v| config_grammar::parse(&format!("{v} {}", line.trim()), &ctx, &doc).is_some());
+        assert!(ok, "`{}` does not replay at {ctx:?}", line.trim());
+        replayed += 1;
+    }
+    assert!(replayed > 0, "{out}");
+}
