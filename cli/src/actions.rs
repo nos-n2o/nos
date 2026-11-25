@@ -383,12 +383,12 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_port_aggregate(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowLacp { name } => {
-            show_lacp(watchdog_socket, name.as_deref()).await;
+        Resolved::ShowLacp { name, detail } => {
+            show_lacp(watchdog_socket, name.as_deref(), detail).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowLldpNeighbors { detail } => {
-            show_lldp_neighbors(watchdog_socket, detail).await;
+        Resolved::ShowLldpNeighbors { detail, interface } => {
+            show_lldp_neighbors(watchdog_socket, detail, interface.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLldpStatistics => {
@@ -815,7 +815,7 @@ async fn show_interface_brief(watchdog_socket: &Path) {
 
 /// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
 /// port-aggregate query instead.
-async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
+async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
     let lacp_socket =
         match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lacp).await {
             Ok(Some(path)) => path,
@@ -829,9 +829,16 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
             }
         };
 
+    let render = |s: &[nos_proto::PortAggregateLacpSummary]| {
+        if detail {
+            format::render_lacp_detail(s)
+        } else {
+            format::render_lacp_tables(s)
+        }
+    };
     match lacp_client::get_summary(&lacp_socket).await {
         Ok(summaries) => match name {
-            None => println!("{}", format::render_lacp_summaries(&summaries)),
+            None => println!("{}", render(&summaries)),
             Some(name) => {
                 let one: Vec<_> = summaries
                     .into_iter()
@@ -840,7 +847,7 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
                 if one.is_empty() {
                     println!("lacp port aggregate '{name}' not found");
                 } else {
-                    println!("{}", format::render_lacp_summaries(&one));
+                    println!("{}", render(&one));
                 }
             }
         },
@@ -865,17 +872,39 @@ async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
 
 /// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
 /// query.
-async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool) {
+async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool, interface: Option<&str>) {
     let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
         return;
     };
     match lldp_client::get_neighbors(&lldp_socket).await {
+        Ok(neighbors) if interface.is_some() => {
+            let i = interface.unwrap_or_default();
+            let kept = filter_lldp_interface(neighbors, i);
+            if kept.is_empty() {
+                println!("no lldp neighbors on '{}'", format::sanitize(i));
+            } else if detail {
+                println!("{}", format::render_lldp_neighbors_detail(&kept));
+            } else {
+                println!("{}", format::render_lldp_neighbors(&kept));
+            }
+        }
         Ok(neighbors) if detail => {
             println!("{}", format::render_lldp_neighbors_detail(&neighbors));
         }
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
+}
+
+/// The neighbors heard on `interface` (exact match on `local_interface`).
+fn filter_lldp_interface(
+    neighbors: Vec<nos_proto::LldpNeighbor>,
+    interface: &str,
+) -> Vec<nos_proto::LldpNeighbor> {
+    neighbors
+        .into_iter()
+        .filter(|n| n.local_interface == interface)
+        .collect()
 }
 
 /// `nos-bfdd`'s socket via the broker, or `None` after printing why not.
@@ -2412,5 +2441,25 @@ mod diff_text_tests {
         let r = diff_text(&b, &a, false);
         assert!(r.find("new").unwrap() < r.find("old").unwrap(), "{r}");
         assert_eq!(diff_text(&a, &a, false), "no changes");
+    }
+}
+
+#[cfg(test)]
+mod lldp_filter_tests {
+    use super::filter_lldp_interface;
+    use nos_proto::LldpNeighbor;
+
+    fn n(i: &str) -> LldpNeighbor {
+        LldpNeighbor {
+            local_interface: i.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn keeps_only_the_exact_interface() {
+        let all = vec![n("eth0"), n("eth1"), n("eth0\nFORGED")];
+        assert_eq!(filter_lldp_interface(all.clone(), "eth0").len(), 1);
+        assert_eq!(filter_lldp_interface(all, "eth9").len(), 0);
     }
 }

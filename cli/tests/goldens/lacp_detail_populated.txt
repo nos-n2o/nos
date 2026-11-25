@@ -1,0 +1,57 @@
+lacp bond1
+  system           02:00:00:00:00:ab
+  key              7
+  rate             fast
+  system-priority  100
+  min-links        2: not met, bond emptied
+  port eth1
+    port-number               4
+    port-priority             50
+    mode                      passive
+    receive                   current
+    mux                       distributing
+    selected                  yes
+    synchronized              yes
+    churn                     none
+    individual                no
+    unsupported-version-pdus  0
+    partner                   02:00:00:00:00:01 key 3 port 9
+    partner-priority          200/60
+  port eth2
+    port-number               4
+    port-priority             50
+    mode                      active
+    receive                   defaulted
+    mux                       detached
+    selected                  no
+    synchronized              no
+    churn                     actor+partner
+    individual                yes
+    unsupported-version-pdus  3
+    partner                   none (defaulted)
+    partner-priority          200/60
+lacp bond22
+  system           02:00:00:00:00:ab
+  key              7
+  rate             fast
+  system-priority  100
+  min-links        2: met
+  version          2
+  algorithm        c-vlan
+  agreement        agreed
+  conversations    eth3 4094
+  port eth3
+    port-number               4
+    port-priority             50
+    mode                      passive
+    receive                   current
+    mux                       distributing
+    selected                  yes
+    synchronized              yes
+    churn                     none
+    individual                no
+    unsupported-version-pdus  0
+    partner                   02:00:00:00:00:01 key 3 port 9
+    partner-priority          200/60
+    partner-version           2
+    partner-port-algorithm    c-vlan

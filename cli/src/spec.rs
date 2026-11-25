@@ -631,7 +631,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      until its entry ages out.",
         },
         Always,
-        Command::ShowLldpNeighbors { detail: false }),
+        Command::ShowLldpNeighbors { detail: false, interface: None }),
     cmd!(["show" "lldp" "neighbors" "detail"],
         Doc::Local {
             summary: "Show every LLDP neighbor in full, one block each.",
@@ -641,7 +641,30 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      neighbor sent are printed.",
         },
         Always,
-        Command::ShowLldpNeighbors { detail: true }),
+        Command::ShowLldpNeighbors { detail: true, interface: None }),
+    cmd!(["show" "lldp" "neighbors" "interface" (ifname: InterfaceName)],
+        Doc::Local {
+            summary: "Show the LLDP neighbors heard on one interface.",
+            detail: "Like show lldp neighbors, keeping only the neighbors heard on the named \
+                     local interface (filtered by the CLI). Prints a message when none was \
+                     heard there.",
+        },
+        Always,
+        |ifname| Command::ShowLldpNeighbors {
+            detail: false,
+            interface: Some(ifname.to_string()),
+        }),
+    cmd!(["show" "lldp" "neighbors" "interface" (ifname: InterfaceName) "detail"],
+        Doc::Local {
+            summary: "Show the LLDP neighbors heard on one interface in full.",
+            detail: "Like show lldp neighbors detail, keeping only the neighbors heard on the \
+                     named local interface (filtered by the CLI).",
+        },
+        Always,
+        |ifname| Command::ShowLldpNeighbors {
+            detail: true,
+            interface: Some(ifname.to_string()),
+        }),
     cmd!(["show" "acl"],
         Doc::Local {
             summary: "Show every access list with its counters.",
@@ -824,24 +847,44 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::ShowBfdReflector),
     cmd!(["show" "lacp"],
         Doc::Local {
-            summary: "Show every LACP port aggregate's negotiation state.",
+            summary: "Show every LACP port aggregate's negotiation state as tables.",
             detail: "Queries nos-lacpd (resolved via nos-watchdogd) for every lacp-mode port \
-                     aggregate's actor system id, key and rate, and each member port's \
-                     receive/mux machine state, partner identity, and whether it is selected \
-                     and synchronized.",
+                     aggregate and prints two tables: the aggregates (actor system id, key, \
+                     rate, priority, min-links, version) and every member port (receive/mux \
+                     machine state, partner identity, selected, synchronized, churn).",
         },
         Always,
-        Command::ShowLacp { name: None }),
+        Command::ShowLacp { name: None, detail: false }),
+    cmd!(["show" "lacp" "detail"],
+        Doc::Local {
+            summary: "Show every LACP port aggregate and member port in full.",
+            detail: "Like show lacp, one key/value line per field: the aggregate's identity, \
+                     min-links verdict and version-2 state, and each member port's state \
+                     machines, priorities, partner identity and counters.",
+        },
+        Always,
+        Command::ShowLacp { name: None, detail: true }),
     cmd!(["show" "lacp" (name: PortAggregateName)],
         Doc::Local {
-            summary: "Show one LACP port aggregate's negotiation state.",
+            summary: "Show one LACP port aggregate's negotiation state as tables.",
             detail: "Queries nos-lacpd (resolved via nos-watchdogd) for the named lacp-mode \
-                     port aggregate's actor identity and rate, and each member port's \
+                     port aggregate and prints its identity table and its member ports' \
                      receive/mux machine state and partner identity.",
         },
         Always,
         |name| Command::ShowLacp {
             name: Some(name.to_string()),
+            detail: false,
+        }),
+    cmd!(["show" "lacp" (name: PortAggregateName) "detail"],
+        Doc::Local {
+            summary: "Show one LACP port aggregate and its member ports in full.",
+            detail: "Like show lacp <name>, one key/value line per field.",
+        },
+        Always,
+        |name| Command::ShowLacp {
+            name: Some(name.to_string()),
+            detail: true,
         }),
     cmd!(["show" "interface"],
         Doc::Local {
@@ -1591,6 +1634,8 @@ mod tests {
         assert!(usages.contains(&"clear bgp <instance> <peer> soft-in"));
         assert!(usages.contains(&"clear bgp <instance> <peer>"));
         assert!(usages.contains(&"set source line <line> <text>"));
+        assert!(usages.contains(&"show lacp <name> detail"));
+        assert!(usages.contains(&"show lldp neighbors interface <ifname> detail"));
         assert!(usages
             .contains(&"show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]"));
     }
