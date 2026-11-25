@@ -115,7 +115,8 @@ pub struct LinkOper {
     #[view()]
     pub down_reason: Option<String>,
     /// Age in seconds since `nos-interfaced` last saw an admin/carrier
-    /// transition; restarts at 0 after an interfaced restart (no flap count).
+    /// transition, else since it first saw the link (a lower bound after an
+    /// interfaced restart; no flap count). `None` only when not known.
     #[view(unit = secs)]
     pub last_change_secs: Option<u64>,
 }

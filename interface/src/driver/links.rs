@@ -48,9 +48,12 @@ struct Table {
     /// Bond kernel name -> its `PortAggregate` config name, stamped on every
     /// `LinkState` of that name (`LinkState::port_aggregate`).
     aggregates: BTreeMap<String, String>,
-    /// When each device's `(admin_up, carrier)` last changed (first sighting
-    /// counts). Kept beside `links`, not in `LinkState`: that is `Eq` and streamed.
+    /// When each device's `(admin_up, carrier)` last changed; a device never
+    /// seen to change counts from when `nos-interfaced` first saw it (#1476). Kept beside `links`, not in `LinkState`: that is `Eq` and streamed.
     changed: BTreeMap<String, Instant>,
+    /// The first full dump has landed: before it, a missing name is unknown,
+    /// not `absent` (#1476).
+    dumped: bool,
 }
 
 impl Table {
@@ -158,6 +161,7 @@ impl LinkHub {
 
     /// A full dump: upsert each, drop every stored name not listed.
     pub fn replace_all(&self, links: Vec<LinkState>) {
+        self.inner.lock().unwrap().dumped = true;
         let keep: Vec<String> = links.iter().map(|l| l.name.clone()).collect();
         let gone: Vec<String> = {
             let table = self.inner.lock().unwrap();
@@ -184,6 +188,9 @@ impl LinkHub {
             return None;
         }
         let table = self.inner.lock().unwrap();
+        if !table.dumped {
+            return None;
+        }
         let Some(link) = table.links.get(name) else {
             return Some(LinkOper {
                 admin_up: false,
@@ -419,9 +426,22 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("b", 2, true)));
     }
 
+    /// Restart case: the link is already up in the first dump, no transition
+    /// follows; the age still counts from first sight, never null.
+    #[test]
+    fn oper_age_counts_from_first_sight_without_transition() {
+        let hub = LinkHub::new(16);
+        hub.replace_all(vec![l("eth0", 2, true)]);
+        hub.replace_all(vec![l("eth0", 2, true)]);
+        assert_eq!(hub.oper("eth0").unwrap().last_change_secs, Some(0));
+    }
+
     #[test]
     fn oper_tracks_transitions_and_cleans_up() {
         let hub = LinkHub::new(16);
+        // before the first dump nothing is known
+        assert!(hub.oper("nope").is_none());
+        hub.replace_all(vec![]);
         let ok = hub.oper("nope").unwrap();
         assert_eq!(ok.down_reason.as_deref(), Some("absent"));
         assert!(!ok.admin_up && !ok.oper_up && ok.last_change_secs.is_none());

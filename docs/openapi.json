@@ -3523,7 +3523,7 @@
             ]
           },
           "last_change_secs": {
-            "description": "Age in seconds since `nos-interfaced` last saw an admin/carrier\ntransition; restarts at 0 after an interfaced restart (no flap count).",
+            "description": "Age in seconds since `nos-interfaced` last saw an admin/carrier\ntransition, else since it first saw the link (a lower bound after an\ninterfaced restart; no flap count). `None` only when not known.",
             "format": "int64",
             "minimum": 0,
             "type": [
