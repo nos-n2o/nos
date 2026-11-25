@@ -4204,25 +4204,31 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // `show log --follow`: an SSE stream carrying a *live* entry, not just the
     // backlog. Follow nos-configd, then commit an empty transaction so it logs
     // "config committed" while the stream is open.
-    let url = format!(
-        "{}/v1/logs/follow?source=nos-configd&limit=1",
-        a.rest.base()
-    );
-    let client = a.rest.client().await?;
-    let stream = tokio::spawn(async move {
-        let mut text = String::new();
-        let Ok(resp) = client.get(&url).send().await else {
-            return text;
-        };
-        let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
-        let _ = tokio::time::timeout(Duration::from_secs(6), async {
-            while let Some(Ok(chunk)) = futures::StreamExt::next(&mut chunks).await {
-                text.push_str(&String::from_utf8_lossy(&chunk));
-            }
-        })
-        .await;
-        text
-    });
+    let follow = |query: &str| {
+        let url = format!("{}/v1/logs/follow?{query}", a.rest.base());
+        let client = a.rest.client();
+        async move {
+            let client = client.await?;
+            anyhow::Ok(tokio::spawn(async move {
+                let mut text = String::new();
+                let Ok(resp) = client.get(&url).send().await else {
+                    return text;
+                };
+                let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
+                let _ = tokio::time::timeout(Duration::from_secs(6), async {
+                    while let Some(Ok(chunk)) = futures::StreamExt::next(&mut chunks).await {
+                        text.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                })
+                .await;
+                text
+            }))
+        }
+    };
+    let stream = follow("source=nos-configd&limit=1").await?;
+    // #1451: the same stream restricted to warn and above must not carry the
+    // info-level "config committed".
+    let filtered = follow("source=nos-configd&level=warn&limit=1").await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
         .await?;
@@ -4232,7 +4238,59 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     if !streamed.contains("event: log") || !streamed.contains("config committed") {
         bail!("the log follow stream carried no live 'config committed' entry:\n{streamed}");
     }
-    log("router-a: log follow streamed a live entry over sse");
+    let filtered = filtered.await?;
+    if filtered.contains("config committed")
+        || filtered.contains("\"level\":\"info\"")
+        || filtered.contains("\"level\":\"debug\"")
+    {
+        bail!("level=warn follow stream carried a below-warn entry:\n{filtered}");
+    }
+    log("router-a: log follow streamed a live entry over sse, level=warn filtered it");
+
+    // #1451: `level`/`match` on the snapshot. The commit above logged
+    // "config committed" (info), so it is in the buffer by now.
+    let levels = |body: &str| -> anyhow::Result<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(body)?;
+        Ok(v.as_array().map_or_else(Vec::new, |a| {
+            a.iter().map(|e| e["level"].to_string()).collect()
+        }))
+    };
+    let errors = a
+        .rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&level=error&limit=100000000",
+            None,
+            200,
+        )
+        .await?;
+    if let Some(l) = levels(&errors)?.iter().find(|l| *l != "\"error\"") {
+        bail!("level=error returned a {l} entry:\n{errors}");
+    }
+    let hit = a
+        .rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&match=CONFIG%20COMMITTED&limit=100000000",
+            None,
+            200,
+        )
+        .await?;
+    let n = levels(&hit)?.len();
+    if n == 0 || hit.to_lowercase().matches("config committed").count() < n {
+        bail!("match=CONFIG COMMITTED: {n} entries, not all containing it:\n{hit}");
+    }
+    expect_body(
+        &a.rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&match=zzz-no-such",
+            None,
+            200,
+        )
+        .await?,
+        "[]",
+    )?;
+    a.rest_expect(Method::GET, "/v1/logs?level=bogus", None, 400)
+        .await?;
+    log("router-a: /v1/logs level and match filters");
 
     rest_users(&w.dock, a).await?;
     rest_secrets(&w.dock, a).await?;

@@ -158,7 +158,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/bgp/evpn`, `/v1/bgp/flowspec`, `/v1/bgp/vpnv4` and `/v1/bgp/vpnv6` (#723): received EVPN routes, Flowspec rules and VPN routes per instance, paged exactly like `/v1/bgp/routes` (same `{"items", "pagination"}` envelope, `?instance=`, `?after=`, `?limit=`, same `400`/`404` rules and opaque cursor). The VPN ones take `?rd=65001:1` for one Route Distinguisher (`400` if it is not one); repeat it on every page of a walk. VPN items carry `rd`, `prefix`, `labels`, `next_hop`, `route_targets`, `best` and the `site_of_origin`, if any.
 - `/v1/ospf/neighbors`, `/v1/ospf/database`, and the same under `/v1/ospfv3/`: neighbours and LSDB, per instance.
 - `/v1/fdb/{domain}`: a broadcast domain's MAC table and flood list.
-- `/v1/logs?source=&limit=`: log entries, optionally from one source and only the last `limit`. `/v1/logs/follow` does the same, then streams new entries (see [below](#following-the-log-server-sent-events)).
+- `/v1/logs?source=&limit=&level=&match=`: log entries, optionally from one source, at least `level` severity (`trace`, `debug`, `info`, `warn`, `error`, case-insensitive; anything else is `400`) and containing `match` (case-insensitive substring of source, target, message, or a field key, value or `key=value`; the CLI's `match` covers the whole rendered line instead). `limit` keeps the most recent N entries after filtering. `/v1/logs/follow` takes the same parameters (the filters apply to the backlog and to each new entry), then streams new entries (see [below](#following-the-log-server-sent-events)).
 
 The shell command for each is listed in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
@@ -171,6 +171,7 @@ $ $C $B/v1/routes/rt1/192.0.2.7
 {"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}
 $ $C "$B/v1/logs?source=nos-bgpd%5Br1%5D&limit=1" | jq '.[0].source'
 "nos-bgpd[r1]"
+$ $C "$B/v1/logs?level=warn&match=peer&limit=5" | jq length
 ```
 
 The `source` filter must match exactly, and per-instance sources contain brackets, so URL-encode them (`nos-bgpd[r1]` becomes `nos-bgpd%5Br1%5D`).
