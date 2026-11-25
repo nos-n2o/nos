@@ -136,6 +136,10 @@ pub enum Command {
     /// `show ospf segment-routing` (#1382): SRGBs, Prefix-SIDs and Adj-SIDs
     /// across every configured OSPF instance.
     ShowOspfSegmentRouting,
+    /// `show ospf` / `show ospf instance` (#1439): each instance's summary.
+    ShowOspfInstance,
+    /// `show ospfv3` / `show ospfv3 instance` (#1439).
+    ShowOspfv3Instance,
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
@@ -1012,6 +1016,16 @@ mod tests {
             Command::parse("show ospfv3 neighbors"),
             Command::ShowOspfv3Neigh
         );
+    }
+
+    #[test]
+    fn show_ospf_instance_both_spellings() {
+        for l in ["show ospf", "show ospf instance"] {
+            assert_eq!(Command::parse(l), Command::ShowOspfInstance, "{l}");
+        }
+        for l in ["show ospfv3", "show ospfv3 instance"] {
+            assert_eq!(Command::parse(l), Command::ShowOspfv3Instance, "{l}");
+        }
     }
 
     #[test]

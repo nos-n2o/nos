@@ -36,6 +36,8 @@ use crate::{clear, login, openapi, show, tx};
         // stale (empty) value and `docs/openapi.json` would depend on the build cache.
         license(name = "GPL-3.0-only", identifier = "GPL-3.0-only")
     ),
+    // The generic `InstanceReport<T>` aliases do not register their payload.
+    components(schemas(nos_proto::InstanceSummary, nos_proto::AreaSummary)),
     modifiers(&MutualTlsScheme),
     security(("mtls" = [])),
     tags(
@@ -85,8 +87,10 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::ospf_neighbors))
         .routes(routes!(show::ospf_database))
         .routes(routes!(show::ospf_segment_routing))
+        .routes(routes!(show::ospf_instance))
         .routes(routes!(show::ospfv3_neighbors))
         .routes(routes!(show::ospfv3_database))
+        .routes(routes!(show::ospfv3_instance))
         .routes(routes!(clear::bgp_soft_in))
         .routes(routes!(clear::bgp_clear_peer))
         .routes(routes!(clear::stp_mcheck))

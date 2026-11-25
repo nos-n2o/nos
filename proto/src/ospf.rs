@@ -269,6 +269,9 @@ pub enum OspfRequest {
     /// One-shot: the segment routing state (SRGBs, Prefix-SIDs, Adj-SIDs),
     /// local and received (#1382).
     GetSegmentRouting,
+    /// One-shot: this instance's own summary (router id, ABR/ASBR, SPF
+    /// counters, per-area counts) (#1439).
+    GetInstance,
 }
 
 /// Messages sent from `nos-ospfd` to a query client.
@@ -280,6 +283,80 @@ pub enum OspfEvent {
     Database(Vec<LsaSummary>),
     /// Reply with the segment routing state.
     SegmentRouting(SrSummary),
+    /// Reply with the instance summary.
+    Instance(InstanceSummary),
+}
+
+/// `show ospf` / `show ospfv3` (#1439): one instance's own state. The
+/// `OSPFv3` daemon replies with this same type (nothing in it is address
+/// family specific).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct InstanceSummary {
+    /// The instance's router id; `None` before its first reconcile.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(text)]
+    pub router_id: Option<Ipv4Addr>,
+    /// Area border router: attached to 2+ areas with an active backbone
+    /// (RFC 3509), derived.
+    #[view(unit = bool)]
+    pub abr: bool,
+    /// Autonomous system boundary router: redistributing external routes.
+    #[view(unit = bool)]
+    pub asbr: bool,
+    /// SPF computations run since start (change-triggered and initial ones;
+    /// the periodic poll does not count).
+    #[view(unit = count)]
+    pub spf_runs: u64,
+    /// Seconds since the last SPF computation; `None` before the first.
+    #[view(unit = secs)]
+    pub last_spf_age_secs: Option<u64>,
+    /// Duration of the last SPF computation in microseconds; `None` before
+    /// the first.
+    #[view(unit = micros)]
+    pub last_spf_duration_micros: Option<u64>,
+    /// Every attached area, by area id.
+    #[view(nested)]
+    pub areas: Vec<AreaSummary>,
+}
+
+/// One area of an `InstanceSummary`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct AreaSummary {
+    /// The area id.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, text, sort)]
+    pub area_id: Ipv4Addr,
+    /// The area's type.
+    #[view(brief, text)]
+    pub area_type: AreaType,
+    /// LSAs in the area's database (AS-scope Type-5 LSAs live in no area
+    /// database and are not counted).
+    #[view(brief, unit = count)]
+    pub lsa_count: u32,
+    /// Interfaces attached to the area, loopbacks included.
+    #[view(brief, unit = count)]
+    pub interface_count: u32,
+    /// Neighbors in `Full` state across the area's interfaces.
+    #[view(brief, unit = count)]
+    pub full_neighbor_count: u32,
+}
+
+/// An area's type (no-summary variants stay `Stub`/`Nssa`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AreaType {
+    /// A regular area.
+    Normal,
+    /// A stub area.
+    Stub,
+    /// A not-so-stubby area.
+    Nssa,
 }
 
 /// `show ospf segment-routing` (#1382): what this router advertises and what

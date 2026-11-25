@@ -513,6 +513,47 @@ async fn wait_external_lsa(
     )
 }
 
+/// Polls `r`'s `GET <path>` (`/v1/ospf/instance` or `/v1/ospfv3/instance`,
+/// #1439) until the instance has `router_id`, the given `abr`, `asbr` false, a
+/// counted SPF run, and every area in `areas` holds at least one LSA (60s).
+/// Returns the instance's summary.
+async fn wait_instance(
+    r: &Router,
+    path: &str,
+    router_id: &str,
+    abr: bool,
+    areas: &[&str],
+) -> anyhow::Result<serde_json::Value> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r.rest_expect(Method::GET, path, None, 200).await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let s = &report[0]["result"];
+        let has_area = |id: &str| {
+            s["areas"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|a| a["area_id"] == id && a["lsa_count"].as_u64().is_some_and(|n| n >= 1))
+        };
+        if s["router_id"] == router_id
+            && s["abr"] == abr
+            && s["asbr"] == false
+            && s["spf_runs"].as_u64().is_some_and(|n| n >= 1)
+            && s["last_spf_age_secs"].is_u64()
+            && areas.iter().all(|id| has_area(id))
+        {
+            return Ok(s.clone());
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: {path} never matched abr={abr} {areas:?}: {last}",
+        r.name()
+    )
+}
+
 /// A third router with a lower router-id joins the broadcast segment: the
 /// incumbent DR/BDR stay put (RFC 2328 §9.4 stability) and it settles as
 /// DrOther, still forming Full adjacencies with the DR and BDR (§8).
@@ -1242,6 +1283,15 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
     let abr_up = "ospf abr backbone attachment changed abr=true";
     let abr_down = "ospf abr backbone attachment changed abr=false";
     b.wait(abr_up).await?;
+    // `show ospf` (#1439): an ABR over area 0 and area 1, SPF counted.
+    wait_instance(
+        b,
+        "/v1/ospf/instance",
+        OSPF_ROUTER_ID_B,
+        true,
+        &[OSPF_AREA, OSPF_AREA_1],
+    )
+    .await?;
     let (down0, up0) = (b.count(abr_down), b.count(abr_up));
     let flushed3 = b.count("ospf lsa prematurely aged.*lsa_type=3");
     let originated3 = b.count("ospf lsa originated.*lsa_type=3");
@@ -1250,6 +1300,8 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
     log("breaking the backbone adjacency on router-b: no longer an ABR");
     b.provision_flags(&with_base(B, broken)).await?;
     b.wait_new(abr_down, down0, 90).await?;
+    // RFC 3509: the derived role follows the lost backbone adjacency.
+    wait_instance(b, "/v1/ospf/instance", OSPF_ROUTER_ID_B, false, &[]).await?;
     b.wait_new("ospf lsa prematurely aged.*lsa_type=3", flushed3, 30)
         .await?;
     log("restoring the backbone adjacency: an ABR again");
@@ -4390,6 +4442,14 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!(
         "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"
     ))
+    .await?;
+    wait_instance(
+        a,
+        "/v1/ospfv3/instance",
+        OSPFV3_ROUTER_ID,
+        false,
+        &[OSPFV3_AREA],
+    )
     .await?;
     b.wait(&format!(
         "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"

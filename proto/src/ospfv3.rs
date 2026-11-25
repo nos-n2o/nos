@@ -135,6 +135,8 @@ pub enum Ospfv3Request {
     /// `OSPFv3` twin, sent by the owning table's `nos-ribd`: the IPv6 routes
     /// to originate as RFC 5340 AS-External-LSAs.
     RedistributeRoutes(crate::bgp::RedistributeUpdate),
+    /// One-shot: this instance's own summary (#1439).
+    GetInstance,
 }
 
 /// Messages sent from `nos-ospfv3d` to a query client.
@@ -144,4 +146,6 @@ pub enum Ospfv3Event {
     Neighbors(Vec<Ospfv3NeighborSummary>),
     /// Reply with the LSDB summary.
     Database(Vec<Ospfv3LsaSummary>),
+    /// Reply with the instance summary (the same type as `OSPFv2`'s).
+    Instance(crate::InstanceSummary),
 }

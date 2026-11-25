@@ -25,7 +25,7 @@ use self::rx::{
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1003,6 +1003,9 @@ pub struct LinkManager {
     /// Each attach point's `bfd` profile (`set_bfd`, every resync); a link
     /// missing here has no BFD.
     bfd: std::sync::Mutex<HashMap<String, BfdProfile>>,
+    /// SPF runs counted by `note_spf`, and the last one's start and duration.
+    spf_runs: AtomicU64,
+    last_spf: std::sync::Mutex<Option<(Instant, Duration)>>,
     opener: Opener,
 }
 
@@ -1124,6 +1127,8 @@ impl LinkManager {
             backbone_forced: AtomicBool::new(true),
             nssa_translating: Mutex::new(HashMap::new()),
             bfd: std::sync::Mutex::new(HashMap::new()),
+            spf_runs: AtomicU64::new(0),
+            last_spf: std::sync::Mutex::new(None),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -1254,6 +1259,73 @@ impl LinkManager {
             .map(|e| (e.config.clone(), e.status.borrow().clone()))
             .collect();
         adj_sid::adjacencies(router_id, &snapshot, &mut self.adj_labels.lock().unwrap())
+    }
+
+    /// Records one SPF run (#1439) for `show ospf`. `compute_routes` stays
+    /// pure: `rib_push_client` calls this after the initial snapshot and
+    /// after every change-triggered recomputation, never after the 2 s poll.
+    pub fn note_spf(&self, duration: Duration) {
+        self.spf_runs.fetch_add(1, Ordering::Relaxed);
+        *self.last_spf.lock().unwrap() = Some((Instant::now(), duration));
+    }
+
+    /// `show ospf` (#1439): router id, ABR/ASBR role, SPF counters and one
+    /// row per attached area.
+    pub async fn instance_summary(&self) -> nos_proto::InstanceSummary {
+        use nos_proto::{AreaSummary, AreaType};
+        let router_id = *self.router_id.lock().await;
+        let border = self.is_backbone_abr().await;
+        // The set `router_flags_and_caps` reads for the E bit.
+        let boundary = !self.redistribute_filtered.lock().await.is_empty();
+        let mut ids: Vec<Ipv4Addr> = self.attached_areas().await.into_iter().collect();
+        ids.sort();
+        let snapshot: Vec<(Ipv4Addr, LinkStatus)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| (e.config.area_id, e.status.borrow().clone()))
+            .collect();
+        let stubs = self.stub_networks.lock().await.clone();
+        let mut areas = Vec::new();
+        for id in ids {
+            let settings = self.area(id).await;
+            let store = self.lsdbs.lock().await.get(&id).cloned();
+            let lsa_count = match store {
+                Some(s) => s.lock().await.all().len(),
+                None => 0,
+            };
+            let here = snapshot.iter().filter(|(a, _)| *a == id);
+            let links = here.clone().count() + stubs.get(&id).map_or(0, Vec::len);
+            let full = here
+                .flat_map(|(_, st)| st.neighbors.values())
+                .filter(|n| n.state == NeighborState::Full)
+                .count();
+            areas.push(AreaSummary {
+                area_id: id,
+                area_type: if settings.nssa {
+                    AreaType::Nssa
+                } else if settings.stub {
+                    AreaType::Stub
+                } else {
+                    AreaType::Normal
+                },
+                lsa_count: u32::try_from(lsa_count).unwrap_or(u32::MAX),
+                interface_count: u32::try_from(links).unwrap_or(u32::MAX),
+                full_neighbor_count: u32::try_from(full).unwrap_or(u32::MAX),
+            });
+        }
+        let last = *self.last_spf.lock().unwrap();
+        nos_proto::InstanceSummary {
+            router_id,
+            abr: border,
+            asbr: boundary,
+            spf_runs: self.spf_runs.load(Ordering::Relaxed),
+            last_spf_age_secs: last.map(|(at, _)| at.elapsed().as_secs()),
+            last_spf_duration_micros: last
+                .map(|(_, d)| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
+            areas,
+        }
     }
 
     /// `show ospf segment-routing` (#1382): the SRGBs, Prefix-SIDs and

@@ -1,0 +1,10 @@
+Router-Id                 1.1.1.1
+Abr                       no
+Asbr                      no
+Spf-Runs                  12
+Last-Spf-Age-Secs         1m35s
+Last-Spf-Duration-Micros  850us
+Areas
+  Area-Id  Area-Type  Lsa-Count  Interface-Count  Full-Neighbor-Count
+  -------  ---------  ---------  ---------------  -------------------
+  0.0.0.0  stub               3                1                    1

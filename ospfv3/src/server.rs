@@ -31,7 +31,7 @@ pub fn start(
 /// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
 fn allowed(role: Role, req: &Ospfv3Request) -> bool {
     match req {
-        Ospfv3Request::GetNeighbors | Ospfv3Request::GetDatabase => {
+        Ospfv3Request::GetNeighbors | Ospfv3Request::GetDatabase | Ospfv3Request::GetInstance => {
             matches!(role, Role::User | Role::Restd)
         }
         Ospfv3Request::RedistributeRoutes(_) => role == Role::Ribd,
@@ -93,6 +93,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ospfv3Request::GetInstance => {
+                let event = Ospfv3Event::Instance(links.instance_summary().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             Ospfv3Request::RedistributeRoutes(update) => {
                 // Only the closing `Full` is applied: it replaces the raw
                 // set, so half a snapshot would withdraw the rest.
@@ -125,6 +131,11 @@ mod authz_tests {
                 allowed(role, &Ospfv3Request::GetNeighbors),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} query"
+            );
+            assert_eq!(
+                allowed(role, &Ospfv3Request::GetInstance),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} instance query"
             );
         }
     }

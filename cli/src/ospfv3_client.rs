@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    IpcCodec, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, Role,
+    InstanceSummary, IpcCodec, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
+    Role,
 };
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -68,6 +69,18 @@ pub async fn get_database(
     match reader.next().await {
         Some(Ok(Ospfv3Event::Database(entries))) => Ok(entries),
         Some(Ok(_)) => Err(Ospfv3ClientError::UnexpectedReply("reply to GetDatabase")),
+        Some(Err(e)) => Err(Ospfv3ClientError::Io(e)),
+        None => Err(Ospfv3ClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches the instance summary (#1439).
+pub async fn get_instance(ospfv3_socket: &Path) -> Result<InstanceSummary, Ospfv3ClientError> {
+    let (mut reader, mut writer) = connect(ospfv3_socket).await?;
+    writer.send(Ospfv3Request::GetInstance).await?;
+    match reader.next().await {
+        Some(Ok(Ospfv3Event::Instance(i))) => Ok(i),
+        Some(Ok(_)) => Err(Ospfv3ClientError::UnexpectedReply("reply to GetInstance")),
         Some(Err(e)) => Err(Ospfv3ClientError::Io(e)),
         None => Err(Ospfv3ClientError::ConnectionClosed),
     }

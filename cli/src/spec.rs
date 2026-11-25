@@ -283,6 +283,20 @@ const OSPF_NEIGH_DOC: Doc = Doc::Local {
              running is reported individually rather than aborting the whole command.",
 };
 
+const OSPF_INSTANCE_DOC: Doc = Doc::Local {
+    summary: "Show each OSPF instance: router id, ABR/ASBR role, SPF runs and the areas.",
+    detail: "Queries every configured OSPF instance's nos-ospfd for its router id, whether \
+             it is an area border router (RFC 3509) or an ASBR, how many SPF runs it made \
+             (and when, how long the last took), and per area: type, LSA, interface and \
+             Full-neighbor counts.",
+};
+
+const OSPFV3_INSTANCE_DOC: Doc = Doc::Local {
+    summary: "Show each OSPFv3 instance: router id, ABR/ASBR role, SPF runs and the areas.",
+    detail: "Mirrors 'show ospf' for OSPFv3 (RFC 5340): queries every configured \
+             Ospfv3Instance's nos-ospfv3d.",
+};
+
 const OSPFV3_NEIGH_DOC: Doc = Doc::Local {
     summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",
     detail: "Mirrors 'show ospf neigh' for OSPFv3 (RFC 5340): queries every configured \
@@ -1146,6 +1160,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowOspfSegmentRouting),
+    cmd!(["show" "ospf"], OSPF_INSTANCE_DOC, Always, Command::ShowOspfInstance),
+    cmd!(["show" "ospf" "instance"], OSPF_INSTANCE_DOC, Always, Command::ShowOspfInstance),
+    cmd!(["show" "ospfv3"], OSPFV3_INSTANCE_DOC, Always, Command::ShowOspfv3Instance),
+    cmd!(["show" "ospfv3" "instance"], OSPFV3_INSTANCE_DOC, Always, Command::ShowOspfv3Instance),
     cmd!(["show" "ospfv3" "neigh"],
         OSPFV3_NEIGH_DOC,
         Always,

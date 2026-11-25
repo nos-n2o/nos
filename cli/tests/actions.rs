@@ -245,12 +245,14 @@ fn lab() -> Lab {
             "ospf" => serve(role, name, &path, |r: OspfRequest| {
                 vec![match r {
                     OspfRequest::GetDatabase => OspfEvent::Database(Vec::new()),
+                    OspfRequest::GetInstance => OspfEvent::Instance(instance_summary()),
                     _ => OspfEvent::Neighbors(Vec::new()),
                 }]
             }),
             _ => serve(role, name, &path, |r: Ospfv3Request| {
                 vec![match r {
                     Ospfv3Request::GetDatabase => Ospfv3Event::Database(Vec::new()),
+                    Ospfv3Request::GetInstance => Ospfv3Event::Instance(instance_summary()),
                     _ => Ospfv3Event::Neighbors(Vec::new()),
                 }]
             }),
@@ -356,6 +358,10 @@ async fn every_show_command_runs_against_its_daemon() {
             "show ospf database router nothost",
             "show ospf neighbors",
             "show ospf segment-routing",
+            "show ospf",
+            "show ospf instance",
+            "show ospfv3",
+            "show ospfv3 instance",
             "show ospfv3 neigh",
             "show ospfv3 database",
             "show ospfv3 database link 0x2001",
@@ -626,4 +632,16 @@ async fn show_log_forwards_the_limit() {
     assert_eq!(got("lg-match"), [None]);
     // `last 0` is rejected before any IPC.
     assert_eq!(got("lg-zero"), Vec::<Option<usize>>::new());
+}
+
+fn instance_summary() -> nos_proto::InstanceSummary {
+    nos_proto::InstanceSummary {
+        router_id: Some("1.1.1.1".parse().unwrap()),
+        abr: false,
+        asbr: false,
+        spf_runs: 1,
+        last_spf_age_secs: Some(1),
+        last_spf_duration_micros: Some(10),
+        areas: Vec::new(),
+    }
 }
