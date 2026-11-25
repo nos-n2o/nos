@@ -1122,11 +1122,13 @@ impl RibDriver for LinuxRibDriver {
         let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
         // SAFETY: `buf` is IF_NAMESIZE bytes as if_indextoname(3) requires; on
         // success it holds a NUL-terminated name.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- if_indextoname(3) FFI, audited above
         let p = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr()) };
         if p.is_null() {
             return None;
         }
         // SAFETY: non-null return: `buf` is NUL-terminated.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage -- NUL-terminated by if_indextoname
         let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
         Some(name.to_string_lossy().into_owned())
     }
