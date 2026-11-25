@@ -7423,6 +7423,10 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
         .as_str()
         .context("show fdb has no bridge name")?
         .to_string();
+    let remote = fdb_mac(&fdb, EVPN_REMOTE_MAC)?;
+    if !remote["interface"].is_null() || !remote["age_secs"].is_null() {
+        bail!("a remote MAC carries a port or an age (#1463): {remote}");
+    }
 
     log("EVPN import policy (#502): a reject-all policy keeps the MAC out, accept-all brings it back");
     let reject_file = policy_file("evpn-reject-all", "reject\n")?;
@@ -7544,6 +7548,18 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
         "local mac learned domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC}"
     ))
     .await?;
+    log("`show fdb` gives the local MAC its port and age (#1463)");
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let local = fdb_mac(&serde_json::from_str(&body)?, EVPN_LOCAL_MAC)?;
+    // Pinned seconds ago; the kernel starts `used` at creation.
+    if local["source"] != "Local"
+        || local["interface"] != EVPN_PORT
+        || local["age_secs"].as_u64().is_none_or(|n| n > 120)
+    {
+        bail!("local MAC without its port/age: {local}");
+    }
     // GoBGP sees the Type-2 (with our RD) and the domain's own Type-3.
     gobgp_evpn_rib(w, "showed the local MAC", |rib| {
         rib.contains(EVPN_LOCAL_MAC) && rib.contains(&format!("rd:{EVPN_RD}"))
@@ -11269,4 +11285,13 @@ pub async fn bgp_v6_over_v4(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait(&format!("loc-rib route for {V6_OVER_V4_PREFIX} withdrawn"))
         .await
+}
+
+/// The `macs[]` entry of a `show fdb` body for `mac`.
+fn fdb_mac(fdb: &serde_json::Value, mac: &str) -> anyhow::Result<serde_json::Value> {
+    fdb["macs"]
+        .as_array()
+        .and_then(|m| m.iter().find(|e| e["mac"] == mac))
+        .cloned()
+        .with_context(|| format!("show fdb has no {mac}: {fdb}"))
 }

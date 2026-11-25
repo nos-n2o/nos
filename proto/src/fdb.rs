@@ -315,6 +315,15 @@ pub struct MacEntry {
     /// The Ethernet Segment a `Local` MAC was learned on, when its port is one.
     #[view(brief, text)]
     pub esi: Option<String>,
+    /// The bridge port a `Local` MAC sits behind, or the segment port of a
+    /// pinned remote MAC; `None` when reached through a VTEP.
+    #[view(brief, text)]
+    pub interface: Option<String>,
+    /// Seconds since the kernel last saw a frame from the MAC
+    /// (`NDA_CACHEINFO` `used`); `None` for remote and segment-pinned
+    /// entries, or when the kernel gave none.
+    #[view(brief, header = "age", unit = secs)]
+    pub age_secs: Option<u32>,
 }
 
 /// One IP-to-MAC neighbor entry of an IP-VRF.

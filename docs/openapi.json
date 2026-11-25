@@ -4085,8 +4085,24 @@
       "MacEntry": {
         "description": "One MAC in a domain's forwarding table.",
         "properties": {
+          "age_secs": {
+            "description": "Seconds since the kernel last saw a frame from the MAC\n(`NDA_CACHEINFO` `used`); `None` for remote and segment-pinned\nentries, or when the kernel gave none.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "esi": {
             "description": "The Ethernet Segment a `Local` MAC was learned on, when its port is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interface": {
+            "description": "The bridge port a `Local` MAC sits behind, or the segment port of a\npinned remote MAC; `None` when reached through a VTEP.",
             "type": [
               "string",
               "null"

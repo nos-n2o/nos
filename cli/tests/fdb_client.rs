@@ -16,6 +16,8 @@ fn sample() -> FdbTable {
             vtep: Some("192.0.2.9".parse().unwrap()),
             vteps: vec!["192.0.2.9".parse().unwrap()],
             esi: None,
+            interface: None,
+            age_secs: None,
         }],
         neighbours: Vec::new(),
         flood: vec!["192.0.2.9".parse().unwrap()],

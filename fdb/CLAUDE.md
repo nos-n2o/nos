@@ -24,6 +24,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 - A forward-facing FDB entry must be **deleted before it changes form** (nexthop group vs plain): the kernel keeps the old form on `replace`.
 - Nexthops (`nexthop.rs`) are hand-encoded netlink, unit tests pin the bytes; tc goes through `nos-tc` (`tc/CLAUDE.md`: priorities 1 and 2 are ours).
 - With the underlay in a VRF, receiving VXLAN needs `net.ipv4.udp_l3mdev_accept=1`; nothing in nos sets it (unprivileged daemons), the e2e helper does.
+- `local_mac_ages` (`NDA_CACHEINFO` `used`, USER_HZ ticks) is read per `GetMacs`, never stored: `refresh_local` must not see a ticking age (#1463).
 - Loop guards: `local_macs` skips `extern_learn` entries (fdbd's own writes), the VXLAN port and inactive segment pins.
 
 ## IPC

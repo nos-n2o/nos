@@ -229,6 +229,8 @@ fn fdb() -> FdbTable {
                 vtep: None,
                 vteps: vec![],
                 esi: Some("00:11:22:33:44:55:66:77:88:99".into()),
+                interface: Some("eth1".into()),
+                age_secs: Some(7),
             },
             MacEntry {
                 mac: "02:00:00:00:00:02".into(),
@@ -236,6 +238,8 @@ fn fdb() -> FdbTable {
                 vtep: Some("192.0.2.9".parse().unwrap()),
                 vteps: vec!["192.0.2.9".parse().unwrap(), "192.0.2.10".parse().unwrap()],
                 esi: None,
+                interface: None,
+                age_secs: None,
             },
         ],
         neighbours: vec![NeighEntry {

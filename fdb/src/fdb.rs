@@ -1588,9 +1588,21 @@ impl Fdb {
         }
     }
 
-    /// `GetMacs`: what this domain's FDB currently holds.
+    /// `GetMacs`: what this domain's FDB currently holds. A `Local` MAC's age
+    /// is read from the kernel per query, never stored.
     pub async fn table(&self) -> FdbTable {
         let g = self.inner.lock().await;
+        let ages = match &g.ready {
+            Some(r) => self
+                .driver
+                .local_mac_ages(&r.bridge, r.vni)
+                .await
+                .unwrap_or_else(|e| {
+                    debug!(domain = %self.domain, error = %e, "could not read the mac ages");
+                    BTreeMap::new()
+                }),
+            None => BTreeMap::new(),
+        };
         let mut macs: Vec<MacEntry> = g
             .local
             .iter()
@@ -1605,6 +1617,8 @@ impl Fdb {
                     .map(|r| esi_of(r, Some(port)))
                     .filter(|e| *e != [0; 10])
                     .map(|e| format_esi(&e)),
+                interface: Some(port.clone()).filter(|p| !p.is_empty()),
+                age_secs: ages.get(m).copied(),
             })
             .collect();
         let mut neighbours: Vec<NeighEntry> = g
@@ -1633,6 +1647,8 @@ impl Fdb {
                     vtep: Some(*vtep),
                     vteps: vec![*vtep],
                     esi: None,
+                    interface: None,
+                    age_secs: None,
                 }),
                 Installed::MacGroup { mac, vteps } => macs.push(MacEntry {
                     mac: format_mac(*mac),
@@ -1640,6 +1656,8 @@ impl Fdb {
                     vtep: vteps.first().copied(),
                     vteps: vteps.clone(),
                     esi: None,
+                    interface: None,
+                    age_secs: None,
                 }),
                 Installed::Neigh { mac, ip, vtep } => neighbours.push(NeighEntry {
                     ip: *ip,
@@ -1655,6 +1673,8 @@ impl Fdb {
                     vtep: None,
                     vteps: Vec::new(),
                     esi: g.ready.as_ref().map(|r| format_esi(&esi_of(r, Some(port)))),
+                    interface: Some(port.clone()),
+                    age_secs: None,
                 }),
             }
         }
@@ -2063,6 +2083,9 @@ mod tests {
         }
         async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
             Ok(BTreeMap::from([([0, 0, 0, 0, 0, 7], "eth1".to_string())]))
+        }
+        async fn local_mac_ages(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, u32>, DriverError> {
+            Ok(BTreeMap::from([([0, 0, 0, 0, 0, 7], 12)]))
         }
         async fn set_port_flood(
             &self,
@@ -2566,6 +2589,28 @@ mod tests {
         assert_eq!(t.routes.len(), 2);
         fdb.set_ready(None).await;
         assert!(rx.borrow().routes.is_empty() && rx.borrow().bgp_instance.is_none());
+    }
+
+    #[tokio::test]
+    async fn table_reports_the_local_mac_port_and_age() {
+        let fdb = Fdb::new(
+            "bd1".to_string(),
+            Arc::new(Recorder::default()),
+            Duration::ZERO,
+        );
+        fdb.set_ready(Some(ready())).await;
+        fdb.refresh_local().await;
+        let t = fdb.table().await;
+        let m = t
+            .macs
+            .iter()
+            .find(|m| m.source == MacSource::Local)
+            .unwrap();
+        assert_eq!(m.interface.as_deref(), Some("eth1"));
+        assert_eq!(m.age_secs, Some(12));
+        for m in t.macs.iter().filter(|m| m.source == MacSource::Remote) {
+            assert_eq!((m.interface.as_deref(), m.age_secs), (None, None));
+        }
     }
 
     /// A Type-4 as another nos PE sends it: modulo, AC-DF.
