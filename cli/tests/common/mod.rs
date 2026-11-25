@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_cli::actions::{handle_action, DocCache, LeaveChoice, Outcome};
+use nos_cli::actions::{DocCache, LeaveChoice, Outcome};
 use nos_cli::command::Command;
 use nos_cli::session::{self, Mode};
 use nos_pki::testing::shared;
@@ -106,8 +106,20 @@ pub async fn run(
     ask: fn(&str) -> LeaveChoice,
 ) -> (Mode, bool) {
     for line in lines {
+        let (line, pipe) = nos_cli::pipe::split(line).unwrap_or((line, None));
         let action = session::resolve(&mode, Command::parse(line));
-        match handle_action(action, mode, &lab.config, &lab.watchdog, &lab.docs, ask).await {
+        let out = nos_cli::pipe::Output::of(pipe);
+        match nos_cli::actions::handle_action_out(
+            action,
+            mode,
+            &lab.config,
+            &lab.watchdog,
+            &lab.docs,
+            ask,
+            out,
+        )
+        .await
+        {
             Outcome::Continue(next) => mode = next,
             Outcome::Exit => return (Mode::Operational, true),
         }
