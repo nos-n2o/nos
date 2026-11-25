@@ -1991,6 +1991,19 @@ fn render_config_raw(config: &Config) -> String {
     }
 }
 
+/// `show config <path>` (#1459): the running config scoped to the object the
+/// `edit` words name. `Err`: the words name no object.
+pub fn render_config_path(config: &Config, words: &[&str]) -> Result<String, String> {
+    let doc = serde_json::to_value(config).unwrap_or_default();
+    let segs = crate::config_grammar::resolve_path(words, &doc)
+        .ok_or_else(|| format!("no such object: {}", sanitize(&words.join(" "))))?;
+    let text = render::render_at(&doc, &segs).map_or_else(
+        || "nothing configured here".to_string(),
+        |lines| render::indent(&lines),
+    );
+    Ok(sanitize(&text).into_owned())
+}
+
 /// `show config admin`: the keystore, secrets as `<hidden>`.
 pub fn render_admin_config(config: &Config) -> String {
     sanitize(&render_admin_config_raw(config)).into_owned()
@@ -3723,6 +3736,41 @@ mod tests {
             render_config(&config_from(&serde_json::json!({"hostname": "nos"}))),
             "nothing configured"
         );
+    }
+
+    #[test]
+    fn show_config_path_scopes_and_reports_misses() {
+        let cfg = config_from(&serde_json::json!({"hostname": "nos"}));
+        assert_eq!(
+            render_config_path(&cfg, &["bgp", "bogus"]).unwrap_err(),
+            "no such object: bgp bogus"
+        );
+        let err = render_config_path(&cfg, &["x\u{1b}[31m"]).unwrap_err();
+        assert!(!err.contains('\u{1b}'), "{err:?}");
+    }
+
+    #[test]
+    fn show_config_path_goldens() {
+        let cfg = ospf_config();
+        assert_eq!(
+            render_config_path(&cfg, &["routing-table", "rt1", "evpn"]).unwrap(),
+            "evpn\n  l3-vni 5000\n  rd 1:1"
+        );
+        let out = render_config_path(&cfg, &["ospf", "instance", "o1"]).unwrap();
+        assert!(
+            out.starts_with("ospf instance o1\n  router-id 1.1.1.1"),
+            "{out}"
+        );
+        // Secrets stay hidden in a scoped print.
+        let out = render_config_path(&cfg, &["user", "admin"]).unwrap();
+        assert_eq!(out, "user admin\n  password <hidden>");
+        assert!(!out.contains("argon2id"), "{out}");
+        // An existing but empty object prints just its header, never a miss.
+        let empty = config_from(&serde_json::json!({
+            "routing_tables": [{"name": "rt1"}]
+        }));
+        let out = render_config_path(&empty, &["routing-table", "rt1"]).unwrap();
+        assert_eq!(out, "routing-table rt1");
     }
 
     #[test]

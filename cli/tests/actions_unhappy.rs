@@ -609,6 +609,8 @@ async fn configd_is_down_for_every_operational_command() {
             "help",
             "show config",
             "show config admin",
+            "show config bgp instance b1",
+            "show config bgp instance nope",
             "show bgp brief",
             "show bgp evpn",
             "show bgp flowspec",

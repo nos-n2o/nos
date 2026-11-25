@@ -174,6 +174,17 @@ impl Completer for NosCompleter {
                 }
             }
         }
+        if words.len() >= 2 && words[0] == "show" && words[1] == "config" {
+            let doc = config(&mut self.config_source).unwrap_or(Value::Null);
+            let mut edit = vec!["edit"];
+            edit.extend(&words[2..]);
+            for c in config_grammar::complete(&edit, &[], &doc) {
+                if c.word.starts_with(partial) && !out.iter().any(|s| s.value == c.word) {
+                    let s = self.suggestion(c.word, c.topic.map(Doc::FromConfig), c.usage, span);
+                    out.push(s);
+                }
+            }
+        }
         CompletionResult::fresh(out)
     }
 }
@@ -231,6 +242,16 @@ mod tests {
         let v = values(Mode::Operational, "");
         assert!(v.contains(&"show".to_string()) && v.contains(&"configure".to_string()));
         assert!(!v.contains(&"set".to_string()) && !v.contains(&"commit".to_string()));
+    }
+
+    #[test]
+    fn show_config_completes_the_path_in_both_modes() {
+        for mode in [Mode::Operational, configuring(&[])] {
+            let v = values(mode.clone(), "show config ");
+            assert!(v.contains(&"admin".to_string()) && v.contains(&"bgp".to_string()));
+            let v = values(mode, "show config bgp instance ");
+            assert!(v.contains(&"r1".to_string()), "{v:?}");
+        }
     }
 
     #[test]

@@ -9,6 +9,9 @@ pub enum Command {
     ShowConfig,
     /// `show config admin` — the keystore section `show config` leaves out.
     ShowConfigAdmin,
+    /// `show config <path>` — the running config scoped to the object the
+    /// `edit` words name; resolved against the config at action time (#1459).
+    ShowConfigPath(String),
     /// `show this` — only meaningful in configuration mode.
     Show,
     /// `show route <table>` (whole table) or `show route <table> <address>`
@@ -247,6 +250,13 @@ mod tests {
     #[test]
     fn show_config_extra_whitespace() {
         assert_eq!(Command::parse("  show   config  "), Command::ShowConfig);
+    }
+
+    #[test]
+    fn show_config_path() {
+        let want = Command::ShowConfigPath("bgp instance r1".into());
+        assert_eq!(Command::parse("show config bgp instance r1"), want);
+        assert_eq!(Command::parse("  show  config  bgp instance r1  "), want);
     }
 
     #[test]
