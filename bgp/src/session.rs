@@ -394,6 +394,8 @@ pub struct SessionManager {
     rpki: Mutex<Option<(rpki::Client, JoinHandle<()>)>>,
     /// The BFD sessions `reconcile::resync` wants; `bfd_client` registers them.
     bfd_targets: watch::Sender<crate::bfd_client::Target>,
+    /// What `nos-bfdd` last reported per guarded peer (`bfd_client::run`).
+    bfd_states: std::sync::Mutex<HashMap<IpAddr, nos_proto::BfdState>>,
 }
 
 /// `SessionManager::applied`.
@@ -471,6 +473,7 @@ impl SessionManager {
             bind_vrf,
             rpki: Mutex::new(None),
             bfd_targets: watch::channel(crate::bfd_client::Target::default()).0,
+            bfd_states: std::sync::Mutex::default(),
         })
     }
 
@@ -499,6 +502,29 @@ impl SessionManager {
 
     pub fn bfd_targets(&self) -> watch::Receiver<crate::bfd_client::Target> {
         self.bfd_targets.subscribe()
+    }
+
+    pub fn set_bfd_states(&self, states: HashMap<IpAddr, nos_proto::BfdState>) {
+        *self.bfd_states.lock().expect("bfd_states poisoned") = states;
+    }
+
+    /// `peer`'s BFD guard: `None` when not guarded, `Down` until a state is seen.
+    fn bfd_state(&self, peer: IpAddr) -> nos_proto::BgpBfdState {
+        use nos_proto::{BfdState, BgpBfdState};
+        if !self.bfd_targets.borrow().peers.contains_key(&peer) {
+            return BgpBfdState::None;
+        }
+        match self
+            .bfd_states
+            .lock()
+            .expect("bfd_states poisoned")
+            .get(&peer)
+        {
+            None | Some(BfdState::Down) => BgpBfdState::Down,
+            Some(BfdState::Init) => BgpBfdState::Init,
+            Some(BfdState::Up) => BgpBfdState::Up,
+            Some(BfdState::AdminDown) => BgpBfdState::AdminDown,
+        }
     }
 
     pub fn set_bfd_targets(&self, target: crate::bfd_client::Target) {
@@ -931,7 +957,7 @@ impl SessionManager {
         let rib = self.bgp_rib.lock().await;
         peers
             .values()
-            .map(|slot| to_peer_summary(slot, &rib))
+            .map(|slot| to_peer_summary(slot, &rib, self.bfd_state(slot.peer.remote_address)))
             .collect()
     }
 
@@ -1743,8 +1769,12 @@ fn total(m: &nos_proto::MessageCounts) -> u64 {
     m.open + m.update + m.notification + m.keepalive + m.route_refresh
 }
 
-fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
-    let status = *slot.status_receiver().borrow();
+fn to_peer_summary(
+    slot: &PeerSlot,
+    rib: &BgpRib,
+    bfd_state: nos_proto::BgpBfdState,
+) -> PeerSummary {
+    let status = slot.status_receiver().borrow().clone();
     // ponytail: a session that ends between fsm::run returning and the next
     // OpenSent write clearing `status.fd` leaves a brief window where this fd
     // is stale/closed — get_ao_info then just errors (e.g. EBADF), reported
@@ -1759,6 +1789,7 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
     let max_prefix_held = slot.max_prefix_held();
     let stale_prefixes = rib.stale_count(slot.peer.remote_address);
     let c = slot.counters().snapshot();
+    let established = status.state == PeerState::Established;
     PeerSummary {
         remote_address: slot.peer.remote_address,
         peer_group: slot.peer.peer_group.clone(),
@@ -1810,6 +1841,18 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
         last_notification_received: c.last_received,
         last_reset_reason: c.last_reset,
         flap_count: c.flaps,
+        received_prefixes: established
+            .then(|| rib.received_prefixes(slot.peer.remote_address))
+            .flatten()
+            .map(|[ipv4, ipv6, evpn]| nos_proto::PrefixCounts { ipv4, ipv6, evpn }),
+        advertised_prefixes: established.then(|| {
+            let [ipv4, ipv6, evpn] = rib.advertised_prefixes(slot.peer.remote_address);
+            nos_proto::PrefixCounts { ipv4, ipv6, evpn }
+        }),
+        negotiated: status.negotiated.clone(),
+        local_address: status.local_addr,
+        local_port: status.local_port,
+        bfd_state,
         status: idle_status(
             shutdown,
             max_prefix_held,
@@ -2444,7 +2487,7 @@ mod tests {
     #[test]
     fn to_peer_summary_of_a_never_connected_peer_is_idle() {
         let slot = PeerSlot::new(peer("10.0.0.1"));
-        let summary = to_peer_summary(&slot, &BgpRib::new());
+        let summary = to_peer_summary(&slot, &BgpRib::new(), nos_proto::BgpBfdState::None);
         assert_eq!(
             summary.remote_address,
             "10.0.0.1".parse::<IpAddr>().unwrap()
@@ -2463,6 +2506,64 @@ mod tests {
         assert_eq!(summary.ao_packets_key_not_found, None);
         assert!(!summary.max_prefix_held);
         assert_eq!(summary.accepted_prefixes, None);
+        assert_eq!(summary.advertised_prefixes, None);
+        assert_eq!(summary.received_prefixes, None);
+        assert_eq!(summary.negotiated, None);
+        assert_eq!(summary.local_address, None);
+        assert_eq!(summary.local_port, None);
+        assert_eq!(summary.bfd_state, nos_proto::BgpBfdState::None);
+    }
+
+    #[test]
+    fn to_peer_summary_of_an_established_peer_has_its_session_details() {
+        let slot = PeerSlot::new(peer("10.0.0.1"));
+        let neg = nos_proto::NegotiatedSummary {
+            four_octet_as: true,
+            route_refresh: true,
+            enhanced_route_refresh: false,
+            extended_message: false,
+            graceful_restart: false,
+            families: vec!["ipv4-unicast".into()],
+            add_path: vec![],
+        };
+        slot.status.send_modify(|s| {
+            s.state = PeerState::Established;
+            s.local_addr = Some("10.0.0.2".parse().unwrap());
+            s.local_port = Some(179);
+            s.negotiated = Some(neg.clone());
+        });
+        let summary = to_peer_summary(&slot, &BgpRib::new(), nos_proto::BgpBfdState::Up);
+        assert_eq!(summary.local_address, Some("10.0.0.2".parse().unwrap()));
+        assert_eq!(summary.local_port, Some(179));
+        assert_eq!(summary.negotiated, Some(neg));
+        assert_eq!(summary.bfd_state, nos_proto::BgpBfdState::Up);
+        assert_eq!(
+            summary.advertised_prefixes,
+            Some(nos_proto::PrefixCounts::default())
+        );
+        assert_eq!(summary.received_prefixes, None, "no soft-reconfig");
+    }
+
+    #[test]
+    fn bfd_state_is_none_unguarded_and_down_until_reported() {
+        use nos_proto::{BfdState, BgpBfdState};
+        let m = SessionManager::new("r1".into());
+        let p: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(m.bfd_state(p), BgpBfdState::None);
+        let want = crate::bfd_client::Want {
+            profile: nos_proto::schema::BfdProfile::default(),
+            multihop: false,
+            local: None,
+        };
+        m.set_bfd_targets(crate::bfd_client::Target {
+            table: "rt1".into(),
+            peers: HashMap::from([(p, want)]),
+        });
+        assert_eq!(m.bfd_state(p), BgpBfdState::Down);
+        m.set_bfd_states(HashMap::from([(p, BfdState::Up)]));
+        assert_eq!(m.bfd_state(p), BgpBfdState::Up);
+        m.set_bfd_states(HashMap::from([(p, BfdState::Init)]));
+        assert_eq!(m.bfd_state(p), BgpBfdState::Init);
     }
 
     #[test]
@@ -2490,7 +2591,7 @@ mod tests {
             exclude_options: false,
         }]));
         let slot = PeerSlot::new(p);
-        let summary = to_peer_summary(&slot, &BgpRib::new());
+        let summary = to_peer_summary(&slot, &BgpRib::new(), nos_proto::BgpBfdState::None);
         assert_eq!(summary.ao_current_key, None);
         assert_eq!(summary.ao_rnext_key, None);
     }

@@ -49,3 +49,22 @@ Last-Notification-Sent
 Last-Notification-Received  -
 Last-Reset-Reason         notification-sent
 Flap-Count                2
+Received-Prefixes
+  v4    4
+  v6    0
+  evpn  2
+Advertised-Prefixes
+  v4    2
+  v6    1
+  evpn  0
+Negotiated
+  Four-Octet-As           yes
+  Route-Refresh           yes
+  Enhanced-Route-Refresh  yes
+  Extended-Message        no
+  Graceful-Restart        no
+  Families                ipv4-unicast, l2vpn-evpn
+  Add-Path                ipv4-unicast both
+Local-Address             10.0.0.1
+Local-Port                41234
+Bfd-State                 Up

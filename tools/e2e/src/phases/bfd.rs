@@ -24,6 +24,19 @@ pub(super) async fn tc(dock: &crate::docker::Dock, args: &[&str]) -> anyhow::Res
     dock.in_netns(NETNS_HELPER_IMAGE, "router-a", &cmd).await
 }
 
+/// Polls the BGP summary on `r` until `peer`'s `bfd_state` is `state` (#1442).
+async fn wait_peer_bfd(
+    r: &crate::router::Router,
+    peer: &str,
+    state: &str,
+    secs: u64,
+) -> anyhow::Result<()> {
+    super::bgp::wait_peer(r, peer, &format!("bfd_state {state}"), secs, |p| {
+        p["bfd_state"] == state
+    })
+    .await
+}
+
 /// Polls `GET /v1/bfd/sessions?peer=<peer>` on `r` until its one session has
 /// `state` (and `diag`, if given) — REST is a snapshot, not a log.
 pub(super) async fn session_is(
@@ -305,7 +318,9 @@ async fn drop_udp_and_recover(w: &World, port: &str) -> anyhow::Result<()> {
         a.wait_new(&closing, n_closing, 10).await?;
         a.wait_new(&sent, n_sent, 10).await?;
         b.wait_new(&closing_b, n_closing_b, 10).await?;
-        b.wait_new(&sent_b, n_sent_b, 10).await
+        b.wait_new(&sent_b, n_sent_b, 10).await?;
+        wait_peer_bfd(a, IP_B.s(), "Down", 10).await?;
+        wait_peer_bfd(b, IP_A.s(), "Down", 10).await
     }
     .await;
     let lifted = tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"]).await;
@@ -337,6 +352,9 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
 
     a.established().await?;
     b.established().await?;
+    for (r, peer) in [(a, IP_B), (b, IP_A)] {
+        wait_peer_bfd(r, peer.s(), "None", 10).await?;
+    }
     log("adding bfd to the peer-group must not reset the session");
     let (cease_a, cease_b, est_a, est_b) =
         (a.count(cease), b.count(cease), a.count(est), b.count(est));
@@ -344,6 +362,8 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     b.provision(&["--bfd-bgp"]).await?;
     session_is(a, IP_B.s(), "Up", None, 30).await?;
     session_is(b, IP_A.s(), "Up", None, 30).await?;
+    wait_peer_bfd(a, IP_B.s(), "Up", 30).await?;
+    wait_peer_bfd(b, IP_A.s(), "Up", 30).await?;
     let sess = session_json(a, IP_B.s()).await?;
     anyhow::ensure!(
         sess["clients"]

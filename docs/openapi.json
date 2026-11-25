@@ -825,6 +825,17 @@
           }
         ]
       },
+      "BgpBfdState": {
+        "description": "Whether a peer is guarded by a BFD session, and its state (`nos-bgpd`'s own\nBFD client).",
+        "enum": [
+          "None",
+          "Down",
+          "Init",
+          "Up",
+          "AdminDown"
+        ],
+        "type": "string"
+      },
       "BgpBlackhole": {
         "description": "RFC 7999 remotely triggered blackhole: a unicast route from this group's\npeers that carries BLACKHOLE (65535:666) and falls inside `prefix_list`\n(the authorisation, with normal prefix-list `range` rules: write\n`10.0.0.0/8 upto 32` to cover host routes) is tagged `NO_EXPORT` and, once\nbest, installed as a discard route. It still runs through `import_policy`,\nwhich under the default deny-all must accept it. eBGP peer-groups only.",
         "properties": {
@@ -4217,6 +4228,55 @@
         },
         "required": [
           "id"
+        ],
+        "type": "object"
+      },
+      "NegotiatedSummary": {
+        "description": "What an `Established` session negotiated (OPEN capabilities, RFC 5492).",
+        "properties": {
+          "add_path": {
+            "description": "RFC 7911 add-path direction per family, as `<family> <none|receive|send|both>`\n(only families with a direction).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "enhanced_route_refresh": {
+            "description": "RFC 7313 enhanced route refresh.",
+            "type": "boolean"
+          },
+          "extended_message": {
+            "description": "RFC 8654 extended message size.",
+            "type": "boolean"
+          },
+          "families": {
+            "description": "Address families both sides carry, by their config name.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "four_octet_as": {
+            "description": "RFC 6793 four-octet AS numbers.",
+            "type": "boolean"
+          },
+          "graceful_restart": {
+            "description": "RFC 4724 graceful restart (both sides).",
+            "type": "boolean"
+          },
+          "route_refresh": {
+            "description": "RFC 2918 route refresh.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "four_octet_as",
+          "route_refresh",
+          "enhanced_route_refresh",
+          "extended_message",
+          "graceful_restart",
+          "families",
+          "add_path"
         ],
         "type": "object"
       },

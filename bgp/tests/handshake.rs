@@ -406,7 +406,7 @@ async fn established_session_reports_status_via_peer_slot() {
 
     // The session is presumed Established by now (per this module's timeout
     // convention); `status`'s watch channel already holds the latest value.
-    let reported = *status.borrow_and_update();
+    let reported = status.borrow_and_update().clone();
     assert_eq!(reported.state, nos_bgp::status::PeerState::Established);
     assert_eq!(reported.remote_asn, Some(b_asn));
     assert_eq!(reported.remote_bgp_id, Some(b_router_id));

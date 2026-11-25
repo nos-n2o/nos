@@ -307,6 +307,19 @@ impl BgpRib {
             + n(self.retained.vpn_flow.get(&peer).map(HashMap::len))
     }
 
+    /// Prefixes received from `peer` before import policy, `[ipv4, ipv6,
+    /// evpn]`; `None` unless soft reconfiguration retains them.
+    pub fn received_prefixes(&self, peer: IpAddr) -> Option<[u32; 3]> {
+        if !self.retained.enabled.contains(&peer) {
+            return None;
+        }
+        let n = |len: Option<usize>| u32::try_from(len.unwrap_or(0)).unwrap_or(u32::MAX);
+        let [v4, v6] = self.retained.count(peer);
+        let evpn = n(self.evpn_adj_rib_in.get(&peer).map(HashMap::len))
+            + n(self.retained.evpn.get(&peer).map(HashMap::len));
+        Some([v4, v6, evpn])
+    }
+
     /// Whether retention is on for `peer`.
     pub fn soft_reconfig_enabled(&self, peer: IpAddr) -> bool {
         self.retained.enabled.contains(&peer)
