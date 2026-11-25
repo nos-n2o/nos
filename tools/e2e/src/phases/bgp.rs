@@ -7554,7 +7554,7 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
         .await?;
     let local = fdb_mac(&serde_json::from_str(&body)?, EVPN_LOCAL_MAC)?;
     // Pinned seconds ago; the kernel starts `used` at creation.
-    if local["source"] != "local"
+    if local["source"] != "Local"
         || local["interface"] != EVPN_PORT
         || local["age_secs"].as_u64().is_none_or(|n| n > 120)
     {
