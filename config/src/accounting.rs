@@ -1,4 +1,4 @@
-//! Per-commit RADIUS accounting (#1153). `nos-configd` holds no RADIUS secret,
+//! Per-commit and per-command AAA accounting (#1153, #1155). `nos-configd` holds no RADIUS secret,
 //! so each commit is handed to `nos-watchdogd` (`WatchdogRequest::AccountCommit`),
 //! which sends it when `aaa accounting` is on. The hand-over goes through a
 //! bounded queue: a full queue (the watchdog slow or down) drops the record
@@ -17,7 +17,7 @@ const QUEUE: usize = 256;
 /// Bound on one hand-over.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Entry = (String, String);
+type Entry = WatchdogRequest;
 
 static TX: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
 
@@ -31,29 +31,37 @@ pub fn start(watchdog_socket: PathBuf) {
 
 /// Queues one commit; a no-op until [`start`] ran, drops when the queue is full.
 pub fn record(actor: &str, transaction: &str) {
+    offer(WatchdogRequest::AccountCommit {
+        actor: actor.to_string(),
+        transaction: transaction.to_string(),
+    });
+}
+
+/// Queues one show/ops command (#1155), like [`record`].
+pub fn record_command(actor: &str, command: &str) {
+    offer(WatchdogRequest::AccountCommand {
+        actor: actor.to_string(),
+        command: command.to_string(),
+    });
+}
+
+fn offer(entry: Entry) {
     if let Some(tx) = TX.get() {
-        offer(tx, actor, transaction);
+        offer_to(tx, entry);
     }
 }
 
-fn offer(tx: &mpsc::Sender<Entry>, actor: &str, transaction: &str) {
-    if tx
-        .try_send((actor.to_string(), transaction.to_string()))
-        .is_err()
-    {
-        warn!("commit accounting queue full, dropping a record");
+fn offer_to(tx: &mpsc::Sender<Entry>, entry: Entry) {
+    if tx.try_send(entry).is_err() {
+        warn!("accounting queue full, dropping a record");
     }
 }
 
 async fn run(mut rx: mpsc::Receiver<Entry>, socket: PathBuf) {
-    while let Some((actor, transaction)) = rx.recv().await {
+    while let Some(request) = rx.recv().await {
         let sent = tokio::time::timeout(
             SEND_TIMEOUT,
-            nos_daemon::ipc::request::<_, WatchdogEvent>(
-                &socket,
-                Role::Watchdog,
-                WatchdogRequest::AccountCommit { actor, transaction },
-            ),
+            nos_daemon::ipc::request::<_, WatchdogEvent>(&socket, Role::Watchdog, request),
         )
         .await;
         if !matches!(sent, Ok(Ok(WatchdogEvent::Ok))) {
@@ -72,10 +80,17 @@ mod tests {
     #[test]
     fn a_full_queue_drops_and_record_before_start_is_a_no_op() {
         record("a", "t");
+        record_command("a", "show version");
         let (tx, mut rx) = mpsc::channel(1);
-        offer(&tx, "a", "t1");
-        offer(&tx, "a", "t2");
-        assert_eq!(rx.try_recv().unwrap().1, "t1");
+        let commit = |t: &str| WatchdogRequest::AccountCommit {
+            actor: "a".into(),
+            transaction: t.into(),
+        };
+        offer_to(&tx, commit("t1"));
+        offer_to(&tx, commit("t2"));
+        assert!(
+            matches!(rx.try_recv().unwrap(), WatchdogRequest::AccountCommit { transaction, .. } if transaction == "t1")
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -94,17 +109,38 @@ mod tests {
                 let (r, w) = tokio::io::split(stream);
                 let mut reader = FramedRead::new(r, IpcCodec::<WatchdogRequest>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogEvent>::default());
-                if let Some(Ok(WatchdogRequest::AccountCommit { actor, transaction })) =
-                    reader.next().await
-                {
-                    got_tx.send((actor, transaction)).await.unwrap();
-                    let _ = writer.send(WatchdogEvent::Ok).await;
-                }
+                let Some(Ok(req)) = reader.next().await else {
+                    continue;
+                };
+                let got = match req {
+                    WatchdogRequest::AccountCommit { actor, transaction } => (actor, transaction),
+                    WatchdogRequest::AccountCommand { actor, command } => (actor, command),
+                    _ => continue,
+                };
+                got_tx.send(got).await.unwrap();
+                let _ = writer.send(WatchdogEvent::Ok).await;
             }
         });
         let (tx, rx) = mpsc::channel(QUEUE);
         tokio::spawn(run(rx, sock));
-        offer(&tx, "alice", "tx1");
+        offer_to(
+            &tx,
+            WatchdogRequest::AccountCommit {
+                actor: "alice".into(),
+                transaction: "tx1".into(),
+            },
+        );
         assert_eq!(got.recv().await.unwrap(), ("alice".into(), "tx1".into()));
+        offer_to(
+            &tx,
+            WatchdogRequest::AccountCommand {
+                actor: "alice".into(),
+                command: "show version".into(),
+            },
+        );
+        assert_eq!(
+            got.recv().await.unwrap(),
+            ("alice".into(), "show version".into())
+        );
     }
 }

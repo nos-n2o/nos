@@ -264,6 +264,17 @@ pub enum Request {
         /// How many commits to go back.
         index: u32,
     },
+    /// One executed show/ops command (#1155), for TACACS+ command accounting
+    /// (when `aaa accounting` is on). Fire-and-forget: replies `Event::Accounted`
+    /// as soon as it is queued; a command over 255 bytes or with a control
+    /// character is an `Event::Error`. Config changes are accounted by the
+    /// daemon itself (commit), not through this.
+    AccountCommand {
+        /// The command line as typed.
+        command: String,
+        /// As on `OpenTransaction`.
+        actor: Option<Actor>,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -332,6 +343,8 @@ pub enum Event {
     },
     /// Reply to `ListExternalUsers` (#1374): `(name, uid)`, by name.
     ExternalUsers(Vec<(String, u32)>),
+    /// Reply to `AccountCommand` (#1155): the command was queued.
+    Accounted,
 }
 
 /// `^[a-z_][a-z0-9_-]{0,31}$`: what a passwd name may be (no `:`, newline,

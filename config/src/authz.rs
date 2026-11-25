@@ -14,6 +14,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::Unsubscribe
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
+        Request::AccountCommand { .. } => matches!(role, Role::User | Role::Restd),
         // `AllocateExternalUser` is the AAA accept path (#1374): only the broker, never a
         // person or another daemon.
         Request::UpgradePasswordHash { .. } | Request::AllocateExternalUser { .. } => {
@@ -81,6 +82,7 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::GetRestApi { .. }
         | Request::UpgradePasswordHash { .. }
         | Request::SetSshHostKey { .. }
+        | Request::AccountCommand { .. }
         | Request::AllocateExternalUser { .. } => true,
         // A non-admin may commit, but not arm a rollback timer.
         Request::CommitTransaction {
@@ -251,6 +253,22 @@ mod tests {
     }
 
     /// #1374: only the watchdog may allocate from an AAA accept; people manage, admin only.
+    #[test]
+    fn command_accounting_is_for_people_and_any_user_role() {
+        let r = Request::AccountCommand {
+            command: "show version".into(),
+            actor: None,
+        };
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(role, &r),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?}"
+            );
+        }
+        assert!(permitted(UserRole::ReadOnly, "bob", &r));
+    }
+
     #[test]
     fn external_user_requests_are_classified() {
         let name = || "u".to_string();

@@ -349,6 +349,14 @@ pub enum WatchdogRequest {
         /// The committed transaction's name.
         transaction: String,
     },
+    /// `nos-configd` only (#1155): one show/ops command by `actor`, for TACACS+
+    /// command accounting (RADIUS has no such record). Queued like `AccountCommit`.
+    AccountCommand {
+        /// Who ran it.
+        actor: String,
+        /// The command line.
+        command: String,
+    },
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -398,6 +406,11 @@ impl fmt::Debug for WatchdogRequest {
                 .debug_struct("AccountCommit")
                 .field("actor", actor)
                 .field("transaction", transaction)
+                .finish(),
+            WatchdogRequest::AccountCommand { actor, command } => f
+                .debug_struct("AccountCommand")
+                .field("actor", actor)
+                .field("command", command)
                 .finish(),
         }
     }

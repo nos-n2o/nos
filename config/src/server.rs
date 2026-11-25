@@ -334,6 +334,14 @@ async fn dispatch_unmasked(
         Request::ClearExternalUser { name } => {
             external_reply(store.clear_external_user(&name).await, &name)
         }
+        Request::AccountCommand { command, actor } => {
+            if command.len() > 255 || command.chars().any(char::is_control) {
+                Event::Error("invalid command line".to_string())
+            } else {
+                crate::accounting::record_command(&effective_actor(caller, actor), &command);
+                Event::Accounted
+            }
+        }
         Request::ListExternalUsers => match store.list_external_users() {
             Ok(l) => Event::ExternalUsers(l),
             Err(e) => Event::Error(e.to_string()),

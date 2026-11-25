@@ -322,6 +322,42 @@ async fn radius_accounts(w: &World, ip: &str) -> anyhow::Result<()> {
     .await?;
     let ssh_as = |user: &'static str| Ssh::password(ip, SSH_PORT, user, "pw");
 
+    // #1155: a TACACS+ stub beside RADIUS only receives command accounting
+    // (login-order stays radius local).
+    w.dock
+        .start_nos_tool(
+            TACACS_STUB,
+            NET,
+            IP_TACACS_STUB.s(),
+            &[
+                "nos-tacacs-stub",
+                "--listen",
+                &format!("0.0.0.0:{TACACS_PORT}"),
+                "--key",
+                TACACS_KEY,
+                "--user",
+                "unused:pw:admin",
+            ],
+            &[],
+        )
+        .await?;
+    a.edit(|c| {
+        c.admin.keys.push(nos_proto::AdminKey {
+            label: "tacacs".into(),
+            secret: TACACS_KEY.into(),
+        });
+        c.aaa.tacacs_servers = vec![nos_proto::TacacsServer {
+            name: "stub".into(),
+            address: IP_TACACS_STUB.s().parse()?,
+            port: Some(TACACS_PORT),
+            routing_table: Some("rt1".into()),
+            key_ref: "tacacs".into(),
+            timeout_secs: Some(2),
+        }];
+        Ok(())
+    })
+    .await?;
+
     log("ssh-login-shell: an unallocated RADIUS user fails over ssh, no ticket, no RADIUS, no allocation");
     let (tickets, accepted, allocs) = (
         a.count("login ticket issued"),
@@ -388,6 +424,26 @@ async fn radius_accounts(w: &World, ip: &str) -> anyhow::Result<()> {
         .await?;
         sh.send("commit").await?;
         a.wait_new(&expect, n, 20).await?;
+
+        log(format!(
+            "ssh-login-shell: {user}'s show command is accounted to TACACS+ (#1155)"
+        ));
+        sh.send("show version").await?;
+        let want = format!("accounting flags=4 user={user} service=nos task_id=cmd:");
+        let mut seen = false;
+        for _ in 0..15 {
+            let l = w.dock.logs(TACACS_STUB).await?;
+            if l.lines()
+                .any(|x| x.contains(&want) && x.contains("cmd=show version"))
+            {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        if !seen {
+            bail!("the TACACS+ stub never saw the show command of {user}");
+        }
     }
 
     log("ssh-login-shell: a system account never reaches the broker, even if RADIUS would accept it");

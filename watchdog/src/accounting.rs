@@ -30,6 +30,8 @@ pub enum Record {
     },
     /// A config commit by `actor`.
     Commit { actor: String, transaction: String },
+    /// A show/ops command by `actor` (#1155); TACACS+ only.
+    Command { actor: String, command: String },
 }
 
 /// A fresh Acct-Session-Id.
@@ -81,6 +83,7 @@ pub fn attrs(record: &Record) -> Vec<(u8, Vec<u8>)> {
             text(attr::USER_NAME, actor),
             text(attr::ACCT_SESSION_ID, &format!("commit:{transaction}")),
         ]),
+        Record::Command { .. } => {}
     }
     out
 }
@@ -104,6 +107,11 @@ pub fn tacacs(record: &Record) -> (nos_tacacs::AcctFlags, &str, Vec<String>) {
         Record::Commit { actor, transaction } => {
             let mut a = base(&format!("commit:{transaction}"));
             a.push("cmd=commit".to_string());
+            (AcctFlags::Stop, actor, a)
+        }
+        Record::Command { actor, command } => {
+            let mut a = base(&format!("cmd:{}", session_id()));
+            a.push(format!("cmd={command}"));
             (AcctFlags::Stop, actor, a)
         }
     }
@@ -168,6 +176,14 @@ mod tests {
         let (f, u, a) = tacacs(&rec);
         assert_eq!((f, u), (AcctFlags::Stop, "a"));
         assert!(a.contains(&"task_id=commit:t".to_string()));
+        let rec = Record::Command {
+            actor: "a".into(),
+            command: "show version".into(),
+        };
+        assert!(attrs(&rec).iter().all(|(t, _)| *t == attr::NAS_IDENTIFIER));
+        let (f, u, a) = tacacs(&rec);
+        assert_eq!((f, u), (AcctFlags::Stop, "a"));
+        assert!(a.contains(&"cmd=show version".to_string()));
     }
 
     #[test]

@@ -347,3 +347,22 @@ pub async fn discard_transaction(socket_path: &Path, name: &str) -> Result<(), C
         None => Err(ClientError::ConnectionClosed),
     }
 }
+
+/// `Request::AccountCommand` (#1155): reports one executed show/ops command.
+/// Best effort: the caller ignores a failure.
+pub async fn account_command(socket_path: &Path, command: &str) -> Result<(), ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::AccountCommand {
+            command: command.to_string(),
+            actor: None,
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(Event::Accounted)) => Ok(()),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon("unexpected event".to_string())),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}

@@ -136,10 +136,13 @@ pub(super) async fn radius_up(w: &World, users: &[&str]) -> anyhow::Result<()> {
 /// Removes the stub container and the `aaa` config `radius_up` added.
 pub(super) async fn radius_down(w: &World) -> anyhow::Result<()> {
     w.dock.container_remove(RADIUS_STUB).await;
+    w.dock.container_remove(TACACS_STUB).await;
     w.a()?
         .edit(|c| {
             c.aaa = nos_proto::Aaa::default();
-            c.admin.keys.retain(|k| k.label != "radius");
+            c.admin
+                .keys
+                .retain(|k| k.label != "radius" && k.label != "tacacs");
             Ok(())
         })
         .await
