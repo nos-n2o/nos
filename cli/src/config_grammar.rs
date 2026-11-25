@@ -72,6 +72,15 @@ pub fn parse(line: &str, context: &[String], config: &Value) -> Option<ConfigEdi
     from(context).or_else(|| (!context.is_empty()).then(|| from(&[])).flatten())
 }
 
+/// The REST segments of the object `words` name, as `edit` resolves them,
+/// absolute from the root and without creating anything. `None`: not an
+/// existing object (unknown word, missing list element, scalar field).
+pub fn resolve_path(words: &[&str], config: &Value) -> Option<Vec<String>> {
+    let mut walk = Walk::at(config, &[])?;
+    walk.no_create = true;
+    walk.run(None, words)?.navigate
+}
+
 /// `move <path-to-element> first|last|before <k>|after <k>`: re-sends the
 /// existing element at its new place, so only the order changes.
 fn parse_move(rest: &[&str], context: &[String], config: &Value) -> Option<ConfigEdit> {
@@ -876,6 +885,19 @@ mod tests {
 
     fn at(ctx: &[&str]) -> Vec<String> {
         ctx.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn resolve_path_finds_existing_objects_only() {
+        let d = doc();
+        let want = Some(at(&["bgp-instance", "r1"]));
+        assert_eq!(resolve_path(&["bgp", "instance", "r1"], &d), want);
+        assert_eq!(resolve_path(&["bgp-instance", "r1"], &d), want);
+        assert_eq!(resolve_path(&["bgp", "instance", "nope"], &d), None);
+        assert_eq!(resolve_path(&["bgp", "bogus"], &d), None);
+        assert_eq!(resolve_path(&["hostname"], &d), None);
+        // Nothing was created in the caller's config.
+        assert_eq!(d, doc());
     }
 
     #[test]

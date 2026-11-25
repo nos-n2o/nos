@@ -309,6 +309,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::FromConfig(Topic::Admin),
         Always,
         Command::ShowConfigAdmin),
+    cmd!(["show" "config" (path: Rest)],
+        Doc::FromConfig(Topic::ShowRunningConfig),
+        Always,
+        |path| Command::ShowConfigPath(path.trim().to_string())),
     cmd!(["show" "this"],
         Doc::FromConfig(Topic::GetTransaction),
         Configuration,
@@ -392,6 +396,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::FromConfig(Topic::ShowHistory),
         Always,
         Command::ShowHistory
+    ),
+    cmd!(
+        ["show" "configuration" "diff" (n: Number)],
+        Doc::FromConfig(Topic::ShowConfigurationDiff),
+        Always,
+        |n| Command::ShowConfigDiff { from: n.parse().ok()?, to: 0 }
+    ),
+    cmd!(
+        ["show" "configuration" "diff" (n: Number) (m: Number)],
+        Doc::FromConfig(Topic::ShowConfigurationDiff),
+        Always,
+        |n, m| Command::ShowConfigDiff { from: n.parse().ok()?, to: m.parse().ok()? }
     ),
     cmd!(
         ["rollback" (n: Number)],
@@ -722,7 +738,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      identified by its routing table and peer address.",
         },
         Always,
-        Command::ShowBfdSessions { peer: None }),
+        Command::ShowBfdSessions { peer: None, detail: false }),
+    cmd!(["show" "bfd" "sessions" "detail"],
+        Doc::Local {
+            summary: "Show every BFD session in full, one block each.",
+            detail: "Like show bfd sessions, plus per session: the uptime since the last Up, \
+                     the time since the last state change, how often it went down, the \
+                     Control packets sent and received (received counts only those accepted \
+                     after authentication), the peer's advertised min-rx, min-tx and \
+                     detect multiplier, and the clients (protocols) that own the session. \
+                     Counters restart with the session.",
+        },
+        Always,
+        Command::ShowBfdSessions { peer: None, detail: true }),
     cmd!(["show" "bfd" "sessions" (peer: IpAddr)],
         Doc::Local {
             summary: "Show the BFD sessions to one peer address.",
@@ -732,6 +760,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always,
         |peer| Command::ShowBfdSessions {
             peer: Some(peer.parse().ok()?),
+            detail: false,
+        }),
+    cmd!(["show" "bfd" "sessions" (peer: IpAddr) "detail"],
+        Doc::Local {
+            summary: "Show the BFD sessions to one peer address in full.",
+            detail: "Like show bfd sessions detail, restricted by nos-bfdd to the sessions \
+                     whose remote address is the given one (one per routing table).",
+        },
+        Always,
+        |peer| Command::ShowBfdSessions {
+            peer: Some(peer.parse().ok()?),
+            detail: true,
         }),
     cmd!(["show" "bfd" "reflector"],
         Doc::Local {

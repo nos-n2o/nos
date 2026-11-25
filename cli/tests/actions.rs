@@ -39,15 +39,23 @@ fn fake_configd(path: &Path) {
             ];
         }
         vec![match req {
-            Request::Get | Request::Subscribe => Event::Config(running.clone()),
+            Request::Get | Request::Subscribe | Request::GetHistoryConfig { index: 0 } => {
+                Event::Config(running.clone())
+            }
             Request::Save { .. } => Event::Saved,
+            Request::GetHistoryConfig { index: 1 } => Event::Config(nos_proto::Config {
+                hostname: "old".into(),
+                ..running.clone()
+            }),
             Request::ListHistory => Event::History(vec![nos_proto::HistoryEntry {
                 index: 1,
                 time: 1_700_000_000,
                 actor: "alice".into(),
                 kind: "commit".into(),
             }]),
-            Request::Rollback { index: 99, .. } => Event::Error("no history entry 99".into()),
+            Request::Rollback { index: 99, .. } | Request::GetHistoryConfig { index: 99 } => {
+                Event::Error("no history entry 99".into())
+            }
             Request::Rollback { .. } => Event::Committed {
                 warnings: vec!["w".into()],
                 unsaved: true,
@@ -278,6 +286,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "help",
             "show config",
             "show config admin",
+            "show config bgp instance b1",
+            "show config bgp instance nope",
             "show route rt1",
             "show route rt1 10.0.0.1",
             "show route gone",
@@ -296,6 +306,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show spanning-tree domain bd1 detail",
             "show bfd sessions",
             "show bfd sessions 192.0.2.1",
+            "show bfd sessions detail",
+            "show bfd sessions 192.0.2.1 detail",
             "show log",
             "show log configd --follow",
             "show log last 5",
@@ -328,6 +340,9 @@ async fn every_show_command_runs_against_its_daemon() {
             "clear bgp b1 192.0.2.2",
             "save",
             "show configuration history",
+            "show configuration diff 1",
+            "show configuration diff 1 0",
+            "show configuration diff 99",
             "not a command",
         ],
         leave_open,

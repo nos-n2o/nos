@@ -3523,7 +3523,7 @@
             ]
           },
           "last_change_secs": {
-            "description": "Age in seconds since `nos-interfaced` last saw an admin/carrier\ntransition; restarts at 0 after an interfaced restart (no flap count).",
+            "description": "Age in seconds since `nos-interfaced` last saw an admin/carrier\ntransition, else since it first saw the link (a lower bound after an\ninterfaced restart; no flap count). `None` only when not known.",
             "format": "int64",
             "minimum": 0,
             "type": [
@@ -8968,6 +8968,60 @@
           }
         },
         "summary": "Commit history (what `rollback` can restore)",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/history/{index}": {
+      "get": {
+        "operationId": "history_config",
+        "parameters": [
+          {
+            "description": "how many commits to go back; 0 is the running config",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "index is beyond the kept history"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-configd keeps no history (no config file)"
+          }
+        },
+        "summary": "The config n commits back (0 = running)",
         "tags": [
           "transactions"
         ]

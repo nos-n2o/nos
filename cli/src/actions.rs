@@ -202,6 +202,10 @@ pub async fn handle_action(
             show_history(socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowConfigDiff { from, to } => {
+            show_config_diff(socket, from, to).await;
+            Outcome::Continue(mode)
+        }
         action @ (Resolved::ShowAaaUsers
         | Resolved::AllocateAaaUser { .. }
         | Resolved::ClearAaaUser { .. }) => {
@@ -295,6 +299,7 @@ pub async fn handle_action(
         }
         action @ (Resolved::ShowRunningConfig
         | Resolved::ShowAdminConfig
+        | Resolved::ShowConfigPath(_)
         | Resolved::ShowTransaction
         | Resolved::ShowRoute { .. }
         | Resolved::ShowFdb { .. }
@@ -341,6 +346,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
     match action {
         Resolved::ShowRunningConfig => {
             show_running_config(socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowConfigPath(path) => {
+            show_config_path(socket, &path).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowAdminConfig => {
@@ -418,9 +427,13 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_bfd_reflector(watchdog_socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowBfdSessions { peer } => {
+        Resolved::ShowBfdSessions { peer, detail } => {
             if let Some(r) = bfd_sessions_reply(watchdog_socket, peer).await {
-                emit(&r, "no bfd sessions");
+                if detail {
+                    emit_detail(&r, "no bfd sessions");
+                } else {
+                    emit(&r, "no bfd sessions");
+                }
             }
             Outcome::Continue(mode)
         }
@@ -582,6 +595,17 @@ pub fn navigate_to(mode: &Mode, path: session::Path) -> Mode {
 async fn show_running_config(socket: &Path) {
     match client::fetch_running_config(socket).await {
         Ok(cfg) => println!("{}", format::render_config(&cfg)),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+async fn show_config_path(socket: &Path, path: &str) {
+    let words: Vec<&str> = path.split_whitespace().collect();
+    match client::fetch_running_config(socket).await {
+        Ok(cfg) => match format::render_config_path(&cfg, &words) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
@@ -807,6 +831,11 @@ async fn resolve_bfd(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
 /// (#1415) and the jq filter (#1420) branch here, off `view::to_value`.
 fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
     println!("{}", view::render(reply, empty));
+}
+
+/// `emit` for a `detail` form: one block per element.
+fn emit_detail<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
+    println!("{}", view::render_detail_list(reply, empty));
 }
 
 async fn bfd_sessions_reply(
@@ -1760,6 +1789,31 @@ async fn show_history(socket: &Path) {
     }
 }
 
+/// `show configuration diff <from> [<to>]`. Two reads, no lock: a commit landing
+/// between them shifts the indexes (documented, #1416).
+async fn show_config_diff(socket: &Path, from: u32, to: u32) {
+    let res = async {
+        let old = client::get_history_config(socket, from).await?;
+        let new = client::get_history_config(socket, to).await?;
+        Ok::<_, client::ClientError>(diff_text(&old, &new, use_color()))
+    }
+    .await;
+    match res {
+        Ok(t) => println!("{t}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+/// The rendered diff from `old` to `new`, or `no changes`.
+pub fn diff_text(old: &nos_proto::Config, new: &nos_proto::Config, color: bool) -> String {
+    let d = nos_proto::diff_configs(old, new);
+    if d.is_empty() {
+        "no changes".to_string()
+    } else {
+        format::render_diff(&d, color)
+    }
+}
+
 async fn rollback(socket: &Path, n: u32) {
     match client::rollback(socket, n).await {
         Ok((warnings, unsaved)) => {
@@ -2252,5 +2306,28 @@ mod log_filter_tests {
         assert_eq!(msgs(trim(es.clone(), 2)), ["3", "4"]);
         assert_eq!(msgs(trim(es.clone(), 9)).len(), 5);
         assert_eq!(trim(es, 0).len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod diff_text_tests {
+    use super::diff_text;
+    use nos_proto::Config;
+
+    fn cfg(h: &str) -> Config {
+        Config {
+            hostname: h.into(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn direction_and_empty() {
+        let (a, b) = (cfg("old"), cfg("new"));
+        let t = diff_text(&a, &b, false);
+        assert!(t.find("old").unwrap() < t.find("new").unwrap(), "{t}");
+        let r = diff_text(&b, &a, false);
+        assert!(r.find("new").unwrap() < r.find("old").unwrap(), "{r}");
+        assert_eq!(diff_text(&a, &a, false), "no changes");
     }
 }

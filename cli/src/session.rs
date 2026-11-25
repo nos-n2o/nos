@@ -81,6 +81,8 @@ pub enum Resolved {
     ShowRunningConfig,
     /// `show config admin` — only the keystore, values `<hidden>`.
     ShowAdminConfig,
+    /// `show config <path>` — the running config scoped to `path` (#1459).
+    ShowConfigPath(String),
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
@@ -139,9 +141,10 @@ pub enum Resolved {
         instance: Option<u16>,
         domain: Option<String>,
     },
-    /// `show bfd sessions [<peer>]` — data-plane, valid in any mode.
+    /// `show bfd sessions [<peer>] [detail]` — data-plane, valid in any mode.
     ShowBfdSessions {
         peer: Option<std::net::IpAddr>,
+        detail: bool,
     },
     /// `show bfd reflector` — data-plane, valid in any mode.
     ShowBfdReflector,
@@ -227,6 +230,10 @@ pub enum Resolved {
         name: String,
     },
     ShowHistory,
+    ShowConfigDiff {
+        from: u32,
+        to: u32,
+    },
     Rollback {
         n: u32,
     },
@@ -280,7 +287,9 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowConfigAdmin => Resolved::ShowAdminConfig,
+        Command::ShowConfigPath(p) => Resolved::ShowConfigPath(p),
         Command::ShowHistory => Resolved::ShowHistory,
+        Command::ShowConfigDiff { from, to } => Resolved::ShowConfigDiff { from, to },
         Command::ShowAaaUsers => Resolved::ShowAaaUsers,
         Command::AllocateAaaUser { name } => Resolved::AllocateAaaUser { name },
         Command::ClearAaaUser { name } => Resolved::ClearAaaUser { name },
@@ -303,7 +312,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowSpanningTreeDetail { instance, domain } => {
             Resolved::ShowSpanningTreeDetail { instance, domain }
         }
-        Command::ShowBfdSessions { peer } => Resolved::ShowBfdSessions { peer },
+        Command::ShowBfdSessions { peer, detail } => Resolved::ShowBfdSessions { peer, detail },
         Command::ShowBfdReflector => Resolved::ShowBfdReflector,
         Command::ShowLog {
             source,
@@ -430,7 +439,9 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::Help
         | Command::ShowConfig
         | Command::ShowConfigAdmin
+        | Command::ShowConfigPath(_)
         | Command::ShowHistory
+        | Command::ShowConfigDiff { .. }
         | Command::ShowAaaUsers
         | Command::AllocateAaaUser { .. }
         | Command::ClearAaaUser { .. }

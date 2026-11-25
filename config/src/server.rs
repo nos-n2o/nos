@@ -249,6 +249,10 @@ async fn dispatch_unmasked(
             }
         }
         Request::ListHistory => history_reply(store).await,
+        Request::GetHistoryConfig { index } => match store.history_config(index).await {
+            Ok(c) => Event::Config(c.for_role(caller.role)),
+            Err(e) => Event::Error(e.to_string()),
+        },
         Request::Rollback { index, actor } => {
             rollback_reply(store, index, effective_actor(caller, actor)).await
         }

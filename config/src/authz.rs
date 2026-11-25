@@ -33,6 +33,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         Request::Save { .. }
         | Request::SaveStatus
         | Request::ListHistory
+        | Request::GetHistoryConfig { .. }
         | Request::Rollback { .. }
         | Request::ConfirmCommit { .. }
         | Request::CancelCommit { .. }
@@ -68,6 +69,7 @@ pub fn permitted(user_role: UserRole, actor: &str, req: &Request) -> bool {
         | Request::Describe { .. }
         | Request::SaveStatus
         | Request::ListHistory
+        | Request::GetHistoryConfig { .. }
         | Request::OpenTransaction { .. }
         | Request::GetTransaction { .. }
         | Request::DiffTransaction { .. }
@@ -158,6 +160,11 @@ mod tests {
                 may_edit,
                 "{role:?} history"
             );
+            assert_eq!(
+                allowed(role, &Request::GetHistoryConfig { index: 1 }),
+                may_edit,
+                "{role:?} history config"
+            );
             let back = Request::Rollback {
                 index: 1,
                 actor: None,
@@ -237,6 +244,7 @@ mod tests {
         };
         for r in [UserRole::Operator, UserRole::ReadOnly] {
             assert!(permitted(r, "u", &Request::ListHistory));
+            assert!(permitted(r, "u", &Request::GetHistoryConfig { index: 1 }));
             assert!(!permitted(r, "u", &back));
         }
         assert!(permitted(UserRole::Admin, "u", &back));

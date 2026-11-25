@@ -2270,6 +2270,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Reset to `none`.",
             ),
         ),
+        Topic::ShowConfigurationDiff => (
+            "Show what changed between two points of the commit history.",
+            "Compares the running config as it was N commits ago with a later point of the \
+             history; `0` is the running config itself, `1` the config the latest commit \
+             replaced. Both come from the same history that `show history` lists and \
+             `rollback` restores, so an index beyond it is refused.",
+        ),
         Topic::ShowHistory => (
             "Show the commit history that `rollback` can go back to.",
             "Lists the last 20 running configs a commit replaced, newest first, with the \

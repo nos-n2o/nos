@@ -9,6 +9,9 @@ pub enum Command {
     ShowConfig,
     /// `show config admin` — the keystore section `show config` leaves out.
     ShowConfigAdmin,
+    /// `show config <path>` — the running config scoped to the object the
+    /// `edit` words name; resolved against the config at action time (#1459).
+    ShowConfigPath(String),
     /// `show this` — only meaningful in configuration mode.
     Show,
     /// `show route <table>` (whole table) or `show route <table> <address>`
@@ -68,10 +71,11 @@ pub enum Command {
         instance: Option<u16>,
         domain: Option<String>,
     },
-    /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
-    /// only those to one peer address.
+    /// `show bfd sessions [<peer>] [detail]` — every BFD session `nos-bfdd`
+    /// holds, or only those to one peer address; `detail` prints one block each.
     ShowBfdSessions {
         peer: Option<IpAddr>,
+        detail: bool,
     },
     /// `show bfd reflector` — the S-BFD reflector's discriminators and counters.
     ShowBfdReflector,
@@ -168,6 +172,11 @@ pub enum Command {
     },
     /// `show configuration history`
     ShowHistory,
+    /// `show configuration diff <n> [<m>]`: from history `n` to `m` (0 = running).
+    ShowConfigDiff {
+        from: u32,
+        to: u32,
+    },
     /// `rollback <n>` — configuration mode.
     Rollback {
         n: u32,
@@ -255,6 +264,13 @@ mod tests {
     }
 
     #[test]
+    fn show_config_path() {
+        let want = Command::ShowConfigPath("bgp instance r1".into());
+        assert_eq!(Command::parse("show config bgp instance r1"), want);
+        assert_eq!(Command::parse("  show  config  bgp instance r1  "), want);
+    }
+
+    #[test]
     fn show_config_admin() {
         assert_eq!(
             Command::parse("show config admin"),
@@ -268,6 +284,22 @@ mod tests {
             Command::parse("show configuration history"),
             Command::ShowHistory
         );
+        assert_eq!(
+            Command::parse("show configuration diff 2"),
+            Command::ShowConfigDiff { from: 2, to: 0 }
+        );
+        assert_eq!(
+            Command::parse("show configuration diff 3 1"),
+            Command::ShowConfigDiff { from: 3, to: 1 }
+        );
+        assert!(matches!(
+            Command::parse("show configuration diff x"),
+            Command::Unknown(_)
+        ));
+        assert!(matches!(
+            Command::parse("show configuration diff"),
+            Command::Unknown(_)
+        ));
         assert_eq!(Command::parse("rollback 3"), Command::Rollback { n: 3 });
         assert!(matches!(Command::parse("rollback x"), Command::Unknown(_)));
     }
@@ -420,14 +452,38 @@ mod tests {
     fn show_bfd_sessions() {
         assert_eq!(
             Command::parse("show bfd sessions"),
-            Command::ShowBfdSessions { peer: None }
+            Command::ShowBfdSessions {
+                peer: None,
+                detail: false
+            }
         );
         assert_eq!(
             Command::parse("show bfd sessions 192.0.2.1"),
             Command::ShowBfdSessions {
-                peer: Some("192.0.2.1".parse().unwrap())
+                peer: Some("192.0.2.1".parse().unwrap()),
+                detail: false
             }
         );
+        assert_eq!(
+            Command::parse("show bfd sessions detail"),
+            Command::ShowBfdSessions {
+                peer: None,
+                detail: true
+            }
+        );
+        assert_eq!(
+            Command::parse("show bfd sessions 192.0.2.1 detail"),
+            Command::ShowBfdSessions {
+                peer: Some("192.0.2.1".parse().unwrap()),
+                detail: true
+            }
+        );
+        for bad in [
+            "show bfd sessions detail 192.0.2.1",
+            "show bfd sessions nope detail",
+        ] {
+            assert_eq!(Command::parse(bad), Command::Unknown(bad.to_string()));
+        }
         assert_eq!(
             Command::parse("show bfd sessions nope"),
             Command::Unknown("show bfd sessions nope".to_string())

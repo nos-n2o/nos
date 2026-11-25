@@ -9,6 +9,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | CLI | REST |
 |---|---|
 | `show config` | `GET /v1/config` |
+| `show configuration diff <n> [<m>]` | `GET /v1/history/{n}` and `GET /v1/history/{m}` (0 = running), diffed client side |
 | `show route <table>` | `GET /v1/routes/{table}` |
 | `show route <table> <address>` | `GET /v1/routes/{table}/{addr}` |
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
@@ -25,7 +26,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | (counters as a flat table) | `GET /v1/spanning-tree/counters` |
 | `clear spanning-tree err-disabled <if>` | `POST /v1/spanning-tree/port/{interface}/err-disabled/clear` |
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
-| `show bfd sessions` / `show bfd sessions <peer>` | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` |
+| `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |

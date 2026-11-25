@@ -1,7 +1,7 @@
 //! Goldens of `show bfd sessions` through the generic view engine (#1422).
 //! Goldens are in `tests/goldens/`; edit them by hand from the failing diff.
 
-use nos_cli::view::{render, render_detail, to_value};
+use nos_cli::view::{render, render_detail, render_detail_list, to_value};
 use nos_proto::schema::BfdAuthMethod;
 use nos_proto::view::view_of;
 use nos_proto::{BfdDiag, BfdSessionKind, BfdSessionView, BfdState, SessionKey};
@@ -159,4 +159,79 @@ fn detail_shows_every_field() {
         assert!(d.contains(f.header), "{} missing", f.header);
     }
     check("bfd_session_detail", &d);
+}
+
+fn list(v: &[BfdSessionView]) -> String {
+    render_detail_list(&v.to_vec(), "no bfd sessions")
+}
+
+#[test]
+fn detail_up() {
+    let mut s = up();
+    s.uptime_secs = Some(3720);
+    s.last_change_secs = 3720;
+    s.down_count = 2;
+    s.tx_packets = 123_456;
+    s.rx_packets = 120_000;
+    s.remote_min_rx_us = Some(3300);
+    s.remote_desired_min_tx_us = Some(3300);
+    s.remote_detect_mult = Some(3);
+    s.clients = vec!["static".into(), "bgp".into()];
+    check("bfd_detail_up", &list(&[s]));
+}
+
+#[test]
+fn detail_down() {
+    let s = base(
+        "192.0.2.2",
+        BfdState::Down,
+        BfdDiag::ControlDetectionTimeExpired,
+        Some("eth1"),
+    );
+    check("bfd_detail_down", &list(&[s]));
+}
+
+#[test]
+fn detail_extras() {
+    let mut a = up();
+    a.auth_method = Some(BfdAuthMethod::KeyedSha1);
+    a.auth_key_id = Some(2);
+    a.echo_active = true;
+    a.echo_interval_us = 50_000;
+    a.kind = BfdSessionKind::SbfdInitiator;
+    let mut u = up();
+    u.kind = BfdSessionKind::Unsolicited;
+    let mut m = base(
+        "10.0.0.2",
+        BfdState::Up,
+        BfdDiag::NoDiagnostic,
+        Some("eth1"),
+    );
+    m.key.aggregate = Some("bond0".into());
+    m.key.table = String::new();
+    m.clients = vec!["micro-bfd".into()];
+    check("bfd_detail_extras", &list(&[a, u, m]));
+}
+
+#[test]
+fn detail_several() {
+    let d = base("192.0.2.2", BfdState::Down, BfdDiag::NoDiagnostic, None);
+    let out = list(&[up(), d, up()]);
+    assert_eq!(out.matches("\n\n").count(), 2, "{out}");
+    check("bfd_detail_several", &out);
+}
+
+#[test]
+fn detail_empty() {
+    check("bfd_detail_empty", &list(&[]));
+}
+
+#[test]
+fn detail_forged_stays_one_line() {
+    let mut s = up();
+    s.key.interface = Some("eth0\nFORGED  up".into());
+    s.clients = vec!["a\u{1b}[2J\nFORGED".into()];
+    let out = list(&[s]);
+    assert!(!out.contains('\u{1b}'), "{out:?}");
+    assert!(!out.contains("\nFORGED"), "{out:?}");
 }
