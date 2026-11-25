@@ -1,0 +1,30 @@
+Key
+  Table      rt1
+  Peer       192.0.2.1
+  Local      -
+  Interface  -
+  Aggregate  -
+  Multihop   no
+State                     Up
+Diag                      NoDiagnostic
+Local-Disc                1
+Remote-Disc               2
+Tx-Interval               100ms
+Detection                 300ms
+Last-Change-Secs          1h02m
+Down-Count                2
+Tx-Packets                123.5K
+Rx-Packets                120.0K
+Remote-Min-Rx-Us          3.3ms
+Remote-Desired-Min-Tx-Us  3.3ms
+Remote-Detect-Mult        3
+Clients                   static, bgp
+Kind                      Classical
+Auth                      -
+Auth-Key                  -
+Auth-Failures             0
+Echo                      no
+Echo-Interval             0us
+Echo-Only                 no
+Pdu                       0 B
+Uptime                    1h02m

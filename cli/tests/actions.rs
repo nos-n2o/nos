@@ -294,6 +294,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show spanning-tree domain bd1 detail",
             "show bfd sessions",
             "show bfd sessions 192.0.2.1",
+            "show bfd sessions detail",
+            "show bfd sessions 192.0.2.1 detail",
             "show log",
             "show log configd --follow",
             "show bgp brief",

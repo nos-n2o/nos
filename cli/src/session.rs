@@ -141,9 +141,10 @@ pub enum Resolved {
         instance: Option<u16>,
         domain: Option<String>,
     },
-    /// `show bfd sessions [<peer>]` — data-plane, valid in any mode.
+    /// `show bfd sessions [<peer>] [detail]` — data-plane, valid in any mode.
     ShowBfdSessions {
         peer: Option<std::net::IpAddr>,
+        detail: bool,
     },
     /// `show bfd reflector` — data-plane, valid in any mode.
     ShowBfdReflector,
@@ -302,7 +303,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowSpanningTreeDetail { instance, domain } => {
             Resolved::ShowSpanningTreeDetail { instance, domain }
         }
-        Command::ShowBfdSessions { peer } => Resolved::ShowBfdSessions { peer },
+        Command::ShowBfdSessions { peer, detail } => Resolved::ShowBfdSessions { peer, detail },
         Command::ShowBfdReflector => Resolved::ShowBfdReflector,
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,

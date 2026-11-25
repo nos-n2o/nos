@@ -25,7 +25,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | (counters as a flat table) | `GET /v1/spanning-tree/counters` |
 | `clear spanning-tree err-disabled <if>` | `POST /v1/spanning-tree/port/{interface}/err-disabled/clear` |
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
-| `show bfd sessions` / `show bfd sessions <peer>` | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` |
+| `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
