@@ -47,6 +47,18 @@ async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
     assert_eq!(ifs[0].state, LinkInterfaceState::PointToPoint);
     assert_eq!((ifs[0].neighbor_count, ifs[0].full_neighbor_count), (1, 1));
     assert_eq!(ifs[0].retransmit_interval, 5);
+    // `show ospf` (#1439): one area, one interface, one Full neighbor.
+    let inst = a.instance_summary().await;
+    assert_eq!(inst.areas.len(), 1, "{inst:?}");
+    assert_eq!(
+        (
+            inst.areas[0].interface_count,
+            inst.areas[0].full_neighbor_count
+        ),
+        (1, 1)
+    );
+    assert!(inst.areas[0].lsa_count >= 2, "own and B's Router-LSA");
+    assert!(b.instance_summary().await.asbr, "B redistributes");
     assert!(ifs[0].address.starts_with("10.0.0.1/"), "{ifs:?}");
     let routes = a.compute_routes().await;
     for prefix in ["192.0.2.2/32", "198.51.100.0/24", "198.51.100.0/25"] {

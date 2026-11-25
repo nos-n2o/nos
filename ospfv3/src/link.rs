@@ -7460,6 +7460,17 @@ pub(crate) mod tests {
         let (a, b) = pair(&wire, None, None).await;
         let n = a.neighbor_summaries().await;
         assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
+        // `show ospfv3` (#1439): one area, one interface, one Full neighbor.
+        let inst = a.instance_summary().await;
+        assert_eq!(inst.areas.len(), 1, "{inst:?}");
+        assert_eq!(
+            (
+                inst.areas[0].interface_count,
+                inst.areas[0].full_neighbor_count
+            ),
+            (1, 1)
+        );
+        assert!(inst.areas[0].lsa_count >= 2, "own and B's Router-LSA");
         let routes = a.compute_routes().await;
         let r = routes
             .iter()
