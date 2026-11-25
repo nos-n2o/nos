@@ -314,6 +314,13 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
+                if action.is_accounted() {
+                    // Best effort and off the command path.
+                    let (sock, cmd) = (config_socket.clone(), line.trim().to_string());
+                    tokio::spawn(async move {
+                        let _ = client::account_command(&sock, &cmd).await;
+                    });
+                }
                 match handle_action(
                     action,
                     mode,

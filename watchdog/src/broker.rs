@@ -252,7 +252,9 @@ fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
         | WatchdogRequest::LoginTicket { .. }
         | WatchdogRequest::RedeemTicket { .. } => true,
         WatchdogRequest::ResolveEndpoint { .. } => peer.is_some(),
-        WatchdogRequest::AccountCommit { .. } => role == Some(Role::Configd.as_str()),
+        WatchdogRequest::AccountCommit { .. } | WatchdogRequest::AccountCommand { .. } => {
+            role == Some(Role::Configd.as_str())
+        }
         WatchdogRequest::RenewCert { .. } => role == Some(Role::User.as_str()),
         // `nos-restd` vouches for REST clients: it has verified their certificate
         // (or, for a login, forwards the password it was given).
@@ -320,6 +322,10 @@ async fn dispatch(
         }
         WatchdogRequest::AccountCommit { actor, transaction } => {
             accounting::offer(&ctx.acct, Record::Commit { actor, transaction });
+            WatchdogEvent::Ok
+        }
+        WatchdogRequest::AccountCommand { actor, command } => {
+            accounting::offer(&ctx.acct, Record::Command { actor, command });
             WatchdogEvent::Ok
         }
         WatchdogRequest::ResolveEndpoint { service } => {
@@ -537,7 +543,8 @@ async fn account_worker(ctx: Arc<Ctx>, mut rx: tokio::sync::mpsc::Receiver<Recor
             continue;
         }
         let servers = radius_servers(&ctx, &cfg, true).await;
-        if !servers.is_empty() {
+        // RADIUS has no command record.
+        if !servers.is_empty() && !matches!(record, Record::Command { .. }) {
             if nos_radius::account(&servers, accounting::attrs(&record)).await {
                 debug!(?record, "radius accounting acknowledged");
             } else {

@@ -283,6 +283,36 @@ pub enum Resolved {
     Error(String),
 }
 
+impl Resolved {
+    /// Is this a show/ops command to account (#1155)? Everything but
+    /// navigation and the config edit/commit/save family, which `nos-configd`
+    /// accounts itself. Deny-list: a new command is accounted by default.
+    pub fn is_accounted(&self) -> bool {
+        !matches!(
+            self,
+            Resolved::Nothing
+                | Resolved::Help
+                | Resolved::ExitShell
+                | Resolved::LeaveConfigPrompt
+                | Resolved::NavigateTop
+                | Resolved::Navigate(_)
+                | Resolved::SaveRunningConfig
+                | Resolved::Rollback { .. }
+                | Resolved::OpenTransaction { .. }
+                | Resolved::ConfigEdit(_)
+                | Resolved::Commit
+                | Resolved::CommitConfirmed { .. }
+                | Resolved::ConfirmCommit
+                | Resolved::CancelCommit
+                | Resolved::Discard
+                | Resolved::EditPolicySource { .. }
+                | Resolved::SetPolicySourceLine { .. }
+                | Resolved::DeletePolicySourceLine { .. }
+                | Resolved::Error(_)
+        )
+    }
+}
+
 pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
     match cmd {
         Command::Empty => Resolved::Nothing,
@@ -494,6 +524,15 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_show_and_ops_commands_are_accounted() {
+        assert!(Resolved::ShowVersion.is_accounted());
+        assert!(Resolved::ShowHistory.is_accounted());
+        assert!(!Resolved::Commit.is_accounted());
+        assert!(!Resolved::Help.is_accounted());
+        assert!(!Resolved::ConfigEdit("set x".into()).is_accounted());
+    }
+
     use super::*;
 
     fn at(segments: &[&str]) -> Path {
