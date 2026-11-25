@@ -20,9 +20,11 @@ pub enum Command {
         table: String,
         address: Option<IpAddr>,
     },
-    /// `show fdb <domain>` — one broadcast domain's forwarding database.
+    /// `show fdb [<domain>] [mac <mac>]` — one broadcast domain's forwarding
+    /// database, or every domain's flat table, optionally for one MAC.
     ShowFdb {
-        domain: String,
+        domain: Option<String>,
+        mac: Option<String>,
     },
     /// `show interface` (every interface) or `show interface <name>` (one).
     ShowInterface {
@@ -992,17 +994,31 @@ mod tests {
     }
 
     #[test]
-    fn show_fdb_takes_one_domain() {
+    fn show_fdb_forms() {
+        let fdb = |domain: Option<&str>, mac: Option<&str>| Command::ShowFdb {
+            domain: domain.map(str::to_string),
+            mac: mac.map(str::to_string),
+        };
+        assert_eq!(Command::parse("show fdb"), fdb(None, None));
+        assert_eq!(Command::parse("show fdb bd1"), fdb(Some("bd1"), None));
+        let m = "02:00:00:00:00:0a";
         assert_eq!(
-            Command::parse("show fdb bd1"),
-            Command::ShowFdb {
-                domain: "bd1".to_string()
-            }
+            Command::parse("show fdb mac 02:00:00:00:00:0A"),
+            fdb(None, Some(m))
         );
         assert_eq!(
-            Command::parse("show fdb"),
-            Command::Unknown("show fdb".to_string())
+            Command::parse("show fdb bd1 mac 02:00:00:00:00:0a"),
+            fdb(Some("bd1"), Some(m))
         );
+        // A domain named `mac` stays reachable.
+        assert_eq!(Command::parse("show fdb mac"), fdb(Some("mac"), None));
+        assert_eq!(
+            Command::parse("show fdb mac mac 02:00:00:00:00:0a"),
+            fdb(Some("mac"), Some(m))
+        );
+        for bad in ["show fdb mac zz", "show fdb mac 01:00:00:00:00:01"] {
+            assert_eq!(Command::parse(bad), Command::Unknown(bad.to_string()));
+        }
     }
 
     #[test]

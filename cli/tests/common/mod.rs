@@ -175,6 +175,11 @@ pub fn base_running() -> Config {
             reference_bandwidth: None,
             address_family: nos_proto::Ospfv3AddressFamily::default(),
         }],
+        broadcast_domains: vec![nos_proto::BroadcastDomain {
+            name: "bd1".to_string(),
+            vni: Some(100),
+            ..Default::default()
+        }],
         ..Default::default()
     }
 }
