@@ -91,6 +91,8 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::ospfv3_database))
         .routes(routes!(clear::bgp_soft_in))
         .routes(routes!(clear::bgp_clear_peer))
+        .routes(routes!(clear::acl_clear_all))
+        .routes(routes!(clear::acl_clear_one))
         .routes(routes!(clear::stp_mcheck))
         .routes(routes!(clear::stp_mcheck_port))
         .routes(routes!(clear::stp_clear_err_disabled))

@@ -86,6 +86,20 @@
         ],
         "type": "object"
       },
+      "AclClearResult": {
+        "properties": {
+          "cleared": {
+            "description": "(device, direction) attachments whose counters restarted at 0.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "type": "object"
+      },
       "AclDirection": {
         "description": "Which way an ACL filters on its device.",
         "enum": [
@@ -8211,6 +8225,37 @@
         ]
       }
     },
+    "/v1/acl/counters/clear": {
+      "post": {
+        "operationId": "acl_clear_all",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AclClearResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-acld is not running"
+          }
+        },
+        "summary": "Reset the counters of every ACL",
+        "tags": [
+          "clear"
+        ]
+      }
+    },
     "/v1/acl/{name}": {
       "get": {
         "operationId": "acl_one",
@@ -8260,6 +8305,58 @@
         "summary": "One ACL with its counters",
         "tags": [
           "show"
+        ]
+      }
+    },
+    "/v1/acl/{name}/counters/clear": {
+      "post": {
+        "operationId": "acl_clear_one",
+        "parameters": [
+          {
+            "description": "ACL name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AclClearResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such ACL"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-acld is not running"
+          }
+        },
+        "summary": "Reset the counters of one ACL",
+        "tags": [
+          "clear"
         ]
       }
     },

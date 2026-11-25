@@ -124,6 +124,10 @@ pub enum Resolved {
     /// `show version` — printed locally, no IPC.
     ShowVersion,
     /// `show acl [<name>]` — data-plane, valid in any mode.
+    /// `clear acl [<name>] counters` — valid in any mode.
+    ClearAclCounters {
+        name: Option<String>,
+    },
     ShowAcl {
         name: Option<String>,
     },
@@ -346,6 +350,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
         Command::ShowVersion => Resolved::ShowVersion,
         Command::ShowAcl { name } => Resolved::ShowAcl { name },
+        Command::ClearAclCounters { name } => Resolved::ClearAclCounters { name },
         Command::ShowSpanningTree => Resolved::ShowSpanningTree,
         Command::ShowSpanningTreeInstance { id } => Resolved::ShowSpanningTreeInstance { id },
         Command::ShowSpanningTreeMstConfig => Resolved::ShowSpanningTreeMstConfig,
@@ -500,6 +505,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowLldpStatistics
         | Command::ShowVersion
         | Command::ShowAcl { .. }
+        | Command::ClearAclCounters { .. }
         | Command::ShowSpanningTree
         | Command::ShowSpanningTreeInstance { .. }
         | Command::ShowSpanningTreeMstConfig

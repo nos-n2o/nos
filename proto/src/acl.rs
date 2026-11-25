@@ -279,6 +279,13 @@ pub enum AclRequest {
     /// One-shot: every flow rule with its state and counters, answered by
     /// `AclEvent::Flowspec`.
     ShowFlowspec,
+    /// One-shot: reinstall every ACL (`None`) or the named one on its idle
+    /// chain so the kernel counters restart at 0, answered by
+    /// `AclEvent::Cleared`. Flowspec counters are untouched.
+    ClearCounters {
+        /// Restrict to this ACL.
+        name: Option<String>,
+    },
 }
 
 /// Messages sent from `nos-acld` to a query client.
@@ -290,11 +297,42 @@ pub enum AclEvent {
     Ack,
     /// Reply to `ShowFlowspec`: per instance (by name), rules in order.
     Flowspec(Vec<FlowspecRuleStatus>),
+    /// Reply to `ClearCounters`.
+    Cleared {
+        /// False: no ACL of that name exists.
+        found: bool,
+        /// (device, direction) pairs whose chain was replaced.
+        attachments: u32,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_counters_round_trips_through_postcard() {
+        let b = postcard::to_allocvec(&AclRequest::ClearCounters {
+            name: Some("E".into()),
+        })
+        .unwrap();
+        assert!(matches!(
+            postcard::from_bytes(&b),
+            Ok(AclRequest::ClearCounters { name: Some(n) }) if n == "E"
+        ));
+        let b = postcard::to_allocvec(&AclEvent::Cleared {
+            found: true,
+            attachments: 3,
+        })
+        .unwrap();
+        assert!(matches!(
+            postcard::from_bytes(&b),
+            Ok(AclEvent::Cleared {
+                found: true,
+                attachments: 3
+            })
+        ));
+    }
 
     #[test]
     fn a_push_round_trips_through_postcard_and_json() {

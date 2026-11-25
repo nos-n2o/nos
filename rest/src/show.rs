@@ -218,7 +218,9 @@ async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
         .await?
     {
         AclEvent::Acls(v) => Ok(v),
-        other @ (AclEvent::Ack | AclEvent::Flowspec(_)) => Err(unexpected("nos-acld", &other)),
+        other @ (AclEvent::Ack | AclEvent::Flowspec(_) | AclEvent::Cleared { .. }) => {
+            Err(unexpected("nos-acld", &other))
+        }
     }
 }
 
@@ -226,7 +228,9 @@ async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
 pub async fn flowspec_rules(State(d): State<Daemons>) -> ApiResult<Json<Vec<FlowspecRuleStatus>>> {
     match d.service(ServiceRef::Acl, AclRequest::ShowFlowspec).await? {
         AclEvent::Flowspec(v) => Ok(Json(v)),
-        other @ (AclEvent::Ack | AclEvent::Acls(_)) => Err(unexpected("nos-acld", &other)),
+        other @ (AclEvent::Ack | AclEvent::Acls(_) | AclEvent::Cleared { .. }) => {
+            Err(unexpected("nos-acld", &other))
+        }
     }
 }
 
