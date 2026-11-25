@@ -1,0 +1,4 @@
+link    device  area     address      type          state         cost  hello  dead  rxmt  dr       bdr      neighbors  full
+------  ------  -------  -----------  ------------  ------------  ----  -----  ----  ----  -------  -------  ---------  ----
+eth0.0  eth0    0.0.0.0  10.0.0.1/30  PointToPoint  PointToPoint  10      10s   40s    5s  -        -                1     1
+eth1.0  eth1    0.0.0.1  10.1.0.1/24  Broadcast     Dr            1       10s   40s    5s  1.1.1.1  3.3.3.3          2     1

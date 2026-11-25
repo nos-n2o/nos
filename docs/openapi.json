@@ -9746,6 +9746,37 @@
         ]
       }
     },
+    "/v1/ospf/interfaces": {
+      "get": {
+        "operationId": "ospf_interfaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF interfaces, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/ospf/neighbors": {
       "get": {
         "operationId": "ospf_neighbors",
@@ -9834,6 +9865,37 @@
           }
         },
         "summary": "OSPFv3 LSDB summary, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospfv3/interfaces": {
+      "get": {
+        "operationId": "ospfv3_interfaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPFv3 interfaces, per instance",
         "tags": [
           "show"
         ]

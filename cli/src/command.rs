@@ -127,6 +127,8 @@ pub enum Command {
     /// `show ospf neigh` — a one-line-per-link neighbor summary across every
     /// configured OSPF instance.
     ShowOspfNeigh,
+    /// `show ospf interface` (#1438): every running OSPF interface.
+    ShowOspfInterface,
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase {
@@ -139,6 +141,8 @@ pub enum Command {
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
+    /// `show ospfv3 interface` (#1438).
+    ShowOspfv3Interface,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -902,6 +906,20 @@ mod tests {
                 rd: Some("65001:1".into())
             }
         );
+    }
+
+    #[test]
+    fn show_ospf_interface() {
+        for w in ["interface", "interfaces"] {
+            assert_eq!(
+                Command::parse(&format!("show ospf {w}")),
+                Command::ShowOspfInterface
+            );
+            assert_eq!(
+                Command::parse(&format!("show ospfv3 {w}")),
+                Command::ShowOspfv3Interface
+            );
+        }
     }
 
     #[test]

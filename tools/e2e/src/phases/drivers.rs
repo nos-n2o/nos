@@ -3916,9 +3916,11 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     for route in [
         "/v1/bgp/rpki",
         "/v1/ospf/neighbors",
+        "/v1/ospf/interfaces",
         "/v1/ospf/database",
         "/v1/ospf/segment-routing",
         "/v1/ospfv3/neighbors",
+        "/v1/ospfv3/interfaces",
         "/v1/ospfv3/database",
     ] {
         a.rest_expect(Method::GET, route, None, 200).await?;

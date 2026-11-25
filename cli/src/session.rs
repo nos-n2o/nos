@@ -190,6 +190,8 @@ pub enum Resolved {
     /// instance argument), mirroring `ShowBgpSummary`: the caller iterates
     /// every `OspfInstance` in the running config itself.
     ShowOspfNeigh,
+    /// `show ospf interface` (#1438).
+    ShowOspfInterface,
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowOspfNeigh`.
     ShowOspfDatabase {
@@ -201,6 +203,8 @@ pub enum Resolved {
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
+    /// `show ospfv3 interface` (#1438).
+    ShowOspfv3Interface,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -372,6 +376,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpVpn { family, rd } => Resolved::ShowBgpVpn { family, rd },
         Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
+        Command::ShowOspfInterface => Resolved::ShowOspfInterface,
         Command::ShowOspfDatabase {
             lsa_type,
             adv_router,
@@ -381,6 +386,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         },
         Command::ShowOspfSegmentRouting => Resolved::ShowOspfSegmentRouting,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
+        Command::ShowOspfv3Interface => Resolved::ShowOspfv3Interface,
         Command::ShowOspfv3Database {
             lsa_type,
             adv_router,
@@ -510,9 +516,11 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBgpVpn { .. }
         | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh
+        | Command::ShowOspfInterface
         | Command::ShowOspfDatabase { .. }
         | Command::ShowOspfSegmentRouting
         | Command::ShowOspfv3Neigh
+        | Command::ShowOspfv3Interface
         | Command::ShowOspfv3Database { .. }
         | Command::ClearBgpSoftIn { .. }
         | Command::ClearBgpPeer { .. }
