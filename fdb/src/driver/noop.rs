@@ -54,6 +54,9 @@ impl FdbDriver for NoopFdbDriver {
     async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
         Ok(BTreeMap::new())
     }
+    async fn local_mac_ages(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, u32>, DriverError> {
+        Ok(BTreeMap::new())
+    }
     async fn set_port_flood(
         &self,
         port: &str,

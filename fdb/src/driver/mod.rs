@@ -98,6 +98,14 @@ pub trait FdbDriver: Send + Sync {
         vni: u32,
     ) -> Result<BTreeMap<Mac, String>, DriverError>;
 
+    /// Seconds since the kernel last saw a frame from each MAC `local_macs`
+    /// reports (`NDA_CACHEINFO` `used`); a MAC without cache info is omitted.
+    async fn local_mac_ages(
+        &self,
+        bridge: &str,
+        vni: u32,
+    ) -> Result<BTreeMap<Mac, u32>, DriverError>;
+
     /// Sets the flooding of the bridge port `port`: `unicast` is
     /// unknown-unicast, `bum` multicast and broadcast (`bridge link set ...
     /// flood .. mcast_flood .. bcast_flood ..`). How a non-Designated-Forwarder
