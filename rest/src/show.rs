@@ -13,7 +13,7 @@ use nos_proto::{
     AclEvent, AclRequest, AclStatus, BfdEvent, BfdRequest, BfdSessionView, BgpEvent, BgpRequest,
     Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, FlowspecRouteSummary,
     FlowspecRuleStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest,
-    LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest,
+    LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogLevel, LogRequest,
     LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
     PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
@@ -403,25 +403,79 @@ pub async fn bfd_reflector(State(d): State<Daemons>) -> ApiResult<Json<Reflector
 pub struct LogQuery {
     source: Option<String>,
     limit: Option<usize>,
+    level: Option<String>,
+    #[serde(rename = "match")]
+    match_: Option<String>,
 }
 
-/// One-shot buffer snapshot (`show log`); there is no `--follow` equivalent yet.
-#[utoipa::path(get, path = "/v1/logs", tag = "show", summary = "Log buffer snapshot", params(("source" = Option<String>, Query, description = "only entries from this source"), ("limit" = Option<usize>, Query, description = "most recent N entries")), responses((status = 200, body = Vec<LogEntry>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+/// `level` (minimum severity) and `match` (case-insensitive substring) of the
+/// log endpoints. Parsed from strings so a bad level is our 400 `ErrorBody`.
+struct LogFilter {
+    min: Option<LogLevel>,
+    needle: Option<String>,
+}
+
+impl LogFilter {
+    /// `level` is case-insensitive; an empty `match` counts as absent.
+    fn new(level: Option<&str>, needle: Option<String>) -> Result<Self, ApiError> {
+        let min = match level {
+            None => None,
+            Some(l) => Some(match l.to_ascii_lowercase().as_str() {
+                "trace" => LogLevel::Trace,
+                "debug" => LogLevel::Debug,
+                "info" => LogLevel::Info,
+                "warn" => LogLevel::Warn,
+                "error" => LogLevel::Error,
+                _ => {
+                    return Err(ApiError::BadRequest(format!(
+                        "level '{l}' is not one of trace, debug, info, warn, error"
+                    )))
+                }
+            }),
+        };
+        Ok(Self {
+            min,
+            needle: needle.filter(|n| !n.is_empty()),
+        })
+    }
+
+    fn is_none(&self) -> bool {
+        self.min.is_none() && self.needle.is_none()
+    }
+
+    fn keep(&self, e: &LogEntry) -> bool {
+        e.matches(self.min, self.needle.as_deref())
+    }
+}
+
+/// One-shot buffer snapshot (`show log`). With `level`/`match` the whole
+/// buffer is fetched, filtered, then trimmed to the most recent `limit`.
+#[utoipa::path(get, path = "/v1/logs", tag = "show", summary = "Log buffer snapshot", params(("source" = Option<String>, Query, description = "only entries from this source"), ("limit" = Option<usize>, Query, description = "most recent N entries (after filtering)"), ("level" = Option<String>, Query, description = "minimum severity: trace, debug, info, warn or error"), ("match" = Option<String>, Query, description = "case-insensitive substring of source, target, message or a field")), responses((status = 200, body = Vec<LogEntry>), (status = 400, body = ErrorBody, description = "unknown level"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn logs(
     State(d): State<Daemons>,
     Query(q): Query<LogQuery>,
 ) -> ApiResult<Json<Vec<LogEntry>>> {
+    let f = LogFilter::new(q.level.as_deref(), q.match_)?;
+    let limit = if f.is_none() { q.limit } else { None };
     match d
         .service(
             ServiceRef::Log,
             LogRequest::GetLogs {
                 source: q.source,
-                limit: q.limit,
+                limit,
             },
         )
         .await?
     {
-        LogEvent::Logs(v) => Ok(Json(v)),
+        LogEvent::Logs(mut v) => {
+            if !f.is_none() {
+                v.retain(|e| f.keep(e));
+                if let Some(n) = q.limit {
+                    v.drain(..v.len().saturating_sub(n));
+                }
+            }
+            Ok(Json(v))
+        }
         LogEvent::Error(e) => Err(ApiError::BadGateway(e)),
         other @ LogEvent::Line(_) => Err(unexpected("nos-logd", &other)),
     }
@@ -448,6 +502,9 @@ pub type Ospfv3DatabaseReport = Vec<InstanceReport<Vec<Ospfv3LsaSummary>>>;
 pub struct FollowQuery {
     source: Option<String>,
     limit: Option<usize>,
+    level: Option<String>,
+    #[serde(rename = "match")]
+    match_: Option<String>,
 }
 
 /// `show log --follow`: a Server-Sent Events stream. The buffer as it stands
@@ -459,11 +516,14 @@ pub struct FollowQuery {
     get, path = "/v1/logs/follow", tag = "show", summary = "Follow the log (Server-Sent Events)",
     params(
         ("source" = Option<String>, Query, description = "only entries from this source"),
-        ("limit" = Option<usize>, Query, description = "trim the initial backlog to the most recent N entries")
+        ("limit" = Option<usize>, Query, description = "trim the initial backlog to the most recent N entries (after filtering)"),
+        ("level" = Option<String>, Query, description = "minimum severity: trace, debug, info, warn or error"),
+        ("match" = Option<String>, Query, description = "case-insensitive substring of source, target, message or a field")
     ),
     responses(
         (status = 200, content_type = "text/event-stream", body = String,
          description = "`event: log` per entry, data = a JSON LogEntry"),
+        (status = 400, body = ErrorBody, description = "unknown level"),
         (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")
     )
 )]
@@ -471,6 +531,7 @@ pub async fn logs_follow(
     State(d): State<Daemons>,
     Query(q): Query<FollowQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let f = LogFilter::new(q.level.as_deref(), q.match_)?;
     let (reader, writer) = d
         .open_stream::<_, LogEvent>(ServiceRef::Log, LogRequest::Tail { source: q.source })
         .await?;
@@ -478,12 +539,14 @@ pub async fn logs_follow(
     let events = reader.flat_map(move |item| {
         let entries: Vec<SseEvent> = match item {
             Ok(LogEvent::Logs(mut v)) => {
+                v.retain(|e| f.keep(e));
                 if let Some(n) = backlog_limit.take() {
                     v.drain(..v.len().saturating_sub(n));
                 }
                 v.iter().filter_map(log_event).collect()
             }
-            Ok(LogEvent::Line(e)) => log_event(&e).into_iter().collect(),
+            Ok(LogEvent::Line(e)) if f.keep(&e) => log_event(&e).into_iter().collect(),
+            Ok(LogEvent::Line(_)) => Vec::new(),
             Ok(LogEvent::Error(m)) => vec![SseEvent::default().event("error").data(m)],
             Err(e) => vec![SseEvent::default().event("error").data(e.to_string())],
         };
