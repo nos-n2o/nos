@@ -392,65 +392,6 @@ fn format_mac(mac: [u8; 6]) -> String {
     mac.map(|b| format!("{b:02x}")).join(":")
 }
 
-fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
-    let receive = match port.receive_state {
-        LacpReceiveState::Initialize => "initialize",
-        LacpReceiveState::PortDisabled => "port-disabled",
-        LacpReceiveState::LacpDisabled => "lacp-disabled",
-        LacpReceiveState::Expired => "expired",
-        LacpReceiveState::Defaulted => "defaulted",
-        LacpReceiveState::Current => "current",
-    };
-    let mux = match port.mux_state {
-        LacpMuxState::Detached => "detached",
-        LacpMuxState::Waiting => "waiting",
-        LacpMuxState::Attached => "attached",
-        LacpMuxState::Collecting => "collecting",
-        LacpMuxState::Distributing => "distributing",
-    };
-    // Defaulted, or never heard (Expired with the all-zero system): the
-    // daemon reports the administrative default, shown as no partner.
-    let defaulted = port.receive_state == nos_proto::LacpReceiveState::Defaulted
-        || port.partner_system_id.is_none_or(|s| s == [0; 6]);
-    let partner = match (port.partner_system_id, port.partner_key) {
-        _ if defaulted => "partner none (defaulted)".to_string(),
-        (Some(system), Some(key)) => format!(
-            "partner {} key {key} port {}",
-            format_mac(system),
-            port.partner_port_number.unwrap_or(0)
-        ),
-        _ => "partner none".to_string(),
-    };
-    let mode = match port.mode {
-        nos_proto::LacpMode::Active => "active",
-        nos_proto::LacpMode::Passive => "passive",
-    };
-    let partner_priority = match (port.partner_system_priority, port.partner_port_priority) {
-        (Some(system), Some(port)) => format!(", partner priority {system}/{port}"),
-        _ => String::new(),
-    };
-    let individual = if port.individual {
-        ", individual (partner not aggregatable)"
-    } else {
-        ""
-    };
-    format!(
-        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}{individual}, unsupported-version PDUs {}",
-        sanitize_line(&port.interface),
-        port.actor_port_number,
-        yes_no(port.selected),
-        yes_no(port.synchronized),
-        match (port.actor_churn, port.partner_churn) {
-            (false, false) => "none",
-            (true, false) => "actor",
-            (false, true) => "partner",
-            (true, true) => "actor+partner",
-        },
-        port.actor_port_priority,
-        port.unsupported_version_pdus,
-    )
-}
-
 /// Render `nos-lldpd`'s neighbor table, for `show lldp neighbors`.
 pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
     sanitize(&render_lldp_neighbors_raw(neighbors)).into_owned()
@@ -1076,74 +1017,282 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
-/// The version-2 line of `show lacp`: algorithm, agreement, per-link conversation counts.
-fn render_lacp_v2(s: &PortAggregateLacpSummary) -> String {
-    use nos_proto::{LacpAgreement, LacpPortAlgorithm};
-    let algorithm = match s.port_algorithm {
-        LacpPortAlgorithm::Unspecified => "unspecified",
-        LacpPortAlgorithm::CVlan => "c-vlan",
-        LacpPortAlgorithm::SVlan => "s-vlan",
-    };
-    let agreement = match s.agreement {
-        LacpAgreement::NotApplicable => "not-applicable",
-        LacpAgreement::Agreed => "agreed",
-        LacpAgreement::Mismatch => "mismatch",
-        LacpAgreement::V1Partner => "v1-partner",
-    };
-    let mut line = format!("  version 2, algorithm {algorithm}, agreement {agreement}");
-    if !s.conversations_per_link.is_empty() {
-        let per_link: Vec<String> = s
-            .conversations_per_link
-            .iter()
-            .map(|(m, n)| format!("{m} {n}"))
-            .collect();
-        line = format!("{line}, conversations {}", per_link.join(", "));
+fn receive_word(s: LacpReceiveState) -> &'static str {
+    match s {
+        LacpReceiveState::Initialize => "initialize",
+        LacpReceiveState::PortDisabled => "port-disabled",
+        LacpReceiveState::LacpDisabled => "lacp-disabled",
+        LacpReceiveState::Expired => "expired",
+        LacpReceiveState::Defaulted => "defaulted",
+        LacpReceiveState::Current => "current",
     }
-    line
 }
 
-/// Render `nos-lacpd`'s per-aggregate LACP state, for `show lacp`.
-pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
-    sanitize(&render_lacp_summaries_raw(summaries)).into_owned()
+fn mux_word(s: LacpMuxState) -> &'static str {
+    match s {
+        LacpMuxState::Detached => "detached",
+        LacpMuxState::Waiting => "waiting",
+        LacpMuxState::Attached => "attached",
+        LacpMuxState::Collecting => "collecting",
+        LacpMuxState::Distributing => "distributing",
+    }
 }
 
-fn render_lacp_summaries_raw(summaries: &[PortAggregateLacpSummary]) -> String {
+fn churn_word(actor: bool, partner: bool) -> &'static str {
+    match (actor, partner) {
+        (false, false) => "none",
+        (true, false) => "actor",
+        (false, true) => "partner",
+        (true, true) => "actor+partner",
+    }
+}
+
+fn lacp_mode_word(m: nos_proto::LacpMode) -> &'static str {
+    match m {
+        nos_proto::LacpMode::Active => "active",
+        nos_proto::LacpMode::Passive => "passive",
+    }
+}
+
+fn rate_word(r: LacpRate) -> &'static str {
+    match r {
+        LacpRate::Slow => "slow",
+        LacpRate::Fast => "fast",
+    }
+}
+
+fn lacp_algorithm_word(a: nos_proto::LacpPortAlgorithm) -> &'static str {
+    match a {
+        nos_proto::LacpPortAlgorithm::Unspecified => "unspecified",
+        nos_proto::LacpPortAlgorithm::CVlan => "c-vlan",
+        nos_proto::LacpPortAlgorithm::SVlan => "s-vlan",
+    }
+}
+
+/// Defaulted, or never heard (Expired with the all-zero system): the daemon
+/// reports the administrative default, shown as no partner.
+fn lacp_partner_defaulted(port: &nos_proto::LacpPortStatus) -> bool {
+    port.receive_state == LacpReceiveState::Defaulted
+        || port.partner_system_id.is_none_or(|s| s == [0; 6])
+}
+
+/// A titled sub-table: the title, then the table indented by two.
+fn titled_table(title: &str, cols: &[Col], rows: &[Vec<String>]) -> String {
+    let body: Vec<String> = table(cols, rows)
+        .lines()
+        .map(|l| format!("  {l}"))
+        .collect();
+    format!("{title}\n{}", body.join("\n"))
+}
+
+/// Render `nos-lacpd`'s state as an aggregate table and a member-port table,
+/// for `show lacp`.
+pub fn render_lacp_tables(summaries: &[PortAggregateLacpSummary]) -> String {
+    sanitize(&render_lacp_tables_raw(summaries)).into_owned()
+}
+
+fn render_lacp_tables_raw(summaries: &[PortAggregateLacpSummary]) -> String {
+    if summaries.is_empty() {
+        return "no lacp port aggregates".to_string();
+    }
+    let aggs: Vec<Vec<String>> = summaries
+        .iter()
+        .map(|s| {
+            vec![
+                s.aggregate.clone(),
+                format_mac(s.actor_system_id),
+                s.actor_key.to_string(),
+                rate_word(s.rate).to_string(),
+                s.actor_system_priority.to_string(),
+                s.min_links.to_string(),
+                yes_no(s.min_links_met).to_string(),
+                match s.version {
+                    nos_proto::LacpVersion::V1 => "1",
+                    nos_proto::LacpVersion::V2 => "2",
+                }
+                .to_string(),
+            ]
+        })
+        .collect();
+    let ports: Vec<Vec<String>> = summaries
+        .iter()
+        .flat_map(|s| s.ports.iter().map(move |p| (s, p)))
+        .map(|(s, p)| {
+            let d = lacp_partner_defaulted(p);
+            let partner = |v: Option<String>| if d { None } else { v }.unwrap_or("-".into());
+            vec![
+                s.aggregate.clone(),
+                p.interface.clone(),
+                p.actor_port_number.to_string(),
+                receive_word(p.receive_state).to_string(),
+                mux_word(p.mux_state).to_string(),
+                partner(p.partner_system_id.map(format_mac)),
+                partner(p.partner_key.map(|k| k.to_string())),
+                partner(p.partner_port_number.map(|k| k.to_string())),
+                yes_no(p.selected).to_string(),
+                yes_no(p.synchronized).to_string(),
+                churn_word(p.actor_churn, p.partner_churn).to_string(),
+                lacp_mode_word(p.mode).to_string(),
+            ]
+        })
+        .collect();
+    let agg_table = titled_table(
+        "Aggregates",
+        &[
+            Col::left("Aggregate"),
+            Col::left("System-id"),
+            Col::right("Key"),
+            Col::left("Rate"),
+            Col::right("Sys-prio"),
+            Col::right("Min-links"),
+            Col::left("Met"),
+            Col::left("Version"),
+        ],
+        &aggs,
+    );
+    let port_table = if ports.is_empty() {
+        "no member ports".to_string()
+    } else {
+        titled_table(
+            "Member ports",
+            &[
+                Col::left("Aggregate"),
+                Col::left("Port"),
+                Col::right("Port-no"),
+                Col::left("Receive"),
+                Col::left("Mux"),
+                Col::left("Partner-system"),
+                Col::right("Partner-key"),
+                Col::right("Partner-port"),
+                Col::left("Selected"),
+                Col::left("Sync"),
+                Col::left("Churn"),
+                Col::left("Mode"),
+            ],
+            &ports,
+        )
+    };
+    format!("{agg_table}\n\n{port_table}")
+}
+
+/// `key  value` lines at `indent`, values aligned.
+fn kv_lines(indent: &str, pairs: &[(&str, String)]) -> Vec<String> {
+    let w = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{indent}{k:<w$}  {}", sanitize_line(v)))
+        .collect()
+}
+
+/// Render every aggregate and port field, one `key value` line each, for
+/// `show lacp detail`.
+pub fn render_lacp_detail(summaries: &[PortAggregateLacpSummary]) -> String {
+    sanitize(&render_lacp_detail_raw(summaries)).into_owned()
+}
+
+fn render_lacp_detail_raw(summaries: &[PortAggregateLacpSummary]) -> String {
+    use nos_proto::LacpAgreement;
     if summaries.is_empty() {
         return "no lacp port aggregates".to_string();
     }
     summaries
         .iter()
         .map(|s| {
-            let rate = match s.rate {
-                LacpRate::Slow => "slow",
-                LacpRate::Fast => "fast",
-            };
-            let mut lines = vec![format!(
-                "lacp {}: system {}, key {}, rate {rate}, system priority {}",
-                s.aggregate,
-                format_mac(s.actor_system_id),
-                s.actor_key,
-                s.actor_system_priority
-            )];
-            if s.min_links > 1 {
-                lines.push(format!(
-                    "  min-links {}: {}",
-                    s.min_links,
-                    if s.min_links_met {
-                        "met"
-                    } else {
-                        "not met, bond emptied"
-                    }
+            let mut lines = vec![format!("lacp {}", sanitize_line(&s.aggregate))];
+            let mut pairs = vec![
+                ("system", format_mac(s.actor_system_id)),
+                ("key", s.actor_key.to_string()),
+                ("rate", rate_word(s.rate).to_string()),
+                ("system-priority", s.actor_system_priority.to_string()),
+                (
+                    "min-links",
+                    format!(
+                        "{}: {}",
+                        s.min_links,
+                        if s.min_links_met {
+                            "met"
+                        } else {
+                            "not met, bond emptied"
+                        }
+                    ),
+                ),
+            ];
+            if s.version == nos_proto::LacpVersion::V2 {
+                pairs.push(("version", "2".to_string()));
+                pairs.push((
+                    "algorithm",
+                    lacp_algorithm_word(s.port_algorithm).to_string(),
                 ));
+                pairs.push((
+                    "agreement",
+                    match s.agreement {
+                        LacpAgreement::NotApplicable => "not-applicable",
+                        LacpAgreement::Agreed => "agreed",
+                        LacpAgreement::Mismatch => "mismatch",
+                        LacpAgreement::V1Partner => "v1-partner",
+                    }
+                    .to_string(),
+                ));
+                if !s.conversations_per_link.is_empty() {
+                    pairs.push((
+                        "conversations",
+                        s.conversations_per_link
+                            .iter()
+                            .map(|(m, n)| format!("{m} {n}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ));
+                }
             }
+            lines.extend(kv_lines("  ", &pairs));
             if s.ports.is_empty() {
                 lines.push("  no member ports".to_string());
             }
-            // Version-1 output stays byte-identical to before #865.
-            if s.version == nos_proto::LacpVersion::V2 {
-                lines.push(render_lacp_v2(s));
+            for p in &s.ports {
+                lines.push(format!("  port {}", sanitize_line(&p.interface)));
+                let partner = if lacp_partner_defaulted(p) {
+                    "none (defaulted)".to_string()
+                } else if let (Some(sys), Some(key)) = (p.partner_system_id, p.partner_key) {
+                    format!(
+                        "{} key {key} port {}",
+                        format_mac(sys),
+                        p.partner_port_number.unwrap_or(0)
+                    )
+                } else {
+                    "none".to_string()
+                };
+                let mut pp = vec![
+                    ("port-number", p.actor_port_number.to_string()),
+                    ("port-priority", p.actor_port_priority.to_string()),
+                    ("mode", lacp_mode_word(p.mode).to_string()),
+                    ("receive", receive_word(p.receive_state).to_string()),
+                    ("mux", mux_word(p.mux_state).to_string()),
+                    ("selected", yes_no(p.selected).to_string()),
+                    ("synchronized", yes_no(p.synchronized).to_string()),
+                    (
+                        "churn",
+                        churn_word(p.actor_churn, p.partner_churn).to_string(),
+                    ),
+                    ("individual", yes_no(p.individual).to_string()),
+                    (
+                        "unsupported-version-pdus",
+                        p.unsupported_version_pdus.to_string(),
+                    ),
+                    ("partner", partner),
+                ];
+                if let (Some(sys), Some(port)) =
+                    (p.partner_system_priority, p.partner_port_priority)
+                {
+                    pp.push(("partner-priority", format!("{sys}/{port}")));
+                }
+                if let Some(v) = p.partner_version {
+                    pp.push(("partner-version", v.to_string()));
+                }
+                if let Some(a) = p.partner_port_algorithm {
+                    pp.push(("partner-port-algorithm", lacp_algorithm_word(a).to_string()));
+                }
+                lines.extend(kv_lines("    ", &pp));
             }
-            lines.extend(s.ports.iter().map(render_lacp_port));
             lines.join("\n")
         })
         .collect::<Vec<_>>()
@@ -3089,80 +3238,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_lacp_summaries_empty() {
-        assert_eq!(render_lacp_summaries(&[]), "no lacp port aggregates");
-    }
-
-    #[test]
-    fn render_lacp_summaries_shows_identity_rate_and_each_port() {
-        let summary = PortAggregateLacpSummary {
-            aggregate: "bond1".to_string(),
-            actor_system_id: [2, 0, 0, 0, 0, 0xab],
-            actor_key: 7,
-            actor_system_priority: 100,
-            rate: LacpRate::Fast,
-            min_links: 2,
-            min_links_met: false,
-            ports: vec![
-                nos_proto::LacpPortStatus {
-                    interface: "eth1".to_string(),
-                    actor_port_number: 4,
-                    receive_state: LacpReceiveState::Current,
-                    mux_state: LacpMuxState::Distributing,
-                    partner_system_id: Some([2, 0, 0, 0, 0, 1]),
-                    partner_key: Some(3),
-                    partner_port_number: Some(9),
-                    actor_port_priority: 50,
-                    mode: nos_proto::LacpMode::Passive,
-                    partner_system_priority: Some(200),
-                    partner_port_priority: Some(60),
-                    selected: true,
-                    synchronized: true,
-                    actor_churn: false,
-                    partner_churn: false,
-                    individual: false,
-                    unsupported_version_pdus: 0,
-                    partner_version: None,
-                    partner_port_algorithm: None,
-                },
-                nos_proto::LacpPortStatus {
-                    interface: "eth2".to_string(),
-                    actor_port_number: 5,
-                    receive_state: LacpReceiveState::Defaulted,
-                    mux_state: LacpMuxState::Detached,
-                    partner_system_id: None,
-                    partner_key: None,
-                    partner_port_number: None,
-                    actor_port_priority: 32768,
-                    mode: nos_proto::LacpMode::Active,
-                    partner_system_priority: None,
-                    partner_port_priority: None,
-                    selected: false,
-                    synchronized: false,
-                    actor_churn: false,
-                    partner_churn: true,
-                    individual: true,
-                    unsupported_version_pdus: 3,
-                    partner_version: None,
-                    partner_port_algorithm: None,
-                },
-            ],
-            version: nos_proto::LacpVersion::V1,
-            port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
-            agreement: nos_proto::LacpAgreement::NotApplicable,
-            conversations_per_link: Vec::new(),
-        };
-        let out = render_lacp_summaries(&[summary]);
-        assert!(out.contains(
-            "lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast, system priority 100"
-        ));
-        assert!(out.contains("  min-links 2: not met, bond emptied"));
-        assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable), unsupported-version PDUs 3"), "{out}");
-        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive, unsupported-version PDUs 0"));
-        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none (defaulted), selected no, synchronized no, churn partner"));
-    }
-
     fn addr(a: &str, label: Option<&str>) -> InterfaceAddress {
         InterfaceAddress {
             address: a.parse().unwrap(),
@@ -3370,90 +3445,170 @@ mod tests {
         assert_eq!(brief.lines().count(), 2 + 3);
     }
 
-    #[test]
-    fn render_lacp_summaries_v2_line_only_for_version_2() {
-        let mut s = PortAggregateLacpSummary {
-            aggregate: "bond1".to_string(),
-            actor_system_id: [0; 6],
-            actor_key: 1,
-            actor_system_priority: 32768,
-            rate: LacpRate::Slow,
-            min_links: 1,
-            min_links_met: true,
-            ports: Vec::new(),
-            version: nos_proto::LacpVersion::V1,
-            port_algorithm: nos_proto::LacpPortAlgorithm::CVlan,
-            agreement: nos_proto::LacpAgreement::Agreed,
-            conversations_per_link: vec![("eth1".to_string(), 2048), ("eth2".to_string(), 2048)],
-        };
-        assert!(!render_lacp_summaries(&[s.clone()]).contains("version 2"));
-        s.version = nos_proto::LacpVersion::V2;
-        assert!(render_lacp_summaries(&[s]).contains(
-            "\n  version 2, algorithm c-vlan, agreement agreed, conversations eth1 2048, eth2 2048"
-        ));
-    }
-
-    #[test]
-    fn render_lacp_port_names_every_state() {
-        let port = |receive, mux, actor_churn, partner_churn| nos_proto::LacpPortStatus {
-            interface: "eth1".to_string(),
-            actor_port_number: 1,
+    fn lacp_port(
+        name: &str,
+        receive: LacpReceiveState,
+        mux: LacpMuxState,
+    ) -> nos_proto::LacpPortStatus {
+        nos_proto::LacpPortStatus {
+            interface: name.to_string(),
+            actor_port_number: 4,
             receive_state: receive,
             mux_state: mux,
             partner_system_id: Some([2, 0, 0, 0, 0, 1]),
-            partner_key: None,
-            partner_port_number: None,
-            actor_port_priority: 32768,
-            mode: nos_proto::LacpMode::Active,
-            partner_system_priority: None,
-            partner_port_priority: None,
-            selected: false,
-            synchronized: false,
-            actor_churn,
-            partner_churn,
+            partner_key: Some(3),
+            partner_port_number: Some(9),
+            actor_port_priority: 50,
+            mode: nos_proto::LacpMode::Passive,
+            partner_system_priority: Some(200),
+            partner_port_priority: Some(60),
+            selected: true,
+            synchronized: true,
+            actor_churn: false,
+            partner_churn: false,
             individual: false,
             unsupported_version_pdus: 0,
             partner_version: None,
             partner_port_algorithm: None,
-        };
-        for (p, want) in [
-            (
-                port(LacpReceiveState::Initialize, LacpMuxState::Waiting, true, false),
-                "receive initialize, mux waiting, partner none, selected no, synchronized no, churn actor",
-            ),
-            (
-                port(LacpReceiveState::PortDisabled, LacpMuxState::Attached, true, true),
-                "receive port-disabled, mux attached, partner none, selected no, synchronized no, churn actor+partner",
-            ),
-            (
-                port(LacpReceiveState::LacpDisabled, LacpMuxState::Collecting, false, false),
-                "receive lacp-disabled, mux collecting,",
-            ),
-            (
-                port(LacpReceiveState::Expired, LacpMuxState::Detached, false, false),
-                "receive expired, mux detached,",
-            ),
-        ] {
-            let out = render_lacp_port(&p);
-            assert!(out.contains(want), "{out}");
         }
-        let empty = PortAggregateLacpSummary {
-            aggregate: "bond1".to_string(),
-            actor_system_id: [0; 6],
-            actor_key: 1,
-            actor_system_priority: 32768,
-            rate: LacpRate::Slow,
-            min_links: 1,
-            min_links_met: true,
-            ports: Vec::new(),
+    }
+
+    fn lacp_agg(name: &str, ports: Vec<nos_proto::LacpPortStatus>) -> PortAggregateLacpSummary {
+        PortAggregateLacpSummary {
+            aggregate: name.to_string(),
+            actor_system_id: [2, 0, 0, 0, 0, 0xab],
+            actor_key: 7,
+            actor_system_priority: 100,
+            rate: LacpRate::Fast,
+            min_links: 2,
+            min_links_met: false,
+            ports,
             version: nos_proto::LacpVersion::V1,
             port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
             agreement: nos_proto::LacpAgreement::NotApplicable,
             conversations_per_link: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn render_lacp_empty() {
+        assert_eq!(render_lacp_tables(&[]), "no lacp port aggregates");
+        assert_eq!(render_lacp_detail(&[]), "no lacp port aggregates");
+    }
+
+    #[test]
+    fn render_lacp_tables_shows_aggregates_and_ports() {
+        let mut p2 = lacp_port("eth2", LacpReceiveState::Defaulted, LacpMuxState::Detached);
+        p2.partner_churn = true;
+        p2.actor_churn = true;
+        let out = render_lacp_tables(&[
+            lacp_agg(
+                "bond1",
+                vec![
+                    lacp_port(
+                        "eth1",
+                        LacpReceiveState::Current,
+                        LacpMuxState::Distributing,
+                    ),
+                    p2,
+                ],
+            ),
+            lacp_agg("bond2", vec![]),
+        ]);
+        assert!(out.starts_with("Aggregates\n"), "{out}");
         assert!(
-            render_lacp_summaries(&[empty]).ends_with("system priority 32768\n  no member ports")
+            out.contains("bond1") && out.contains("02:00:00:00:00:ab"),
+            "{out}"
         );
+        assert!(out.contains("Member ports\n"), "{out}");
+        assert!(
+            out.contains("current") && out.contains("distributing"),
+            "{out}"
+        );
+        assert!(out.contains("02:00:00:00:00:01"), "{out}");
+        assert!(out.contains("actor+partner"), "{out}");
+        let defaulted = out.lines().find(|l| l.contains("eth2")).unwrap();
+        assert!(
+            defaulted.contains("defaulted") && defaulted.contains("-  "),
+            "{defaulted}"
+        );
+        assert!(!defaulted.contains("02:00:00:00:00:01"), "{defaulted}");
+        let none = render_lacp_tables(&[lacp_agg("bond2", vec![])]);
+        assert!(none.ends_with("\n\nno member ports"), "{none}");
+    }
+
+    #[test]
+    fn render_lacp_words_cover_every_state() {
+        for (r, w) in [
+            (LacpReceiveState::Initialize, "initialize"),
+            (LacpReceiveState::PortDisabled, "port-disabled"),
+            (LacpReceiveState::LacpDisabled, "lacp-disabled"),
+            (LacpReceiveState::Expired, "expired"),
+            (LacpReceiveState::Defaulted, "defaulted"),
+            (LacpReceiveState::Current, "current"),
+        ] {
+            assert_eq!(receive_word(r), w);
+        }
+        for (m, w) in [
+            (LacpMuxState::Detached, "detached"),
+            (LacpMuxState::Waiting, "waiting"),
+            (LacpMuxState::Attached, "attached"),
+            (LacpMuxState::Collecting, "collecting"),
+            (LacpMuxState::Distributing, "distributing"),
+        ] {
+            assert_eq!(mux_word(m), w);
+        }
+        assert_eq!(churn_word(false, false), "none");
+        assert_eq!(churn_word(true, false), "actor");
+        assert_eq!(churn_word(false, true), "partner");
+        assert_eq!(churn_word(true, true), "actor+partner");
+        assert_eq!(lacp_mode_word(nos_proto::LacpMode::Active), "active");
+        assert_eq!(rate_word(LacpRate::Slow), "slow");
+    }
+
+    #[test]
+    fn render_lacp_detail_partner_variants_and_v2() {
+        let known = lacp_port(
+            "eth1",
+            LacpReceiveState::Current,
+            LacpMuxState::Distributing,
+        );
+        let mut defaulted = lacp_port("eth2", LacpReceiveState::Defaulted, LacpMuxState::Detached);
+        defaulted.individual = true;
+        let mut none = lacp_port("eth3", LacpReceiveState::Expired, LacpMuxState::Waiting);
+        none.partner_key = None;
+        none.partner_version = Some(2);
+        none.partner_port_algorithm = Some(nos_proto::LacpPortAlgorithm::SVlan);
+        none.partner_system_priority = None;
+        let out = render_lacp_detail(&[lacp_agg("bond1", vec![known, defaulted, none])]);
+        assert!(out.starts_with("lacp bond1\n"), "{out}");
+        assert!(out.contains("not met, bond emptied"), "{out}");
+        assert!(out.contains("02:00:00:00:00:01 key 3 port 9"), "{out}");
+        assert!(out.contains("none (defaulted)"), "{out}");
+        assert!(out.contains("partner-priority"), "{out}");
+        assert!(out.contains("partner-version"), "{out}");
+        assert!(out.contains("s-vlan"), "{out}");
+        assert!(
+            out.contains("individual") && !out.contains("version  2"),
+            "{out}"
+        );
+        assert!(!out.contains("algorithm  c-vlan"), "{out}");
+
+        let mut v2 = lacp_agg("bond1", vec![]);
+        v2.version = nos_proto::LacpVersion::V2;
+        v2.port_algorithm = nos_proto::LacpPortAlgorithm::CVlan;
+        v2.agreement = nos_proto::LacpAgreement::Agreed;
+        v2.conversations_per_link = vec![("eth1".to_string(), 2048), ("eth2".to_string(), 2048)];
+        let out = render_lacp_detail(&[v2]);
+        assert!(out.contains("c-vlan") && out.contains("agreed"), "{out}");
+        assert!(out.contains("eth1 2048, eth2 2048"), "{out}");
+        assert!(out.ends_with("no member ports"), "{out}");
+        let met = {
+            let mut m = lacp_agg("b", vec![]);
+            m.min_links_met = true;
+            render_lacp_detail(&[m])
+        };
+        assert!(met.contains("2: met"), "{met}");
     }
 
     #[test]

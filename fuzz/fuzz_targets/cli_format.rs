@@ -87,7 +87,10 @@ fuzz_target!(|input: Input| {
                 has_dom.then_some(dom.as_str()),
             ));
         }
-        Input::Lacp(x) => outs.push(f::render_lacp_summaries(&x)),
+        Input::Lacp(x) => {
+            outs.push(f::render_lacp_tables(&x));
+            outs.push(f::render_lacp_detail(&x));
+        }
         Input::Utc(x) => outs.push(f::utc(x)),
         Input::Log(x) => outs.push(f::render_log_entry(&x)),
         Input::Logs(x) => outs.push(f::render_log_entries(&x)),

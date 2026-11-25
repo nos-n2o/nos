@@ -1,0 +1,12 @@
+Aggregates
+  Aggregate  System-id          Key  Rate  Sys-prio  Min-links  Met  Version
+  ---------  -----------------  ---  ----  --------  ---------  ---  -------
+  bond1      02:00:00:00:00:ab    7  fast       100          2  no   1
+  bond22     02:00:00:00:00:ab    7  fast       100          2  yes  2
+
+Member ports
+  Aggregate  Port  Port-no  Receive    Mux           Partner-system     Partner-key  Partner-port  Selected  Sync  Churn          Mode
+  ---------  ----  -------  ---------  ------------  -----------------  -----------  ------------  --------  ----  -------------  -------
+  bond1      eth1        4  current    distributing  02:00:00:00:00:01            3             9  yes       yes   none           passive
+  bond1      eth2        4  defaulted  detached      -                            -             -  no        no    actor+partner  active
+  bond22     eth3        4  current    distributing  02:00:00:00:00:01            3             9  yes       yes   none           passive

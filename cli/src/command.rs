@@ -38,14 +38,18 @@ pub enum Command {
     ShowPortAggregate {
         name: Option<String>,
     },
-    /// `show lacp` (every aggregate) or `show lacp <name>` (one).
+    /// `show lacp [<name>] [detail]` (every aggregate or one), as tables or
+    /// (`detail`) one key/value block per aggregate and port.
     ShowLacp {
         name: Option<String>,
+        detail: bool,
     },
-    /// `show lldp neighbors [detail]` — every LLDP neighbor heard on any
-    /// interface, one line each or (`detail`) one block each.
+    /// `show lldp neighbors [interface <if>] [detail]` — the LLDP neighbors
+    /// heard on any (or one) interface, one line each or (`detail`) one block
+    /// each.
     ShowLldpNeighbors {
         detail: bool,
+        interface: Option<String>,
     },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
@@ -423,11 +427,31 @@ mod tests {
     fn show_lldp_neighbors() {
         assert_eq!(
             Command::parse("show lldp neighbors"),
-            Command::ShowLldpNeighbors { detail: false }
+            Command::ShowLldpNeighbors {
+                detail: false,
+                interface: None
+            }
         );
         assert_eq!(
             Command::parse("show lldp neighbors detail"),
-            Command::ShowLldpNeighbors { detail: true }
+            Command::ShowLldpNeighbors {
+                detail: true,
+                interface: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show lldp neighbors interface eth0"),
+            Command::ShowLldpNeighbors {
+                detail: false,
+                interface: Some("eth0".into())
+            }
+        );
+        assert_eq!(
+            Command::parse("show lldp neighbors interface eth0 detail"),
+            Command::ShowLldpNeighbors {
+                detail: true,
+                interface: Some("eth0".into())
+            }
         );
         assert_eq!(
             Command::parse("show lldp statistics"),
@@ -502,12 +526,30 @@ mod tests {
     fn show_lacp() {
         assert_eq!(
             Command::parse("show lacp"),
-            Command::ShowLacp { name: None }
+            Command::ShowLacp {
+                name: None,
+                detail: false
+            }
+        );
+        assert_eq!(
+            Command::parse("show lacp detail"),
+            Command::ShowLacp {
+                name: None,
+                detail: true
+            }
         );
         assert_eq!(
             Command::parse("show lacp bond1"),
             Command::ShowLacp {
                 name: Some("bond1".to_string()),
+                detail: false
+            }
+        );
+        assert_eq!(
+            Command::parse("show lacp bond1 detail"),
+            Command::ShowLacp {
+                name: Some("bond1".to_string()),
+                detail: true
             }
         );
     }

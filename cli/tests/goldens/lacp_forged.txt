@@ -1,0 +1,9 @@
+Aggregates
+  Aggregate         System-id          Key  Rate  Sys-prio  Min-links  Met  Version
+  ----------------  -----------------  ---  ----  --------  ---------  ---  -------
+  x\nFORGED\x1b[2J  02:00:00:00:00:ab    7  fast       100          2  no   1
+
+Member ports
+  Aggregate         Port              Port-no  Receive  Mux      Partner-system     Partner-key  Partner-port  Selected  Sync  Churn  Mode
+  ----------------  ----------------  -------  -------  -------  -----------------  -----------  ------------  --------  ----  -----  -------
+  x\nFORGED\x1b[2J  x\nFORGED\x1b[2J        4  current  waiting  02:00:00:00:00:01            3             9  yes       yes   none   passive

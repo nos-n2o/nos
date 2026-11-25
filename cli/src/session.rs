@@ -111,10 +111,13 @@ pub enum Resolved {
     },
     ShowLacp {
         name: Option<String>,
+        detail: bool,
     },
-    /// `show lldp neighbors [detail]` — data-plane, valid in any mode.
+    /// `show lldp neighbors [interface <if>] [detail]` — data-plane, valid in
+    /// any mode.
     ShowLldpNeighbors {
         detail: bool,
+        interface: Option<String>,
     },
     /// `show lldp statistics` — data-plane, valid in any mode.
     ShowLldpStatistics,
@@ -332,8 +335,10 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowInterfaceBrief => Resolved::ShowInterfaceBrief,
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
-        Command::ShowLacp { name } => Resolved::ShowLacp { name },
-        Command::ShowLldpNeighbors { detail } => Resolved::ShowLldpNeighbors { detail },
+        Command::ShowLacp { name, detail } => Resolved::ShowLacp { name, detail },
+        Command::ShowLldpNeighbors { detail, interface } => {
+            Resolved::ShowLldpNeighbors { detail, interface }
+        }
         Command::ShowLldpStatistics => Resolved::ShowLldpStatistics,
         Command::ShowVersion => Resolved::ShowVersion,
         Command::ShowAcl { name } => Resolved::ShowAcl { name },
