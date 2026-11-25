@@ -57,8 +57,8 @@ fuzz_target!(|input: Input| {
     let mut diff_color = false;
     match input {
         Input::Sub(x) => outs.push(f::render_subinterface_status(&x)),
-        Input::If(x) => outs.push(f::render_interface_status(&x)),
-        Input::Ifs(x) => outs.push(f::render_interface_statuses(&x)),
+        Input::If(x) => outs.push(f::render_interface_detail(&x)),
+        Input::Ifs(x) => outs.push(f::render_interface_details(&x)),
         Input::Agg(x) => outs.push(f::render_port_aggregate_status(&x)),
         Input::Aggs(x) => outs.push(f::render_port_aggregate_statuses(&x)),
         Input::Lldp(x) => outs.extend([

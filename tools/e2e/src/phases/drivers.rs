@@ -257,6 +257,16 @@ pub async fn interface_speed(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a: GET /v1/interfaces/eth0 reports speed_mbps {got:?}, sysfs says {want:?}");
     }
     log(format!("router-a: rest reports eth0 speed_mbps {got:?}"));
+    // #1454: the observed link state of the same device.
+    let link = &status["link"];
+    if link["admin_up"] != true
+        || link["oper_up"] != true
+        || !link["down_reason"].is_null()
+        || !link["last_change_secs"].is_u64()
+    {
+        bail!("router-a: eth0 link is not up with an age: {link}");
+    }
+    log(format!("router-a: rest reports eth0 link {link}"));
     // `lo` is not a configured interface (404), or if listed has no speed.
     let (code, text) = a.rest(Method::GET, "/v1/interfaces/lo", None).await?;
     if code == 200 {
@@ -311,6 +321,17 @@ pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_connected(PORT_AGGREGATE_SUBNET).await?;
+    // #1454: the bond device's own observed link state (up or not depends on
+    // its slaves' carrier, so only its shape is asserted).
+    let body = a
+        .rest_expect(Method::GET, "/v1/port-aggregates/bond1", None, 200)
+        .await?;
+    let bond: serde_json::Value = serde_json::from_str(&body)?;
+    let link = &bond["link"];
+    if link["admin_up"] != true || !link["last_change_secs"].is_u64() {
+        bail!("router-a: bond1 link is not admin up with an age: {link}");
+    }
+    log(format!("router-a: rest reports bond1 link {link}"));
 
     let mut delete = members.to_vec();
     delete.push("--delete-port-aggregate");

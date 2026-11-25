@@ -1,38 +1,45 @@
 use std::net::Ipv6Addr;
 
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::InterfaceAddress;
 
-/// One interface's current desired state, as reconciled by `nos-interfaced`
-/// from the running config. This reflects *desired* state — `nos-interfaced`
-/// does not yet apply it to the OS (see `interface/CLAUDE.md`), so it is not
-/// necessarily what the kernel actually has configured.
+/// One interface's current state, as reconciled by `nos-interfaced` from the
+/// running config. Most fields reflect *desired* config; the observed kernel
+/// state is in `link_local_address`, `speed_mbps` and `link`.
 ///
 /// `addresses`/`routing_table` are populated only for a loopback interface
 /// (flat L3 config, unchanged); every other interface's L3 config lives in
 /// `subinterfaces` instead — see `schema::Subinterface`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
 pub struct InterfaceStatus {
     /// Interface name.
+    #[view(brief)]
     pub name: String,
     /// Configured addresses.
+    #[view(text)]
     pub addresses: Vec<InterfaceAddress>,
     /// Routing table (VRF) the object is enslaved to, if any.
+    #[view()]
     pub routing_table: Option<String>,
     /// Switching profile applied, if any.
+    #[view()]
     pub switching_profile: Option<String>,
     /// If set, names the `PortAggregate` this interface is a static bonded
     /// member of — same shape/role as `switching_profile`.
+    #[view()]
     pub port_aggregate: Option<String>,
     /// This interface's configured MTU, or `1500` (Linux's own default) if
     /// unset — reflects desired config like every other field here, is
     /// the default for every one of `subinterfaces`, each of which may
     /// override it (`SubinterfaceStatus.mtu`).
+    #[view()]
     pub mtu: u32,
     /// Subinterfaces (VLAN-tagged).
+    #[view(nested)]
     pub subinterfaces: Vec<SubinterfaceStatus>,
     /// This interface's kernel-assigned IPv6 link-local address (`fe80::/10`
     /// scope), if the Linux driver has observed one — `None` until the
@@ -44,36 +51,73 @@ pub struct InterfaceStatus {
     /// purely so a consumer like `nos-ospfv3d` can source real RFC 5340
     /// Hello/Link-LSA traffic from it without its own kernel access.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view()]
     pub link_local_address: Option<Ipv6Addr>,
     /// Observed: held administratively down by `nos-stpd`'s BPDU guard
     /// (err-disabled). Read back by a restarting `nos-stpd`.
+    #[view()]
     pub err_disabled: bool,
     /// Observed kernel link speed in Mbit/s (`/sys/class/net/<dev>/speed`),
     /// sampled when the status is served; `None` = unknown (no carrier,
     /// down, loopback, a kernel that does not say). The kernel's number is
     /// reported untouched for bond/bridge/veth.
+    #[view(unit = mbps)]
     pub speed_mbps: Option<u32>,
+    /// Observed link state; `None` = not observed (noop driver). Appended last.
+    #[view(nested)]
+    pub link: Option<LinkOper>,
 }
 
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
 /// point on a physical interface, `tag == 0` for the untagged/native case.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
 pub struct SubinterfaceStatus {
     /// 802.1Q VLAN ID.
+    #[view(brief)]
     pub tag: u16,
     /// Configured addresses.
+    #[view(brief, text)]
     pub addresses: Vec<InterfaceAddress>,
     /// Routing table (VRF) the object is enslaved to, if any.
+    #[view(brief)]
     pub routing_table: Option<String>,
     /// Effective MTU of this sub-link: its own override if configured, else
     /// the parent's `mtu`. Desired config, like `InterfaceStatus.mtu`.
+    #[view(brief)]
     pub mtu: u32,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this subinterface's own kernel device.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief)]
     pub link_local_address: Option<Ipv6Addr>,
+    /// Observed link state of this sub-link's kernel device; `None` = not
+    /// observed (noop driver). Appended last.
+    #[view(nested)]
+    pub link: Option<LinkOper>,
+}
+
+/// Observed admin/oper state of one kernel device, with the age of its last
+/// transition.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct LinkOper {
+    /// `IFF_UP`: administratively up.
+    #[view(unit = bool)]
+    pub admin_up: bool,
+    /// Administratively up with carrier.
+    #[view(unit = bool)]
+    pub oper_up: bool,
+    /// Why it is not operationally up: `admin-down`, `no-carrier` or
+    /// `absent` (unknown kernel device); `None` when up.
+    #[view()]
+    pub down_reason: Option<String>,
+    /// Age in seconds since `nos-interfaced` last saw an admin/carrier
+    /// transition; restarts at 0 after an interfaced restart (no flap count).
+    #[view(unit = secs)]
+    pub last_change_secs: Option<u64>,
 }
 
 /// The wire twin of `schema::BroadcastDomain` — a domain's own bridge
@@ -147,6 +191,9 @@ pub struct PortAggregateStatus {
     /// See `InterfaceStatus.speed_mbps`; the bond's own device (the kernel
     /// sums its up slaves).
     pub speed_mbps: Option<u32>,
+    /// Observed link state of the bond device; `None` = not observed.
+    /// Appended last.
+    pub link: Option<LinkOper>,
 }
 
 /// One member link's installed conversation steering and its tc counters.
@@ -417,8 +464,8 @@ mod tests {
     }
 
     #[test]
-    fn interface_status_wire_ends_with_speed() {
-        let st = |speed_mbps| InterfaceStatus {
+    fn interface_status_wire_ends_with_speed_then_link() {
+        let st = |speed_mbps, link| InterfaceStatus {
             name: "e".into(),
             addresses: vec![],
             routing_table: None,
@@ -429,16 +476,96 @@ mod tests {
             link_local_address: None,
             err_disabled: false,
             speed_mbps,
+            link,
         };
-        // name, 0 addrs, 3 None, mtu 1500 (2-byte varint), 0 subs, None, false, speed.
-        let none = postcard::to_allocvec(&st(None)).unwrap();
-        assert_eq!(none.last(), Some(&0));
-        let some = postcard::to_allocvec(&st(Some(1000))).unwrap();
-        assert_eq!(&some[some.len() - 3..], &[1, 0xE8, 0x07]);
+        let oper = LinkOper {
+            admin_up: true,
+            oper_up: false,
+            down_reason: Some("no-carrier".into()),
+            last_change_secs: Some(5),
+        };
+        // ... speed_mbps (None = 0x00), then link (None = trailing 0x00).
+        let none = postcard::to_allocvec(&st(None, None)).unwrap();
+        assert_eq!(&none[none.len() - 2..], &[0, 0]);
+        let some = postcard::to_allocvec(&st(Some(1000), Some(oper.clone()))).unwrap();
+        // link: Some, admin_up, oper_up, Some("no-carrier"), Some(5).
+        let mut tail = vec![1, 1, 0, 1, 10];
+        tail.extend_from_slice(b"no-carrier");
+        tail.extend_from_slice(&[1, 5]);
+        assert_eq!(&some[some.len() - tail.len()..], &tail[..]);
+        assert_eq!(
+            &some[some.len() - tail.len() - 3..some.len() - tail.len()],
+            &[1, 0xE8, 0x07]
+        );
         assert_eq!(
             postcard::from_bytes::<InterfaceStatus>(&some).unwrap(),
-            st(Some(1000))
+            st(Some(1000), Some(oper))
         );
+    }
+
+    #[test]
+    fn sub_and_aggregate_wire_end_with_link() {
+        let sub = SubinterfaceStatus {
+            tag: 10,
+            addresses: vec![],
+            routing_table: None,
+            mtu: 1500,
+            link_local_address: None,
+            link: None,
+        };
+        assert_eq!(postcard::to_allocvec(&sub).unwrap().last(), Some(&0));
+        let agg = PortAggregateStatus {
+            name: "a".into(),
+            mode: crate::schema::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: 1500,
+            subinterfaces: vec![],
+            link_local_address: None,
+            bond_name: None,
+            err_disabled: false,
+            steering: vec![],
+            speed_mbps: None,
+            link: Some(LinkOper {
+                admin_up: false,
+                oper_up: false,
+                down_reason: None,
+                last_change_secs: None,
+            }),
+        };
+        let b = postcard::to_allocvec(&agg).unwrap();
+        assert_eq!(&b[b.len() - 6..], &[0, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn link_oper_view_keys_match_json() {
+        let oper = LinkOper {
+            admin_up: true,
+            oper_up: true,
+            down_reason: None,
+            last_change_secs: Some(1),
+        };
+        let st = InterfaceStatus {
+            name: "e".into(),
+            addresses: vec![],
+            routing_table: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: vec![SubinterfaceStatus {
+                tag: 1,
+                addresses: vec![],
+                routing_table: None,
+                mtu: 1500,
+                link_local_address: None,
+                link: Some(oper.clone()),
+            }],
+            link_local_address: None,
+            err_disabled: false,
+            speed_mbps: None,
+            link: Some(oper),
+        };
+        let node = crate::view::view_of::<InterfaceStatus>().unwrap();
+        crate::view::assert_keys_match(node, &serde_json::to_value(&st).unwrap());
     }
 
     #[test]

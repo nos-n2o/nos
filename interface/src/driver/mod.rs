@@ -174,6 +174,10 @@ pub trait InterfaceDriver: Send + Sync {
     /// read sampled per query. `None` = unknown (`-1`, `0`, unreadable).
     async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32>;
 
+    /// Observed admin/oper state of kernel device `kernel_interface`, sampled
+    /// per query. `None` = nothing observed (noop).
+    async fn link_oper(&self, kernel_interface: &str) -> Option<nos_proto::LinkOper>;
+
     /// Puts one bridge port in `state` right now (`InterfaceRequest::
     /// SetStpPortStates`). The port must exist and be a bridge port. A
     /// resync keeps the state through `InterfaceState.stp`.

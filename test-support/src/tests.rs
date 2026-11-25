@@ -72,6 +72,7 @@ fn iface(name: &str) -> InterfaceStatus {
         link_local_address: None,
         err_disabled: false,
         speed_mbps: None,
+        link: None,
     }
 }
 
@@ -301,6 +302,7 @@ async fn interfaced_lookups_links_and_pushed() {
             err_disabled: false,
             steering: Vec::new(),
             speed_mbps: None,
+            link: None,
         },
     );
     assert!(matches!(q(pa()).await, InterfaceEvent::PortAggregate(_)));
