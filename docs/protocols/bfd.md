@@ -64,7 +64,7 @@ set ospfv3 instance o1 area 0.0.0.0 profile p1 bfd fast
 - `admin-down` (a local `shutdown enable`), `init`, a session that was never `up` and a lost connection to `nos-bfdd` kill nothing (RFC 5882 §3.2): OSPF behaves as without BFD.
 - Adding, changing or removing the `bfd` reference never resets an adjacency; only registrations change.
 - Log anchors: `bfd session down, killing ospf neighbor link=... neighbor=...` (`ospfv3` for OSPFv3), preceded by `ospf: bfd session down peer=... diag=...`.
-- `show bfd sessions` lists the sessions; they are keyed by (table, peer), so two links to one peer address in one table share a session.
+- `show bfd sessions` lists the sessions; they are keyed by (table, peer), so two links to one peer address in one table share a session. `show bfd sessions [<peer>] detail` prints every field per session (uptime, last change, down count, packet counters, remote timers, clients).
 
 ## Authenticate sessions
 

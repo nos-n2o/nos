@@ -427,9 +427,13 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_bfd_reflector(watchdog_socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowBfdSessions { peer } => {
+        Resolved::ShowBfdSessions { peer, detail } => {
             if let Some(r) = bfd_sessions_reply(watchdog_socket, peer).await {
-                emit(&r, "no bfd sessions");
+                if detail {
+                    emit_detail(&r, "no bfd sessions");
+                } else {
+                    emit(&r, "no bfd sessions");
+                }
             }
             Outcome::Continue(mode)
         }
@@ -821,6 +825,11 @@ async fn resolve_bfd(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
 /// (#1415) and the jq filter (#1420) branch here, off `view::to_value`.
 fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
     println!("{}", view::render(reply, empty));
+}
+
+/// `emit` for a `detail` form: one block per element.
+fn emit_detail<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
+    println!("{}", view::render_detail_list(reply, empty));
 }
 
 async fn bfd_sessions_reply(

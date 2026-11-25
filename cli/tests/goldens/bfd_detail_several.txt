@@ -1,0 +1,92 @@
+Key
+  Table      rt1
+  Peer       192.0.2.1
+  Local      -
+  Interface  -
+  Aggregate  -
+  Multihop   no
+State                     Up
+Diag                      NoDiagnostic
+Local-Disc                1
+Remote-Disc               2
+Tx-Interval               100ms
+Detection                 300ms
+Last-Change-Secs          0s
+Down-Count                0
+Tx-Packets                0
+Rx-Packets                0
+Remote-Min-Rx-Us          -
+Remote-Desired-Min-Tx-Us  -
+Remote-Detect-Mult        -
+Clients                   
+Kind                      Classical
+Auth                      -
+Auth-Key                  -
+Auth-Failures             0
+Echo                      no
+Echo-Interval             0us
+Echo-Only                 no
+Pdu                       0 B
+Uptime                    -
+
+Key
+  Table      rt1
+  Peer       192.0.2.2
+  Local      -
+  Interface  -
+  Aggregate  -
+  Multihop   no
+State                     Down
+Diag                      NoDiagnostic
+Local-Disc                1
+Remote-Disc               2
+Tx-Interval               100ms
+Detection                 300ms
+Last-Change-Secs          0s
+Down-Count                0
+Tx-Packets                0
+Rx-Packets                0
+Remote-Min-Rx-Us          -
+Remote-Desired-Min-Tx-Us  -
+Remote-Detect-Mult        -
+Clients                   
+Kind                      Classical
+Auth                      -
+Auth-Key                  -
+Auth-Failures             0
+Echo                      no
+Echo-Interval             0us
+Echo-Only                 no
+Pdu                       0 B
+Uptime                    -
+
+Key
+  Table      rt1
+  Peer       192.0.2.1
+  Local      -
+  Interface  -
+  Aggregate  -
+  Multihop   no
+State                     Up
+Diag                      NoDiagnostic
+Local-Disc                1
+Remote-Disc               2
+Tx-Interval               100ms
+Detection                 300ms
+Last-Change-Secs          0s
+Down-Count                0
+Tx-Packets                0
+Rx-Packets                0
+Remote-Min-Rx-Us          -
+Remote-Desired-Min-Tx-Us  -
+Remote-Detect-Mult        -
+Clients                   
+Kind                      Classical
+Auth                      -
+Auth-Key                  -
+Auth-Failures             0
+Echo                      no
+Echo-Interval             0us
+Echo-Only                 no
+Pdu                       0 B
+Uptime                    -

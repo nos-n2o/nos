@@ -71,10 +71,11 @@ pub enum Command {
         instance: Option<u16>,
         domain: Option<String>,
     },
-    /// `show bfd sessions [<peer>]` — every BFD session `nos-bfdd` holds, or
-    /// only those to one peer address.
+    /// `show bfd sessions [<peer>] [detail]` — every BFD session `nos-bfdd`
+    /// holds, or only those to one peer address; `detail` prints one block each.
     ShowBfdSessions {
         peer: Option<IpAddr>,
+        detail: bool,
     },
     /// `show bfd reflector` — the S-BFD reflector's discriminators and counters.
     ShowBfdReflector,
@@ -446,14 +447,38 @@ mod tests {
     fn show_bfd_sessions() {
         assert_eq!(
             Command::parse("show bfd sessions"),
-            Command::ShowBfdSessions { peer: None }
+            Command::ShowBfdSessions {
+                peer: None,
+                detail: false
+            }
         );
         assert_eq!(
             Command::parse("show bfd sessions 192.0.2.1"),
             Command::ShowBfdSessions {
-                peer: Some("192.0.2.1".parse().unwrap())
+                peer: Some("192.0.2.1".parse().unwrap()),
+                detail: false
             }
         );
+        assert_eq!(
+            Command::parse("show bfd sessions detail"),
+            Command::ShowBfdSessions {
+                peer: None,
+                detail: true
+            }
+        );
+        assert_eq!(
+            Command::parse("show bfd sessions 192.0.2.1 detail"),
+            Command::ShowBfdSessions {
+                peer: Some("192.0.2.1".parse().unwrap()),
+                detail: true
+            }
+        );
+        for bad in [
+            "show bfd sessions detail 192.0.2.1",
+            "show bfd sessions nope detail",
+        ] {
+            assert_eq!(Command::parse(bad), Command::Unknown(bad.to_string()));
+        }
         assert_eq!(
             Command::parse("show bfd sessions nope"),
             Command::Unknown("show bfd sessions nope".to_string())

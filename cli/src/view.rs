@@ -31,6 +31,21 @@ pub fn render<T: Serialize + ViewValue>(reply: &T, empty: &str) -> String {
     }
 }
 
+/// `to_value`, then one detail block per array element, blank-line separated;
+/// `empty` for an empty array, `render` for anything else.
+pub fn render_detail_list<T: Serialize + ViewValue>(reply: &T, empty: &str) -> String {
+    let value = to_value(reply);
+    match (view_of::<T>(), &value) {
+        (Some(_), Value::Array(a)) if a.is_empty() => empty.to_string(),
+        (Some(node), Value::Array(a)) => a
+            .iter()
+            .map(|o| render_detail(node, o))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => render(reply, empty),
+    }
+}
+
 /// A scalar reply has no node: print it as text.
 static TEXT: Field = Field {
     key: "",
