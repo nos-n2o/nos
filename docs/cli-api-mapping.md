@@ -9,6 +9,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | CLI | REST |
 |---|---|
 | `show config` | `GET /v1/config` |
+| `show configuration diff <n> [<m>]` | `GET /v1/history/{n}` and `GET /v1/history/{m}` (0 = running), diffed client side |
 | `show route <table>` | `GET /v1/routes/{table}` |
 | `show route <table> <address>` | `GET /v1/routes/{table}/{addr}` |
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |

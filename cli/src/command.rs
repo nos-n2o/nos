@@ -166,6 +166,11 @@ pub enum Command {
     },
     /// `show configuration history`
     ShowHistory,
+    /// `show configuration diff <n> [<m>]`: from history `n` to `m` (0 = running).
+    ShowConfigDiff {
+        from: u32,
+        to: u32,
+    },
     /// `rollback <n>` — configuration mode.
     Rollback {
         n: u32,
@@ -273,6 +278,22 @@ mod tests {
             Command::parse("show configuration history"),
             Command::ShowHistory
         );
+        assert_eq!(
+            Command::parse("show configuration diff 2"),
+            Command::ShowConfigDiff { from: 2, to: 0 }
+        );
+        assert_eq!(
+            Command::parse("show configuration diff 3 1"),
+            Command::ShowConfigDiff { from: 3, to: 1 }
+        );
+        assert!(matches!(
+            Command::parse("show configuration diff x"),
+            Command::Unknown(_)
+        ));
+        assert!(matches!(
+            Command::parse("show configuration diff"),
+            Command::Unknown(_)
+        ));
         assert_eq!(Command::parse("rollback 3"), Command::Rollback { n: 3 });
         assert!(matches!(Command::parse("rollback x"), Command::Unknown(_)));
     }

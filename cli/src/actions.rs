@@ -202,6 +202,10 @@ pub async fn handle_action(
             show_history(socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowConfigDiff { from, to } => {
+            show_config_diff(socket, from, to).await;
+            Outcome::Continue(mode)
+        }
         action @ (Resolved::ShowAaaUsers
         | Resolved::AllocateAaaUser { .. }
         | Resolved::ClearAaaUser { .. }) => {
@@ -1716,6 +1720,31 @@ async fn show_history(socket: &Path) {
     }
 }
 
+/// `show configuration diff <from> [<to>]`. Two reads, no lock: a commit landing
+/// between them shifts the indexes (documented, #1416).
+async fn show_config_diff(socket: &Path, from: u32, to: u32) {
+    let res = async {
+        let old = client::get_history_config(socket, from).await?;
+        let new = client::get_history_config(socket, to).await?;
+        Ok::<_, client::ClientError>(diff_text(&old, &new, use_color()))
+    }
+    .await;
+    match res {
+        Ok(t) => println!("{t}"),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+/// The rendered diff from `old` to `new`, or `no changes`.
+pub fn diff_text(old: &nos_proto::Config, new: &nos_proto::Config, color: bool) -> String {
+    let d = nos_proto::diff_configs(old, new);
+    if d.is_empty() {
+        "no changes".to_string()
+    } else {
+        format::render_diff(&d, color)
+    }
+}
+
 async fn rollback(socket: &Path, n: u32) {
     match client::rollback(socket, n).await {
         Ok((warnings, unsaved)) => {
@@ -2155,5 +2184,28 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
             None => String::new(),
         };
         println!("  {usage:<45} {summary}");
+    }
+}
+
+#[cfg(test)]
+mod diff_text_tests {
+    use super::diff_text;
+    use nos_proto::Config;
+
+    fn cfg(h: &str) -> Config {
+        Config {
+            hostname: h.into(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn direction_and_empty() {
+        let (a, b) = (cfg("old"), cfg("new"));
+        let t = diff_text(&a, &b, false);
+        assert!(t.find("old").unwrap() < t.find("new").unwrap(), "{t}");
+        let r = diff_text(&b, &a, false);
+        assert!(r.find("new").unwrap() < r.find("old").unwrap(), "{r}");
+        assert_eq!(diff_text(&a, &a, false), "no changes");
     }
 }
