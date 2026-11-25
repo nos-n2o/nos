@@ -102,6 +102,7 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(tx::save))
         .routes(routes!(tx::status))
         .routes(routes!(tx::history))
+        .routes(routes!(tx::history_config))
         .routes(routes!(tx::rollback))
         .routes(routes!(tx::commit_confirm))
         .routes(routes!(tx::commit_cancel))

@@ -2099,6 +2099,46 @@ async fn history_and_rollback_over_ipc() {
     };
     assert!(e.starts_with("no history entry"), "{e}");
 
+    // #1458: GetHistoryConfig. After the rollback the running config is the
+    // blank one and history entry 2 holds the bgp instance rollback replaced.
+    writer
+        .send(Request::GetHistoryConfig { index: 0 })
+        .await
+        .unwrap();
+    let Event::Config(run) = next_event(&mut reader).await else {
+        panic!("expected Config");
+    };
+    assert_eq!(
+        run,
+        store
+            .running_snapshot()
+            .await
+            .for_role(nos_proto::Role::User)
+    );
+    assert_eq!(run.bgp_instances.len(), 0);
+    writer
+        .send(Request::GetHistoryConfig { index: 1 })
+        .await
+        .unwrap();
+    let Event::Config(old) = next_event(&mut reader).await else {
+        panic!("expected Config");
+    };
+    assert_eq!(old.bgp_instances.len(), 1, "what the rollback replaced");
+    writer
+        .send(Request::GetHistoryConfig { index: 50 })
+        .await
+        .unwrap();
+    let Event::Error(e) = next_event(&mut reader).await else {
+        panic!("expected Error");
+    };
+    assert!(e.starts_with("no history entry"), "{e}");
+    let (mut reader, mut writer) = connect_as(&sock_path, "bgpd", "default").await;
+    writer
+        .send(Request::GetHistoryConfig { index: 1 })
+        .await
+        .unwrap();
+    assert!(matches!(next_event(&mut reader).await, Event::Error(m) if m == "permission denied"));
+
     let (mut reader, mut writer) = connect_as(&sock_path, "bgpd", "default").await;
     writer.send(Request::ListHistory).await.unwrap();
     assert!(matches!(next_event(&mut reader).await, Event::Error(m) if m == "permission denied"));

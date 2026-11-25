@@ -1105,7 +1105,12 @@ mod tests {
                 used.insert(t);
             }
         }
-        let unused: Vec<_> = Topic::ALL.iter().filter(|t| !used.contains(t)).collect();
+        let unused: Vec<_> = Topic::ALL
+            .iter()
+            .filter(|t| !used.contains(t))
+            // ponytail: the CLI command arrives with #1460; drop this exemption there.
+            .filter(|t| **t != Topic::ShowConfigurationDiff)
+            .collect();
         assert!(unused.is_empty(), "unused topics: {unused:?}");
     }
 

@@ -634,6 +634,21 @@ pub async fn history(State(d): State<Daemons>) -> ApiResult<Json<Vec<HistoryEntr
     }
 }
 
+/// `GET /v1/history/<n>` — the config `n` commits back (`0` = the running config).
+#[utoipa::path(get, path = "/v1/history/{index}", tag = "transactions", summary = "The config n commits back (0 = running)", params(("index" = u32, Path, description = "how many commits to go back; 0 is the running config")), responses((status = 200, body = Config), (status = 404, body = ErrorBody, description = "index is beyond the kept history"), (status = 502, body = ErrorBody, description = "nos-configd keeps no history (no config file)")))]
+pub async fn history_config(
+    State(d): State<Daemons>,
+    axum::extract::Path(index): axum::extract::Path<u32>,
+) -> ApiResult<Json<Value>> {
+    match d.config(Request::GetHistoryConfig { index }).await {
+        // Password hashes masked like `GET /v1/config`.
+        Ok(Event::Config(c)) => Ok(Json(c.redacted())),
+        Ok(other) => Err(unexpected("nos-configd", &other)),
+        Err(ApiError::BadRequest(m)) => Err(ApiError::BadGateway(m)),
+        Err(e) => Err(e),
+    }
+}
+
 /// `POST /v1/rollback/<n>` — restore the running config as it was `n` commits
 /// ago, as a normal commit (validated, broadcast, a new history entry).
 #[utoipa::path(post, path = "/v1/rollback/{n}", tag = "transactions", summary = "Roll back the last n commits", params(("n" = u32, Path, description = "how many commits to go back; 0 does nothing")), responses((status = 200, body = CommitResult), (status = 404, body = ErrorBody, description = "n is beyond the kept history"), (status = 422, body = ErrorBody, description = "the old config no longer validates, or would remove every user")))]

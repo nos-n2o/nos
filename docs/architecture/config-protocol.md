@@ -17,7 +17,7 @@ Client → Server:
   Request::Describe            one-shot fetch of one operation's documentation, by Topic
   Request::SetTransactionPath  set/remove one subsection of a named transaction by URL-style path (whole config for an empty path) — see nos_proto::config_path (if_match as above); an optional `position` (`ListPosition`: First/Last/Before(k)/After(k)) inserts or moves the list element the path names (#539)
   Request::EditTransactionPath the same edit, replying Event::TransactionEdit (#774); what nos-restd, nos and nos-provision send. SetTransactionPath is unused in tree, kept for wire compatibility
-  Request::ListHistory / Rollback { index, actor }   commit history and `rollback N` (#1141), see below
+  Request::ListHistory / Rollback { index, actor } / GetHistoryConfig { index }   commit history, `rollback N` (#1141) and the config N commits back (#1458), see below
   Request::UserExists          cheap auth probe (#755): is this name in `Config.users`? `Restd` only; replies with no config data
   Request::ListBgpInstances / ListOspfInstances / ListOspfv3Instances   instance names only (#759): what `nos-restd`'s show routes iterate, without shipping the config. `Restd` only
   Request::GetRestApi { table }  that routing table's pinned `rest_api` (#759, #758): the listener's per-tick "what is wanted" probe. `Restd` only
@@ -66,6 +66,7 @@ Editing the config happens inside a **named transaction**, held server-side in `
 ### Commit history (#1141)
 
 - `Request::ListHistory` (`Event::History`) and `Request::Rollback { index, actor }` (`Event::Committed`), both `User`/`Restd` only in `authz::allowed`; in `authz::permitted` listing is open to every role (metadata only, no config content) and `Rollback` is admin-only.
+- `Request::GetHistoryConfig { index }` (`User`/`Restd`; readable by every role in `permitted`) replies `Event::Config`, `for_role`-projected like `Get`; `0` is the running config (also without a history), an index beyond it is `no history entry`, no config file is `history unavailable` (502 over REST, `GET /v1/history/{index}`). The CLI diffs two of them client-side (#1416).
 - `history.rs`: the config a commit replaces is handed (an `Arc`, no copy) to a writer thread through a bounded channel and written to `<config path>.history/<id>.yaml` (dir 0700, files 0600, `write_durable`, first line `# nos-history time= kind= actor=`). A full queue or a failed write is a warning, never a failed commit. The oldest beyond 20 are deleted. Not a config knob (a const).
 - Independent of `save` and `.bak`; startup never loads from it. Listing parses the files (unparsable or no-longer-valid ones are skipped), so indexes are 1-based over valid entries, newest first.
 - `rollback N` puts entry `N` into a `Blank`-based transaction and runs the normal commit path (`commit_as`: validation, `NoUsersLeft`, warnings, one broadcast, its own entry with kind `rollback`). An unknown index is `no history entry` (404 over REST).
