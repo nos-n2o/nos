@@ -135,6 +135,15 @@ impl InterfaceDriver for RecordingDriver {
     async fn bridge_mtu(&self, k: &str) -> Option<u32> {
         NoopInterfaceDriver.bridge_mtu(k).await
     }
+    /// Canned: the queried kernel name is echoed in `down_reason`.
+    async fn link_oper(&self, k: &str) -> Option<nos_proto::LinkOper> {
+        Some(nos_proto::LinkOper {
+            admin_up: true,
+            oper_up: false,
+            down_reason: Some(format!("dev:{k}")),
+            last_change_secs: Some(7),
+        })
+    }
     async fn link_speed_mbps(&self, k: &str) -> Option<u32> {
         NoopInterfaceDriver.link_speed_mbps(k).await
     }
@@ -706,4 +715,58 @@ async fn queries_and_pushes_are_gated_by_role_over_the_live_server() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn get_interface_fills_link_from_the_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interface.sock");
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(RecordingDriver::default()),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(InterfaceRequest::GetInterface {
+            name: "eth0".to_string(),
+        })
+        .await
+        .unwrap();
+    let InterfaceEvent::Interface(st) = next_event(&mut reader).await else {
+        panic!("expected Interface");
+    };
+    let link = st.link.expect("link");
+    assert!(link.admin_up && !link.oper_up);
+    assert_eq!(link.down_reason.as_deref(), Some("dev:eth0"));
+    assert_eq!(link.last_change_secs, Some(7));
+    // the untagged sub-link lives on the parent device itself
+    let sub = st.subinterfaces.iter().find(|s| s.tag == 0).unwrap();
+    assert_eq!(
+        sub.link.as_ref().unwrap().down_reason.as_deref(),
+        Some("dev:eth0")
+    );
+}
+
+#[tokio::test]
+async fn noop_driver_leaves_link_unobserved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interface.sock");
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(InterfaceRequest::GetInterfaces).await.unwrap();
+    let InterfaceEvent::Interfaces(all) = next_event(&mut reader).await else {
+        panic!("expected Interfaces");
+    };
+    assert!(all.iter().all(|i| i.link.is_none()));
 }

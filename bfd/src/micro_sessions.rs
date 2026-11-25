@@ -128,7 +128,7 @@ pub struct Micro {
 
 impl Micro {
     pub fn new(mgr: Arc<Manager>, push: mpsc::Sender<BfdAggregateMembers>) -> Self {
-        let client = mgr.new_client();
+        let client = mgr.new_client("micro-bfd");
         Micro {
             mgr,
             client,

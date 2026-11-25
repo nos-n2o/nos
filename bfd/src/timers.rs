@@ -54,6 +54,11 @@ impl Timers {
         }
     }
 
+    /// What the remote last told us.
+    pub fn remote(&self) -> Option<Remote> {
+        self.remote
+    }
+
     /// Starts a Poll sequence for new local intervals (§6.5, §6.8.3): they
     /// are advertised at once but only take effect locally on Final.
     pub fn change(&mut self, desired_min_tx: u32, required_min_rx: u32) {

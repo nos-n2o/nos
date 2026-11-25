@@ -53,6 +53,23 @@ pub(super) async fn session_is(
     )
 }
 
+/// The one session to `peer` as REST reports it (#1456).
+async fn session_json(r: &crate::router::Router, peer: &str) -> anyhow::Result<serde_json::Value> {
+    let body = r
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bfd/sessions?peer={peer}"),
+            None,
+            200,
+        )
+        .await?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    v.as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{}: no bfd session to {peer}: {body}", r.name()))
+}
+
 /// #659: router-a retiring its session tells router-b AdminDown, so b logs
 /// `neighbor-signaled-session-down` and never waits out its detection time.
 async fn graceful_down(
@@ -99,6 +116,32 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     a.rest_expect(Method::GET, "/v1/bfd/sessions?peer=nope", None, 400)
         .await?;
 
+    log("#1456: counters, uptime, remote timers and clients");
+    let s1 = session_json(a, IP_B.s()).await?;
+    anyhow::ensure!(s1["tx_packets"].as_u64() > Some(0), "tx_packets: {s1}");
+    anyhow::ensure!(s1["rx_packets"].as_u64() > Some(0), "rx_packets: {s1}");
+    anyhow::ensure!(s1["uptime_secs"].is_u64(), "uptime_secs: {s1}");
+    anyhow::ensure!(
+        s1["remote_detect_mult"] == 3,
+        "profile fast has mult 3: {s1}"
+    );
+    anyhow::ensure!(
+        s1["remote_min_rx_us"].is_u64() && s1["remote_desired_min_tx_us"].is_u64(),
+        "remote timers: {s1}"
+    );
+    anyhow::ensure!(
+        s1["clients"] == serde_json::json!(["static"]),
+        "clients: {s1}"
+    );
+    anyhow::ensure!(s1["down_count"] == 0, "down_count: {s1}");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let s2 = session_json(a, IP_B.s()).await?;
+    anyhow::ensure!(
+        s2["tx_packets"].as_u64() > s1["tx_packets"].as_u64()
+            && s2["rx_packets"].as_u64() > s1["rx_packets"].as_u64(),
+        "counters did not grow in 1 s: {s1} then {s2}"
+    );
+
     log("reaching Up opens a Poll sequence (#694): it completes without a flap");
     let (any_down_a, any_down_b) = (a.count("bfd session down"), b.count("bfd session down"));
     a.assert_quiet("bfd session down", any_down_a, 5).await?;
@@ -125,7 +168,11 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
         dropped?;
         a.wait_new(&down_a, n_down, 10).await?;
         a.wait_new(&removed, n_removed, 10).await?;
-        session_is(a, IP_B.s(), "Down", Some("ControlDetectionTimeExpired"), 5).await
+        session_is(a, IP_B.s(), "Down", Some("ControlDetectionTimeExpired"), 5).await?;
+        let d = session_json(a, IP_B.s()).await?;
+        anyhow::ensure!(d["uptime_secs"].is_null(), "uptime while Down: {d}");
+        anyhow::ensure!(d["down_count"].as_u64() >= Some(1), "down_count: {d}");
+        Ok(())
     }
     .await;
     // Lift it whatever happened, so a failure does not leave the lab broken.
@@ -139,6 +186,8 @@ pub async fn bfd(w: &mut World) -> anyhow::Result<()> {
     // The diag is whatever last took the session down: it sticks while Up,
     // so Up is only asserted without one.
     session_is(a, IP_B.s(), "Up", None, 5).await?;
+    let u = session_json(a, IP_B.s()).await?;
+    anyhow::ensure!(u["uptime_secs"].is_u64(), "uptime after Up again: {u}");
 
     log("#659: router-a's last client leaves: router-b sees AdminDown, not a timeout");
     graceful_down(b, a.provision(&["--remove-static-route", BFD_PREFIX_B])).await?;
@@ -295,6 +344,13 @@ pub async fn bgp_bfd(w: &mut World) -> anyhow::Result<()> {
     b.provision(&["--bfd-bgp"]).await?;
     session_is(a, IP_B.s(), "Up", None, 30).await?;
     session_is(b, IP_A.s(), "Up", None, 30).await?;
+    let sess = session_json(a, IP_B.s()).await?;
+    anyhow::ensure!(
+        sess["clients"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x == "bgp")),
+        "bgp is a client of the session: {sess}"
+    );
     a.assert_quiet(cease, cease_a, 3).await?;
     b.assert_quiet(cease, cease_b, 0).await?;
     a.assert_quiet(est, est_a, 0).await?;

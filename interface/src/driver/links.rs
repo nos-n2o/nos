@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::Instant;
 
-use nos_proto::LinkState;
+use nos_proto::{LinkOper, LinkState};
 use rtnetlink::packet_core::NetlinkPayload;
 use rtnetlink::packet_route::link::{LinkAttribute, LinkFlags, LinkMessage, State};
 use rtnetlink::packet_route::RouteNetlinkMessage;
@@ -47,6 +48,9 @@ struct Table {
     /// Bond kernel name -> its `PortAggregate` config name, stamped on every
     /// `LinkState` of that name (`LinkState::port_aggregate`).
     aggregates: BTreeMap<String, String>,
+    /// When each device's `(admin_up, carrier)` last changed (first sighting
+    /// counts). Kept beside `links`, not in `LinkState`: that is `Eq` and streamed.
+    changed: BTreeMap<String, Instant>,
 }
 
 impl Table {
@@ -66,6 +70,11 @@ impl Table {
             events.push(LinkEvent::Removed(link.name.clone()));
         }
         let announce = existing.is_none() || recreated;
+        if existing
+            .is_none_or(|e| recreated || (e.admin_up, e.carrier) != (link.admin_up, link.carrier))
+        {
+            self.changed.insert(link.name.clone(), Instant::now());
+        }
         // A rename arrives as RTM_NEWLINK only: drop the old name.
         let stale: Vec<String> = self
             .links
@@ -75,6 +84,7 @@ impl Table {
             .collect();
         for old in stale {
             self.links.remove(&old);
+            self.changed.remove(&old);
             debug!(name = %old, "link removed");
             events.push(LinkEvent::Removed(old));
         }
@@ -139,6 +149,7 @@ impl LinkHub {
         if ifindex.is_some_and(|i| table.links.get(name).is_some_and(|l| l.ifindex != i)) {
             return;
         }
+        table.changed.remove(name);
         if table.links.remove(name).is_some() {
             debug!(name = %name, "link removed");
             let _ = self.tx.send(LinkEvent::Removed(name.to_string()));
@@ -163,6 +174,30 @@ impl LinkHub {
         for n in gone {
             self.remove(&n);
         }
+    }
+
+    /// Observed admin/oper state of kernel device `name`; `None` when the
+    /// hub observes nothing (noop). An unknown device on an observed hub is
+    /// `absent`.
+    pub fn oper(&self, name: &str) -> Option<LinkOper> {
+        if !self.observed {
+            return None;
+        }
+        let table = self.inner.lock().unwrap();
+        let Some(link) = table.links.get(name) else {
+            return Some(LinkOper {
+                admin_up: false,
+                oper_up: false,
+                down_reason: Some("absent".into()),
+                last_change_secs: None,
+            });
+        };
+        Some(LinkOper {
+            admin_up: link.admin_up,
+            oper_up: link.is_up(),
+            down_reason: link.down_reason().map(str::to_string),
+            last_change_secs: table.changed.get(name).map(|t| t.elapsed().as_secs()),
+        })
     }
 
     pub fn watch(&self) -> LinkWatch {
@@ -382,5 +417,36 @@ mod tests {
         assert!(rx.try_recv().is_err());
         hub.upsert(l("b", 2, true));
         assert_eq!(rx.try_recv().unwrap(), LinkEvent::Added(l("b", 2, true)));
+    }
+
+    #[test]
+    fn oper_tracks_transitions_and_cleans_up() {
+        let hub = LinkHub::new(16);
+        let ok = hub.oper("nope").unwrap();
+        assert_eq!(ok.down_reason.as_deref(), Some("absent"));
+        assert!(!ok.admin_up && !ok.oper_up && ok.last_change_secs.is_none());
+        hub.upsert(l("eth0", 2, true));
+        let t0 = hub.inner.lock().unwrap().changed["eth0"];
+        let o = hub.oper("eth0").unwrap();
+        assert!(o.admin_up && o.oper_up && o.down_reason.is_none());
+        assert_eq!(o.last_change_secs, Some(0));
+        // identical upsert and aggregate-only change keep the timestamp
+        hub.upsert(l("eth0", 2, true));
+        hub.set_port_aggregate("eth0", Some("agg"));
+        assert_eq!(hub.inner.lock().unwrap().changed["eth0"], t0);
+        // carrier flip resets it
+        let mut down = l("eth0", 2, true);
+        down.carrier = false;
+        hub.upsert(down);
+        assert!(hub.inner.lock().unwrap().changed["eth0"] >= t0);
+        let o = hub.oper("eth0").unwrap();
+        assert!(o.admin_up && !o.oper_up);
+        assert_eq!(o.down_reason.as_deref(), Some("no-carrier"));
+        hub.remove("eth0");
+        assert!(hub.inner.lock().unwrap().changed.is_empty());
+        // rename drops the old name's timestamp
+        hub.upsert(l("a", 5, true));
+        hub.upsert(l("b", 5, true));
+        assert!(!hub.inner.lock().unwrap().changed.contains_key("a"));
     }
 }

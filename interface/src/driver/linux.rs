@@ -1588,6 +1588,10 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         })
     }
 
+    async fn link_oper(&self, kernel_interface: &str) -> Option<nos_proto::LinkOper> {
+        self.links.oper(kernel_interface)
+    }
+
     async fn link_speed_mbps(&self, kernel_interface: &str) -> Option<u32> {
         let path = format!("/sys/class/net/{kernel_interface}/speed");
         let raw = tokio::fs::read_to_string(path).await.ok()?;

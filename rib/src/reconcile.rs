@@ -938,11 +938,13 @@ mod tests {
                     addresses: addrs(a),
                     routing_table: rt.map(String::from),
                     link_local_address: None,
+                    link: None,
                 })
                 .collect(),
             link_local_address: None,
             err_disabled: false,
             speed_mbps: None,
+            link: None,
         }
     }
 
@@ -996,6 +998,7 @@ mod tests {
             err_disabled: false,
             steering: Vec::new(),
             speed_mbps: None,
+            link: None,
         }];
         let mut got: Vec<(String, String)> =
             connected_entries("rt1", &interfaces, &aggregates, &domains)

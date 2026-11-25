@@ -159,6 +159,7 @@ fn status(name: &str, mtu: u32, subs: Vec<SubinterfaceStatus>) -> InterfaceStatu
         link_local_address: None,
         err_disabled: false,
         speed_mbps: None,
+        link: None,
     }
 }
 
@@ -169,6 +170,7 @@ fn sub_status(tag: u16, addrs: &[&str], ll: Option<&str>) -> SubinterfaceStatus 
         addresses: addrs.iter().map(|a| addr(a)).collect(),
         routing_table: Some("rt1".into()),
         link_local_address: ll.map(|l| l.parse().unwrap()),
+        link: None,
     }
 }
 

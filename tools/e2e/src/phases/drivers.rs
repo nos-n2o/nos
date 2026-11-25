@@ -257,6 +257,16 @@ pub async fn interface_speed(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a: GET /v1/interfaces/eth0 reports speed_mbps {got:?}, sysfs says {want:?}");
     }
     log(format!("router-a: rest reports eth0 speed_mbps {got:?}"));
+    // #1454: the observed link state of the same device.
+    let link = &status["link"];
+    if link["admin_up"] != true
+        || link["oper_up"] != true
+        || !link["down_reason"].is_null()
+        || !link["last_change_secs"].is_u64()
+    {
+        bail!("router-a: eth0 link is not up with an age: {link}");
+    }
+    log(format!("router-a: rest reports eth0 link {link}"));
     // `lo` is not a configured interface (404), or if listed has no speed.
     let (code, text) = a.rest(Method::GET, "/v1/interfaces/lo", None).await?;
     if code == 200 {
@@ -311,6 +321,17 @@ pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_connected(PORT_AGGREGATE_SUBNET).await?;
+    // #1454: the bond device's own observed link state (up or not depends on
+    // its slaves' carrier, so only its shape is asserted).
+    let body = a
+        .rest_expect(Method::GET, "/v1/port-aggregates/bond1", None, 200)
+        .await?;
+    let bond: serde_json::Value = serde_json::from_str(&body)?;
+    let link = &bond["link"];
+    if link["admin_up"] != true || !link["last_change_secs"].is_u64() {
+        bail!("router-a: bond1 link is not admin up with an age: {link}");
+    }
+    log(format!("router-a: rest reports bond1 link {link}"));
 
     let mut delete = members.to_vec();
     delete.push("--delete-port-aggregate");
@@ -4220,25 +4241,31 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // `show log --follow`: an SSE stream carrying a *live* entry, not just the
     // backlog. Follow nos-configd, then commit an empty transaction so it logs
     // "config committed" while the stream is open.
-    let url = format!(
-        "{}/v1/logs/follow?source=nos-configd&limit=1",
-        a.rest.base()
-    );
-    let client = a.rest.client().await?;
-    let stream = tokio::spawn(async move {
-        let mut text = String::new();
-        let Ok(resp) = client.get(&url).send().await else {
-            return text;
-        };
-        let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
-        let _ = tokio::time::timeout(Duration::from_secs(6), async {
-            while let Some(Ok(chunk)) = futures::StreamExt::next(&mut chunks).await {
-                text.push_str(&String::from_utf8_lossy(&chunk));
-            }
-        })
-        .await;
-        text
-    });
+    let follow = |query: &str| {
+        let url = format!("{}/v1/logs/follow?{query}", a.rest.base());
+        let client = a.rest.client();
+        async move {
+            let client = client.await?;
+            anyhow::Ok(tokio::spawn(async move {
+                let mut text = String::new();
+                let Ok(resp) = client.get(&url).send().await else {
+                    return text;
+                };
+                let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
+                let _ = tokio::time::timeout(Duration::from_secs(6), async {
+                    while let Some(Ok(chunk)) = futures::StreamExt::next(&mut chunks).await {
+                        text.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                })
+                .await;
+                text
+            }))
+        }
+    };
+    let stream = follow("source=nos-configd&limit=1").await?;
+    // #1451: the same stream restricted to warn and above must not carry the
+    // info-level "config committed".
+    let filtered = follow("source=nos-configd&level=warn&limit=1").await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
         .await?;
@@ -4248,7 +4275,59 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     if !streamed.contains("event: log") || !streamed.contains("config committed") {
         bail!("the log follow stream carried no live 'config committed' entry:\n{streamed}");
     }
-    log("router-a: log follow streamed a live entry over sse");
+    let filtered = filtered.await?;
+    if filtered.contains("config committed")
+        || filtered.contains("\"level\":\"info\"")
+        || filtered.contains("\"level\":\"debug\"")
+    {
+        bail!("level=warn follow stream carried a below-warn entry:\n{filtered}");
+    }
+    log("router-a: log follow streamed a live entry over sse, level=warn filtered it");
+
+    // #1451: `level`/`match` on the snapshot. The commit above logged
+    // "config committed" (info), so it is in the buffer by now.
+    let levels = |body: &str| -> anyhow::Result<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(body)?;
+        Ok(v.as_array().map_or_else(Vec::new, |a| {
+            a.iter().map(|e| e["level"].to_string()).collect()
+        }))
+    };
+    let errors = a
+        .rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&level=error&limit=100000000",
+            None,
+            200,
+        )
+        .await?;
+    if let Some(l) = levels(&errors)?.iter().find(|l| *l != "\"error\"") {
+        bail!("level=error returned a {l} entry:\n{errors}");
+    }
+    let hit = a
+        .rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&match=CONFIG%20COMMITTED&limit=100000000",
+            None,
+            200,
+        )
+        .await?;
+    let n = levels(&hit)?.len();
+    if n == 0 || hit.to_lowercase().matches("config committed").count() < n {
+        bail!("match=CONFIG COMMITTED: {n} entries, not all containing it:\n{hit}");
+    }
+    expect_body(
+        &a.rest_expect(
+            Method::GET,
+            "/v1/logs?source=nos-configd&match=zzz-no-such",
+            None,
+            200,
+        )
+        .await?,
+        "[]",
+    )?;
+    a.rest_expect(Method::GET, "/v1/logs?level=bogus", None, 400)
+        .await?;
+    log("router-a: /v1/logs level and match filters");
 
     rest_users(&w.dock, a).await?;
     rest_secrets(&w.dock, a).await?;

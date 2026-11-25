@@ -2,7 +2,8 @@
 //! packets out), `run` the tokio task that feeds it.
 
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nos_proto::schema::{BfdAuthMethod, BfdProfile, EchoMode};
@@ -85,6 +86,79 @@ pub struct Status {
     /// RFC 9764 `padded-pdu-size`, 0 when not padded.
     pub tx_pdu_bytes: u32,
     pub kind: BfdSessionKind,
+    /// What the peer last advertised; `None` until a packet arrived.
+    pub remote: Option<Remote>,
+}
+
+/// Per-session counters and transition times, shared between the session task
+/// (writer) and `Manager::sessions` (reader); never part of `Status`, so they
+/// cause no client churn.
+#[derive(Debug)]
+pub struct Stats {
+    tx: AtomicU64,
+    rx: AtomicU64,
+    tr: Mutex<Trans>,
+}
+
+#[derive(Debug)]
+struct Trans {
+    last_change: Instant,
+    up_since: Option<Instant>,
+    down_count: u32,
+}
+
+/// One reading of `Stats`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatsSnapshot {
+    pub uptime_secs: Option<u64>,
+    pub last_change_secs: u64,
+    pub down_count: u32,
+    pub tx: u64,
+    pub rx: u64,
+}
+
+impl Stats {
+    pub fn new(created: Instant) -> Self {
+        Stats {
+            tx: AtomicU64::new(0),
+            rx: AtomicU64::new(0),
+            tr: Mutex::new(Trans {
+                last_change: created,
+                up_since: None,
+                down_count: 0,
+            }),
+        }
+    }
+
+    pub fn count_tx(&self) {
+        self.tx.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn count_rx(&self) {
+        self.rx.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The session moved `old` -> `new` at `at`.
+    pub fn on_transition(&self, old: BfdState, new: BfdState, at: Instant) {
+        let mut t = self.tr.lock().unwrap();
+        t.last_change = at;
+        t.up_since = (new == BfdState::Up).then_some(at);
+        if old == BfdState::Up && new != BfdState::Up {
+            t.down_count += 1;
+        }
+    }
+
+    pub fn snapshot(&self, now: Instant) -> StatsSnapshot {
+        let t = self.tr.lock().unwrap();
+        let secs = |a: Instant| now.saturating_duration_since(a).as_secs();
+        StatsSnapshot {
+            uptime_secs: t.up_since.map(secs),
+            last_change_secs: secs(t.last_change),
+            down_count: t.down_count,
+            tx: self.tx.load(Ordering::Relaxed),
+            rx: self.rx.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Where a session's Echo packets leave: the IP packet looped through the
@@ -197,6 +271,7 @@ impl Core {
             echo_only: self.unaffiliated(),
             tx_pdu_bytes: self.profile.padded_pdu_size.map_or(0, u32::from),
             kind: BfdSessionKind::Classical,
+            remote: self.timers.remote(),
         }
     }
 
@@ -579,6 +654,10 @@ fn now() -> Instant {
 }
 
 /// The session task. Ends when the manager drops its senders (or aborts it).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one task, one handle per channel"
+)]
 pub async fn run(
     key: SessionKey,
     mut core: Core,
@@ -587,6 +666,7 @@ pub async fn run(
     mut pkts: mpsc::Receiver<Packet>,
     mut cmds: mpsc::Receiver<Cmd>,
     status: watch::Sender<Status>,
+    counters: Arc<Stats>,
 ) {
     core.set_echo_path(echo.is_some());
     let mut last = core.status();
@@ -597,7 +677,10 @@ pub async fn run(
         let out = tokio::select! {
             p = pkts.recv() => match p {
                 Some(p) => match core.authenticate(now(), &p) {
-                    Ok(()) => core.on_packet(now(), &p, jitter_pct()),
+                    Ok(()) => {
+                        counters.count_rx();
+                        core.on_packet(now(), &p, jitter_pct())
+                    }
                     Err(e) => {
                         // Rate-limited: a wrong key is a packet every interval.
                         if last_warn.is_none_or(|t| now() - t >= AUTH_WARN_EVERY) {
@@ -641,6 +724,10 @@ pub async fn run(
                 }
             } else {
                 too_big = false;
+                // NoTx (echo-only) sends nothing: not a Control packet sent.
+                if !core.status().echo_only {
+                    counters.count_tx();
+                }
             }
         }
         if let (Some((_, payload)), Some(e)) = (core.echo_due(now()), echo.as_ref())
@@ -651,6 +738,7 @@ pub async fn run(
         let s = core.status();
         if s != last {
             if s.state != last.state {
+                counters.on_transition(last.state, s.state, now());
                 log_transition(&key, &s);
             }
             if s.echo_active != last.echo_active {
@@ -692,6 +780,42 @@ pub(crate) fn log_transition(key: &SessionKey, s: &Status) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_track_uptime_flaps_and_age() {
+        use BfdState::*;
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        let st = Stats::new(t0);
+        let snap = st.snapshot(at(5));
+        assert_eq!(
+            (snap.uptime_secs, snap.last_change_secs, snap.down_count),
+            (None, 5, 0)
+        );
+        st.on_transition(Down, Init, at(6));
+        st.on_transition(Init, Up, at(7));
+        let snap = st.snapshot(at(17));
+        assert_eq!(
+            (snap.uptime_secs, snap.last_change_secs, snap.down_count),
+            (Some(10), 10, 0)
+        );
+        st.on_transition(Up, Down, at(20));
+        assert_eq!(st.snapshot(at(21)).uptime_secs, None);
+        st.on_transition(Down, Up, at(30));
+        st.on_transition(Up, AdminDown, at(40));
+        st.on_transition(AdminDown, Up, at(50));
+        assert_eq!(
+            st.snapshot(at(52)).uptime_secs,
+            Some(2),
+            "restarts after a flap"
+        );
+        assert_eq!(st.snapshot(at(52)).down_count, 2);
+        st.count_tx();
+        st.count_rx();
+        st.count_rx();
+        let s = st.snapshot(at(52));
+        assert_eq!((s.tx, s.rx), (1, 2));
+    }
 
     /// Test keystore: the secret of a label is the label text itself.
     fn rk(p: &BfdProfile) -> Option<AuthKey> {

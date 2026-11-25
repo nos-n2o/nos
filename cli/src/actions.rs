@@ -173,6 +173,7 @@ pub enum LeaveChoice {
 /// `ask_leave` answers the commit/discard/leave-open question on `exit` with
 /// uncommitted changes — a stdin prompt in `main.rs`, a canned answer in
 /// tests.
+#[allow(clippy::too_many_lines, reason = "one arm per action")]
 pub async fn handle_action(
     action: Resolved,
     mode: Mode,
@@ -298,6 +299,7 @@ pub async fn handle_action(
         | Resolved::ShowRoute { .. }
         | Resolved::ShowFdb { .. }
         | Resolved::ShowInterface { .. }
+        | Resolved::ShowInterfaceBrief
         | Resolved::ShowPortAggregate { .. }
         | Resolved::ShowLacp { .. }
         | Resolved::ShowLldpNeighbors { .. }
@@ -358,6 +360,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowFdb { domain } => {
             show_fdb(watchdog_socket, &domain).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowInterfaceBrief => {
+            show_interface_brief(watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowInterface { name } => {
@@ -662,29 +668,52 @@ async fn show_fdb(watchdog_socket: &Path, domain: &str) {
 /// the watchdog broker, then queries it either for every interface
 /// (`name: None`) or one named interface.
 async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
-    let interface_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-interfaced is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {}", format::sanitize(&e.to_string()));
-                return;
-            }
-        };
+    let Some(interface_socket) = resolve_interfaced(watchdog_socket).await else {
+        return;
+    };
 
     match name {
         None => match interface_client::get_interfaces(&interface_socket).await {
-            Ok(statuses) => println!("{}", format::render_interface_statuses(&statuses)),
+            Ok(statuses) => println!("{}", format::render_interface_details(&statuses)),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
         Some(name) => match interface_client::get_interface(&interface_socket, name).await {
-            Ok(Some(status)) => println!("{}", format::render_interface_statuses(&[status])),
+            Ok(Some(status)) => println!("{}", format::render_interface_detail(&status)),
             Ok(None) => println!("interface '{name}' not found"),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
+    }
+}
+
+/// One watchdog resolution of `nos-interfaced`, reporting why on `None`.
+async fn resolve_interfaced(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
+    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => {
+            eprintln!("nos-interfaced is not running");
+            None
+        }
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            None
+        }
+    }
+}
+
+/// `show interface brief`: one resolution, then the interface and the
+/// port-aggregate queries.
+async fn show_interface_brief(watchdog_socket: &Path) {
+    let Some(socket) = resolve_interfaced(watchdog_socket).await else {
+        return;
+    };
+    let both = async {
+        let interfaces = interface_client::get_interfaces(&socket).await?;
+        let aggregates = interface_client::get_port_aggregates(&socket).await?;
+        Ok::<_, interface_client::InterfaceClientError>((interfaces, aggregates))
+    };
+    match both.await {
+        Ok((i, a)) => println!("{}", format::render_interface_brief(&i, &a)),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
