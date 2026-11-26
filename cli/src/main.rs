@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context as _;
 use clap::Parser;
 use nos_cli::actions::{
-    doc_for_blocking, handle_action, resolve_config_socket, subscribe_hostname_task, DocCache,
+    doc_for_blocking, handle_action_out, resolve_config_socket, subscribe_hostname_task, DocCache,
     LeaveChoice, Outcome,
 };
 use nos_cli::command::Command;
@@ -313,7 +313,14 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
         let prompt = NosPrompt::for_mode(hostname.clone(), &mode, unsaved.clone());
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
-                let action = session::resolve(&mode, Command::parse(&line));
+                let (cmd_line, pipe) = match nos_cli::pipe::split(&line) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        eprintln!("error: {}", nos_cli::format::sanitize(&e));
+                        continue;
+                    }
+                };
+                let action = session::resolve(&mode, Command::parse(cmd_line));
                 if action.is_accounted() {
                     // Best effort and off the command path.
                     let (sock, cmd) = (config_socket.clone(), line.trim().to_string());
@@ -321,13 +328,14 @@ async fn run(args: Args, ticket: Option<zeroize::Zeroizing<Vec<u8>>>) -> anyhow:
                         let _ = client::account_command(&sock, &cmd).await;
                     });
                 }
-                match handle_action(
+                match handle_action_out(
                     action,
                     mode,
                     &config_socket,
                     &watchdog_socket,
                     &doc_cache,
                     prompt_leave_choice,
+                    nos_cli::pipe::Output::of(pipe),
                 )
                 .await
                 {

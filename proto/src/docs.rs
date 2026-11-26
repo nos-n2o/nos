@@ -719,6 +719,8 @@ topics! {
     ShowConfigurationDiff,
     /// `Request::ListExternalUsers`
     ShowAaaUsers,
+    /// the `| json` output pipe of `show` commands
+    PipeJson,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

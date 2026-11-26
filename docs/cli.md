@@ -81,6 +81,15 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Units are decimal: `human_duration` (`45s`, `3m05s`, `1h02m`, `3d00h00m`), `human_bytes` (`512 B`, `1.5 KB`, `840.3 MB`, base 1000), `human_count` (`1.2M`), `human_us` (`250us`, `3.3ms`, `1.5s`).
 - Output words for enums are explicit `match`es (no `{:?}`), so a new variant fails to compile; a unit test forbids `{:?}` in `format.rs`.
 
+### `| json` on `show` commands (#1415)
+
+- `show <command> | json` prints the reply as pretty JSON instead of text; the line is split at its first `|` (`cli/src/pipe.rs`), and the word after it must be `json`. `show log` is never split (`match <text>` takes the rest of the line); a non-`show` line is untouched.
+- Supported: `show bfd sessions`, `show route <table> [<addr>]`, `show bgp routes`. Any other `show` line is refused with `error: this command has no JSON output` before any IPC; a view-driven command gains it when it prints through `emit` (set its arm in `Resolved::json_capable`).
+- Keys keep the declaration order of the REST body (the reply is serialized directly). An empty list is `[]`; `show route <table> <addr>` with no match is `null`.
+- `show route <table>` and `show bgp routes` stream one array, one element per line, a page at a time. `show bgp routes` prints one object keyed by instance name, each value such an array. If a walk fails midway the closing bracket is never written and the error goes to stderr, so a consumer gets invalid JSON, never silently truncated data.
+- DEL and U+0080-U+009F (a CSI on some terminals) are written as `\u00XX`: the JSON stays valid and lossless, and a daemon-supplied string cannot inject terminal escapes.
+- Tab offers `|` after a supported command, then `json`; `?` explains it (`Topic::PipeJson`).
+
 ### Adding a view (#1422)
 
 - A reply type that derives `nos_proto::view::View` (`#[view(...)]` on every field) prints through `cli/src/view.rs`, with no hand-written renderer: a list as a table of its `brief` fields, one object as a `header  value` block of every non-hidden field.

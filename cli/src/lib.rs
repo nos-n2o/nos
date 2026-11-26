@@ -17,6 +17,7 @@ pub mod log_client;
 pub mod login;
 pub mod ospf_client;
 pub mod ospfv3_client;
+pub mod pipe;
 pub mod rib_client;
 pub mod session;
 pub mod spec;
