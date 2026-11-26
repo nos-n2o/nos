@@ -372,6 +372,12 @@ impl Resolved {
             | Resolved::ShowPolicySource { .. }
             | Resolved::SetPolicySourceLine { .. }
             | Resolved::DeletePolicySourceLine { .. }
+            | Resolved::ClearAclCounters { .. }
+            | Resolved::ShowBgpNeighbor { .. }
+            | Resolved::ShowOspfInterface
+            | Resolved::ShowOspfRoute
+            | Resolved::ShowOspfv3Interface
+            | Resolved::ShowOspfv3Route
             | Resolved::Error(_) => false,
         }
     }
