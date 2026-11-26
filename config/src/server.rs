@@ -149,8 +149,11 @@ async fn dispatch_unmasked(
         Request::SaveStatus => Event::SaveStatus {
             unsaved: store.unsaved(),
         },
-        Request::Save { .. } => match store.save_to_disk().await {
-            Ok(()) => Event::Saved,
+        Request::Save { actor } => match store.save_to_disk().await {
+            Ok(()) => {
+                crate::accounting::record_command(&effective_actor(caller, actor), "save");
+                Event::Saved
+            }
             Err(e) => {
                 warn!(error = %e, "save to disk failed");
                 Event::Error(e.to_string())
@@ -227,7 +230,9 @@ async fn dispatch_unmasked(
         }
         Request::ConfirmCommit { actor } => match store.confirm_commit().await {
             Ok(committer) => {
-                info!(committer = ?committer, confirmer = ?effective_actor(caller, actor), "config confirm audit");
+                let who = effective_actor(caller, actor);
+                crate::accounting::record_command(&who, "confirm commit");
+                info!(committer = ?committer, confirmer = ?who, "config confirm audit");
                 Event::Committed {
                     warnings: Vec::new(),
                     unsaved: store.unsaved(),
@@ -239,6 +244,7 @@ async fn dispatch_unmasked(
             let who = effective_actor(caller, actor);
             match store.cancel_commit(&who).await {
                 Ok((committer, warnings)) => {
+                    crate::accounting::record_command(&who, "cancel commit");
                     info!(committer = ?committer, canceller = ?who, "config cancel audit");
                     Event::Committed {
                         warnings,
@@ -371,6 +377,7 @@ async fn history_reply(store: &ConfigStore) -> Event {
 async fn rollback_reply(store: &ConfigStore, index: u32, who: String) -> Event {
     match store.rollback(index, &who).await {
         Ok(warnings) => {
+            crate::accounting::record_command(&who, &format!("rollback {index}"));
             info!(index, actor = ?who, "config rollback audit");
             for w in &warnings {
                 warn!(warning = %w, "rollback warning");

@@ -147,6 +147,10 @@ fn fdb_table() -> FdbEvent {
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fake per daemon; grew past the limit with the ospf instance fakes"
+)]
 fn lab() -> Lab {
     shared().install("user", "admin");
     let dir = tempfile::tempdir().unwrap();
@@ -306,6 +310,7 @@ fn lab() -> Lab {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines, reason = "one line per show command")]
 async fn every_show_command_runs_against_its_daemon() {
     let lab = lab();
     let (mode, exited) = run(

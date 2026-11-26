@@ -396,6 +396,8 @@ impl Resolved {
             | Resolved::ShowOspfRoute
             | Resolved::ShowOspfv3Interface
             | Resolved::ShowOspfv3Route
+            | Resolved::ShowOspfInstance
+            | Resolved::ShowOspfv3Instance
             | Resolved::Error(_) => false,
         }
     }
