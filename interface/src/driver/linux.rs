@@ -11,7 +11,9 @@ use nos_proto::{
     loopback_table_name, InterfaceAddress, IpNet, PortAggregateMode, ServiceRef, StpPortState,
     VlanTag,
 };
-use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
+use rtnetlink::packet_route::address::{
+    AddressAttribute, AddressMessage, AddressProtocol, AddressScope,
+};
 use rtnetlink::packet_route::link::{
     BondMode, InfoBridgePort, InfoKind, InfoPortData, InfoPortKind, LinkAttribute, LinkFlags,
     LinkInfo, LinkMessage, LinkProtoInfoBridge,
@@ -23,6 +25,7 @@ use tracing::{debug, info, trace, warn};
 use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict};
 
 use super::links::{self, Delta, LinkHub};
+use super::ownership::{plan_addresses, ADDR_PROTO, LINK_ALIAS};
 use super::{
     bridge_registry, port_aggregate_registry, rib_client,
     steering::{self, Op, SteeringState, Wanted, STEERING_PRIO},
@@ -251,6 +254,20 @@ fn sub_link_mtu(over: Option<u32>, parent: Option<u32>) -> Option<u32> {
 /// Kernel device name for a loopback interface's routing table, mirroring
 /// `nos-ribd`'s `vrf<table_id>` VRF naming — the loopback's own config name
 /// (`loopback-<table>`) is never used as the kernel name, same reasoning.
+/// Whether the address carries NOS's `IFA_PROTO` marker.
+fn is_nos_address(msg: &AddressMessage) -> bool {
+    msg.attributes
+        .iter()
+        .any(|a| matches!(a, AddressAttribute::Protocol(p) if u8::from(*p) == ADDR_PROTO))
+}
+
+/// Whether the link carries NOS's `IFLA_IFALIAS` marker.
+fn is_nos_link(link: &LinkMessage) -> bool {
+    link.attributes
+        .iter()
+        .any(|a| matches!(a, LinkAttribute::IfAlias(s) if s == LINK_ALIAS))
+}
+
 fn loopback_ifname(table_id: u32) -> String {
     format!("lo{table_id}")
 }
@@ -820,11 +837,26 @@ impl LinuxInterfaceDriver {
             .ok_or_else(|| DriverError::LoopbackNotFound(name.to_string()))
     }
 
+    /// An address-add request stamped with the NOS `IFA_PROTO` marker.
+    fn stamped_add(&self, index: u32, net: IpNet) -> rtnetlink::AddressAddRequest {
+        let mut req = self
+            .handle
+            .address()
+            .add(index, net.addr(), net.prefix_len());
+        req.message_mut()
+            .attributes
+            .push(AddressAttribute::Protocol(AddressProtocol::Other(
+                ADDR_PROTO,
+            )));
+        req
+    }
+
     async fn reconcile_addresses(
         &self,
         interface: &str,
         index: u32,
         desired: &[InterfaceAddress],
+        all_owned: bool,
     ) -> Result<(), DriverError> {
         // ponytail: label is stored in config but never applied to the
         // kernel (no `ip addr ... label` call) — upgrade when a consumer
@@ -857,8 +889,14 @@ impl LinuxInterfaceDriver {
             observed.push((net, msg));
         }
 
-        let observed_keys: Vec<IpNet> = observed.iter().map(|(net, _)| *net).collect();
-        let (to_add, to_remove) = diff_addresses(&observed_keys, desired);
+        // Only addresses carrying our `IFA_PROTO` marker (or every address on
+        // a device NOS created itself) may be removed (#1515).
+        let marked: Vec<(IpNet, bool)> = observed
+            .iter()
+            .map(|(net, msg)| (*net, all_owned || is_nos_address(msg)))
+            .collect();
+        let plan = plan_addresses(&marked, desired);
+        let (to_add, to_remove, to_adopt) = (plan.to_add, plan.to_remove, plan.to_adopt);
 
         // Removes first: a prefix-length change on the same IPv6 address
         // ("add /48, remove /64") otherwise hits EEXIST on the add and the
@@ -876,14 +914,18 @@ impl LinuxInterfaceDriver {
                 }
             }
         }
+        for net in to_adopt {
+            match self.stamped_add(index, net).replace().execute().await {
+                Ok(()) => {
+                    info!(interface = %interface, address = %net, "adopted interface address");
+                }
+                Err(e) => {
+                    warn!(interface = %interface, address = %net, error = %e, "failed to adopt interface address");
+                }
+            }
+        }
         for net in to_add {
-            match self
-                .handle
-                .address()
-                .add(index, net.addr(), net.prefix_len())
-                .execute()
-                .await
-            {
+            match self.stamped_add(index, net).execute().await {
                 Ok(()) => info!(interface = %interface, address = %net, "added interface address"),
                 Err(e) => {
                     warn!(interface = %interface, address = %net, error = %e, "failed to add interface address");
@@ -1064,8 +1106,12 @@ impl LinuxInterfaceDriver {
                 continue;
             };
             if !desired_tags.contains(&tag) {
-                self.handle.link().del(link.header.index).execute().await?;
-                info!(interface = %interface, sub_interface = %name, "deleted vlan sub-interface");
+                if is_nos_link(&link) {
+                    self.handle.link().del(link.header.index).execute().await?;
+                    info!(interface = %interface, sub_interface = %name, "deleted vlan sub-interface");
+                } else {
+                    debug!(interface = %interface, sub_interface = %name, "foreign vlan sub-interface left alone");
+                }
             }
         }
 
@@ -1074,16 +1120,28 @@ impl LinuxInterfaceDriver {
             let sub_link = if let Some(link) = self.find_link(&subname).await? {
                 link
             } else {
-                self.handle
-                    .link()
-                    .add(LinkVlan::new(&subname, physical_index, *tag).build())
-                    .execute()
-                    .await?;
+                let mut msg = LinkVlan::new(&subname, physical_index, *tag).build();
+                msg.attributes
+                    .push(LinkAttribute::IfAlias(LINK_ALIAS.to_string()));
+                self.handle.link().add(msg).execute().await?;
                 info!(interface = %interface, sub_interface = %subname, tag, "created vlan sub-interface");
                 self.find_link(&subname)
                     .await?
                     .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(subname.clone()))?
             };
+
+            if !is_nos_link(&sub_link) {
+                self.handle
+                    .link()
+                    .set(
+                        LinkUnspec::new_with_index(sub_link.header.index)
+                            .append_extra_attribute(LinkAttribute::IfAlias(LINK_ALIAS.to_string()))
+                            .build(),
+                    )
+                    .execute()
+                    .await?;
+                info!(interface = %interface, sub_interface = %subname, "adopted vlan sub-interface");
+            }
 
             let over = match master {
                 TaggedMaster::Vrf { mtu, .. } => *mtu,
@@ -1125,7 +1183,7 @@ impl LinuxInterfaceDriver {
                     let vrf_ifname = self.vrf_lookup(routing_table.as_deref()).await;
                     self.reconcile_master_lookup(&subname, &sub_link, vrf_ifname, MasterKind::Vrf)
                         .await?;
-                    self.reconcile_addresses(&subname, sub_link.header.index, addresses)
+                    self.reconcile_addresses(&subname, sub_link.header.index, addresses, false)
                         .await?;
                 }
             }
@@ -1196,7 +1254,7 @@ impl LinuxInterfaceDriver {
         let tag0 = subinterfaces.iter().find(|s| s.tag == 0);
         let physical_addresses: &[InterfaceAddress] =
             tag0.map_or(&[][..], |s| s.addresses.as_slice());
-        self.reconcile_addresses(name, index, physical_addresses)
+        self.reconcile_addresses(name, index, physical_addresses, false)
             .await?;
 
         let vrf_ifname = self
@@ -1313,7 +1371,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             // (`desired.addresses`/`routing_table`) — it never has
             // `subinterfaces`/`switching_profile`/`port_aggregate`, so
             // there's nothing for `reconcile_physical_link` to share here.
-            self.reconcile_addresses(&desired.name, index, &desired.addresses)
+            self.reconcile_addresses(&desired.name, index, &desired.addresses, true)
                 .await?;
             let vrf_ifname = self.resolve_vrf_name(table_name).await;
             self.reconcile_master_lookup(&desired.name, &link, vrf_ifname, MasterKind::Vrf)
@@ -1367,7 +1425,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
                 debug!(interface = %name, device = %kernel_name, "loopback device not present, nothing to remove");
                 return Ok(());
             };
-            self.reconcile_addresses(&kernel_name, link.header.index, &[])
+            self.reconcile_addresses(&kernel_name, link.header.index, &[], true)
                 .await?;
             self.handle.link().del(link.header.index).execute().await?;
             info!(interface = %name, device = %kernel_name, "deleted loopback device");
@@ -1386,7 +1444,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             &StpPorts::default(),
         )
         .await?;
-        self.reconcile_addresses(name, link.header.index, &[])
+        self.reconcile_addresses(name, link.header.index, &[], false)
             .await?;
         self.reconcile_master(name, &link, None, MasterKind::Vrf)
             .await?;
@@ -1425,7 +1483,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
                 .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(ifname.clone()))?
         };
 
-        self.reconcile_addresses(&ifname, link.header.index, &desired.addresses)
+        self.reconcile_addresses(&ifname, link.header.index, &desired.addresses, true)
             .await?;
         let vrf_ifname = self.vrf_lookup(desired.routing_table.as_deref()).await;
         self.reconcile_master_lookup(&ifname, &link, vrf_ifname, MasterKind::Vrf)
@@ -1761,20 +1819,6 @@ fn random_local_mac() -> [u8; 6] {
     [(r[0] & 0xfc) | 0x02, r[1], r[2], r[3], r[4], r[5]]
 }
 
-fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpNet>) {
-    let to_add = desired
-        .iter()
-        .filter(|d| !observed.contains(d))
-        .copied()
-        .collect();
-    let to_remove = observed
-        .iter()
-        .filter(|o| !desired.contains(o))
-        .copied()
-        .collect();
-    (to_add, to_remove)
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1910,60 +1954,6 @@ mod tests {
     #[test]
     fn loopback_ifname_formats_from_id() {
         assert_eq!(loopback_ifname(100), "lo100");
-    }
-
-    #[test]
-    fn diff_addresses_computes_add_and_remove() {
-        let observed = vec![
-            "10.0.0.1/24".parse().unwrap(),
-            "10.0.0.9/24".parse().unwrap(),
-        ];
-        let desired = vec![
-            "10.0.0.1/24".parse().unwrap(),
-            "10.0.0.2/24".parse().unwrap(),
-        ];
-        let (to_add, to_remove) = diff_addresses(&observed, &desired);
-        assert_eq!(to_add, vec!["10.0.0.2/24".parse().unwrap()]);
-        assert_eq!(to_remove, vec!["10.0.0.9/24".parse().unwrap()]);
-    }
-
-    #[test]
-    fn diff_addresses_prefix_length_change_is_remove_plus_add() {
-        // #655: same host address, new prefix length — both sides non-empty,
-        // so `reconcile_addresses` must remove before it adds.
-        for (old, new) in [
-            ("2001:db8::1/64", "2001:db8::1/48"),
-            ("10.0.0.1/24", "10.0.0.1/16"),
-        ] {
-            let (old, new): (nos_proto::IpNet, nos_proto::IpNet) =
-                (old.parse().unwrap(), new.parse().unwrap());
-            let (to_add, to_remove) = diff_addresses(&[old], &[new]);
-            assert_eq!((to_add, to_remove), (vec![new], vec![old]));
-        }
-    }
-
-    #[test]
-    fn diff_addresses_no_change_when_equal() {
-        let addrs = vec!["10.0.0.1/24".parse().unwrap()];
-        let (to_add, to_remove) = diff_addresses(&addrs, &addrs);
-        assert_eq!(to_add, [] as [nos_proto::IpNet; 0]);
-        assert_eq!(to_remove, [] as [nos_proto::IpNet; 0]);
-    }
-
-    #[test]
-    fn diff_addresses_empty_desired_removes_everything() {
-        let observed = vec!["10.0.0.1/24".parse().unwrap()];
-        let (to_add, to_remove) = diff_addresses(&observed, &[]);
-        assert_eq!(to_add, [] as [nos_proto::IpNet; 0]);
-        assert_eq!(to_remove, observed);
-    }
-
-    #[test]
-    fn diff_addresses_empty_observed_adds_everything() {
-        let desired = vec!["10.0.0.1/24".parse().unwrap()];
-        let (to_add, to_remove) = diff_addresses(&[], &desired);
-        assert_eq!(to_add, desired);
-        assert_eq!(to_remove, [] as [nos_proto::IpNet; 0]);
     }
 
     /// Against the real kernel: needs `CAP_NET_ADMIN` in the current netns and
