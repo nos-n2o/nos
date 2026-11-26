@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use nos_proto::{BgpEvent, BgpRequest, ServiceRef, StpEvent, StpRequest};
+use nos_proto::{AclEvent, AclRequest, BgpEvent, BgpRequest, ServiceRef, StpEvent, StpRequest};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -263,5 +263,88 @@ pub async fn stp_clear_err_disabled(
         other @ (StpEvent::Summary(_) | StpEvent::Mcheck { .. }) => {
             Err(unexpected("nos-stpd", &other))
         }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AclClearResult {
+    /// (device, direction) attachments whose counters restarted at 0.
+    cleared: u32,
+}
+
+async fn clear_acl(d: &Daemons, name: Option<String>) -> ApiResult<Json<AclClearResult>> {
+    match d
+        .service(
+            ServiceRef::Acl,
+            AclRequest::ClearCounters { name: name.clone() },
+        )
+        .await?
+    {
+        AclEvent::Cleared { found, attachments } => acl_cleared(found, attachments, name),
+        other @ (AclEvent::Acls(_) | AclEvent::Ack | AclEvent::Flowspec(_)) => {
+            Err(unexpected("nos-acld", &other))
+        }
+    }
+}
+
+fn acl_cleared(
+    found: bool,
+    attachments: u32,
+    name: Option<String>,
+) -> ApiResult<Json<AclClearResult>> {
+    if found {
+        Ok(Json(AclClearResult {
+            cleared: attachments,
+        }))
+    } else {
+        Err(ApiError::NotFound(format!(
+            "no acl '{}'",
+            name.unwrap_or_default()
+        )))
+    }
+}
+
+/// `clear acl counters`.
+#[utoipa::path(
+    post, path = "/v1/acl/counters/clear", tag = "clear",
+    summary = "Reset the counters of every ACL",
+    responses(
+        (status = 200, body = AclClearResult),
+        (status = 503, body = ErrorBody, description = "nos-acld is not running")
+    )
+)]
+pub async fn acl_clear_all(State(d): State<Daemons>) -> ApiResult<Json<AclClearResult>> {
+    clear_acl(&d, None).await
+}
+
+/// `clear acl <name> counters`.
+#[utoipa::path(
+    post, path = "/v1/acl/{name}/counters/clear", tag = "clear",
+    summary = "Reset the counters of one ACL",
+    params(("name" = String, Path, description = "ACL name")),
+    responses(
+        (status = 200, body = AclClearResult),
+        (status = 404, body = ErrorBody, description = "no such ACL"),
+        (status = 503, body = ErrorBody, description = "nos-acld is not running")
+    )
+)]
+pub async fn acl_clear_one(
+    State(d): State<Daemons>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<AclClearResult>> {
+    clear_acl(&d, Some(name)).await
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_acl_is_a_404_and_a_known_one_reports_its_attachments() {
+        assert_eq!(acl_cleared(true, 2, None).unwrap().0.cleared, 2);
+        assert!(matches!(
+            acl_cleared(false, 0, Some("X".into())),
+            Err(ApiError::NotFound(m)) if m == "no acl 'X'"
+        ));
     }
 }

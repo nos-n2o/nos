@@ -55,6 +55,10 @@ pub enum Command {
     ShowLldpStatistics,
     /// `show version` — local, valid in any mode.
     ShowVersion,
+    /// `clear acl [<name>] counters` (#1419).
+    ClearAclCounters {
+        name: Option<String>,
+    },
     /// `show acl` (every ACL) or `show acl <name>` (one): counters included.
     ShowAcl {
         name: Option<String>,
@@ -366,6 +370,20 @@ mod tests {
             Command::parse("clear spanning-tree detected-protocols interface eth1"),
             Command::ClearStpMcheck {
                 interface: Some("eth1".into())
+            }
+        );
+    }
+
+    #[test]
+    fn clear_acl_counters() {
+        assert_eq!(
+            Command::parse("clear acl counters"),
+            Command::ClearAclCounters { name: None }
+        );
+        assert_eq!(
+            Command::parse("clear acl EDGE counters"),
+            Command::ClearAclCounters {
+                name: Some("EDGE".into())
             }
         );
     }

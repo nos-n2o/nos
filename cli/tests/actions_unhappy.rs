@@ -557,6 +557,8 @@ const QUERIES: &[&str] = &[
     "clear spanning-tree detected-protocols interface none",
     "clear spanning-tree err-disabled eth0",
     "clear spanning-tree err-disabled eth1",
+    "clear acl counters",
+    "clear acl EDGE counters",
     "clear bgp b1 192.0.2.2",
     "clear bgp b1 192.0.2.2 soft-in",
     "clear bgp b1 192.0.2.3",

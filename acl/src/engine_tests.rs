@@ -413,3 +413,51 @@ fn a_chain_adopted_from_a_previous_run_is_not_attributed() {
     e.sync(&plan(&compiled(1), &[]), &links(&[link("eth0", 4, None)]));
     assert_eq!(e.show(None)[0].attached.len(), 0);
 }
+
+#[test]
+fn clear_reinstalls_on_the_idle_chain_and_switches() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None), link("eth1", 5, None)]);
+    e.sync(
+        &plan(&compiled(1), &[(eth("eth0"), In), (eth("eth1"), Out)]),
+        &l,
+    );
+    take(&mut e);
+    assert_eq!(e.clear_counters(Some("NOPE")), (false, 0));
+    assert_eq!(take(&mut e), NONE);
+
+    assert_eq!(e.clear_counters(Some("E")), (true, 2));
+    assert_eq!(
+        take(&mut e),
+        [
+            Call::Install(4, In, B),
+            Call::Switch(4, In, B),
+            Call::Flush(4, In, A),
+            Call::Install(5, Out, B),
+            Call::Switch(5, Out, B),
+            Call::Flush(5, Out, A),
+        ]
+    );
+    // No name: every ACL again, back on chain A.
+    assert_eq!(e.clear_counters(None), (true, 2));
+    assert_eq!(e.live()[&("eth0".to_string(), In)], A);
+}
+
+#[test]
+fn clearing_an_unattached_acl_is_found_with_no_attachments() {
+    let mut e = Engine::new(NoopDriver::default());
+    e.sync(&plan(&compiled(1), &[]), &links(&[]));
+    take(&mut e);
+    assert_eq!(e.clear_counters(Some("E")), (true, 0));
+    assert_eq!(take(&mut e), NONE);
+}
+
+#[test]
+fn a_refused_clear_keeps_the_live_chain_and_is_not_counted() {
+    let mut e = Engine::new(NoopDriver::default());
+    let l = links(&[link("eth0", 4, None)]);
+    e.sync(&plan(&compiled(1), &[(eth("eth0"), In)]), &l);
+    e.driver_mut().fail_install = true;
+    assert_eq!(e.clear_counters(None), (true, 0));
+    assert_eq!(e.live()[&("eth0".to_string(), In)], A);
+}

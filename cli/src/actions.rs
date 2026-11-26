@@ -310,6 +310,7 @@ pub async fn handle_action(
         | Resolved::ShowLldpNeighbors { .. }
         | Resolved::ShowLldpStatistics
         | Resolved::ShowAcl { .. }
+        | Resolved::ClearAclCounters { .. }
         | Resolved::ShowSpanningTree
         | Resolved::ShowSpanningTreeInstance { .. }
         | Resolved::ShowSpanningTreeMstConfig
@@ -395,6 +396,10 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowLldpStatistics => {
             show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ClearAclCounters { name } => {
+            clear_acl_counters(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowAcl { name } => {
@@ -1044,6 +1049,44 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
                     format::render_stp_detail(&s, instance, domain.as_deref()),
             }
         ),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+/// Sentence for a `ClearCounters` reply (pure; the name is untrusted).
+fn clear_acl_message(name: Option<&str>, found: bool, attachments: u32) -> String {
+    match (name, found, attachments) {
+        (Some(n), false, _) => format!("acl '{}' not found", format::sanitize_line(n)),
+        (Some(n), true, 0) => {
+            format!(
+                "acl '{}' is not attached, its counters are 0",
+                format::sanitize_line(n)
+            )
+        }
+        (Some(n), true, k) => format!(
+            "acl '{}': cleared the counters on {k} attachment(s)",
+            format::sanitize_line(n)
+        ),
+        (None, _, k) => format!("cleared the counters of {k} acl attachment(s)"),
+    }
+}
+
+async fn clear_acl_counters(watchdog_socket: &Path, name: Option<&str>) {
+    let acl_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-acld is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+        };
+    match acl_client::clear_counters(&acl_socket, name).await {
+        Ok((false, _)) => eprintln!("error: {}", clear_acl_message(name, false, 0)),
+        Ok((found, n)) => println!("{}", clear_acl_message(name, found, n)),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
@@ -2541,5 +2584,28 @@ mod lldp_filter_tests {
         let all = vec![n("eth0"), n("eth1"), n("eth0\nFORGED")];
         assert_eq!(filter_lldp_interface(all.clone(), "eth0").len(), 1);
         assert_eq!(filter_lldp_interface(all, "eth9").len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod clear_acl_tests {
+    use super::clear_acl_message as m;
+
+    #[test]
+    fn the_four_replies_and_a_forged_name() {
+        assert_eq!(
+            m(None, true, 3),
+            "cleared the counters of 3 acl attachment(s)"
+        );
+        assert_eq!(
+            m(Some("E"), true, 2),
+            "acl 'E': cleared the counters on 2 attachment(s)"
+        );
+        assert_eq!(
+            m(Some("E"), true, 0),
+            "acl 'E' is not attached, its counters are 0"
+        );
+        assert_eq!(m(Some("E"), false, 0), "acl 'E' not found");
+        assert!(!m(Some("a\x1b[2Jb"), false, 0).contains('\x1b'));
     }
 }

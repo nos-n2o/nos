@@ -686,7 +686,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      attached, its default action and, per rule, the packets and bytes it \
                      matched (summed over every device it is attached to). Rules the optimiser \
                      dropped (shadowed by an earlier rule, or trailing and equal to the default) \
-                     are marked and stay at 0. Counters reset when the ACL is edited.",
+                     are marked and stay at 0. 'clear acl counters' resets them.",
         },
         Always,
         Command::ShowAcl { name: None }),
@@ -697,6 +697,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         |name| Command::ShowAcl {
+            name: Some(name.to_string()),
+        }),
+    cmd!(["clear" "acl" "counters"],
+        Doc::Local {
+            summary: "Reset the counters of every access list.",
+            detail: "Asks nos-acld to reinstall every attached ACL on its idle chain and switch, \
+                     so the kernel counters restart at 0 without a moment unfiltered. Flowspec \
+                     rule counters are not touched.",
+        },
+        Always,
+        Command::ClearAclCounters { name: None }),
+    cmd!(["clear" "acl" (name: AclName) "counters"],
+        Doc::Local {
+            summary: "Reset the counters of one access list.",
+            detail: "Same as clear acl counters, for the named ACL only. Reported as an error \
+                     if no such ACL exists; an ACL attached nowhere has no counters to reset.",
+        },
+        Always,
+        |name| Command::ClearAclCounters {
             name: Some(name.to_string()),
         }),
     cmd!(["show" "version"],

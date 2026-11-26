@@ -131,6 +131,37 @@ async fn check_counters(a: &Router) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `clear acl counters` (#1419): the counters restart, the drop never lapses.
+async fn check_clear(a: &Router) -> anyhow::Result<()> {
+    let bytes = |acl: &serde_json::Value| rule_of(acl, "d-bgp").and_then(|r| r["bytes"].as_u64());
+    let acl = wait_d_bgp_counted(a).await?;
+    let before = bytes(&acl).ok_or_else(|| anyhow::anyhow!("no d-bgp bytes: {acl}"))?;
+    let (cleared, est) = (
+        a.count("acl counters cleared acl=EDGE"),
+        a.count(ESTABLISHED),
+    );
+    let body = a
+        .rest_expect(Method::POST, "/v1/acl/EDGE/counters/clear", None, 200)
+        .await?;
+    anyhow::ensure!(body.contains("\"cleared\":1"), "clear reply: {body}");
+    a.wait_new("acl counters cleared acl=EDGE", cleared, 30)
+        .await?;
+    let acl = a
+        .rest_expect(Method::GET, "/v1/acl/EDGE", None, 200)
+        .await?;
+    let acl: serde_json::Value = serde_json::from_str(&acl)?;
+    let after = bytes(&acl).ok_or_else(|| anyhow::anyhow!("no d-bgp bytes: {acl}"))?;
+    anyhow::ensure!(after < before, "counters not reset: {before} -> {after}");
+    a.assert_quiet(ESTABLISHED, est, 10).await?;
+    let (status, _) = a
+        .rest(Method::POST, "/v1/acl/NOPE/counters/clear", None)
+        .await?;
+    anyhow::ensure!(status == 404, "clear unknown acl: {status}");
+    a.rest_expect(Method::POST, "/v1/acl/counters/clear", None, 200)
+        .await?;
+    Ok(())
+}
+
 /// Writes router-a's flowspec file: instance `e2e` on `eth0`, `rules`.
 async fn write_flowspec(dock: &Dock, a: &Router, rules: serde_json::Value) -> anyhow::Result<()> {
     let set = serde_json::json!({ "instance": "e2e", "devices": ["eth0"], "rules": rules });
@@ -259,6 +290,7 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(COMPILED_2, compiled, 30).await?;
     a.wait_new(ENDED, ended, 60).await?;
     check_counters(a).await?;
+    check_clear(a).await?;
 
     log("step 2a (#663): nos-acld stops and restarts: the drop keeps holding");
     let (started, detached, est, compiled) = (
