@@ -723,6 +723,10 @@ topics! {
     PipeJson,
     /// the `| display set` output pipe of `show config` / `show this`
     DisplaySet,
+    /// `TacacsServer.authentication`
+    TacacsAuthentication,
+    /// `TacacsServer.single_connect`
+    TacacsSingleConnect,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

@@ -1966,6 +1966,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the seconds to wait for one exchange.",
             "1 to 30. `delete` restores 5.",
         ),
+        Topic::TacacsAuthentication => (
+            "Choose how a TACACS+ server checks the password.",
+            "`pap` (default): the password rides in the first packet. `ascii`: the server prompts for the user name and password and the login answers each prompt (up to 6 rounds); use it for servers that only offer ASCII login.",
+        ),
+        Topic::TacacsSingleConnect => (
+            "Reuse one TCP connection to a TACACS+ server.",
+            "On: every login and accounting exchange runs over one connection when the server agrees (RFC 8907 section 4.5); it is reopened after an error and dropped after 60 idle seconds. A server that does not agree is used one connection per exchange. Off by default.",
+        ),
         Topic::AaaLoginOrder => (
             "Set the order login backends are tried in.",
             "`local`, `radius` and `tacacs`. Empty means `local` only. A RADIUS reject never falls through to the next backend; it does when no server answered. After `local`, the next backend is tried only for a name with no local user.",

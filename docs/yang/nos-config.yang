@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-05 {
+  revision 2026-12-06 {
     description "Generated.";
   }
 
@@ -1984,6 +1984,17 @@ module nos-config {
       leaf timeout_secs {
         type uint8;
         description "Set the seconds to wait for one exchange.";
+      }
+      leaf authentication {
+        type enumeration {
+          enum "Pap";
+          enum "Ascii";
+        }
+        description "Choose how a TACACS+ server checks the password.";
+      }
+      leaf single_connect {
+        type boolean;
+        description "Reuse one TCP connection to a TACACS+ server.";
       }
     }
     leaf-list login_order {
