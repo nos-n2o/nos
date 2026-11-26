@@ -23,6 +23,8 @@ pub enum FieldId {
     BgpLocalPref,
     /// `this.bgp.med` (RFC 4271 `MULTI_EXIT_DISC`).
     BgpMed,
+    /// `this.bgp.tag`: a local route tag, never sent to a peer (absent = 0).
+    BgpTag,
     /// `this.bgp.next_hop` (RFC 4271 `NEXT_HOP`).
     BgpNextHop,
     /// First AS of the effective path, read-only (see `Op::OptIntCmp`).
@@ -136,6 +138,14 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         &["bgp", "local_pref"],
         FieldInfo {
             id: FieldId::BgpLocalPref,
+            ty: FieldType::Int,
+            mutable: true,
+        },
+    ),
+    (
+        &["bgp", "tag"],
+        FieldInfo {
+            id: FieldId::BgpTag,
             ty: FieldType::Int,
             mutable: true,
         },

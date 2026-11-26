@@ -956,6 +956,7 @@ fn verdict(policy: &nos_rpl::CompiledPolicy, prefix: &str, communities: &[u32]) 
     let input = nos_rpl::Input {
         prefix: prefix.parse().unwrap(),
         bgp: nos_rpl::BgpInput {
+            tag: 0,
             origin: nos_rpl::Origin::Igp,
             as_path: &[65001, 65002],
             as_path_segments: &[],

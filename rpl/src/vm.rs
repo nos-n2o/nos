@@ -409,6 +409,8 @@ pub struct BgpInput<'a> {
     pub local_pref: u32,
     /// `MULTI_EXIT_DISC`, if present (RFC 4271 §5.1.4).
     pub med: Option<u32>,
+    /// Local route tag (`this.bgp.tag`), 0 when untagged.
+    pub tag: u32,
     /// `NEXT_HOP`, if known (RFC 4271 §5.1.3).
     pub next_hop: Option<IpAddr>,
     /// Whether the route was learned over IBGP.
@@ -480,6 +482,8 @@ pub enum Verdict {
         local_pref: u32,
         /// Final MED.
         med: Option<u32>,
+        /// Final local route tag (`this.bgp.tag`); local only, never sent.
+        tag: u32,
         /// Final standard communities.
         communities: Vec<u32>,
         /// Final extended communities.
@@ -515,6 +519,10 @@ pub const MAX_CODE_OPS: usize = 65_536;
 /// `CommunityAdd`/`Remove`/`Clear` needs to hand back an owned `Vec` through
 /// `Verdict`, but `Cow::to_mut()` only clones on a script's first actual
 /// write, and `Reject` never pays for it at all.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat op-dispatch loop; splitting it would only move the arms"
+)]
 pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     debug_assert!(
         segments_match_flat(input),
@@ -524,6 +532,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut sp = 0usize;
     let mut cur_local_pref = input.bgp.local_pref;
     let mut cur_med = input.bgp.med;
+    let mut cur_tag = input.bgp.tag;
     let mut lists = Lists {
         std: Cow::Borrowed(input.bgp.communities),
         ext: Cow::Borrowed(input.bgp.extended_communities),
@@ -550,7 +559,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     loop {
         let op = &policy.code[pc];
         match op {
-            Op::LoadField(id) => push!(load_field(*id, input, cur_origin, cur_local_pref)),
+            Op::LoadField(id) => push!(load_field(*id, input, cur_origin, cur_local_pref, cur_tag)),
             Op::LoadConstInt(n) => push!(Value::Int(*n)),
             Op::LoadConstPrefix(p) => push!(Value::Prefix(*p)),
             Op::LoadConstIp(a) => push!(Value::Ip(*a)),
@@ -639,11 +648,11 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::SetField(id) => {
                 let v = as_int(pop!());
-                set_field(*id, v, &mut cur_local_pref, &mut cur_med);
+                set_field(*id, v, &mut cur_local_pref, &mut cur_med, &mut cur_tag);
             }
             Op::AddField(id) => {
                 let d = as_int(pop!());
-                add_field(*id, d, &mut cur_local_pref, &mut cur_med);
+                add_field(*id, d, &mut cur_local_pref, &mut cur_med, &mut cur_tag);
             }
             Op::CommunityAdd(id, val) => lists.add(*id, val),
             Op::CommunityRemove(id, val) => lists.remove(*id, val),
@@ -653,6 +662,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 return Verdict::Accept {
                     local_pref: cur_local_pref,
                     med: cur_med,
+                    tag: cur_tag,
                     communities: lists.std.into_owned(),
                     extended_communities: lists.ext.into_owned(),
                     large_communities: lists.large.into_owned(),
@@ -821,12 +831,13 @@ fn field_len(id: FieldId, input: &Input, lists: &Lists) -> i64 {
 }
 
 /// `Op::LoadField`, split out of `run` for length.
-fn load_field(id: FieldId, input: &Input, origin: Origin, local_pref: u32) -> Value {
+fn load_field(id: FieldId, input: &Input, origin: Origin, local_pref: u32, tag: u32) -> Value {
     match id {
         FieldId::Prefix => Value::Prefix(input.prefix),
         FieldId::BgpOrigin => Value::Enum(origin as u8),
         FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
         FieldId::BgpLocalPref => Value::Int(i64::from(local_pref)),
+        FieldId::BgpTag => Value::Int(i64::from(tag)),
         FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
         FieldId::BgpValidationState => Value::Enum(input.bgp.validation_state as u8),
         _ => unreachable!("check.rs rejects LoadField for {id:?}"),
@@ -976,16 +987,17 @@ fn origin_from(v: Value) -> Origin {
 }
 
 /// `Op::SetField`, split out of `run` for length.
-fn set_field(id: FieldId, v: i64, local_pref: &mut u32, med: &mut Option<u32>) {
+fn set_field(id: FieldId, v: i64, local_pref: &mut u32, med: &mut Option<u32>, tag: &mut u32) {
     match id {
         FieldId::BgpLocalPref => *local_pref = to_u32_saturating(v),
         FieldId::BgpMed => *med = Some(to_u32_saturating(v)),
+        FieldId::BgpTag => *tag = to_u32_saturating(v),
         _ => unreachable!("check.rs rejects SetField for {id:?}"),
     }
 }
 
 /// `Op::AddField`, split out of `run` for length.
-fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>) {
+fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>, tag: &mut u32) {
     match id {
         FieldId::BgpLocalPref => {
             *local_pref = to_u32_saturating(i64::from(*local_pref).saturating_add(d));
@@ -995,6 +1007,7 @@ fn add_field(id: FieldId, d: i64, local_pref: &mut u32, med: &mut Option<u32>) {
                 i64::from(med.unwrap_or(0)).saturating_add(d),
             ));
         }
+        FieldId::BgpTag => *tag = to_u32_saturating(i64::from(*tag).saturating_add(d)),
         _ => unreachable!("check.rs rejects AddField for {id:?}"),
     }
 }

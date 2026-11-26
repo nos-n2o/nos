@@ -111,6 +111,7 @@ mod tests {
         let input = nos_rpl::Input {
             prefix: "10.0.0.0/8".parse().unwrap(),
             bgp: nos_rpl::BgpInput {
+                tag: 0,
                 origin: nos_rpl::Origin::Igp,
                 as_path: &[],
                 as_path_segments: &[],

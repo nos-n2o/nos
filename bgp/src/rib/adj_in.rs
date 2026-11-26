@@ -43,6 +43,7 @@ pub(super) fn evpn_rejected(
     let input = nos_rpl::Input {
         prefix,
         bgp: nos_rpl::BgpInput {
+            tag: 0,
             origin: nos_rpl::Origin::Igp,
             // EVPN routes carry no AS_PATH here: empty segments and path_length 0 are correct (#868); if one ever does, fill it via `policy_segments`.
             as_path: &[],

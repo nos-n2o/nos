@@ -1196,6 +1196,7 @@ mod tests {
         Input {
             prefix,
             bgp: BgpInput {
+                tag: 0,
                 origin: Origin::Igp,
                 as_path,
                 as_path_segments: &[],
@@ -1229,6 +1230,7 @@ mod tests {
         Input {
             prefix,
             bgp: BgpInput {
+                tag: 0,
                 origin: Origin::Igp,
                 as_path: &[],
                 as_path_segments: &[],
@@ -1411,6 +1413,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 200,
                 med: None,
                 communities: Vec::new(),
@@ -1480,6 +1483,45 @@ mod tests {
             let lp_run = run(vec![Op::LoadConstInt(d), Op::AddField(lp), Op::Accept]);
             let med_run = run(vec![Op::LoadConstInt(d), Op::AddField(med), Op::Accept]);
             assert_eq!((lp_run.0, med_run.1), (want, Some(want)));
+        }
+    }
+
+    #[test]
+    fn bgp_tag_reads_sets_and_saturates() {
+        let (prefix, path, cluster) = default_input("10.0.0.0/8");
+        let tag_of = |src: &str, start: u32| {
+            let mut input = make_input(prefix, &path, 100, None, &cluster);
+            input.bgp.tag = start;
+            match crate::vm::run(&compile_src(src), &input) {
+                Verdict::Accept { tag, .. } => tag,
+                Verdict::Reject => u32::MAX - 1,
+            }
+        };
+        assert_eq!(tag_of("accept\n", 0), 0);
+        assert_eq!(tag_of("accept\n", 7), 7);
+        assert_eq!(tag_of("set this.bgp.tag = 42\naccept\n", 0), 42);
+        assert_eq!(tag_of("set this.bgp.tag += 5\naccept\n", 7), 12);
+        assert_eq!(tag_of("set this.bgp.tag -= 9\naccept\n", 7), 0);
+        assert_eq!(
+            tag_of("set this.bgp.tag += 4294967295\naccept\n", 7),
+            u32::MAX
+        );
+        // A read after a `set` sees the new value.
+        let src = "set this.bgp.tag = 3\nif this.bgp.tag == 3:\n    set this.bgp.tag = 4\naccept\n";
+        assert_eq!(tag_of(src, 0), 4);
+        let src = "if this.bgp.tag == 7:\n    reject\naccept\n";
+        assert_eq!(tag_of(src, 7), u32::MAX - 1);
+    }
+
+    #[test]
+    fn bgp_tag_compile_errors() {
+        for src in [
+            "set this.bgp.tag = 4294967296\naccept\n",
+            "set this.bgp.tag = 10.0.0.1\naccept\n",
+            "set this.bgp.tag = \"x\"\naccept\n",
+            "this.bgp.tag.add(1)\naccept\n",
+        ] {
+            assert!(crate::compile(src, &Symbols::EMPTY).is_err(), "{src}");
         }
     }
 
@@ -1631,6 +1673,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 150,
                 med: None,
                 communities: Vec::new(),
@@ -1652,6 +1695,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: Some(50),
                 communities: Vec::new(),
@@ -1682,6 +1726,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -1701,6 +1746,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -1734,6 +1780,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &absent),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: vec![(65000 << 16) | 200],
@@ -1754,6 +1801,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: vec![(65000 << 16) | 100],
@@ -1777,6 +1825,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: vec![(65000 << 16) | 200],
@@ -1894,6 +1943,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -1916,6 +1966,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -1936,6 +1987,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -2043,6 +2095,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &matches_neither),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: vec![(65000 << 16) | 999],
@@ -2072,6 +2125,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: vec![(65000 << 16) | 100, (65000 << 16) | 200],
@@ -2120,6 +2174,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input2),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -2158,6 +2213,7 @@ mod tests {
         assert_eq!(
             vm::run(&policy, &input2),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),

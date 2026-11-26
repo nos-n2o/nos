@@ -4683,6 +4683,7 @@ fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy, ipv4: bo
             None => IpNet::V6(prefix),
         },
         bgp: nos_rpl::BgpInput {
+            tag: 0,
             origin: nos_rpl::Origin::Igp,
             as_path: &[],
             as_path_segments: &[],

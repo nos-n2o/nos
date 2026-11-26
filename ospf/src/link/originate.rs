@@ -530,6 +530,7 @@ pub(super) fn passes_redistribute_policy(prefix: Ipv4Net, policy: &CompiledPolic
     let input = nos_rpl::Input {
         prefix: IpNet::V4(prefix),
         bgp: nos_rpl::BgpInput {
+            tag: 0,
             origin: nos_rpl::Origin::Igp,
             as_path: &[],
             as_path_segments: &[],

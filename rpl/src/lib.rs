@@ -357,6 +357,7 @@ mod tests {
         let input = Input {
             prefix: "10.0.0.0/8".parse().unwrap(),
             bgp: BgpInput {
+                tag: 0,
                 origin: Origin::Igp,
                 as_path: &[],
                 as_path_segments: &[],
@@ -382,6 +383,7 @@ mod tests {
         assert_eq!(
             vm::run(&ACCEPT_ALL, &input),
             Verdict::Accept {
+                tag: 0,
                 local_pref: 100,
                 med: None,
                 communities: Vec::new(),
@@ -397,6 +399,7 @@ mod tests {
         let input = Input {
             prefix: "10.0.0.0/8".parse().unwrap(),
             bgp: BgpInput {
+                tag: 0,
                 origin: Origin::Igp,
                 as_path: &[],
                 as_path_segments: &[],
