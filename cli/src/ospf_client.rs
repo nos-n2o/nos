@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    InterfaceSummary, IpcCodec, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Role,
-    RouteSummary, SrSummary,
+    InstanceSummary, InterfaceSummary, IpcCodec, LsaSummary, NeighborSummary, OspfEvent,
+    OspfRequest, Role, RouteSummary, SrSummary,
 };
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -103,6 +103,18 @@ pub async fn get_segment_routing(ospf_socket: &Path) -> Result<SrSummary, OspfCl
         Some(Ok(_)) => Err(OspfClientError::UnexpectedReply(
             "reply to GetSegmentRouting",
         )),
+        Some(Err(e)) => Err(OspfClientError::Io(e)),
+        None => Err(OspfClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches the instance summary (#1439).
+pub async fn get_instance(ospf_socket: &Path) -> Result<InstanceSummary, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
+    writer.send(OspfRequest::GetInstance).await?;
+    match reader.next().await {
+        Some(Ok(OspfEvent::Instance(i))) => Ok(i),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetInstance")),
         Some(Err(e)) => Err(OspfClientError::Io(e)),
         None => Err(OspfClientError::ConnectionClosed),
     }

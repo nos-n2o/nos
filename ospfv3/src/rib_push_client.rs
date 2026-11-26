@@ -113,7 +113,10 @@ async fn run(
         let (mut reader, write_half) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(write_half, IpcCodec::<RibRequest>::default());
         let mut eof_buf = [0u8; 1];
+        let started = std::time::Instant::now();
         let routes = compute_routes(&links).await;
+        // The initial snapshot is an SPF run (counted, `note_spf`).
+        links.note_spf(started.elapsed());
         if !push(
             &mut writer,
             &instance,
@@ -133,8 +136,9 @@ async fn run(
 
         let changed = links.route_changed();
         loop {
+            let mut by_change = false;
             tokio::select! {
-                stop = wait_for_change(&changed, &mut shutdown) => if stop { return },
+                stop = wait_for_change(&changed, &mut shutdown, &mut by_change) => if stop { return },
                 _ = reader.read(&mut eof_buf) => {
                     warn!(table = %table, "nos-ribd closed the ospfv3 push connection, reconnecting");
                     break;
@@ -151,7 +155,12 @@ async fn run(
                 .await;
                 break;
             }
+            let started = std::time::Instant::now();
             let new_routes = compute_routes(&links).await;
+            // Only a change-triggered run is an SPF run; the poll tick is not.
+            if by_change {
+                links.note_spf(started.elapsed());
+            }
             let updates = diff_routes(&last_sent, &new_routes);
             if !push(&mut writer, &instance, updates, chunk).await {
                 warn!(table = %table, "write failure sending ospfv3 route update, reconnecting");
@@ -219,13 +228,18 @@ where
 
 /// Waits for the next reason to recompute routes: an LSDB change (then a
 /// `HOLD_DOWN` pause, so an LSU burst costs one SPF, not one per LSA), the
-/// `POLL_INTERVAL` fallback, or shutdown. Returns `true` to stop entirely.
+/// `POLL_INTERVAL` fallback, or shutdown. Returns `true` to stop entirely;
+/// `by_change` is set when it woke on an LSDB change (an SPF run, `note_spf`).
 async fn wait_for_change(
     changed: &tokio::sync::Notify,
     shutdown: &mut watch::Receiver<bool>,
+    by_change: &mut bool,
 ) -> bool {
     tokio::select! {
-        () = changed.notified() => wait_or_shutdown(HOLD_DOWN, shutdown).await,
+        () = changed.notified() => {
+            *by_change = true;
+            wait_or_shutdown(HOLD_DOWN, shutdown).await
+        }
         () = tokio::time::sleep(POLL_INTERVAL) => false,
         _ = shutdown.changed() => *shutdown.borrow(),
     }
@@ -439,10 +453,14 @@ mod tests {
         for _ in 0..5 {
             n.notify_one();
         }
-        assert!(!wait_for_change(&n, &mut rx).await);
+        let mut by = false;
+        assert!(!wait_for_change(&n, &mut rx, &mut by).await);
+        assert!(by);
         assert_eq!(start.elapsed(), HOLD_DOWN);
         // The burst is spent: the next wait falls back to the poll tick.
-        assert!(!wait_for_change(&n, &mut rx).await);
+        by = false;
+        assert!(!wait_for_change(&n, &mut rx, &mut by).await);
+        assert!(!by);
         assert_eq!(start.elapsed(), HOLD_DOWN + POLL_INTERVAL);
     }
 

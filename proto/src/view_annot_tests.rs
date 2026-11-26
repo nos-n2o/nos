@@ -9,7 +9,10 @@ use serde::Serialize;
 use crate::bgp::RpkiSessionState;
 use crate::bgp::{BmpFrameCounts, BmpStationState, BmpStationStatus, RpkiCacheStatus};
 use crate::fdb::{EsEntry, FdbTable, MacEntry, MacSource, NeighEntry};
-use crate::ospf::{LinkInterfaceState, LlsSummary, NeighborSummary, OspfNeighborState};
+use crate::ospf::{
+    AreaSummary, AreaType, InstanceSummary, LinkInterfaceState, LlsSummary, NeighborSummary,
+    OspfNeighborState,
+};
 use crate::ospfv3::Ospfv3NeighborSummary;
 use crate::schema::AclAction;
 use crate::view::{assert_keys_match, view_of, ViewValue};
@@ -246,6 +249,28 @@ fn ospfv3_neighbor_summary() {
             uptime_secs: r.uptime_secs,
         },
         "06657468302e30000000010201020202020601030a2801010101010101010001fe800000000000000000000000000002010101250178",
+    );
+}
+
+#[test]
+fn ospf_instance_summary() {
+    check(
+        &InstanceSummary {
+            router_id: Some(Ipv4Addr::new(1, 1, 1, 1)),
+            abr: true,
+            asbr: false,
+            spf_runs: 3,
+            last_spf_age_secs: Some(9),
+            last_spf_duration_micros: Some(120),
+            areas: vec![AreaSummary {
+                area_id: Ipv4Addr::new(0, 0, 0, 1),
+                area_type: AreaType::Nssa,
+                lsa_count: 4,
+                interface_count: 2,
+                full_neighbor_count: 1,
+            }],
+        },
+        "010101010101000301090178010000000102040201",
     );
 }
 

@@ -2476,3 +2476,88 @@ async fn sr_summary_reports_the_local_srgb_and_prefix_sid() {
     let ilm = manager.ilm_routes(&[]).await;
     assert_eq!(ilm.iter().map(|r| r.label).collect::<Vec<_>>(), [16001]);
 }
+
+/// #1439: `instance_summary` of a fresh manager, then with two areas (one an
+/// NSSA), an ASBR role and one counted SPF run.
+#[tokio::test(start_paused = true)]
+async fn instance_summary_reports_role_areas_and_spf() {
+    let manager = LinkManager::new(
+        1,
+        Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+        crate::boot::BootCounter::in_memory(),
+    );
+    let fresh = manager.instance_summary().await;
+    assert_eq!(
+        (fresh.router_id, fresh.abr, fresh.asbr, fresh.spf_runs),
+        (None, false, false, 0)
+    );
+    assert_eq!(fresh.last_spf_age_secs, None);
+    assert_eq!(fresh.last_spf_duration_micros, None);
+    assert_eq!(fresh.areas.len(), 0);
+
+    let rid = Ipv4Addr::new(1, 1, 1, 1);
+    let area1 = Ipv4Addr::new(0, 0, 0, 1);
+    manager
+        .set_area_settings(HashMap::from([(
+            area1,
+            AreaSettings {
+                stub: true,
+                nssa: true,
+                import_summaries: true,
+                ..AreaSettings::default()
+            },
+        )]))
+        .await;
+    manager
+        .reconcile(
+            Vec::new(),
+            HashMap::from([
+                (
+                    Ipv4Addr::UNSPECIFIED,
+                    vec![("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1)],
+                ),
+                (
+                    area1,
+                    vec![("192.168.10.0/24".parse::<Ipv4Net>().unwrap(), 1)],
+                ),
+            ]),
+            rid,
+        )
+        .await;
+    manager.originate_router_lsas(rid).await;
+    manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![
+            nos_proto::RedistributedRoute {
+                prefix: "198.51.100.0/24".parse::<Ipv4Net>().unwrap().into(),
+                gateway: "10.9.9.9".parse().unwrap(),
+            },
+        ]))
+        .await;
+    manager
+        .set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+        .await;
+    manager.note_spf(Duration::from_micros(250));
+    tokio::time::advance(Duration::from_secs(7)).await;
+
+    let s = manager.instance_summary().await;
+    assert_eq!(s.router_id, Some(rid));
+    assert!(s.abr, "two areas with the (forced) backbone");
+    assert!(s.asbr);
+    assert_eq!((s.spf_runs, s.last_spf_age_secs), (1, Some(7)));
+    assert_eq!(s.last_spf_duration_micros, Some(250));
+    let rows: Vec<_> = s
+        .areas
+        .iter()
+        .map(|a| (a.area_id, a.area_type, a.interface_count, a.lsa_count >= 1))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (Ipv4Addr::UNSPECIFIED, nos_proto::AreaType::Normal, 1, true),
+            (area1, nos_proto::AreaType::Nssa, 1, true),
+        ]
+    );
+
+    manager.backbone_forced.store(false, Ordering::Relaxed);
+    assert!(!manager.instance_summary().await.abr, "no active backbone");
+}

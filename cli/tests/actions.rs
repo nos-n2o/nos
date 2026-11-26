@@ -174,6 +174,14 @@ fn lab() -> Lab {
             "rib" => serve(role, name, &path, |r: RibRequest| {
                 vec![match r {
                     RibRequest::Lookup { .. } => RibEvent::NoMatch,
+                    RibRequest::GetSummary => RibEvent::Summary(nos_proto::RibSummary {
+                        table: "rt1".to_string(),
+                        vrf: Some("vrf-rt1".to_string()),
+                        kernel_table: Some(100),
+                        ipv4_prefixes: 1,
+                        ipv6_prefixes: 0,
+                        sources: vec![],
+                    }),
                     _ => RibEvent::RoutesPage {
                         routes: Vec::new(),
                         next: None,
@@ -247,6 +255,7 @@ fn lab() -> Lab {
                     OspfRequest::GetDatabase => OspfEvent::Database(Vec::new()),
                     OspfRequest::GetInterfaces => OspfEvent::Interfaces(Vec::new()),
                     OspfRequest::GetRoutes => OspfEvent::Routes(Vec::new()),
+                    OspfRequest::GetInstance => OspfEvent::Instance(instance_summary()),
                     _ => OspfEvent::Neighbors(Vec::new()),
                 }]
             }),
@@ -255,6 +264,7 @@ fn lab() -> Lab {
                     Ospfv3Request::GetDatabase => Ospfv3Event::Database(Vec::new()),
                     Ospfv3Request::GetInterfaces => Ospfv3Event::Interfaces(Vec::new()),
                     Ospfv3Request::GetRoutes => Ospfv3Event::Routes(Vec::new()),
+                    Ospfv3Request::GetInstance => Ospfv3Event::Instance(instance_summary()),
                     _ => Ospfv3Event::Neighbors(Vec::new()),
                 }]
             }),
@@ -315,6 +325,11 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bfd sessions | json",
             "show bgp routes | json",
             "show version | json",
+            "show config | display set",
+            "show config bgp instance b1 | display set",
+            "show config bgp instance nope | display set",
+            "show config admin | display set",
+            "show version | display set",
             "show bfd sessions | nope",
             "show route gone",
             "show fdb bd1",
@@ -375,6 +390,10 @@ async fn every_show_command_runs_against_its_daemon() {
             "show ospf database router nothost",
             "show ospf neighbors",
             "show ospf segment-routing",
+            "show ospf",
+            "show ospf instance",
+            "show ospfv3",
+            "show ospfv3 instance",
             "show ospfv3 neigh",
             "show ospfv3 interface",
             "show ospfv3 route",
@@ -444,6 +463,29 @@ async fn every_show_command_runs_against_its_daemon() {
     );
     assert_eq!(*hostname.lock().unwrap(), "r1");
     assert!(repainted.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn route_tables_summary_and_filters_run() {
+    let lab = lab();
+    let (mode, exited) = run(
+        &lab,
+        Mode::Operational,
+        &[
+            "show route",
+            "show route | json",
+            "show route rt1 summary",
+            "show route rt1 summary | json",
+            "show route rt1 protocol static",
+            "show route rt1 protocol static | json",
+            "show route rt1 prefix 10.0.0.0/24 longer",
+            "show route gone summary",
+        ],
+        leave_open,
+    )
+    .await;
+    assert_eq!(mode, Mode::Operational);
+    assert!(!exited);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -647,4 +689,16 @@ async fn show_log_forwards_the_limit() {
     assert_eq!(got("lg-match"), [None]);
     // `last 0` is rejected before any IPC.
     assert_eq!(got("lg-zero"), Vec::<Option<usize>>::new());
+}
+
+fn instance_summary() -> nos_proto::InstanceSummary {
+    nos_proto::InstanceSummary {
+        router_id: Some("1.1.1.1".parse().unwrap()),
+        abr: false,
+        asbr: false,
+        spf_runs: 1,
+        last_spf_age_secs: Some(1),
+        last_spf_duration_micros: Some(10),
+        areas: Vec::new(),
+    }
 }

@@ -63,6 +63,25 @@ fn start() -> (
     (tmp, path, server)
 }
 
+/// #1439: `GetInstance` is a people's query too.
+#[tokio::test]
+async fn instance_query_is_for_people() {
+    let (_tmp, path, _server) = start();
+    for role in Role::ALL {
+        let (mut r, mut w) = connect_as(&path, role).await;
+        w.send(OspfRequest::GetInstance).await.unwrap();
+        let reply = next_event(&mut r).await;
+        if matches!(role, Role::User | Role::Restd) {
+            assert!(
+                matches!(reply, Some(OspfEvent::Instance(ref s)) if s.areas.is_empty() && s.spf_runs == 0),
+                "{role:?}: {reply:?}"
+            );
+        } else {
+            assert!(reply.is_none(), "{role:?}: no reply");
+        }
+    }
+}
+
 #[tokio::test]
 async fn only_people_get_the_show_queries_answered() {
     let (_tmp, path, _server) = start();

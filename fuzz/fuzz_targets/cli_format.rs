@@ -25,6 +25,7 @@ enum Input {
     Log(p::LogEntry),
     Logs(Vec<p::LogEntry>),
     Routes(Vec<p::PrefixRoutes>),
+    RouteHeader(p::RibSummary),
     BgpSummary(String, Vec<p::PeerSummary>),
     Evpn(String, Vec<p::EvpnRouteSummary>),
     Vpn(String, p::AddressFamily, Vec<p::VpnRouteSummary>),
@@ -95,6 +96,7 @@ fuzz_target!(|input: Input| {
         Input::Log(x) => outs.push(f::render_log_entry(&x)),
         Input::Logs(x) => outs.push(f::render_log_entries(&x)),
         Input::Routes(x) => outs.push(f::render_prefix_routes(&x)),
+        Input::RouteHeader(x) => outs.push(f::render_route_header(&x)),
         Input::BgpSummary(i, x) => outs.push(f::render_bgp_summary(&i, &x)),
         Input::Evpn(i, x) => {
             outs.extend([f::render_bgp_evpn(&i, &x), f::render_bgp_evpn_lines(&x)])

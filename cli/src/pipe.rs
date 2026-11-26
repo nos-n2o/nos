@@ -10,6 +10,7 @@ use std::io::Write;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pipe {
     Json,
+    DisplaySet,
 }
 
 /// How a reply is printed.
@@ -17,11 +18,17 @@ pub enum Pipe {
 pub enum Output {
     Text,
     Json,
+    /// `| display set` (#1462)
+    Set,
 }
 
 impl Output {
     pub fn of(pipe: Option<Pipe>) -> Self {
-        pipe.map_or(Output::Text, |Pipe::Json| Output::Json)
+        match pipe {
+            None => Output::Text,
+            Some(Pipe::Json) => Output::Json,
+            Some(Pipe::DisplaySet) => Output::Set,
+        }
     }
 }
 
@@ -36,8 +43,10 @@ pub fn split(line: &str) -> Result<(&str, Option<Pipe>), String> {
     };
     match tail.split_whitespace().collect::<Vec<_>>()[..] {
         ["json"] => Ok((head, Some(Pipe::Json))),
-        [] => Err("'|' needs a pipe: json".into()),
-        [other, ..] => Err(format!("unknown pipe '{other}' (known: json)")),
+        ["display", "set"] => Ok((head, Some(Pipe::DisplaySet))),
+        [] => Err("'|' needs a pipe: json, display set".into()),
+        ["display", ..] => Err("usage: | display set".into()),
+        [other, ..] => Err(format!("unknown pipe '{other}' (known: json, display set)")),
     }
 }
 
@@ -107,6 +116,19 @@ mod tests {
             .unwrap_err()
             .contains("unknown pipe 'jq'"));
         assert!(split("show x | json | json").is_err());
+        assert_eq!(
+            split("show config | display set"),
+            Ok(("show config ", Some(Pipe::DisplaySet)))
+        );
+        for bad in [
+            "display",
+            "display foo",
+            "display set x",
+            "display set | json",
+        ] {
+            assert!(split(&format!("show config | {bad}")).is_err(), "{bad}");
+        }
+        assert_eq!(Output::of(Some(Pipe::DisplaySet)), Output::Set);
         // Not a show line, or `show log`: untouched.
         assert_eq!(
             split("set description a|b"),

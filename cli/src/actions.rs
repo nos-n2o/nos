@@ -15,6 +15,7 @@ use nos_proto::{
     ServiceRef, Topic, DEFAULT_CONFIG_SOCKET,
 };
 
+use crate::command::RouteQuery;
 use crate::pipe::{self, JsonArray, Output};
 use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
@@ -205,6 +206,37 @@ pub async fn handle_action_out(
     ask_leave: fn(&str) -> LeaveChoice,
     out: Output,
 ) -> Outcome {
+    if out == Output::Set {
+        match action {
+            Resolved::ShowRunningConfig => show_set(socket, &[]).await,
+            Resolved::ShowConfigPath(p) => {
+                show_set(socket, &p.split_whitespace().collect::<Vec<_>>()).await;
+            }
+            Resolved::ShowTransaction => {
+                let (t, path) = (current_transaction(&mode), current_path(&mode));
+                match client::get_transaction(socket, &t).await {
+                    Ok(snap) => {
+                        let doc = serde_json::to_value(&snap.config).unwrap_or_default();
+                        println!("{}", format::set_lines(&doc, path.segments()));
+                    }
+                    Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+                }
+            }
+            Resolved::Error(_) => {
+                return handle_text_action(
+                    action,
+                    mode,
+                    socket,
+                    watchdog_socket,
+                    doc_cache,
+                    ask_leave,
+                )
+                .await;
+            }
+            _ => eprintln!("error: this command has no display set output"),
+        }
+        return Outcome::Continue(mode);
+    }
     if out == Output::Json {
         match action {
             Resolved::ShowBfdSessions { peer, .. } => {
@@ -213,8 +245,16 @@ pub async fn handle_action_out(
                 }
                 return Outcome::Continue(mode);
             }
-            Resolved::ShowRoute { table, address } => {
-                show_route_json(watchdog_socket, &table, address).await;
+            Resolved::ShowRoute { table, query } => {
+                show_route_json(watchdog_socket, &table, query).await;
+                return Outcome::Continue(mode);
+            }
+            Resolved::ShowRouteTables => {
+                show_route_tables(socket, watchdog_socket, out).await;
+                return Outcome::Continue(mode);
+            }
+            Resolved::ShowRouteSummary { table } => {
+                show_route_summary(watchdog_socket, &table, out).await;
                 return Outcome::Continue(mode);
             }
             Resolved::ShowBgpRoutes => {
@@ -360,6 +400,8 @@ async fn handle_text_action(
         | Resolved::ShowConfigPath(_)
         | Resolved::ShowTransaction
         | Resolved::ShowRoute { .. }
+        | Resolved::ShowRouteTables
+        | Resolved::ShowRouteSummary { .. }
         | Resolved::ShowFdb { .. }
         | Resolved::ShowInterface { .. }
         | Resolved::ShowInterfaceBrief
@@ -390,6 +432,8 @@ async fn handle_text_action(
         | Resolved::ShowOspfRoute
         | Resolved::ShowOspfDatabase { .. }
         | Resolved::ShowOspfSegmentRouting
+        | Resolved::ShowOspfInstance
+        | Resolved::ShowOspfv3Instance
         | Resolved::ShowOspfv3Neigh
         | Resolved::ShowOspfv3Interface
         | Resolved::ShowOspfv3Route
@@ -427,8 +471,16 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_transaction(&mode, socket).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowRoute { table, address } => {
-            show_route(watchdog_socket, &table, address).await;
+        Resolved::ShowRoute { table, query } => {
+            show_route(watchdog_socket, &table, query).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowRouteTables => {
+            show_route_tables(socket, watchdog_socket, Output::Text).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowRouteSummary { table } => {
+            show_route_summary(watchdog_socket, &table, Output::Text).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowFdb { domain, mac } => {
@@ -567,6 +619,14 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_ospfv3_interface(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowOspfInstance => {
+            show_ospf_instance(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Instance => {
+            show_ospfv3_instance(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowOspfSegmentRouting => {
             show_ospf_segment_routing(socket, watchdog_socket).await;
             Outcome::Continue(mode)
@@ -687,6 +747,16 @@ async fn show_running_config(socket: &Path) {
     }
 }
 
+async fn show_set(socket: &Path, words: &[&str]) {
+    match client::fetch_running_config(socket).await {
+        Ok(cfg) => match format::render_display_set(&cfg, words) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
 async fn show_config_path(socket: &Path, path: &str) {
     let words: Vec<&str> = path.split_whitespace().collect();
     match client::fetch_running_config(socket).await {
@@ -731,42 +801,130 @@ async fn resolve_service(
 /// Resolves `table`'s nos-ribd instance fresh (not cached — tables come and
 /// go during a session) via the watchdog broker, then queries it either for
 /// the whole table (`address: None`) or a longest-prefix-match lookup.
-async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::net::IpAddr>) {
-    let Some(rib_socket) = resolve_service(
+/// The table's `nos-ribd` socket, or why not (printed to stderr).
+async fn resolve_rib(watchdog_socket: &Path, table: &str) -> Option<PathBuf> {
+    resolve_service(
         watchdog_socket,
         nos_proto::ServiceRef::RibTable(table.to_string()),
         &format!("routing table '{table}'"),
     )
     .await
-    else {
+}
+
+/// The filter a query walks with (`Lookup` walks nothing).
+fn route_filter(query: &RouteQuery) -> nos_proto::RouteFilter {
+    match query {
+        RouteQuery::Filter(f) => f.clone(),
+        RouteQuery::Table | RouteQuery::Lookup(_) => nos_proto::RouteFilter::default(),
+    }
+}
+
+async fn show_route(watchdog_socket: &Path, table: &str, query: RouteQuery) {
+    let Some(rib_socket) = resolve_rib(watchdog_socket, table).await else {
         return;
     };
 
-    match address {
-        None => {
+    match query {
+        RouteQuery::Table | RouteQuery::Filter(_) => {
+            // The header and VPN label print once, never per page; a ribd
+            // that cannot summarise (older) just goes without.
+            match rib_client::get_summary(&rib_socket).await {
+                Ok(s) => println!("{}", format::render_route_header(&s)),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            }
             if let Some(label) = rib_client::get_vpn_label(&rib_socket).await {
                 println!("VPN label: {label}");
             }
             // Each page prints as it arrives; an empty table is one empty page.
             let mut any = false;
-            let walked = rib_client::for_each_routes_page(&rib_socket, |page| {
-                if !page.is_empty() {
-                    any = true;
-                    println!("{}", format::render_prefix_routes(page));
-                }
-            })
-            .await;
+            let walked =
+                rib_client::for_each_routes_page(&rib_socket, route_filter(&query), |page| {
+                    if !page.is_empty() {
+                        any = true;
+                        println!("{}", format::render_prefix_routes(page));
+                    }
+                })
+                .await;
             match walked {
                 Ok(()) if !any => println!("{}", format::render_prefix_routes(&[])),
                 Ok(()) => {}
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
         }
-        Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
+        RouteQuery::Lookup(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
             Ok(None) => println!("{}", format::none(None, &format!("route matches {addr}"))),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
+    }
+}
+
+/// `show route <table> summary`.
+async fn show_route_summary(watchdog_socket: &Path, table: &str, out: Output) {
+    let Some(rib_socket) = resolve_rib(watchdog_socket, table).await else {
+        return;
+    };
+    match rib_client::get_summary(&rib_socket).await {
+        Ok(s) => emit_out(&s, "", out),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
+/// `show route`: every configured table's summary, sorted by name. A table
+/// whose ribd is down or fails is a trailing line (text) or stderr (JSON).
+async fn show_route_tables(config_socket: &Path, watchdog_socket: &Path, out: Output) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    let mut rows = Vec::new();
+    let mut down = Vec::new();
+    for t in &cfg.routing_tables {
+        let name = t.name.clone();
+        let summary = match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::RibTable(name.clone()),
+        )
+        .await
+        {
+            Ok(Some(path)) => rib_client::get_summary(&path)
+                .await
+                .map_err(|e| e.to_string()),
+            Ok(None) => Err("not running".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match summary {
+            Ok(s) => rows.push(s),
+            Err(e) => down.push((name, e)),
+        }
+    }
+    rows.sort_by(|a, b| a.table.cmp(&b.table));
+    match out {
+        Output::Json => {
+            for (name, e) in &down {
+                eprintln!("{}: {}", format::sanitize(name), format::sanitize(e));
+            }
+            println!("{}", pipe::json_pretty(&rows));
+        }
+        Output::Text | Output::Set => {
+            let empty = if down.is_empty() {
+                &format::none(None, "routing tables")
+            } else {
+                ""
+            };
+            let mut lines: Vec<String> = Some(view::render(&rows, empty))
+                .filter(|t| !t.is_empty())
+                .into_iter()
+                .collect();
+            lines.extend(
+                down.iter()
+                    .map(|(n, e)| format!("{}  {}", format::sanitize(n), format::sanitize(e))),
+            );
+            println!("{}", lines.join("\n"));
+        }
     }
 }
 
@@ -1001,43 +1159,30 @@ fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str
 /// `emit`, or the reply as JSON (an empty list is `[]`, never the text).
 fn emit_out<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str, out: Output) {
     match out {
-        Output::Text => emit(reply, empty),
+        Output::Text | Output::Set => emit(reply, empty),
         Output::Json => println!("{}", pipe::json_pretty(reply)),
     }
 }
 
 /// `show route <table> [<addr>] | json`: one streamed array of prefixes, or
 /// the longest match (`null` when none). Errors go to stderr, nothing else.
-async fn show_route_json(watchdog_socket: &Path, table: &str, address: Option<IpAddr>) {
-    let rib_socket = match watchdog_client::resolve(
-        watchdog_socket,
-        nos_proto::ServiceRef::RibTable(table.to_string()),
-    )
-    .await
-    {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!(
-                "{}",
-                format::not_running(&format!("routing table '{table}'"))
-            );
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+async fn show_route_json(watchdog_socket: &Path, table: &str, query: RouteQuery) {
+    let Some(rib_socket) = resolve_rib(watchdog_socket, table).await else {
+        return;
     };
-    match address {
-        None => {
+    match query {
+        RouteQuery::Table | RouteQuery::Filter(_) => {
             let mut stdout = io::stdout();
             let mut array = JsonArray::begin(&mut stdout);
-            match rib_client::for_each_routes_page(&rib_socket, |page| array.page(page)).await {
+            let filter = route_filter(&query);
+            match rib_client::for_each_routes_page(&rib_socket, filter, |page| array.page(page))
+                .await
+            {
                 Ok(()) => array.end(),
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             }
         }
-        Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
+        RouteQuery::Lookup(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(m) => println!("{}", pipe::json_pretty(&m)),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
@@ -2023,6 +2168,78 @@ async fn show_ospf_database(
             Ok(None) => eprintln!(
                 "{}",
                 format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospf [instance]` (#1439): one summary block per instance.
+async fn show_ospf_instance(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    if cfg.ospf_instances.is_empty() {
+        println!("{}", format::none(None, "ospf instances"));
+        return;
+    }
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(sock)) => match ospf_client::get_instance(&sock).await {
+                Ok(summary) => {
+                    println!("ospf instance {}:", instance.name);
+                    emit(&summary, "");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance '{}'", instance.name))
+            ),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospfv3 [instance]` (#1439): one summary block per instance.
+async fn show_ospfv3_instance(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    if cfg.ospfv3_instances.is_empty() {
+        println!("{}", format::none(None, "ospfv3 instances"));
+        return;
+    }
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(sock)) => match ospfv3_client::get_instance(&sock).await {
+                Ok(summary) => {
+                    println!("ospfv3 instance {}:", instance.name);
+                    emit(&summary, "");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospfv3 instance '{}'", instance.name))
             ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }

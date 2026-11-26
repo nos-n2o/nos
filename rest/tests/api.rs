@@ -1262,6 +1262,78 @@ async fn show_spanning_tree_counters_lists_one_row_per_port_and_tree() {
     );
 }
 
+/// #1439: `GET /v1/ospf/instance` and `/v1/ospfv3/instance` relay each
+/// daemon's `InstanceSummary`.
+#[tokio::test]
+async fn ospf_instance_summary_is_relayed_per_instance() {
+    use nos_proto::{
+        AreaSummary, AreaType, InstanceSummary, OspfEvent, OspfInstance, OspfRequest, Ospfv3Event,
+        Ospfv3Instance, Ospfv3Request,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (v2, v3) = (dir.path().join("o.sock"), dir.path().join("v.sock"));
+    let summary = || InstanceSummary {
+        router_id: Some(Ipv4Addr::new(1, 1, 1, 1)),
+        abr: true,
+        asbr: false,
+        spf_runs: 2,
+        last_spf_age_secs: Some(3),
+        last_spf_duration_micros: Some(40),
+        areas: vec![AreaSummary {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            area_type: AreaType::Normal,
+            lsa_count: 4,
+            interface_count: 1,
+            full_neighbor_count: 1,
+        }],
+    };
+    as_restd();
+    serve(&v2, ("ospfd", "o1"), move |_: OspfRequest| {
+        OspfEvent::Instance(summary())
+    });
+    serve(&v3, ("ospfv3d", "v1"), move |_: Ospfv3Request| {
+        Ospfv3Event::Instance(summary())
+    });
+    let f = fixture(vec![
+        (ServiceRef::OspfInstance("o1".into()), v2),
+        (ServiceRef::Ospfv3Instance("v1".into()), v3),
+    ])
+    .await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/t5?base=current", None).await;
+    let o1 = OspfInstance {
+        name: "o1".into(),
+        ..OspfInstance::default()
+    };
+    let v1 = Ospfv3Instance {
+        name: "v1".into(),
+        ..Ospfv3Instance::default()
+    };
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t5/ospf-instance/o1",
+        Some(serde_json::to_value(o1).unwrap()),
+    )
+    .await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t5/ospfv3-instance/v1",
+        Some(serde_json::to_value(v1).unwrap()),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/t5/commit", None).await;
+    for (uri, name) in [("/v1/ospf/instance", "o1"), ("/v1/ospfv3/instance", "v1")] {
+        let (s, v) = send(app, Method::GET, uri, None).await;
+        assert_eq!(s, StatusCode::OK, "{uri}");
+        assert_eq!(v[0]["instance"], name, "{v}");
+        assert_eq!(v[0]["result"]["abr"], true, "{v}");
+        assert_eq!(v[0]["result"]["areas"][0]["lsa_count"], 4, "{v}");
+        assert_eq!(v[0]["result"]["areas"][0]["area_type"], "normal", "{v}");
+    }
+}
+
 #[tokio::test]
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
@@ -2881,6 +2953,8 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         "/v1/ospf/database",
         "/v1/ospf/segment-routing",
         "/v1/ospf/routes",
+        "/v1/ospf/instance",
+        "/v1/ospfv3/instance",
         "/v1/ospfv3/neighbors",
         "/v1/ospfv3/database",
         "/v1/ospfv3/routes",
@@ -2888,7 +2962,7 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         let (s, _) = send(&app, Method::GET, uri, None).await;
         assert_eq!(s, StatusCode::OK, "{uri}");
     }
-    assert_eq!(lists.load(Ordering::SeqCst), 11);
+    assert_eq!(lists.load(Ordering::SeqCst), 13);
     assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");

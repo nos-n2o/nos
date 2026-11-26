@@ -1,7 +1,10 @@
 use futures::{SinkExt, StreamExt};
-use nos_cli::rib_client::{for_each_routes_page, get_vpn_label, lookup};
+use nos_cli::rib_client::{for_each_routes_page, get_summary, get_vpn_label, lookup};
 use nos_pki::testing::shared;
-use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
+use nos_proto::{
+    IpcCodec, PrefixRoutes, RibEvent, RibRequest, RibSummary, RouteEntry, RouteFilter,
+    RouteSourceKind,
+};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_prefix_routes() -> PrefixRoutes {
@@ -44,12 +47,23 @@ async fn serve_pages(listener: nos_pki::Listener, pages: Vec<(Option<&'static st
     let mut reader = FramedRead::new(r, IpcCodec::<RibRequest>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<RibEvent>::default());
     for (after, reply) in pages {
-        let RibRequest::GetRoutesPage { after: got, .. } = reader.next().await.unwrap().unwrap()
+        let RibRequest::GetRoutesPage {
+            after: got, filter, ..
+        } = reader.next().await.unwrap().unwrap()
         else {
             panic!("not a page request");
         };
+        // The filter rides on every page, not just the first.
+        assert_eq!(filter, test_filter());
         assert_eq!(got, after.map(|a| a.parse().unwrap()));
         writer.send(reply).await.unwrap();
+    }
+}
+
+fn test_filter() -> RouteFilter {
+    RouteFilter {
+        source: Some(RouteSourceKind::Static),
+        ..RouteFilter::default()
     }
 }
 
@@ -68,7 +82,7 @@ async fn walk(pages: Vec<(Option<&'static str>, RibEvent)>) -> (Vec<String>, Res
     let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
     let server = tokio::spawn(serve_pages(listener, pages));
     let mut seen = Vec::new();
-    let res = for_each_routes_page(&path, |p| {
+    let res = for_each_routes_page(&path, test_filter(), |p| {
         seen.extend(p.iter().map(|r| r.prefix.to_string()));
     })
     .await
@@ -158,4 +172,32 @@ async fn get_vpn_label_returns_the_label_and_none_on_anything_else() {
     ));
     assert_eq!(get_vpn_label(&path).await, None);
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_summary_returns_the_summary_and_errors_otherwise() {
+    let summary = RibSummary {
+        table: "rt1".to_string(),
+        vrf: None,
+        kernel_table: Some(100),
+        ipv4_prefixes: 2,
+        ipv6_prefixes: 0,
+        sources: vec![],
+    };
+    for (reply, want) in [
+        (RibEvent::Summary(summary.clone()), None),
+        (RibEvent::Error("boom".to_string()), Some("boom")),
+        (RibEvent::NoMatch, Some("unexpected")),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rib.sock");
+        let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
+        let server = tokio::spawn(serve_once(listener, RibRequest::GetSummary, reply));
+        let got = get_summary(&path).await;
+        server.await.unwrap();
+        match want {
+            None => assert_eq!(got.unwrap(), summary),
+            Some(text) => assert!(got.unwrap_err().to_string().contains(text)),
+        }
+    }
 }

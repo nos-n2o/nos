@@ -12,9 +12,9 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 |---|---|
 | `show config` | `GET /v1/config` |
 | `show configuration diff <n> [<m>]` | `GET /v1/history/{n}` and `GET /v1/history/{m}` (0 = running), diffed client side |
-| `show route <table>` | `GET /v1/routes/{table}` (filters `?protocol=`, `?prefix=`, `?longer=true`; CLI words arrive with #1446) |
-| `show route` | `GET /v1/routes` (every table with its summary; arrives with #1446) |
-| `show route <table> summary` | `GET /v1/routes/{table}/summary` (arrives with #1446) |
+| `show route <table> [protocol <p>\|prefix <cidr> [longer]]` | `GET /v1/routes/{table}` (filters `?protocol=`, `?prefix=`, `?longer=true`) |
+| `show route` | `GET /v1/routes` (every table with its summary) |
+| `show route <table> summary` | `GET /v1/routes/{table}/summary` |
 | `show route <table> <address>` | `GET /v1/routes/{table}/{addr}` |
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
 | `show interface brief` | `GET /v1/interfaces` + `GET /v1/port-aggregates` |
@@ -48,6 +48,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show ospf route` | `GET /v1/ospf/routes` |
 | `show ospfv3 route` | `GET /v1/ospfv3/routes` |
 | `show ospf neigh` / `show ospf database` | `GET /v1/ospf/neighbors` / `GET /v1/ospf/database` |
+| `show ospf` / `show ospf instance` | `GET /v1/ospf/instance` |
+| `show ospfv3` / `show ospfv3 instance` | `GET /v1/ospfv3/instance` |
 | `show ospf segment-routing` | `GET /v1/ospf/segment-routing` |
 | `show ospfv3 neigh` / `show ospfv3 database` | `GET /v1/ospfv3/neighbors` / `GET /v1/ospfv3/database` |
 | `show fdb <domain>` | `GET /v1/fdb/{domain}` |

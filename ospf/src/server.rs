@@ -34,7 +34,8 @@ fn allowed(role: Role, req: &OspfRequest) -> bool {
         | OspfRequest::GetDatabase
         | OspfRequest::GetSegmentRouting
         | OspfRequest::GetInterfaces
-        | OspfRequest::GetRoutes => {
+        | OspfRequest::GetRoutes
+        | OspfRequest::GetInstance => {
             matches!(role, Role::User | Role::Restd)
         }
         OspfRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -114,6 +115,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            OspfRequest::GetInstance => {
+                let event = OspfEvent::Instance(links.instance_summary().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             OspfRequest::RedistributeRoutes(update) => {
                 // Only the closing `Full` is applied: it clears the raw set,
                 // so half a snapshot would withdraw the rest.
@@ -146,6 +153,7 @@ mod authz_tests {
                 OspfRequest::GetNeighbors,
                 OspfRequest::GetInterfaces,
                 OspfRequest::GetRoutes,
+                OspfRequest::GetInstance,
             ] {
                 assert_eq!(
                     allowed(role, &q),
