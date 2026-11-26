@@ -80,6 +80,27 @@ struct Slot {
     /// The `by_peer` table half (`peer_table`): a packet must arrive on it.
     table: String,
     peer: IpAddr,
+    /// The session's interface (single-hop): a packet that arrives on another
+    /// one is dropped when the arrival is known.
+    iface: Option<String>,
+}
+
+/// The `by_peer` scope of `key` (RFC 5881 §4 interface, RFC 5883 §4 local
+/// address); `None` for micro-BFD, whose table already is the member.
+fn peer_scope(key: &SessionKey) -> Option<String> {
+    if key.aggregate.is_some() {
+        None
+    } else if key.multihop {
+        key.local.map(|a| a.to_string())
+    } else {
+        key.interface.clone()
+    }
+}
+
+type PeerKey = (String, IpAddr, bool, Option<String>);
+
+fn peer_key(key: &SessionKey) -> PeerKey {
+    (peer_table(key), key.peer, key.multihop, peer_scope(key))
 }
 
 /// The `by_peer` table half of `key`: the routing table, or a member's own.
@@ -109,12 +130,37 @@ struct Tables {
     unsolicited: Option<Unsolicited>,
     by_disc: HashMap<u32, Slot>,
     /// Packets with Your Discriminator 0 (§6.8.6: found by source address
-    /// and table, plus the port the packet came in on). ponytail: no
-    /// interface in the single-hop key (RFC 5881 §4 mentions it) and no
-    /// local address in the multihop one (RFC 5883 §4 wants the pair), so two
-    /// sessions to one peer address in one table collide; add the arrival
-    /// interface / destination from `IP_PKTINFO` if that matters.
-    by_peer: HashMap<(String, IpAddr, bool), Slot>,
+    /// and table, plus the port the packet came in on). The last key part is
+    /// the session's interface (single-hop) or local address (multihop):
+    /// looked up for the packet's arrival first, then `None`, so a session
+    /// without one still takes any arrival.
+    by_peer: HashMap<PeerKey, Slot>,
+}
+
+impl Tables {
+    /// The `by_peer` key of the session a zero-discriminator packet is for.
+    fn peer_slot(
+        &self,
+        table: &str,
+        src: IpAddr,
+        multihop: bool,
+        scope: Option<&str>,
+    ) -> Option<PeerKey> {
+        let exact = [scope.map(str::to_string), None].into_iter().find_map(|s| {
+            let k = (table.to_string(), src, multihop, s);
+            self.by_peer.contains_key(&k).then_some(k)
+        });
+        // Arrival unknown (no pktinfo): any session of that peer will do.
+        // ponytail: linear scan, only on that rare path.
+        exact.or_else(|| {
+            scope.is_none().then(|| {
+                self.by_peer
+                    .keys()
+                    .find(|k| (&k.0, k.1, k.2) == (&table.to_string(), src, multihop))
+                    .cloned()
+            })?
+        })
+    }
 }
 
 /// Maps received datagrams to session tasks. Cloned into every socket task.
@@ -131,10 +177,10 @@ impl Demux {
             member: key.aggregate.as_ref().and(key.interface.clone()),
             table: peer_table(key),
             peer: key.peer,
+            iface: key.interface.clone().filter(|_| key.aggregate.is_none()),
         };
         t.by_disc.insert(disc, slot.clone());
-        t.by_peer
-            .insert((peer_table(key), key.peer, key.multihop), slot);
+        t.by_peer.insert(peer_key(key), slot);
     }
 
     fn set_min_ttl(&self, disc: u32, key: &SessionKey, min_ttl: u8) {
@@ -142,10 +188,7 @@ impl Demux {
         if let Some(s) = t.by_disc.get_mut(&disc) {
             s.min_ttl = min_ttl;
         }
-        if let Some(s) = t
-            .by_peer
-            .get_mut(&(peer_table(key), key.peer, key.multihop))
-        {
+        if let Some(s) = t.by_peer.get_mut(&peer_key(key)) {
             s.min_ttl = min_ttl;
         }
     }
@@ -153,7 +196,7 @@ impl Demux {
     fn remove(&self, disc: u32, key: &SessionKey) {
         let mut t = self.0.lock().unwrap();
         t.by_disc.remove(&disc);
-        t.by_peer.remove(&(peer_table(key), key.peer, key.multihop));
+        t.by_peer.remove(&peer_key(key));
     }
 
     /// Decodes `data` (received on `table`'s single-hop or `multihop` socket
@@ -167,7 +210,26 @@ impl Demux {
         ttl: Option<u8>,
         data: &[u8],
     ) -> bool {
-        self.route_on(table, None, src, multihop, ttl, data)
+        self.route_from(table, None, None, src, multihop, ttl, data)
+    }
+
+    /// `route` with where the datagram arrived (`IP_PKTINFO`): its interface
+    /// name and the address it was sent to. Sessions are told apart by the
+    /// interface (single-hop) or that address (multihop).
+    #[allow(clippy::too_many_arguments, reason = "one datagram's fields")]
+    pub fn route_from(
+        &self,
+        table: &str,
+        arrival: Option<&str>,
+        dst: Option<IpAddr>,
+        src: IpAddr,
+        multihop: bool,
+        ttl: Option<u8>,
+        data: &[u8],
+    ) -> bool {
+        let dst = dst.map(|a| a.to_string());
+        let scope = if multihop { dst.as_deref() } else { arrival };
+        self.route_on(table, None, scope, arrival, src, multihop, ttl, data)
     }
 
     /// A micro-BFD packet (already TTL-checked by `micro::parse_frame`) that
@@ -176,6 +238,8 @@ impl Demux {
         self.route_on(
             &micro::demux_table(member),
             Some(member),
+            None,
+            None,
             src,
             false,
             Some(255),
@@ -183,10 +247,13 @@ impl Demux {
         )
     }
 
+    #[allow(clippy::too_many_arguments, reason = "one datagram's fields")]
     fn route_on(
         &self,
         table: &str,
         member: Option<&str>,
+        scope: Option<&str>,
+        arrival: Option<&str>,
         src: IpAddr,
         multihop: bool,
         ttl: Option<u8>,
@@ -203,7 +270,7 @@ impl Demux {
         if p.your_discriminator == 0
             && !multihop
             && member.is_none()
-            && !t.by_peer.contains_key(&(table.to_string(), src, multihop))
+            && t.peer_slot(table, src, multihop, scope).is_none()
             && let Some(hook) = t.unsolicited.clone()
         {
             drop(t);
@@ -212,7 +279,8 @@ impl Demux {
             t = self.0.lock().unwrap();
         }
         let session = if p.your_discriminator == 0 {
-            t.by_peer.get(&(table.to_string(), src, multihop))
+            t.peer_slot(table, src, multihop, scope)
+                .and_then(|k| t.by_peer.get(&k))
         } else {
             t.by_disc
                 .get(&p.your_discriminator)
@@ -224,6 +292,12 @@ impl Demux {
         // single-hop (multihop sources may legitimately differ).
         if s.table != table || (!s.multihop && s.peer != src) {
             debug!(peer = %src, table, "bfd packet discarded: wrong table/source");
+            return false;
+        }
+        if let (Some(want), Some(got)) = (&s.iface, arrival)
+            && want != got
+        {
+            debug!(peer = %src, interface = got, "bfd packet discarded: wrong interface");
             return false;
         }
         if !ttl_ok(multihop, ttl, s.min_ttl) {
@@ -1471,5 +1545,100 @@ pub(crate) mod tests {
         assert_eq!(s[0].kind, BfdSessionKind::Classical);
         m.deregister(c, &unsolicited_key("10.0.0.3"));
         assert_eq!(m.sessions(None).len(), 0);
+    }
+
+    fn zero_disc_packet() -> [u8; 24] {
+        unsolicited::tests::pkt(BfdState::Down, 0).encode()
+    }
+
+    /// RFC 5881 §4: two single-hop sessions to one link-local address on
+    /// different interfaces each get their own packets.
+    #[tokio::test]
+    async fn single_hop_sessions_to_one_peer_are_told_apart_by_interface() {
+        let (m, _, demux) = mgr(false);
+        let c = m.new_client("static");
+        let k = |i: &str| SessionKey {
+            peer: "fe80::1".parse().unwrap(),
+            interface: Some(i.into()),
+            ..key("192.0.2.1")
+        };
+        let (ka, kb) = (k("eth0"), k("eth1"));
+        m.register(c, &ka, &BfdProfile::default());
+        m.register(c, &kb, &BfdProfile::default());
+        assert_eq!(m.sessions(None).len(), 2);
+        let pkt = zero_disc_packet();
+        let at = |i| demux.route_from("rt1", Some(i), None, ka.peer, false, Some(255), &pkt);
+        assert!(at("eth0"));
+        assert!(at("eth1"));
+        assert!(!at("eth2"), "no session there, none without interface");
+        // Removing one leaves the other.
+        m.deregister(c, &ka);
+        assert!(!at("eth0"));
+        assert!(at("eth1"));
+    }
+
+    /// An interface-less session keeps matching any arrival; an exact one wins.
+    #[tokio::test]
+    async fn interfaceless_session_takes_any_arrival() {
+        let (m, _, demux) = mgr(false);
+        let c = m.new_client("static");
+        let any = key("192.0.2.1");
+        m.register(c, &any, &BfdProfile::default());
+        let p = zero_disc_packet();
+        assert!(demux.route_from("rt1", Some("eth7"), None, any.peer, false, Some(255), &p));
+        assert!(demux.route("rt1", any.peer, false, Some(255), &p));
+    }
+
+    /// A discriminator packet from the right peer on the wrong interface is dropped.
+    #[tokio::test]
+    async fn discriminator_packet_on_the_wrong_interface_is_dropped() {
+        let (m, _, demux) = mgr(false);
+        let c = m.new_client("static");
+        let k = SessionKey {
+            interface: Some("eth0".into()),
+            ..key("192.0.2.1")
+        };
+        let rx = m.register(c, &k, &BfdProfile::default());
+        let disc = rx.borrow().local_discriminator;
+        let mut p = unsolicited::tests::pkt(BfdState::Down, 0);
+        p.your_discriminator = disc;
+        let p = p.encode();
+        let at = |i| demux.route_from("rt1", i, None, k.peer, false, Some(255), &p);
+        assert!(!at(Some("eth1")));
+        assert!(at(Some("eth0")));
+        assert!(at(None), "arrival unknown: not checked");
+    }
+
+    /// RFC 5883 §4: multihop sessions to one peer differ by local address.
+    #[tokio::test]
+    async fn multihop_sessions_to_one_peer_are_told_apart_by_destination() {
+        let (m, _, demux) = mgr(false);
+        let c = m.new_client("static");
+        let k = |l: &str| SessionKey {
+            multihop: true,
+            local: Some(l.parse().unwrap()),
+            ..key("192.0.2.1")
+        };
+        let (ka, kb) = (k("192.0.2.9"), k("192.0.2.10"));
+        m.register(c, &ka, &BfdProfile::default());
+        m.register(c, &kb, &BfdProfile::default());
+        let pkt = zero_disc_packet();
+        let to = |d: &str| {
+            demux.route_from(
+                "rt1",
+                None,
+                Some(d.parse().unwrap()),
+                ka.peer,
+                true,
+                Some(255),
+                &pkt,
+            )
+        };
+        assert!(to("192.0.2.9"));
+        assert!(to("192.0.2.10"));
+        assert!(!to("192.0.2.11"));
+        m.deregister(c, &ka);
+        assert!(!to("192.0.2.9"));
+        assert!(to("192.0.2.10"));
     }
 }

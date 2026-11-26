@@ -37,7 +37,7 @@ use crate::packet;
 use crate::reflector::Reflector;
 use crate::sbfd::{self, SbfdPath};
 use crate::session::{rand_u32, EchoPath, EchoTx, Looped, Tx};
-use nos_bfd_socket::{ifindex, recv_one, recv_probe, send_from, set_int};
+use nos_bfd_socket::{ifindex, ifname, recv_one, recv_probe, send_from, set_int};
 use nos_daemon::{ipc, watchdog};
 use nos_l2_socket::{L2Socket, L2Unicast};
 
@@ -96,9 +96,11 @@ fn rx_socket(vrf: &str, v6: bool, port: u16) -> io::Result<AsyncFd<Socket>> {
     let bind: SocketAddr = if v6 {
         s.set_only_v6(true)?;
         set_int(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT, 1)?;
+        set_int(fd, libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO, 1)?;
         (Ipv6Addr::UNSPECIFIED, port).into()
     } else {
         set_int(fd, libc::IPPROTO_IP, libc::IP_RECVTTL, 1)?;
+        set_int(fd, libc::IPPROTO_IP, libc::IP_PKTINFO, 1)?;
         (Ipv4Addr::UNSPECIFIED, port).into()
     };
     s.bind(&bind.into())?;
@@ -244,6 +246,8 @@ async fn rx_loop(
 ) {
     let mut buf = [0u8; 128];
     let mut have = ifindex(&vrf);
+    // Arrival ifindex to name, forgotten when the VRF is recreated.
+    let names: Mutex<HashMap<u32, Option<String>>> = Mutex::default();
     socket_loop(
         format!("udp table={table} v6={v6} multihop={multihop}"),
         sock,
@@ -257,7 +261,26 @@ async fn rx_loop(
         |s| {
             let d = recv_one(s.get_ref().as_raw_fd(), &mut buf)?;
             // TTL check (RFC 5881 §5 / RFC 5883 §5) is per session, in `route`.
-            let ok = demux.route(&table, d.src, multihop, d.ttl, &buf[..d.len.min(buf.len())]);
+            let arrival = (d.ifindex != 0)
+                .then(|| {
+                    names
+                        .lock()
+                        .unwrap()
+                        .entry(d.ifindex)
+                        .or_insert_with(|| ifname(d.ifindex))
+                        .clone()
+                })
+                .flatten();
+            let data = &buf[..d.len.min(buf.len())];
+            let ok = demux.route_from(
+                &table,
+                arrival.as_deref(),
+                d.dst,
+                d.src,
+                multihop,
+                d.ttl,
+                data,
+            );
             debug!(peer = %d.src, ttl = ?d.ttl, delivered = ok, "bfd packet received");
             Ok(())
         },
@@ -267,6 +290,7 @@ async fn rx_loop(
             let changed = now != 0 && now != have;
             if changed {
                 have = now;
+                names.lock().unwrap().clear();
             }
             changed
         },
