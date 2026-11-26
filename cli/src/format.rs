@@ -1526,11 +1526,76 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
     }
 }
 
-/// Render one prefix's candidate routes, best (winner, marked `*`) to worst,
-/// one line per candidate. Used for both `show route <table>` (many entries)
-/// and `show route <table> <address>` (one entry, wrapped in a slice).
+/// The once-per-walk header of `show route <table>`: the table, its VRF and
+/// kernel table when known, and the line codes.
+pub fn render_route_header(s: &nos_proto::RibSummary) -> String {
+    let mut parts = Vec::new();
+    if let Some(vrf) = &s.vrf {
+        parts.push(format!("vrf {}", sanitize_line(vrf)));
+    }
+    if let Some(t) = s.kernel_table {
+        parts.push(format!("kernel table {t}"));
+    }
+    let detail = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    };
+    sanitize(&format!(
+        "routing-table {}{detail}   Codes: * selected, > in FIB",
+        sanitize_line(&s.table)
+    ))
+    .into_owned()
+}
+
+/// Render each prefix, then one line per candidate, best (winner, `*`) to
+/// worst: `  *> via G dev IF [source/pref] metric N, hh:mm:ss`, `>` marking
+/// the one in the FIB. Used for `show route <table>` (many entries) and
+/// `show route <table> <address>` (one entry, wrapped in a slice).
 pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
     sanitize(&render_prefix_routes_raw(entries)).into_owned()
+}
+
+/// `via ...` of one candidate: discard wording, or its hops (each with
+/// `dev <interface>` when known) plus the EVPN router MAC.
+fn render_route_via(candidate: &nos_proto::RouteEntry) -> String {
+    if candidate.blackhole {
+        return "discard (blackhole)".to_string();
+    }
+    if candidate.discard {
+        return "discard".to_string();
+    }
+    // A `Vpn` hop shows its own PE, RD and labels.
+    let gateways = candidate
+        .gateways
+        .iter()
+        .enumerate()
+        .map(|(i, gw)| {
+            let mut hop = match candidate.vpn.get(i) {
+                Some(v) => {
+                    let labels = candidate
+                        .mpls_labels
+                        .get(i)
+                        .into_iter()
+                        .flatten()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    format!("{gw} pe {} rd {} label {labels}", v.pe_next_hop, v.rd)
+                }
+                None => gw.to_string(),
+            };
+            if let Some(Some(dev)) = candidate.interfaces.get(i) {
+                hop = format!("{hop} dev {}", sanitize_line(dev));
+            }
+            hop
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let evpn = candidate.evpn.as_ref().map_or_else(String::new, |e| {
+        format!(" rmac {} vni {}", e.router_mac, e.vni)
+    });
+    format!("via {gateways}{evpn}")
 }
 
 fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
@@ -1541,7 +1606,11 @@ fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
     for entry in entries {
         lines.push(format!("{}", entry.prefix));
         for (i, candidate) in entry.candidates.iter().enumerate() {
-            let marker = if i == 0 { "*" } else { " " };
+            let selected = if i == 0 { '*' } else { ' ' };
+            let fib = if candidate.installed { '>' } else { ' ' };
+            let metric = candidate
+                .metric
+                .map_or_else(String::new, |m| format!(" metric {m}"));
             let backup = candidate.backup.map_or_else(String::new, |b| {
                 let tunnel = if candidate.backup_tunnel {
                     "tunnel "
@@ -1550,40 +1619,12 @@ fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
                 };
                 format!(" backup {tunnel}{b}")
             });
-            let via = if candidate.blackhole {
-                "discard (blackhole)".to_string()
-            } else if candidate.discard {
-                "discard".to_string()
-            } else {
-                // A `Vpn` hop shows its own PE, RD and labels.
-                let gateways = candidate
-                    .gateways
-                    .iter()
-                    .enumerate()
-                    .map(|(i, gw)| match candidate.vpn.get(i) {
-                        Some(v) => {
-                            let labels = candidate
-                                .mpls_labels
-                                .get(i)
-                                .into_iter()
-                                .flatten()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join("/");
-                            format!("{gw} pe {} rd {} label {labels}", v.pe_next_hop, v.rd)
-                        }
-                        None => gw.to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let evpn = candidate.evpn.as_ref().map_or_else(String::new, |e| {
-                    format!(" rmac {} vni {}", e.router_mac, e.vni)
-                });
-                format!("via {gateways}{evpn}")
-            };
             lines.push(format!(
-                "  {marker} {via} [{}]{backup}",
-                render_route_source(candidate.source)
+                "  {selected}{fib} {} [{}/{}]{metric}, {}{backup}",
+                render_route_via(candidate),
+                render_route_source(candidate.source),
+                candidate.preference,
+                crate::table::human_clock(candidate.age_secs),
             ));
         }
     }
@@ -2461,6 +2502,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn route_lines_show_dev_metric_fib_and_age_and_a_header_once() {
+        let mut e = nos_proto::RouteEntry {
+            gateways: vec!["10.0.0.3".parse().unwrap(), "10.0.1.3".parse().unwrap()],
+            source: RouteSourceKind::Ospf,
+            backup: None,
+            discard: false,
+            evpn: None,
+            backup_tunnel: false,
+            mpls_labels: vec![],
+            vpn: vec![],
+            blackhole: false,
+            metric: Some(30),
+            preference: 110,
+            age_secs: 3723,
+            interfaces: vec![Some("eth0".to_string()), None],
+            installed: true,
+        };
+        let mut loser = e.clone();
+        loser.installed = false;
+        loser.metric = None;
+        loser.interfaces = vec![Some("eth0\n  *> via 6.6.6.6\x1b[31m".to_string())];
+        e.age_secs = 3723;
+        let routes = [PrefixRoutes {
+            prefix: "10.9.0.0/24".parse().unwrap(),
+            candidates: vec![e, loser],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "10.9.0.0/24\n  *> via 10.0.0.3 dev eth0, 10.0.1.3 [ospf/110] metric 30, 01:02:03\n   \
+             \x20 via 10.0.0.3 dev eth0\\n  *> via 6.6.6.6\\x1b[31m, 10.0.1.3 [ospf/110], 01:02:03"
+        );
+        let mut s = nos_proto::RibSummary {
+            table: "rt1".to_string(),
+            vrf: Some("vrf-rt1".to_string()),
+            kernel_table: Some(100),
+            ipv4_prefixes: 0,
+            ipv6_prefixes: 0,
+            sources: vec![],
+        };
+        assert_eq!(
+            render_route_header(&s),
+            "routing-table rt1 (vrf vrf-rt1, kernel table 100)   Codes: * selected, > in FIB"
+        );
+        s.vrf = None;
+        s.kernel_table = None;
+        assert_eq!(
+            render_route_header(&s),
+            "routing-table rt1   Codes: * selected, > in FIB"
+        );
+    }
+
+    #[test]
     fn discard_route_renders_as_discard() {
         let routes = [PrefixRoutes {
             prefix: "203.0.113.120/29".parse().unwrap(),
@@ -2483,7 +2576,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "203.0.113.120/29\n  * discard [ospf]"
+            "203.0.113.120/29\n  *  discard [ospf/0], 00:00:00"
         );
     }
 
@@ -2510,7 +2603,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "198.51.100.7/32\n  * discard (blackhole) [bgp]"
+            "198.51.100.7/32\n  *  discard (blackhole) [bgp/0], 00:00:00"
         );
     }
 
@@ -2541,7 +2634,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "10.2.0.0/24\n  * via 10.50.0.3 rmac 02:00:00:00:00:03 vni 5000 [evpn]"
+            "10.2.0.0/24\n  *  via 10.50.0.3 rmac 02:00:00:00:00:03 vni 5000 [evpn/0], 00:00:00"
         );
     }
 
@@ -2571,7 +2664,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "10.10.0.0/24\n  * via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100/7 [vpn]"
+            "10.10.0.0/24\n  *  via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100/7 [vpn/0], 00:00:00"
         );
     }
 
@@ -2604,8 +2697,8 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "10.10.0.0/24\n  * via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100, \
-             10.0.0.3 pe 192.0.2.3 rd 65001:2 label 200 [vpn]"
+            "10.10.0.0/24\n  *  via 10.0.0.3 pe 192.0.2.3 rd 65001:1 label 100, \
+             10.0.0.3 pe 192.0.2.3 rd 65001:2 label 200 [vpn/0], 00:00:00"
         );
     }
 
@@ -2632,7 +2725,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "203.0.113.80/32\n  * via 10.0.0.2, 10.0.1.2 [ospf] backup 10.0.1.3"
+            "203.0.113.80/32\n  *  via 10.0.0.2, 10.0.1.2 [ospf/0], 00:00:00 backup 10.0.1.3"
         );
     }
 
@@ -2659,7 +2752,7 @@ mod tests {
         }];
         assert_eq!(
             render_prefix_routes(&routes),
-            "203.0.113.80/32\n  * via 10.0.0.2 [ospf] backup tunnel 203.0.113.84"
+            "203.0.113.80/32\n  *  via 10.0.0.2 [ospf/0], 00:00:00 backup tunnel 203.0.113.84"
         );
     }
 

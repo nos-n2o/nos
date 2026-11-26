@@ -115,6 +115,11 @@ pub fn human_duration(secs: u64) -> String {
     }
 }
 
+/// `hh:mm:ss`, hours uncapped: `00:00:45`, `25:01:01`.
+pub fn human_clock(secs: u64) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
 /// Decimal bytes: `512 B`, `1.5 KB`, `840.3 MB`.
 pub fn human_bytes(n: u64) -> String {
     scaled(n, &["B", "KB", "MB", "GB", "TB", "PB", "EB"], " ")
@@ -138,6 +143,13 @@ mod tests {
         r.iter()
             .map(|r| r.iter().map(ToString::to_string).collect())
             .collect()
+    }
+
+    #[test]
+    fn human_clock_is_hh_mm_ss_with_uncapped_hours() {
+        assert_eq!(human_clock(0), "00:00:00");
+        assert_eq!(human_clock(3723), "01:02:03");
+        assert_eq!(human_clock(90_061), "25:01:01");
     }
 
     #[test]

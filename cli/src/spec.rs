@@ -11,7 +11,7 @@
 
 use nos_proto::{Topic, TransactionBase};
 
-use crate::command::Command;
+use crate::command::{Command, RouteQuery};
 use crate::session::Mode;
 
 /// One piece of a command's token sequence.
@@ -52,6 +52,10 @@ pub enum ArgKind {
     LogLevel,
     /// A log source name; completion comes with the lazy fetch (#1452).
     LogSource,
+    /// A route source (`ArgKind::fixed_values`, parsed by `RouteSourceKind`).
+    RouteSource,
+    /// An IP prefix, `192.0.2.0/24`.
+    Cidr,
 }
 
 impl ArgKind {
@@ -72,6 +76,7 @@ impl ArgKind {
     pub fn fixed_values(self) -> Option<&'static [&'static str]> {
         match self {
             ArgKind::LogLevel => Some(&["trace", "debug", "info", "warn", "error"]),
+            ArgKind::RouteSource => Some(&["static", "bgp", "ospf", "connected", "evpn", "vpn"]),
             _ => None,
         }
     }
@@ -366,7 +371,69 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always,
         |table| Command::ShowRoute {
             table: table.to_string(),
-            address: None,
+            query: RouteQuery::Table,
+        }),
+    cmd!(["show" "route"],
+        Doc::Local {
+            summary: "List every routing table with its prefix counts.",
+            detail: "Reads the configured routing tables and asks each table's nos-ribd \
+                     (resolved via nos-watchdogd) for its VRF, kernel table id and the number \
+                     of IPv4 and IPv6 prefixes. A table whose nos-ribd is not running is \
+                     listed as not running.",
+        },
+        Always,
+        Command::ShowRouteTables),
+    cmd!(["show" "route" (table: RoutingTableName) "summary"],
+        Doc::Local {
+            summary: "Show a routing table's prefix and per-source route counts.",
+            detail: "Asks the table's nos-ribd for its VRF, kernel table id, the number of \
+                     IPv4 and IPv6 prefixes and the candidate routes per source.",
+        },
+        Always,
+        |table| Command::ShowRouteSummary { table: table.to_string() }),
+    cmd!(["show" "route" (table: RoutingTableName) "protocol" (source: RouteSource)],
+        Doc::Local {
+            summary: "Show the routes of one source in a routing table.",
+            detail: "Like `show route <table>`, keeping only the prefixes with a candidate \
+                     of the given source (static, bgp, ospf, connected, evpn, vpn) and only \
+                     those candidates.",
+        },
+        Always,
+        |table, source| Command::ShowRoute {
+            table: table.to_string(),
+            query: RouteQuery::Filter(nos_proto::RouteFilter {
+                source: Some(source.parse().ok()?),
+                ..Default::default()
+            }),
+        }),
+    cmd!(["show" "route" (table: RoutingTableName) "prefix" (prefix: Cidr)],
+        Doc::Local {
+            summary: "Show the routes of exactly one prefix in a routing table.",
+            detail: "Like `show route <table>`, keeping only the prefix given as a CIDR \
+                     (e.g. 10.0.0.0/24), not the longest-prefix match of an address.",
+        },
+        Always,
+        |table, prefix| Command::ShowRoute {
+            table: table.to_string(),
+            query: RouteQuery::Filter(nos_proto::RouteFilter {
+                prefix: Some(prefix.parse().ok()?),
+                ..Default::default()
+            }),
+        }),
+    cmd!(["show" "route" (table: RoutingTableName) "prefix" (prefix: Cidr) "longer"],
+        Doc::Local {
+            summary: "Show the routes of a prefix and every longer prefix it covers.",
+            detail: "Like `show route <table> prefix <cidr>`, also including every more \
+                     specific prefix inside the CIDR.",
+        },
+        Always,
+        |table, prefix| Command::ShowRoute {
+            table: table.to_string(),
+            query: RouteQuery::Filter(nos_proto::RouteFilter {
+                prefix: Some(prefix.parse().ok()?),
+                longer: true,
+                ..Default::default()
+            }),
         }),
     cmd!(["show" "route" (table: RoutingTableName) (address: IpAddr)],
         Doc::Local {
@@ -378,7 +445,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Always,
         |table, address| Command::ShowRoute {
             table: table.to_string(),
-            address: Some(address.parse().ok()?),
+            query: RouteQuery::Lookup(address.parse().ok()?),
         }),
     cmd!(["show" "fdb"],
         Doc::Local {
@@ -1514,6 +1581,8 @@ mod tests {
             Token::Arg(ArgKind::Mac) => out.push("02:00:00:00:00:01"),
             Token::Arg(ArgKind::Rest) => out.push("  some text"),
             Token::Arg(ArgKind::LogLevel) => out.push("info"),
+            Token::Arg(ArgKind::RouteSource) => out.push("static"),
+            Token::Arg(ArgKind::Cidr) => out.push("192.0.2.0/24"),
             Token::Arg(_) => out.push("sample"),
             Token::Opt(clause) => clause.iter().for_each(|t| sample(t, out)),
         }

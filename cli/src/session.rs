@@ -3,7 +3,7 @@ use std::net::IpAddr;
 
 use nos_proto::TransactionBase;
 
-use crate::command::Command;
+use crate::command::{Command, RouteQuery};
 
 /// Navigation position within the transaction's config tree, as REST
 /// segments (`config_path`): `["bgp-instance", "r1", "peer-group", "pg1"]`.
@@ -86,11 +86,16 @@ pub enum Resolved {
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
-    /// `show route <table>` (whole table) or `show route <table> <address>`
-    /// (longest-prefix-match lookup) — data-plane, valid in any mode.
+    /// `show route <table> [...]` — data-plane, valid in any mode.
     ShowRoute {
         table: String,
-        address: Option<IpAddr>,
+        query: RouteQuery,
+    },
+    /// `show route` (#1446).
+    ShowRouteTables,
+    /// `show route <table> summary` (#1446).
+    ShowRouteSummary {
+        table: String,
     },
     /// `show fdb [<domain>] [mac <mac>]` — data-plane, valid in any mode.
     ShowFdb {
@@ -311,6 +316,8 @@ impl Resolved {
         match self {
             Resolved::ShowBfdSessions { .. }
             | Resolved::ShowRoute { .. }
+            | Resolved::ShowRouteTables
+            | Resolved::ShowRouteSummary { .. }
             | Resolved::ShowBgpRoutes => true,
             Resolved::Nothing
             | Resolved::Help
@@ -425,7 +432,9 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ClearAaaUser { name } => Resolved::ClearAaaUser { name },
         Command::ConfirmCommit => Resolved::ConfirmCommit,
         Command::CancelCommit => Resolved::CancelCommit,
-        Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
+        Command::ShowRoute { table, query } => Resolved::ShowRoute { table, query },
+        Command::ShowRouteTables => Resolved::ShowRouteTables,
+        Command::ShowRouteSummary { table } => Resolved::ShowRouteSummary { table },
         Command::ShowFdb { domain, mac } => Resolved::ShowFdb { domain, mac },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowInterfaceBrief => Resolved::ShowInterfaceBrief,
@@ -588,6 +597,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ConfirmCommit
         | Command::CancelCommit
         | Command::ShowRoute { .. }
+        | Command::ShowRouteTables
+        | Command::ShowRouteSummary { .. }
         | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }
         | Command::ShowInterfaceBrief
