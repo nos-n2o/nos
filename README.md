@@ -17,7 +17,7 @@ authority.
 
 Architecture and protocol internals: [`docs/architecture/`](docs/architecture/README.md).
 Using a router (concepts, shell, REST): [`docs/`](docs/README.md).
-Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md). Coding agents: see
+Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md); security reports: [`SECURITY.md`](SECURITY.md); [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Coding agents: see
 [`CLAUDE.md`](CLAUDE.md). This file only orients a human and gets a router
 running.
 
@@ -138,4 +138,4 @@ not unit tests alone — this is not a claim of production-readiness.
 
 ## Licence
 
-GPL-3.0 — see [`LICENSE`](LICENSE).
+GPL-3.0 — see [`LICENSE`](LICENSE). Reporting a vulnerability: [`SECURITY.md`](SECURITY.md). Community rules: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
