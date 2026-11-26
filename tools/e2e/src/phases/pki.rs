@@ -296,6 +296,7 @@ async fn tacacs(w: &World) -> anyhow::Result<()> {
             routing_table: Some("rt1".into()),
             key_ref: "tacacs".into(),
             timeout_secs: Some(2),
+            ..Default::default()
         }];
         c.aaa.accounting = true;
         c.aaa.login_order = vec![
@@ -358,7 +359,71 @@ async fn tacacs(w: &World) -> anyhow::Result<()> {
     }
     a.wait_new(&rejected, before, 15).await?;
 
+    tacacs_ascii_single_connect(w).await?;
     w.dock.container_remove(TACACS_STUB).await;
+    Ok(())
+}
+
+/// Occurrences of `needle` in the stub's log.
+async fn stub_count(w: &World, needle: &str) -> anyhow::Result<usize> {
+    Ok(w.dock.logs(TACACS_STUB).await?.matches(needle).count())
+}
+
+/// Authentication, authorization and accounting sessions the stub has served.
+fn stub_sessions(logs: &str) -> usize {
+    [
+        "tacacs-stub: authen pass",
+        "tacacs-stub: author",
+        "tacacs-stub: accounting",
+    ]
+    .iter()
+    .map(|n| logs.matches(n).count())
+    .sum()
+}
+
+/// #1155: the same server switched to ASCII authentication and single-connect:
+/// the login is prompted (GETPASS, CONTINUE) and the exchanges of a whole
+/// provisioning run (authentication, authorization, accounting) share fewer
+/// TCP connections than sessions.
+async fn tacacs_ascii_single_connect(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    a.edit(|c| {
+        let s = &mut c.aaa.tacacs_servers[0];
+        s.authentication = nos_proto::TacacsAuthentication::Ascii;
+        s.single_connect = true;
+        Ok(())
+    })
+    .await?;
+    log("ASCII login over single-connect: prompted, and sessions share connections");
+    let opened = stub_count(w, "connection opened").await?;
+    let before = stub_sessions(&w.dock.logs(TACACS_STUB).await?);
+    let prompts = stub_count(w, "authen getpass").await?;
+    let needle = "login accepted by tacacs user=\"tac-admin\" role=\"admin\"";
+    let accepted = a.count(needle);
+    let (code, out) = run_provision(
+        w,
+        &["--login-user", "tac-admin", "--login-password", "pw-admin"],
+    )
+    .await?;
+    if code != 0 || !out.contains("provisioning complete") {
+        bail!("an ASCII TACACS+ admin should provision, got exit {code}: {out}");
+    }
+    a.wait_new(needle, accepted, 15).await?;
+    // The commit and START records are sent by a worker: let them land.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    if stub_count(w, "authen pass user=tac-admin type=ascii").await? == 0 {
+        bail!("the stub never saw an ASCII authentication");
+    }
+    if stub_count(w, "authen getpass").await? <= prompts {
+        bail!("the ASCII login was never prompted for a password");
+    }
+    let logs = w.dock.logs(TACACS_STUB).await?;
+    let sessions = stub_sessions(&logs) - before;
+    let conns = logs.matches("connection opened").count() - opened;
+    log(format!("{sessions} sessions over {conns} connection(s)"));
+    if sessions < 3 || conns >= sessions {
+        bail!("single-connect should share connections: {sessions} sessions, {conns} connections");
+    }
     Ok(())
 }
 

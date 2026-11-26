@@ -349,8 +349,6 @@ impl Resolved {
             | Resolved::ShowLacp { .. }
             | Resolved::ShowLldpNeighbors { .. }
             | Resolved::ShowLldpStatistics
-            | Resolved::ShowOspfInstance
-            | Resolved::ShowOspfv3Instance
             | Resolved::ShowVersion
             | Resolved::ShowAcl { .. }
             | Resolved::ShowSpanningTree
