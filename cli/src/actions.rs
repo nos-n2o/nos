@@ -898,7 +898,7 @@ async fn show_route_tables(config_socket: &Path, watchdog_socket: &Path, out: Ou
             }
             println!("{}", pipe::json_pretty(&rows));
         }
-        Output::Text => {
+        Output::Text | Output::Set => {
             let empty = if down.is_empty() {
                 "no routing tables"
             } else {

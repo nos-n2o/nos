@@ -340,6 +340,8 @@ impl Resolved {
             | Resolved::ShowAdminConfig
             | Resolved::ShowConfigPath(_)
             | Resolved::ShowTransaction
+            | Resolved::ShowOspfInstance
+            | Resolved::ShowOspfv3Instance
             | Resolved::ShowFdb { .. }
             | Resolved::ShowInterface { .. }
             | Resolved::ShowInterfaceBrief
