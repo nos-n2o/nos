@@ -421,10 +421,11 @@ impl Dock {
         seed: Option<(&str, &str, &[u8])>,
         caps: &[&str],
     ) -> anyhow::Result<()> {
-        // router-f (FRR) and router-g (ExaBGP) share one IP: a leftover of
+        // router-f (FRR) and router-g (ExaBGP) share `IP_G`: a leftover of
         // either clashes (403 "Address already in use", #1468). Clear both,
-        // and retry once if the daemon still reports the clash.
-        let clash = ["router-f", "router-g"].contains(&name);
+        // and retry once if the daemon still reports the clash. Only for that
+        // address: an FRR PE elsewhere (`evpn-esi`) must leave router-g (GoBGP) up.
+        let clash = ["router-f", "router-g"].contains(&name) && ip == crate::consts::IP_G.s();
         if clash {
             self.container_remove("router-f").await;
             self.container_remove("router-g").await;

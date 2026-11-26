@@ -184,6 +184,33 @@ enum Installed {
     },
 }
 
+/// RFC 7432 §7.6: a Type-4 is imported only by a PE attached to the segment,
+/// which it recognises by the ES-Import RT derived from the ESI.
+fn es_import_ok(route: &EvpnRoute, esi: &Esi) -> bool {
+    route.ext_communities.contains(&es_import_rt(esi))
+}
+
+/// The (our ESI, origin) Type-4s received without that ESI's ES-Import RT:
+/// ignored by `plan_df` and `ad_index`.
+fn es_import_mismatches(
+    r: &Ready,
+    received: &HashMap<EvpnKey, EvpnRoute>,
+) -> BTreeSet<(Esi, IpAddr)> {
+    received
+        .values()
+        .filter_map(|route| match &route.key {
+            EvpnKey::EthernetSegment { esi, origin, .. }
+                if *origin != r.vtep
+                    && r.es_ports.iter().any(|p| p.esi == *esi)
+                    && !es_import_ok(route, esi) =>
+            {
+                Some((*esi, *origin))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The A-D index of `received`: only routes carrying one of our import Route
 /// Targets count (a per-ES route carries the RTs of the EVIs on the segment),
 /// and never our own. A per-EVI route also has to name this domain's VNI.
@@ -194,7 +221,7 @@ fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
     let mut out = Ads::new();
     for route in received.values() {
         if let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key {
-            if *origin != r.vtep && route.ext_communities.contains(&es_import_rt(esi)) {
+            if *origin != r.vtep && es_import_ok(route, esi) {
                 out.entry(*esi).or_default().es_pes.insert(*origin);
             }
             continue;
@@ -551,7 +578,7 @@ fn plan_df(
                 let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key else {
                     continue;
                 };
-                if *esi != p.esi || *origin == r.vtep {
+                if *esi != p.esi || *origin == r.vtep || !es_import_ok(route, esi) {
                     continue;
                 }
                 let (alg, ac_df) = df_capabilities(route);
@@ -685,6 +712,8 @@ struct Inner {
     bias_peers: BTreeMap<IpAddr, u16>,
     /// Ports already warned about for a failed local-bias setup.
     bias_warned: BTreeSet<String>,
+    /// (ESI, origin) Type-4s already warned about for a missing ES-Import RT.
+    es_import_warned: BTreeSet<(Esi, IpAddr)>,
     /// When the local-bias kernel state was last written unconditionally: an
     /// unchanged one is only re-asserted (healing a recreated bond or VXLAN
     /// device) about once per `TICK`, not on every pushed route.
@@ -865,6 +894,21 @@ impl Fdb {
         self.sync_df(&mut g).await;
     }
 
+    /// Warns once per (ESI, origin) Type-4 ignored for lacking the ES-Import RT.
+    fn warn_es_import(&self, g: &mut Inner) {
+        let bad = g
+            .ready
+            .as_ref()
+            .map_or_default(|r| es_import_mismatches(r, &g.received));
+        for (esi, origin) in bad.difference(&g.es_import_warned) {
+            warn!(
+                domain = %self.domain, esi = %format_esi(esi), origin = %origin,
+                "evpn type-4 ignored, es-import rt mismatch"
+            );
+        }
+        g.es_import_warned = bad;
+    }
+
     /// Re-elects the Designated Forwarder of every attached segment and
     /// applies it: a non-DF stops flooding BUM to the segment's port, a DF
     /// (and a port no longer on any segment) floods normally. A port is held
@@ -874,6 +918,7 @@ impl Fdb {
     /// healed by the tick.
     async fn sync_df(&self, g: &mut Inner) {
         let was = pinnable(&g.segments);
+        self.warn_es_import(g);
         let mut plan = g
             .ready
             .as_ref()
@@ -2651,6 +2696,36 @@ mod tests {
     // [192.0.1.9, 192.0.2.1][10100 % 2] = 192.0.1.9 but HRW elects us
     // (weights 1081544908 vs 1754456132, see `df::hrw_weight`).
     const LOW_PE: &str = "192.0.1.9";
+
+    #[test]
+    fn a_type4_without_the_es_import_rt_is_no_df_candidate() {
+        let no_rt = |esi, o| EvpnRoute {
+            ext_communities: vec![df_election_ext(DF_ALG_MODULO, true)],
+            ..es_route(esi, o)
+        };
+        let wrong_rt = EvpnRoute {
+            ext_communities: vec![es_import_rt(&[9; 10])],
+            ..es_route(ESI, LOW_PE)
+        };
+        // Lower-address peer: with the RT we are non-DF, without it we are DF.
+        let with = plan_one(
+            DfAlgorithm::Modulo,
+            vec![es_route(ESI, LOW_PE), evi_ad(ESI, LOW_PE)],
+        );
+        assert!(!with.df);
+        for bad in [no_rt(ESI, LOW_PE), wrong_rt] {
+            let s = plan_one(DfAlgorithm::Modulo, vec![bad.clone(), evi_ad(ESI, LOW_PE)]);
+            assert!(s.df);
+            assert!(!s.pes.contains(&LOW_PE.parse().unwrap()));
+            let r = ready_with_segment();
+            let received = HashMap::from([(bad.key.clone(), bad)]);
+            assert_eq!(es_import_mismatches(&r, &received).len(), 1);
+        }
+        // Another ESI's Type-4 is not ours to warn about.
+        let r = ready_with_segment();
+        let o = no_rt([7; 10], LOW_PE);
+        assert!(es_import_mismatches(&r, &HashMap::from([(o.key.clone(), o)])).is_empty());
+    }
 
     #[test]
     fn hrw_runs_only_when_every_pe_asks_for_it() {
