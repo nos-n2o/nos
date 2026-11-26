@@ -105,6 +105,12 @@ pub enum Command {
     ShowBgpSummary {
         instance: Option<String>,
     },
+    /// `show bgp neighbor [<ip>] [instance <name>]` — one detail block per
+    /// peer (#1443).
+    ShowBgpNeighbor {
+        peer: Option<IpAddr>,
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
@@ -884,6 +890,27 @@ mod tests {
         assert_eq!(
             Command::parse("show bgp brief"),
             Command::ShowBgpSummary { instance: None }
+        );
+    }
+
+    #[test]
+    fn show_bgp_neighbor() {
+        let n = |peer: Option<&str>, instance: Option<&str>| Command::ShowBgpNeighbor {
+            peer: peer.map(|p| p.parse().unwrap()),
+            instance: instance.map(String::from),
+        };
+        assert_eq!(Command::parse("show bgp neighbor"), n(None, None));
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2"),
+            n(Some("10.0.0.2"), None)
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor instance r1"),
+            n(None, Some("r1"))
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2 instance r1"),
+            n(Some("10.0.0.2"), Some("r1"))
         );
     }
 

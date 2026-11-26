@@ -120,6 +120,27 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
             "graceful restart negotiated peer={IP_A} .*notification=true"
         ))
         .await?;
+    // #1443: `?instance=` and `?peer=` narrow the summary; unknown ones are 404.
+    let a = w.a()?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/summary?instance=r1", None, 200)
+        .await?;
+    expect_body(&body, "Established")?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bgp/summary?instance=r1&peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    if body.matches("\"remote_address\"").count() != 1 {
+        bail!("?peer={IP_B} should return exactly one peer: {body}");
+    }
+    for q in ["instance=nope", "peer=203.0.113.99"] {
+        a.rest_expect(Method::GET, &format!("/v1/bgp/summary?{q}"), None, 404)
+            .await?;
+    }
     // #473: both images were built from one tree, so `nos-restd` reports the
     // same baked-in revision; `unknown` means `NOS_BUILD_REV` never arrived.
     let (ra, rb) = (revision(w.a()?).await?, revision(w.b()?).await?);

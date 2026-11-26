@@ -170,6 +170,11 @@ pub enum Resolved {
     ShowBgpSummary {
         instance: Option<String>,
     },
+    /// `show bgp neighbor [<ip>] [instance <name>]` — data-plane, valid in any mode.
+    ShowBgpNeighbor {
+        peer: Option<std::net::IpAddr>,
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — data-plane, valid in any mode. Router-wide like
     /// `ShowBgpSummary`.
     ShowBgpEvpn,
@@ -378,6 +383,9 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
             needle,
         },
         Command::ShowBgpSummary { instance } => Resolved::ShowBgpSummary { instance },
+        Command::ShowBgpNeighbor { peer, instance } => {
+            Resolved::ShowBgpNeighbor { peer, instance }
+        }
         Command::ShowBgpEvpn => Resolved::ShowBgpEvpn,
         Command::ShowBgpFlowspec { family, vrf } => Resolved::ShowBgpFlowspec { family, vrf },
         Command::ShowBgpRpki => Resolved::ShowBgpRpki,
@@ -521,6 +529,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBfdReflector
         | Command::ShowLog { .. }
         | Command::ShowBgpSummary { .. }
+        | Command::ShowBgpNeighbor { .. }
         | Command::ShowBgpEvpn
         | Command::ShowBgpFlowspec { .. }
         | Command::ShowBgpRpki

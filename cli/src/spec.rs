@@ -988,6 +988,40 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         |name| Command::ShowBgpSummary { instance: Some(name.to_string()) }),
+    cmd!(["show" "bgp" "neighbor"],
+        Doc::Local {
+            summary: "Show every BGP session in full, per instance.",
+            detail: "One block per peer of every configured BGP instance: session state, \
+                     timers, message and prefix counters, last notification, negotiated \
+                     capabilities, local endpoint, BFD state, and the TCP-AO and graceful \
+                     restart state when present.",
+        },
+        Always,
+        Command::ShowBgpNeighbor { peer: None, instance: None }),
+    cmd!(["show" "bgp" "neighbor" (peer: IpAddr)],
+        Doc::Local {
+            summary: "Show the BGP session with one peer in full.",
+            detail: "Like show bgp neighbor, restricted to the peer with this address.",
+        },
+        Always,
+        |peer| Command::ShowBgpNeighbor { peer: Some(peer.parse().ok()?), instance: None }),
+    cmd!(["show" "bgp" "neighbor" "instance" (name: BgpInstanceName)],
+        Doc::Local {
+            summary: "Show the BGP sessions of one instance in full.",
+            detail: "Like show bgp neighbor, restricted to the instance <name>.",
+        },
+        Always,
+        |name| Command::ShowBgpNeighbor { peer: None, instance: Some(name.to_string()) }),
+    cmd!(["show" "bgp" "neighbor" (peer: IpAddr) "instance" (name: BgpInstanceName)],
+        Doc::Local {
+            summary: "Show the BGP session with one peer of one instance in full.",
+            detail: "Like show bgp neighbor <peer>, restricted to the instance <name>.",
+        },
+        Always,
+        |peer, name| Command::ShowBgpNeighbor {
+            peer: Some(peer.parse().ok()?),
+            instance: Some(name.to_string()),
+        }),
     cmd!(["show" "bgp" "brief"],
         Doc::Local {
             summary: "The old name of show bgp summary.",
