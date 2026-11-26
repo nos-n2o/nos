@@ -1,1 +1,1 @@
-bgp instance r1: no peers configured
+bgp instance r1: no peers

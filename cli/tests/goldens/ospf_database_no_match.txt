@@ -1,1 +1,1 @@
-ospf instance o1: no LSAs match
+ospf instance o1: no matching LSAs
