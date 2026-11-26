@@ -428,7 +428,7 @@ mod tests {
         assert_ne!(b, body);
     }
 
-    /// RFC 8907 §4.5: pad_1 = MD5(session_id, key, version, seq_no), pad_n adds
+    /// RFC 8907 §4.5: the first pad is `MD5(session, key, version, seq)`, each next one adds
     /// the previous pad. Known answer computed with an independent MD5.
     #[test]
     fn pseudo_pad_known_answer() {

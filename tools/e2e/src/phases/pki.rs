@@ -371,10 +371,14 @@ async fn stub_count(w: &World, needle: &str) -> anyhow::Result<usize> {
 
 /// Authentication, authorization and accounting sessions the stub has served.
 fn stub_sessions(logs: &str) -> usize {
-    ["tacacs-stub: authen pass", "tacacs-stub: author", "tacacs-stub: accounting"]
-        .iter()
-        .map(|n| logs.matches(n).count())
-        .sum()
+    [
+        "tacacs-stub: authen pass",
+        "tacacs-stub: author",
+        "tacacs-stub: accounting",
+    ]
+    .iter()
+    .map(|n| logs.matches(n).count())
+    .sum()
 }
 
 /// #1155: the same server switched to ASCII authentication and single-connect:
@@ -416,7 +420,7 @@ async fn tacacs_ascii_single_connect(w: &World) -> anyhow::Result<()> {
     let logs = w.dock.logs(TACACS_STUB).await?;
     let sessions = stub_sessions(&logs) - before;
     let conns = logs.matches("connection opened").count() - opened;
-    log(&format!("{sessions} sessions over {conns} connection(s)"));
+    log(format!("{sessions} sessions over {conns} connection(s)"));
     if sessions < 3 || conns >= sessions {
         bail!("single-connect should share connections: {sessions} sessions, {conns} connections");
     }

@@ -76,7 +76,7 @@ impl std::fmt::Debug for Server {
             .field("vrf", &self.vrf)
             .field("ascii", &self.ascii)
             .field("single_connect", &self.pool.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
