@@ -54,10 +54,16 @@ fn rule_matches(r: &AclRule, p: &Packet) -> bool {
 }
 
 fn first_match(acl: &Acl, p: &Packet) -> AclAction {
-    acl.rules
-        .iter()
-        .find(|r| rule_matches(r, p))
-        .map_or(acl.default_action, |r| r.action)
+    // A deny default permits ICMPv6 133..=136 after the rules (#1530).
+    let nd = p.v6 && p.proto == 58 && !p.non_first_fragment && (133..=136).contains(&p.icmp.0);
+    acl.rules.iter().find(|r| rule_matches(r, p)).map_or(
+        if acl.default_action == AclAction::Deny && nd {
+            AclAction::Permit
+        } else {
+            acl.default_action
+        },
+        |r| r.action,
+    )
 }
 
 /// What the kernel's flower does with one filter.
@@ -156,7 +162,7 @@ fn rule() -> impl Strategy<Value = AclRule> {
     );
     let extra = (
         any::<bool>(),
-        prop::option::of(0u8..3),
+        prop::option::of(0u8..5),
         prop::option::of(0u8..2),
     );
     (proto, nets, ports, extra, any::<bool>(), any::<bool>()).prop_map(
@@ -187,7 +193,9 @@ fn rule() -> impl Strategy<Value = AclRule> {
                 r.filter(|_| tcp_udp)
                     .map(|(start, end)| PortRange { start, end })
             };
-            let icmp_type = ity.filter(|_| icmp).map(|t| [8, 0, 135][usize::from(t)]);
+            let icmp_type = ity
+                .filter(|_| icmp)
+                .map(|t| [8, 0, 135, 136, 134][usize::from(t)]);
             AclRule {
                 action: if deny {
                     AclAction::Deny
@@ -216,7 +224,7 @@ fn packet() -> impl Strategy<Value = Packet> {
         (0usize..5, 0usize..5),
         (pick(&PORTS), pick(&PORTS)),
         pick(&[0u16, ACK, RST, 0x02, ACK | 0x08]),
-        (pick(&[8u8, 0, 135]), 0u8..2),
+        (pick(&[8u8, 0, 135, 133, 134, 136]), 0u8..2),
         prop::bool::weighted(0.2),
     )
         .prop_map(|(proto, v6, (s, d), (sport, dport), flags, icmp, nff)| {
@@ -265,7 +273,7 @@ proptest! {
                 .collect(),
         };
         let c = compile(&acl).unwrap();
-        prop_assert!(c.levels.len() <= acl.rules.len());
+        prop_assert!(c.levels.len() <= acl.rules.len() + 1);
         prop_assert_eq!(c.rules, acl.rules.len());
         for p in &packets {
             prop_assert_eq!(compiled_verdict(&c, p), first_match(&acl, p), "{:?}", p);

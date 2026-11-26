@@ -798,3 +798,9 @@ pub const OSPF_SR_LOOPBACK_C: &str = "203.0.113.132";
 pub const OSPF_SR_INDEX_A: u32 = 11;
 pub const OSPF_SR_INDEX_B: u32 = 12;
 pub const OSPF_SR_INDEX_C: u32 = 13;
+
+/// `acl` step 5b (#1530): both routers' `eth0` IPv6 addresses on one /64
+/// (ULA, unused elsewhere); the ACL's implicit ND permit lets them resolve
+/// each other under `default-action deny`.
+pub const ACL_ND_A: &str = "fd53:1530::1";
+pub const ACL_ND_B: &str = "fd53:1530::2";

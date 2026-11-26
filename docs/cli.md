@@ -233,7 +233,8 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
 - **Families:** a rule with an IPv4 prefix matches only IPv4, an IPv6 prefix only IPv6, no prefix both. `source` and `destination` must be in the same family; `icmp` is IPv4 and `icmpv6` IPv6.
 - **Caveats:**
   - An interface ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first.
-  - On IPv6 permit `icmpv6` first: the default `deny` drops Neighbor Discovery.
+  - A `deny` default permits ICMPv6 types 133-136 (Neighbor Discovery) after your rules, on `acl in` and `acl out`: an earlier rule (a `deny icmpv6 icmp-type 135`) wins, and `show acl` lists it as `implicit nd permit` (counters, or `shadowed` when your rules cover all four).
+  - The hop limit of 255 is not checked (flower cannot match it).
   - Only IPv4 and IPv6 are filtered; ARP, LACP, LLDP and STP always pass.
   - A physical interface's ACL sees untagged frames only; attach to the subinterface for tagged traffic.
   - A rule with a port, `established` or ICMP match never matches non-first IP fragments.

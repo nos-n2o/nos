@@ -3,10 +3,15 @@
 
 use std::collections::BTreeMap;
 
+use nos_proto::schema::AclAction;
 use nos_proto::{AclAttachment, AclRuleStatus, AclStatus};
 
-use crate::compile::{Compiled, DEFAULT_COOKIE};
+use crate::compile::{Compiled, DEFAULT_COOKIE, IMPLICIT_ND_COOKIE};
 use crate::driver::Counter;
+
+/// The `show acl` row of the implicit ND permit; user rule names cannot hold
+/// spaces, so it never collides.
+const IMPLICIT_ND_NAME: &str = "implicit nd permit";
 
 /// Sums `counters` per cookie across every attachment, so a rule counts once
 /// however many filters (family split, `established` pair, packed levels) and
@@ -25,7 +30,7 @@ pub fn status(name: &str, c: &Compiled, attached: &[(AclAttachment, Vec<Counter>
             .position(|l| l.filters.iter().any(|f| f.rule as usize == rule))
             .map(|l| u32::try_from(l).unwrap_or(u32::MAX))
     };
-    let rules = c
+    let mut rules: Vec<AclRuleStatus> = c
         .rule_names
         .iter()
         .enumerate()
@@ -49,6 +54,17 @@ pub fn status(name: &str, c: &Compiled, attached: &[(AclAttachment, Vec<Counter>
             }
         })
         .collect();
+    if c.default_action == AclAction::Deny {
+        let (packets, bytes) = sums.get(&IMPLICIT_ND_COOKIE).copied().unwrap_or_default();
+        rules.push(AclRuleStatus {
+            name: IMPLICIT_ND_NAME.into(),
+            action: AclAction::Permit,
+            dropped: (c.implicit == 0).then(|| "shadowed".into()),
+            level: level_of(IMPLICIT_ND_COOKIE as usize),
+            packets,
+            bytes,
+        });
+    }
     let (default_packets, default_bytes) = sums.get(&DEFAULT_COOKIE).copied().unwrap_or_default();
     let mut attached: Vec<AclAttachment> = attached.iter().map(|(a, _)| a.clone()).collect();
     attached.sort();
@@ -156,6 +172,37 @@ mod tests {
         assert_eq!(s.rules[0].level, Some(0));
         assert_eq!(s.rules[1].level, None);
         assert_eq!((s.levels, s.filters), (1, 5));
+    }
+
+    #[test]
+    fn a_deny_default_shows_the_implicit_nd_row() {
+        let mut deny = Acl::default();
+        deny.rules.push(rule("a", AclAction::Permit, None));
+        let c = compile(&deny).unwrap();
+        let s = status(
+            "E",
+            &c,
+            &[(
+                at("eth0", AclDirection::In),
+                vec![k(IMPLICIT_ND_COOKIE, 4), k(IMPLICIT_ND_COOKIE, 1)],
+            )],
+        );
+        let r = s.rules.last().unwrap();
+        assert_eq!(
+            (r.name.as_str(), r.action, r.packets, r.bytes, &r.dropped),
+            (
+                "implicit nd permit",
+                AclAction::Permit,
+                5,
+                500,
+                &Some("shadowed".into())
+            )
+        );
+        // `a` permits everything: it shadows all four.
+        assert_eq!((s.rules.len(), r.level), (2, None));
+        let s = status("E", &compile(&Acl::default()).unwrap(), &[]);
+        let r = s.rules.last().unwrap();
+        assert_eq!((r.dropped.as_deref(), r.level), (None, Some(0)));
     }
 
     #[test]
