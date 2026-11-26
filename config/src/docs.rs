@@ -2320,6 +2320,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              included). `--follow` streams new lines after the backlog; the filters apply \
              to them too.",
         ),
+        Topic::DisplaySet => (
+            "Print the configuration as flat `set` lines.",
+            "`show config [<path>] | display set` and `show this | display set` print the \
+             configuration as one absolute `set` line per value, each pasteable from the \
+             top of the config. A secret is a `# ... <hidden>` comment; a policy's source \
+             is an `edit` block of `set source line <n> <text>` closed by `top`. Any other \
+             command, and `show config admin`, is refused.",
+        ),
         Topic::PipeJson => (
             "Print a show command's output as JSON.",
             "`show <command> | json` prints the same data `nos-restd` serves, as JSON, \

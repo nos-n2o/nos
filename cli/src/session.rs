@@ -309,6 +309,15 @@ pub enum Resolved {
 }
 
 impl Resolved {
+    /// Does `| display set` (#1462) work on this command? Exhaustive on
+    /// purpose; keep in step with `actions::handle_action_out`.
+    pub fn display_set_capable(&self) -> bool {
+        matches!(
+            self,
+            Resolved::ShowRunningConfig | Resolved::ShowConfigPath(_) | Resolved::ShowTransaction
+        )
+    }
+
     /// Does `| json` (#1415) work on this command? Exhaustive on purpose: a
     /// new variant must be classified. Keep in step with
     /// `actions::handle_action_out`; a flat view's migration flips its arm.

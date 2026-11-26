@@ -206,6 +206,37 @@ pub async fn handle_action_out(
     ask_leave: fn(&str) -> LeaveChoice,
     out: Output,
 ) -> Outcome {
+    if out == Output::Set {
+        match action {
+            Resolved::ShowRunningConfig => show_set(socket, &[]).await,
+            Resolved::ShowConfigPath(p) => {
+                show_set(socket, &p.split_whitespace().collect::<Vec<_>>()).await;
+            }
+            Resolved::ShowTransaction => {
+                let (t, path) = (current_transaction(&mode), current_path(&mode));
+                match client::get_transaction(socket, &t).await {
+                    Ok(snap) => {
+                        let doc = serde_json::to_value(&snap.config).unwrap_or_default();
+                        println!("{}", format::set_lines(&doc, path.segments()));
+                    }
+                    Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+                }
+            }
+            Resolved::Error(_) => {
+                return handle_text_action(
+                    action,
+                    mode,
+                    socket,
+                    watchdog_socket,
+                    doc_cache,
+                    ask_leave,
+                )
+                .await;
+            }
+            _ => eprintln!("error: this command has no display set output"),
+        }
+        return Outcome::Continue(mode);
+    }
     if out == Output::Json {
         match action {
             Resolved::ShowBfdSessions { peer, .. } => {
@@ -706,6 +737,16 @@ async fn show_running_config(socket: &Path) {
     }
 }
 
+async fn show_set(socket: &Path, words: &[&str]) {
+    match client::fetch_running_config(socket).await {
+        Ok(cfg) => match format::render_display_set(&cfg, words) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
 async fn show_config_path(socket: &Path, path: &str) {
     let words: Vec<&str> = path.split_whitespace().collect();
     match client::fetch_running_config(socket).await {
@@ -1129,7 +1170,7 @@ fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str
 /// `emit`, or the reply as JSON (an empty list is `[]`, never the text).
 fn emit_out<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str, out: Output) {
     match out {
-        Output::Text => emit(reply, empty),
+        Output::Text | Output::Set => emit(reply, empty),
         Output::Json => println!("{}", pipe::json_pretty(reply)),
     }
 }

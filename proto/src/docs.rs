@@ -721,6 +721,8 @@ topics! {
     ShowAaaUsers,
     /// the `| json` output pipe of `show` commands
     PipeJson,
+    /// the `| display set` output pipe of `show config` / `show this`
+    DisplaySet,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
