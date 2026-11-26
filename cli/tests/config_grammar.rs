@@ -82,6 +82,7 @@ fn populated() -> Config {
                 bfd: None,
                 subnet: "10.0.0.0/24".parse().unwrap(),
                 gateway: "10.0.0.254".parse().unwrap(),
+                ..Default::default()
             }],
         }],
         interfaces: vec![

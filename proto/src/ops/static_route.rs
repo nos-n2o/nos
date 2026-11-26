@@ -49,6 +49,7 @@ impl StaticRouteOp {
                         bfd: None,
                         subnet: *subnet,
                         gateway: *gateway,
+                        ..StaticRoute::default()
                     }),
                 }
                 Ok(())
@@ -122,6 +123,7 @@ mod tests {
                 bfd: None,
                 subnet: subnet("10.0.0.0/24"),
                 gateway: addr("10.0.0.1"),
+                ..Default::default()
             }],
         )]);
         StaticRouteOp::Set {
@@ -159,6 +161,7 @@ mod tests {
                 bfd: None,
                 subnet: subnet("10.0.0.0/24"),
                 gateway: addr("10.0.0.1"),
+                ..Default::default()
             }],
         )]);
         StaticRouteOp::Delete {

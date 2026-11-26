@@ -181,6 +181,7 @@ fn static_route(subnet: &str, gateway: &str, bfd: Option<&str>) -> StaticRoute {
         subnet: subnet.parse().unwrap(),
         gateway: gateway.parse().unwrap(),
         bfd: bfd.map(Into::into),
+        ..Default::default()
     }
 }
 

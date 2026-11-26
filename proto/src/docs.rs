@@ -191,6 +191,14 @@ topics! {
     StaticRoutingInstance,
     /// `StaticRoutingInstance.routes`
     StaticRoute,
+    /// `StaticRoute.distance`
+    StaticRouteDistance,
+    /// `StaticRoute.tag`
+    StaticRouteTag,
+    /// `StaticRoute.interface`
+    StaticRouteInterface,
+    /// `StaticRoute.blackhole`
+    StaticRouteBlackhole,
     /// `Config.interfaces`
     Interface,
     /// `Interface.addresses` (also a subinterface's)

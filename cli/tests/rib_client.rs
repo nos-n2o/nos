@@ -25,6 +25,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
             age_secs: 0,
             interfaces: vec![],
             installed: false,
+            tag: None,
         }],
     }
 }

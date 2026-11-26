@@ -89,6 +89,14 @@ lab-1> show route rt1 198.51.100.7
 
 Setting a route that already exists changes its gateway. Each prefix has exactly one gateway: equal-cost static routes are not supported.
 
+Optional per-route fields, set one per line under `route <subnet>`:
+
+- `distance <1-255>`: administrative distance; unset keeps the default (1).
+- `tag <n>`: opaque route tag.
+- `interface <name>`: outgoing interface, or `<interface>.<tag>` for a subinterface. It must sit in a routing table bound to this instance, and is required when the gateway is an IPv6 link-local address.
+- `blackhole true`: discard the traffic. The gateway must be `0.0.0.0` (or `::` for IPv6), and `bfd` and `interface` must stay unset. Any other route must not use the unspecified gateway.
+- These four are accepted and validated at commit but not yet honoured: `nos-ribd` ignores them (#1523).
+
 The same over REST. An instance is `{"name", "routes"}`, and a route is `{"subnet", "gateway"}`, keyed by its prefix with `/` encoded as `%2F`:
 
 ```sh
