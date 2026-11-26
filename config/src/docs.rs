@@ -741,8 +741,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Creates a route for the given subnet within a static routing instance if it \
              doesn't exist, or repoints its gateway if it does. The gateway's address family \
              must match the subnet's, and a subnet must not repeat within the same instance; \
-             both are checked at commit time. Only one gateway per subnet is supported — \
-             ECMP is not modeled in this iteration.",
+             both are checked at commit time. Further gateways go in `next-hops`.",
                 " ",
                 "Remove a static route.",
             ),
@@ -762,6 +761,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::StaticRouteBlackhole => (
             "Make a static route discard its traffic.",
             "With `blackhole` the gateway must be the unspecified address (`0.0.0.0` or `::`, matching the subnet), and `bfd` and `interface` must stay unset; `distance` and `tag` still apply. Without it the gateway must not be unspecified. Not yet honoured: the RIB ignores it.",
+        ),
+        Topic::StaticRouteNextHops => (
+            "Add or remove an extra gateway of a static route.",
+            "Each next hop (keyed by its gateway address) joins the route's own gateway in one ECMP set; `distance` and `tag` are shared. A hop has its own optional `interface` and `bfd`. Same address family as the subnet, no repeats, none on a blackhole. Not yet honoured: the RIB ignores it.",
         ),
         Topic::Interface => (
             "Create an interface in the transaction if it doesn't already exist.",

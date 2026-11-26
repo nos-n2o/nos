@@ -87,10 +87,11 @@ lab-1> show route rt1 198.51.100.7
   * via 10.50.0.3 [static]
 ```
 
-Setting a route that already exists changes its gateway. Each prefix has exactly one gateway: equal-cost static routes are not supported.
+Setting a route that already exists changes its gateway. The route's own `gateway` is its first next hop; further equal-cost gateways go under `next-hop` (below).
 
 Optional per-route fields, set one per line under `route <subnet>`:
 
+- `next-hop <gateway>`: an extra ECMP gateway, keyed by its address, with its own optional `interface` and `bfd`. Same address family as the subnet, no repeats (nor the route's own gateway), none on a `blackhole`. `distance` and `tag` are shared by all hops. Inert until `nos-ribd` groups them (#1556).
 - `distance <1-255>`: administrative distance; unset keeps the default (1).
 - `tag <n>`: opaque route tag.
 - `interface <name>`: outgoing interface, or `<interface>.<tag>` for a subinterface. It must sit in a routing table bound to this instance, and is required when the gateway is an IPv6 link-local address.

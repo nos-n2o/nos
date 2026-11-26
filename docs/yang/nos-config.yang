@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-07 {
+  revision 2026-12-08 {
     description "Generated.";
   }
 
@@ -1314,6 +1314,21 @@ module nos-config {
       leaf blackhole {
         type boolean;
         description "Make a static route discard its traffic.";
+      }
+      list next_hops {
+        key "gateway";
+        description "Add or remove an extra gateway of a static route.";
+        leaf gateway {
+          type inet:ip-address;
+        }
+        leaf interface {
+          type string;
+          description "Pin a static route to an outgoing interface.";
+        }
+        leaf bfd {
+          type string;
+          description "Run BFD with a BFD profile.";
+        }
       }
     }
   }

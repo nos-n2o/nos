@@ -257,6 +257,24 @@ fn ospf_area_type_and_range() {
     assert_eq!(links[0].hello_interval, Some(5));
 }
 
+/// #1555: an extra gateway of a static route is reachable from the CLI.
+#[test]
+fn static_route_next_hops() {
+    let doc = serde_json::to_value(populated()).unwrap();
+    let line =
+        "set static-routing-instance sri1 route 10.0.0.0/24 next-hop 10.0.1.2 interface eth1";
+    let w = writes(line, &doc).unwrap_or_else(|| panic!("rejected: {line}"));
+    let mut applied = doc.clone();
+    for pair in w.as_array().unwrap() {
+        let path: Vec<String> = serde_json::from_value(pair[0].clone()).unwrap();
+        config_path::set(&mut applied, &path, pair[1].clone()).unwrap();
+    }
+    let cfg: Config = serde_json::from_value(applied).unwrap();
+    let hops = &cfg.static_routing_instances[0].routes[0].next_hops;
+    assert_eq!(hops[0].gateway.to_string(), "10.0.1.2");
+    assert_eq!(hops[0].interface.as_deref(), Some("eth1"));
+}
+
 /// #25: a routing table's EVPN L3 VNI is reachable from the CLI.
 #[test]
 fn routing_table_evpn() {

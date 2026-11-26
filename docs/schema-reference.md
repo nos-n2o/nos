@@ -21,7 +21,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 ## Nesting one level under a parent
 
-- `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`; `StaticRoute` nests one level under `StaticRoutingInstance` the same way. `StaticRoute.distance`/`tag`/`interface`/`blackhole` (appended last, `#[serde(default)]`) are inert until `nos-ribd` honours them; `interface` is checked from `StaticRoutingInstance.routes` (needs the instance name), the rest on the route itself.
+- `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`; `StaticRoute` nests one level under `StaticRoutingInstance` the same way. `StaticRoute.distance`/`tag`/`interface`/`blackhole` (appended last, `#[serde(default)]`) are inert until `nos-ribd` honours them; `interface` is checked from `StaticRoutingInstance.routes` (needs the instance name), the rest on the route itself. `StaticRoute.next_hops: Vec<StaticNextHop>` (appended last, `#[serde(default)]`; `StaticNextHop` keys on `gateway`, which is why `gateway` follows `subnet` in `config_path::ELEMENT_KEYS`) holds the extra ECMP gateways, validated by `next_hops_valid` and, for `interface`, from the instance like the primary; inert until #1556.
 
 ## EVPN IP-VRF on a routing table
 

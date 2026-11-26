@@ -405,6 +405,10 @@ pub struct Args {
     /// per family; `--static-gateway` not needed).
     #[arg(long)]
     pub static_blackhole: bool,
+    /// `<subnet>=<gateway>[,<gateway>...]`: extra `next-hops` on a
+    /// `--static-route` (repeatable; the route must be in the same run).
+    #[arg(long, value_parser = parse_extra_gateway)]
+    pub static_extra_gateway: Vec<(IpNet, Vec<IpAddr>)>,
 
     /// If set, configures `redistribute from static to bgp` on
     /// `--routing-table` — requires `--static-route` to also be set (so the
@@ -2346,6 +2350,38 @@ fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
+fn parse_extra_gateway(s: &str) -> Result<(IpNet, Vec<IpAddr>), String> {
+    let (subnet, gws) = s
+        .split_once('=')
+        .ok_or("expected <subnet>=<gateway>[,...]")?;
+    let gws = gws
+        .split(',')
+        .map(|g| g.parse::<IpAddr>().map_err(|e| format!("{g}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((subnet.parse::<IpNet>().map_err(|e| e.to_string())?, gws))
+}
+
+/// `--static-extra-gateway` as path edits creating `next-hops` elements.
+fn static_extra_gateway_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    let mut v = Vec::new();
+    for (subnet, gws) in &args.static_extra_gateway {
+        for g in gws {
+            v.push((
+                vec![
+                    "static-routing-instance".to_string(),
+                    args.static_routing_instance.clone(),
+                    "route".to_string(),
+                    subnet.to_string(),
+                    "next-hops".to_string(),
+                    g.to_string(),
+                ],
+                Some(format!(r#"{{"gateway":"{g}"}}"#)),
+            ));
+        }
+    }
+    v
+}
+
 /// `--static-distance`/`--static-tag`/`--static-interface`/`--static-blackhole`
 /// as path edits on every `--static-route` (no `ConfigOp` carries them).
 fn static_route_field_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
@@ -2445,6 +2481,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     }
     v.extend(sbfd_static_paths(args));
     v.extend(static_route_field_paths(args));
+    v.extend(static_extra_gateway_paths(args));
     if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
         v.push((
             vec!["sbfd-reflector".to_string(), "discriminator".to_string()],
@@ -2771,6 +2808,17 @@ fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
             if args.static_blackhole {
                 r.blackhole = true;
             }
+            for (_, gws) in args
+                .static_extra_gateway
+                .iter()
+                .filter(|(s, _)| *s == r.subnet)
+            {
+                r.next_hops
+                    .extend(gws.iter().map(|&gateway| nos_proto::StaticNextHop {
+                        gateway,
+                        ..Default::default()
+                    }));
+            }
         }
     }
 }
@@ -3080,6 +3128,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    if let Some((s, _)) = args
+        .static_extra_gateway
+        .iter()
+        .find(|(s, _)| !args.static_route.contains(s))
+    {
+        bail!("--static-extra-gateway {s} needs the same subnet in --static-route");
+    }
     if !args.static_route.is_empty() {
         let gateway = args.static_gateway;
         if gateway.is_none() && !args.static_blackhole {
@@ -7034,6 +7089,34 @@ mod tests {
             cfg.static_routing_instances[0].routes[0].bfd.as_deref(),
             Some("sb")
         );
+    }
+
+    #[test]
+    fn static_extra_gateways_become_next_hops() {
+        let a = [
+            "--static-route",
+            "10.9.0.0/24",
+            "--static-gateway",
+            "10.0.0.1",
+            "--static-extra-gateway",
+            "10.9.0.0/24=10.0.0.2,10.0.0.3",
+        ];
+        let args = parse(&a);
+        assert_eq!(static_extra_gateway_paths(&args).len(), 2);
+        let mut cfg = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut cfg).unwrap();
+        }
+        apply_bfd(&args, &mut cfg);
+        let hops = &cfg.static_routing_instances[0].routes[0].next_hops;
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[1].gateway, "10.0.0.3".parse::<IpAddr>().unwrap());
+        // A route not in this run is a clear error.
+        let args = parse(&["--static-extra-gateway", "10.9.0.0/24=10.0.0.2"]);
+        assert!(build_ops(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("--static-route"));
     }
 
     #[test]

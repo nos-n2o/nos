@@ -117,7 +117,7 @@ pub use routing_table::{
 };
 pub use sbfd::SbfdReflector;
 pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};
-pub use static_route::StaticRoute;
+pub use static_route::{StaticNextHop, StaticRoute};
 pub use static_routing_instance::StaticRoutingInstance;
 pub use stp_port_profile::{EdgePort, LinkType, StpPortMstInstance, StpPortProfile};
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
