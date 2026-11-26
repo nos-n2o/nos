@@ -34,6 +34,7 @@ A single fixed process (like `nos-stpd`): every `acl in`/`acl out` on an `Interf
 - An attach point whose device is absent logs `acl pending interface= direction= acl= reason="absent"` once and applies when the link shows up. A device that disappears is dropped without driver calls (its qdisc went with it).
 - The untagged (tag 0) subinterface is its parent's device: the commit refuses both setting one direction (`schema::acl::one_per_device`).
 - `log`: `sample` (group `ACL_PSAMPLE_GROUP`, one packet in `SAMPLE_RATE` = 100, `LOG_TRUNC`) then `gact`, one cookie (#699: the verdict counters stay exact, log lines are statistical; a rate gate with a twin filter was refused by the kernel with `EEXIST`). Flowspec S uses the same `sample_kind` and keeps its cookie on the action after the sample. `LinuxDriver::install` refuses a `log` ACL when psample cannot pass the cookie (`check_log`, owner decision L2); egress samples carry `out` = device, ingress `in` = device and `out` = 0.
+- Under a `deny` default `compile` adds four implicit IPv6 ND permit filters (ICMPv6 133-136, cookie `IMPLICIT_ND_COOKIE` = `u32::MAX-1`, `Compiled.implicit`) as a synthetic last rule: user rules covering one shadow it, and a trailing user `deny` that overlaps them is not popped as the default's twin (#1530). `show acl` has an `implicit nd permit` row.
 - L4 keys never match non-first fragments (`ponytail:` in `compile/rule.rs`).
 
 ## Tests

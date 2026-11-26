@@ -13,6 +13,9 @@ use nos_tc::{FlowerKeys, Protocol};
 /// The action cookie of the default-action filters; a rule's is its index.
 pub const DEFAULT_COOKIE: u32 = u32::MAX;
 
+/// The cookie of the implicit IPv6 ND permit filters (deny default only).
+pub const IMPLICIT_ND_COOKIE: u32 = u32::MAX - 1;
+
 /// One flower filter of a level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
@@ -47,6 +50,9 @@ pub struct Compiled {
     pub shadowed: Vec<u32>,
     /// Trailing rules whose action is the default's: no filter, counter 0.
     pub trailing: Vec<u32>,
+    /// Implicit ND permit filters kept: 0 when the default is permit or a
+    /// user rule shadows all four.
+    pub implicit: usize,
     /// Name and action of every user rule, by index (`show acl`, #543).
     pub rule_names: Vec<(String, AclAction)>,
 }
@@ -99,6 +105,7 @@ pub fn compile_within(acl: &Acl, max_levels: usize) -> Result<Compiled, String> 
         default_action: acl.default_action,
         shadowed: p.shadowed,
         trailing: p.trailing,
+        implicit: p.implicit,
         rule_names: acl
             .rules
             .iter()
@@ -182,10 +189,65 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_acl_is_just_the_defaults() {
+    fn a_deny_default_adds_four_implicit_nd_filters() {
         let c = compile(&Acl::default()).unwrap();
-        assert_eq!(c.levels, Vec::<Level>::new());
-        assert_eq!((c.filters(), c.default_action), (2, AclAction::Deny));
+        assert_eq!((c.levels.len(), c.implicit, c.filters()), (1, 4, 6));
+        let types: Vec<_> = c.levels[0]
+            .filters
+            .iter()
+            .map(|f| (f.rule, f.keys.icmp_type, f.action))
+            .collect();
+        let want: Vec<_> = (133..=136)
+            .map(|t| (IMPLICIT_ND_COOKIE, Some(t), AclAction::Permit))
+            .collect();
+        assert_eq!(types, want);
+        let permit = Acl {
+            default_action: AclAction::Permit,
+            ..Default::default()
+        };
+        let c = compile(&permit).unwrap();
+        assert_eq!((c.levels.len(), c.implicit, c.filters()), (0, 0, 2));
+    }
+
+    #[test]
+    fn an_earlier_icmpv6_rule_shadows_the_implicit_permit() {
+        let mut deny135 = rule("d", AclAction::Deny, Some(AclProtocol::Icmpv6));
+        deny135.icmp_type = Some(135);
+        let acl = |rules| Acl {
+            default_action: AclAction::Deny,
+            rules,
+            ..Default::default()
+        };
+        let all = acl(vec![rule(
+            "p",
+            AclAction::Permit,
+            Some(AclProtocol::Icmpv6),
+        )]);
+        let c = compile(&all).unwrap();
+        assert_eq!((c.implicit, c.levels.len(), c.filters()), (0, 1, 3));
+        let c = compile(&acl(vec![deny135])).unwrap();
+        // The explicit deny stays; 135 is dropped, the other three are
+        // disjoint from it and share its level.
+        assert_eq!((c.implicit, c.levels.len()), (3, 1));
+        assert_eq!(c.levels[0].filters[0].rule, 0);
+        assert!(c.levels[0]
+            .filters
+            .iter()
+            .all(|f| f.rule == 0 || f.keys.icmp_type != Some(135)));
+    }
+
+    #[test]
+    fn a_trailing_deny_that_meets_nd_is_kept_under_a_deny_default() {
+        let acl = |p| Acl {
+            default_action: AclAction::Deny,
+            rules: vec![rule("d", AclAction::Deny, Some(p))],
+            ..Default::default()
+        };
+        // Popped as the default's twin, it would let ND through.
+        let c = compile(&acl(AclProtocol::Icmpv6)).unwrap();
+        assert_eq!((c.trailing.len(), c.levels.len()), (0, 1));
+        let c = compile(&acl(AclProtocol::Tcp)).unwrap();
+        assert_eq!((c.trailing, c.implicit), (vec![0], 4));
     }
 
     #[test]

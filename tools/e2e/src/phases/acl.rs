@@ -35,6 +35,15 @@ const COMPILED_3: &str = "compiled acl acl=EDGE rules=3 filters=2 levels=0 shado
 /// then the trailing `permit` and `p-bgp` (permit = the default) are popped;
 /// the 10 left are pairwise disjoint: levels=1, filters = 8 + 4 + 2 defaults.
 const COMPILED_5: &str = "compiled acl acl=EDGE2 rules=13 filters=14 levels=1 shadowed=1";
+/// Step 5b (#1530), `EDGE6`: default deny, `p-bgp` (IPv4: 1 filter) and
+/// `p-rest` (tcp 8080, the harness's REST API: IPv4 and IPv6 = 2 filters),
+/// which overlap, so two levels; the 4 implicit ND filters (ICMPv6, disjoint
+/// from both) join level 0; plus the 2 defaults: 1 + 2 + 4 + 2 = 9.
+const COMPILED_6: &str = "compiled acl acl=EDGE6 rules=2 filters=9 levels=2 shadowed=0";
+const ATTACHED_6: &str = "acl attached interface=eth0 direction=in acl=EDGE6";
+/// `d-nd` (deny icmpv6 type 135) shadows implicit 135: 1 + 1 + 2 + 3
+/// implicit + 2 defaults = 9 again, still two levels.
+const COMPILED_6B: &str = "compiled acl acl=EDGE6 rules=3 filters=9 levels=2 shadowed=0";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 /// Step 2b (#544): router-b's TCP from its address, denied and sampled on
@@ -256,6 +265,90 @@ async fn flowspec(dock: &Dock, a: &Router) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Step 5b (#1530): a deny default permits IPv6 Neighbor Discovery after the
+/// rules. Router-b's TCP connect to router-a's IPv6 address sends its SYN
+/// only once router-b resolved router-a's MAC, which needs router-a to
+/// receive the NS: `implicit nd permit` counts it and the default counts the
+/// SYN. Without the implicit permit both stay 0.
+async fn nd_permit(w: &World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    log("step 5b (#1530): EDGE6 default deny: ND passes via the implicit permit");
+    b.provision(&["--address6", &format!("{ACL_ND_B}/64")])
+        .await?;
+    let (compiled, attached, ended) = (a.count(COMPILED_6), a.count(ATTACHED_6), a.count(ENDED));
+    a.provision(&[
+        "--address6",
+        &format!("{ACL_ND_A}/64"),
+        "--acl-default",
+        "EDGE6=deny",
+        "--acl-rule",
+        &format!("EDGE6,p-bgp,permit,tcp,{IP_B}/32,any,any"),
+        "--acl-rule",
+        "EDGE6,p-rest,permit,tcp,any,any,8080",
+        "--acl-in",
+        "eth0=EDGE6",
+    ])
+    .await?;
+    a.wait_new(COMPILED_6, compiled, 30).await?;
+    a.wait_new(ATTACHED_6, attached, 30).await?;
+    a.assert_quiet(ENDED, ended, 12).await?;
+    let script = format!(
+        "use Socket qw(:DEFAULT inet_pton pack_sockaddr_in6); use Fcntl; socket(my $f, AF_INET6, SOCK_STREAM, 0) or die \"socket: $!\"; \
+         setsockopt($f, SOL_SOCKET, 25, \"{RLFA_VRF}\") or die \"bind: $!\"; \
+         fcntl($f, F_SETFL, O_NONBLOCK); connect($f, pack_sockaddr_in6(9, inet_pton(AF_INET6, \"{ACL_ND_A}\"))); sleep 3"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (code, out) = w
+            .dock
+            .exec_root("router-b", &["perl", "-e", &script])
+            .await?;
+        anyhow::ensure!(code == 0, "router-b v6 connect failed ({code}): {out}");
+        let body = a
+            .rest_expect(Method::GET, "/v1/acl/EDGE6", None, 200)
+            .await?;
+        let acl: serde_json::Value = serde_json::from_str(&body)?;
+        let nd = rule_of(&acl, "implicit nd permit");
+        if nd.is_some_and(|r| r["packets"].as_u64() > Some(0))
+            && acl["default_packets"].as_u64() > Some(0)
+        {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "implicit nd permit/default never counted: {body}"
+        );
+    }
+
+    log("step 5c: d-nd (deny icmpv6 type 135) before p-bgp shadows implicit 135");
+    let compiled = a.count(COMPILED_6B);
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let _ = a.rest(Method::DELETE, &tx, None).await;
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    let rule = serde_json::json!({
+        "name": "d-nd", "action": "Deny", "protocol": "icmpv6", "icmp_type": 135,
+    });
+    a.rest_expect(
+        Method::PUT,
+        &format!("{tx}/acl/EDGE6/rule/d-nd?before=p-bgp"),
+        Some(&rule.to_string()),
+        200,
+    )
+    .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    a.wait_new(COMPILED_6B, compiled, 30).await?;
+
+    let detached = a.count(DETACHED);
+    a.provision(&["--acl-in", "eth0="]).await?;
+    a.wait_new(DETACHED, detached, 30).await?;
+    a.provision(&["--remove-address6-extra", &format!("{ACL_ND_A}/64")])
+        .await?;
+    b.provision(&["--remove-address6-extra", &format!("{ACL_ND_B}/64")])
+        .await
+}
+
 pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     // A hold-time change restarts the session (`diff_peers`).
@@ -380,6 +473,8 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let detached = a.count(DETACHED);
     a.provision(&["--acl-in", "eth0="]).await?;
     a.wait_new(DETACHED, detached, 30).await?;
+
+    nd_permit(w).await?;
 
     log("step 6: flowspec (#561): a drop rule ends the session, show counts it");
     flowspec(&w.dock, a).await?;

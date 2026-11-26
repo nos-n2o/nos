@@ -3,7 +3,8 @@
 use nos_proto::schema::{AclProtocol, AclRule};
 use nos_tc::{FlowerKeys, Protocol};
 
-use super::Filter;
+use super::{Filter, IMPLICIT_ND_COOKIE};
+use nos_proto::schema::AclAction;
 
 /// TCP header flag bits (RFC 9293 §3.1).
 const TCP_RST: u16 = 0x04;
@@ -55,6 +56,27 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
             action: r.action,
             rule: index,
             log: r.log,
+        })
+        .collect()
+}
+
+/// The implicit IPv6 Neighbor Discovery permit (RFC 4861: RS, RA, NS, NA)
+/// after a deny default: one filter per type, flower matches a single one.
+///
+/// ponytail: the hop limit of 255 is not matchable by flower, so a forwarded
+/// ND-typed packet passes too.
+pub(super) fn implicit_nd() -> Vec<Filter> {
+    (133u8..=136)
+        .map(|t| Filter {
+            protocol: Protocol::Ipv6,
+            keys: FlowerKeys {
+                ip_proto: Some(AclProtocol::Icmpv6.number()),
+                icmp_type: Some(t),
+                ..Default::default()
+            },
+            action: AclAction::Permit,
+            rule: IMPLICIT_ND_COOKIE,
+            log: false,
         })
         .collect()
 }

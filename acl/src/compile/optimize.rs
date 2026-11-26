@@ -14,7 +14,7 @@
 //! ponytail: no cross-rule prefix merge (T6 b), so every filter keeps one
 //! rule and counters stay exact.
 
-use nos_proto::schema::Acl;
+use nos_proto::schema::{Acl, AclAction};
 
 use super::keys::{contains, overlap};
 use super::{rule, Filter, Level};
@@ -24,6 +24,8 @@ pub(super) struct Packed {
     pub levels: Vec<Level>,
     pub shadowed: Vec<u32>,
     pub trailing: Vec<u32>,
+    /// Implicit ND filters kept (0 unless the default is deny).
+    pub implicit: usize,
 }
 
 /// A rule is a set of filters (family split, `established` pair).
@@ -37,7 +39,7 @@ fn covers(a: &[Filter], b: &[Filter]) -> bool {
 }
 
 pub(super) fn pack(acl: &Acl) -> Packed {
-    let all: Vec<Vec<Filter>> = (0u32..)
+    let mut all: Vec<Vec<Filter>> = (0u32..)
         .zip(&acl.rules)
         .map(|(i, r)| rule::filters(r, i))
         .collect();
@@ -50,16 +52,35 @@ pub(super) fn pack(acl: &Acl) -> Packed {
         }
     }
     // A `log` rule is observable, so it stays even when it equals the default.
+    let deny = acl.default_action == AclAction::Deny;
+    let nd = if deny {
+        rule::implicit_nd()
+    } else {
+        Vec::new()
+    };
     let mut trailing = Vec::new();
     while let Some(&last) = kept.last() {
         let r = &acl.rules[last];
-        if r.action != acl.default_action || r.log {
+        // A trailing deny that meets ND must stay: the implicit permit
+        // follows it, and it would otherwise equal the default.
+        if r.action != acl.default_action || r.log || (deny && overlaps(&all[last], &nd)) {
             break;
         }
         trailing.push(u32::try_from(last).expect("rule count fits u32"));
         kept.pop();
     }
     trailing.reverse();
+    // The implicit ND permit is a synthetic last rule, minus the filters a
+    // kept user rule already covers (an earlier explicit verdict wins).
+    let nd: Vec<Filter> = nd
+        .into_iter()
+        .filter(|f| !kept.iter().any(|&k| all[k].iter().any(|x| contains(x, f))))
+        .collect();
+    let implicit = nd.len();
+    if !nd.is_empty() {
+        kept.push(all.len());
+        all.push(nd);
+    }
     let mut level_of: Vec<usize> = Vec::with_capacity(kept.len());
     let mut levels: Vec<Level> = Vec::new();
     for (n, &j) in kept.iter().enumerate() {
@@ -78,6 +99,7 @@ pub(super) fn pack(acl: &Acl) -> Packed {
         levels,
         shadowed,
         trailing,
+        implicit,
     }
 }
 
