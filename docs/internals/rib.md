@@ -114,3 +114,9 @@ A `PushBgpRoutes` `Full` larger than one frame arrives as `FullPart`s plus a clo
 - Never take the gate from a query path (`GetRoutesPage`, `Lookup`, ...): reads must not wait for netlink.
 - A push now waits for an in-flight full apply (a dump-diff on a big table); it queues on its connection, nothing is lost.
 - A failed `apply`/`apply_delta` calls `KernelGate::mark_dirty`; `reconcile::run` then does a full apply from a fresh snapshot, at most once per second while it keeps failing. The 10 s tick stays the floor.
+
+## `show route` attributes (#1444)
+
+- Metric (`Rib::ospf_metrics`/`bgp_metrics`), age (`first_seen`, restamped when a candidate appears or its next hops change) and `connected_iface` sit beside `entries`, never in `RibEntry`: none of them is a winner change, so a metric-only update never reaches the kernel.
+- `installed` is logical: the winner, not `Connected`, and no failed kernel write pending (`KernelGate::is_dirty`). Age resets when `nos-ribd` restarts.
+- Interface names: `RibDriver::interface_name` (`if_indextoname`) for a hop with an ifindex, else the longest `Connected` prefix covering the gateway (physical and subinterface only).

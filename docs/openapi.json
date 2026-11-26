@@ -5998,6 +5998,12 @@
       "RouteEntry": {
         "description": "One candidate route for a prefix.",
         "properties": {
+          "age_secs": {
+            "description": "Seconds since the candidate last appeared or its next hops changed\n(reset when `nos-ribd` restarts).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "backup": {
             "description": "Pre-computed backup next hop, installed in the kernel at a higher\nmetric so it takes over the instant the primary is withdrawn.",
             "type": [
@@ -6035,6 +6041,29 @@
             },
             "type": "array"
           },
+          "installed": {
+            "description": "The candidate is the one `nos-ribd` handed to the kernel (logical, not\nread back: false for a `Connected` route, a loser, or while a kernel\nwrite is pending retry).",
+            "type": "boolean"
+          },
+          "interfaces": {
+            "description": "The local interface each of `gateways` leaves over, in `gateways`\norder; `None` where unknown (loopback, bond and SVI are not named).",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": "array"
+          },
+          "metric": {
+            "description": "The route's metric (an OSPF SPF cost, a BGP best path's MED); `None`\nfor a source without one.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "mpls_labels": {
             "description": "The MPLS label stack each of `gateways` is forwarded with (RFC 4364\nsection 4.3.4), outermost first, in `gateways` order; every stack is\nempty for a source other than `Vpn`.",
             "items": {
@@ -6046,6 +6075,12 @@
               "type": "array"
             },
             "type": "array"
+          },
+          "preference": {
+            "description": "The source's administrative preference (lower wins).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "source": {
             "$ref": "#/components/schemas/RouteSourceKind",

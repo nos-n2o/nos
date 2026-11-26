@@ -2474,6 +2474,11 @@ mod tests {
                 mpls_labels: vec![],
                 vpn: vec![],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2496,6 +2501,11 @@ mod tests {
                 mpls_labels: vec![],
                 vpn: vec![],
                 blackhole: true,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2522,6 +2532,11 @@ mod tests {
                 mpls_labels: vec![],
                 vpn: vec![],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2547,6 +2562,11 @@ mod tests {
                     rd: "65001:1".to_string(),
                 }],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2575,6 +2595,11 @@ mod tests {
                 mpls_labels: vec![vec![100], vec![200]],
                 vpn: vec![info("65001:1"), info("65001:2")],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2598,6 +2623,11 @@ mod tests {
                 mpls_labels: vec![],
                 vpn: vec![],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(
@@ -2620,6 +2650,11 @@ mod tests {
                 mpls_labels: vec![],
                 vpn: vec![],
                 blackhole: false,
+                metric: None,
+                preference: 0,
+                age_secs: 0,
+                interfaces: vec![],
+                installed: false,
             }],
         }];
         assert_eq!(

@@ -276,7 +276,13 @@ const PAGE_BYTES: usize = nos_proto::codec::MAX_FRAME / 2;
 /// One `RoutesPage` reply: at most `limit` (0 or over [`ROUTES_PAGE_MAX`]:
 /// the maximum) prefixes, cut early once their encoding passes `budget`
 /// bytes (a page always holds at least one prefix, so a walk advances).
-fn routes_page(rib: &Rib, after: Option<IpNet>, limit: u32, budget: usize) -> RibEvent {
+fn routes_page(
+    rib: &Rib,
+    render: &Render<'_>,
+    after: Option<IpNet>,
+    limit: u32,
+    budget: usize,
+) -> RibEvent {
     let limit = match limit {
         0 => ROUTES_PAGE_MAX,
         n => n.min(ROUTES_PAGE_MAX),
@@ -285,7 +291,7 @@ fn routes_page(rib: &Rib, after: Option<IpNet>, limit: u32, budget: usize) -> Ri
     let mut routes = Vec::with_capacity(page.len());
     let mut bytes = 0;
     for (prefix, candidates) in page {
-        let pr = to_prefix_routes(prefix, &candidates, rib);
+        let pr = to_prefix_routes(prefix, &candidates, rib, render);
         bytes += pr.wire_len();
         if bytes > budget && !routes.is_empty() {
             more = true;
@@ -305,13 +311,23 @@ async fn dispatch(ctx: &Context, v3: bool, req: RibRequest) -> Option<RibEvent> 
         )),
         RibRequest::GetRoutesPage { after, limit } => {
             let guard = ctx.rib.read().await;
-            Some(routes_page(&guard, after, limit, PAGE_BYTES))
+            let ifname = |i| ctx.driver.interface_name(i);
+            let render = Render {
+                kernel_ok: !ctx.kernel.is_dirty(),
+                ifname: &ifname,
+            };
+            Some(routes_page(&guard, &render, after, limit, PAGE_BYTES))
         }
         RibRequest::Lookup { addr } => {
             let guard = ctx.rib.read().await;
+            let ifname = |i| ctx.driver.interface_name(i);
+            let render = Render {
+                kernel_ok: !ctx.kernel.is_dirty(),
+                ifname: &ifname,
+            };
             Some(match guard.lookup(addr) {
                 Some((prefix, candidates)) => {
-                    RibEvent::Match(to_prefix_routes(prefix, &candidates, &guard))
+                    RibEvent::Match(to_prefix_routes(prefix, &candidates, &guard, &render))
                 }
                 None => RibEvent::NoMatch,
             })
@@ -557,11 +573,18 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
     for update in updates {
         match update {
             BgpRouteUpdate::Full(routes) => {
+                guard.set_bgp_metrics(
+                    routes
+                        .iter()
+                        .filter_map(|r| Some((r.prefix, r.metric?)))
+                        .collect(),
+                );
                 guard.replace_source(RouteSource::Bgp, routes.into_iter().map(bgp_entry));
                 full_replace = true;
             }
             BgpRouteUpdate::Add(r) => {
                 let prefix = r.prefix;
+                guard.set_bgp_metric(prefix, r.metric);
                 match guard.upsert_and_diff(bgp_entry(r)) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
@@ -575,6 +598,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             // Staged by `FullStaging::absorb` before dispatch.
             BgpRouteUpdate::FullPart(_) => {}
             BgpRouteUpdate::Remove(prefix) => {
+                guard.set_bgp_metric(prefix, None);
                 match guard.remove_and_diff(&prefix, RouteSource::Bgp) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
@@ -745,13 +769,50 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
     }
 }
 
-fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry], rib: &Rib) -> PrefixRoutes {
+/// What `to_prefix_routes` needs beyond the `Rib`.
+struct Render<'a> {
+    /// No kernel write is pending a retry, so a winner counts as installed.
+    kernel_ok: bool,
+    /// Kernel interface name for an ifindex.
+    ifname: &'a dyn Fn(u32) -> Option<String>,
+}
+
+#[cfg(test)]
+fn plain() -> Render<'static> {
+    Render {
+        kernel_ok: true,
+        ifname: &|_| None,
+    }
+}
+
+fn to_prefix_routes(
+    prefix: nos_proto::IpNet,
+    candidates: &[RibEntry],
+    rib: &Rib,
+    render: &Render<'_>,
+) -> PrefixRoutes {
     let (evpn, vpn_info) = (&rib.evpn, &rib.vpn_info);
     PrefixRoutes {
         prefix,
         candidates: candidates
             .iter()
-            .map(|e| RouteEntry {
+            .enumerate()
+            .map(|(i, e)| RouteEntry {
+                metric: rib.metric(&prefix, e.source),
+                preference: e.source.preference(),
+                age_secs: rib.age_secs(&prefix, e.source),
+                interfaces: e
+                    .next_hops
+                    .iter()
+                    .map(|h| {
+                        h.interface_id
+                            .and_then(render.ifname)
+                            .or_else(|| rib.iface_for_gateway(h.gateway).map(String::from))
+                    })
+                    .collect(),
+                // Candidates arrive best first: the first is the kernel winner
+                // (`best_routes_for_kernel`), except a `Connected` one.
+                installed: render.kernel_ok && i == 0 && e.source != RouteSource::Connected,
                 gateways: e.next_hops.iter().map(|h| h.gateway).collect(),
                 source: to_source_kind(e.source),
                 backup: e.backup,
@@ -815,7 +876,9 @@ mod authz_tests {
         let entry = ospf_entry(route.clone());
         assert!(entry.is_discard());
         assert_eq!(entry.backup, None);
-        assert!(to_prefix_routes(entry.prefix, &[entry], &Rib::new()).candidates[0].discard);
+        assert!(
+            to_prefix_routes(entry.prefix, &[entry], &Rib::new(), &plain()).candidates[0].discard
+        );
         assert!(!ospf_entry(OspfRoute {
             discard: false,
             ..route
@@ -900,7 +963,7 @@ mod authz_tests {
             next_hop_labels: Vec::new(),
         });
         assert_eq!((entry.backup, entry.backup_tunnel), (Some(pq), true));
-        let shown = to_prefix_routes(entry.prefix, &[entry], &Rib::new());
+        let shown = to_prefix_routes(entry.prefix, &[entry], &Rib::new(), &plain());
         assert!(shown.candidates[0].backup_tunnel);
     }
 
@@ -935,6 +998,7 @@ mod authz_tests {
             next_hops: vec![],
             backup_next_hop: Some("10.0.0.9".parse().unwrap()),
             discard: true,
+            metric: None,
         });
         assert!(b.is_discard() && b.backup.is_none());
         let normal = bgp_entry(BgpRoute {
@@ -942,6 +1006,7 @@ mod authz_tests {
             next_hops: vec!["10.0.0.2".parse().unwrap()],
             backup_next_hop: None,
             discard: false,
+            metric: None,
         });
         assert!(!normal.is_discard());
         let o = ospf_entry(OspfRoute {
@@ -956,7 +1021,7 @@ mod authz_tests {
         });
         let rib = Rib::new();
         let flags = |e: RibEntry| {
-            let c = &to_prefix_routes(e.prefix, &[e], &rib).candidates[0];
+            let c = &to_prefix_routes(e.prefix, &[e], &rib, &plain()).candidates[0];
             (c.discard, c.blackhole)
         };
         assert_eq!(flags(b), (true, true));
@@ -981,7 +1046,7 @@ mod authz_tests {
         };
         let mut rib = Rib::new();
         rib.evpn = evpn;
-        let shown = to_prefix_routes(entry.prefix, &[entry], &rib);
+        let shown = to_prefix_routes(entry.prefix, &[entry], &rib, &plain());
         let info = shown.candidates[0].evpn.as_ref().unwrap();
         assert_eq!(shown.candidates[0].source, RouteSourceKind::Evpn);
         assert_eq!(
@@ -1085,6 +1150,7 @@ mod authz_tests {
             next_hops: vec!["10.0.0.2".parse().unwrap()],
             backup_next_hop: None,
             discard: false,
+            metric: None,
         };
         apply_bgp_route_update(&ctx, vec![BgpRouteUpdate::Add(r("10.1.0.0/24"))]).await;
         assert!(dirty(&ctx));
@@ -1151,7 +1217,7 @@ mod authz_tests {
         assert_eq!(e.next_hops[0].gateway, e.next_hops[1].gateway);
         let mut rib = Rib::new();
         rib.vpn_info.insert(r.prefix, vpn_info(&r));
-        let shown = &to_prefix_routes(r.prefix, &[e], &rib).candidates[0];
+        let shown = &to_prefix_routes(r.prefix, &[e], &rib, &plain()).candidates[0];
         assert_eq!(shown.mpls_labels, labels);
         let rds: Vec<_> = shown.vpn.iter().map(|v| v.rd.as_str()).collect();
         assert_eq!(rds, ["65001:1", "65001:2"]);
@@ -1214,6 +1280,53 @@ mod authz_tests {
         ));
     }
 
+    #[test]
+    fn route_attributes_are_rendered_per_candidate() {
+        let mut rib = Rib::new();
+        let p: IpNet = "10.5.0.0/24".parse().unwrap();
+        let mk = |source, gw: &str, ifx| RibEntry {
+            prefix: p,
+            next_hops: vec![(gw.parse().unwrap(), ifx).into()],
+            source,
+            backup: None,
+            backup_interface_id: None,
+            backup_tunnel: false,
+        };
+        rib.insert(mk(RouteSource::Bgp, "10.0.0.1", Some(7)));
+        rib.insert(mk(RouteSource::Static, "10.0.0.2", None));
+        rib.insert(mk(RouteSource::Connected, "10.5.0.1", None));
+        rib.set_bgp_metric(p, Some(42));
+        rib.connected_iface
+            .insert("10.0.0.0/24".parse().unwrap(), "eth0.3".into());
+        let name = |i: u32| (i == 7).then(|| "eth7".to_string());
+        let show = |rib: &Rib, ok| {
+            let r = Render {
+                kernel_ok: ok,
+                ifname: &name,
+            };
+            let (_, c) = rib.routes_page(None, 1).0.remove(0);
+            to_prefix_routes(p, &c, rib, &r).candidates
+        };
+        let c = show(&rib, true);
+        // Best first: Connected, Static, Bgp.
+        let src: Vec<_> = c.iter().map(|e| (e.preference, e.installed)).collect();
+        assert_eq!(src, [(0, false), (1, false), (20, false)]);
+        assert_eq!(c[2].metric, Some(42));
+        assert_eq!(c[2].interfaces, [Some("eth7".to_string())]);
+        assert_eq!(c[1].interfaces, [Some("eth0.3".to_string())]);
+
+        // Without the Connected shadow, Static wins and only it is installed.
+        rib.remove(&p, RouteSource::Connected);
+        let c = show(&rib, true);
+        assert_eq!(
+            c.iter().map(|e| e.installed).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(rib.best_routes_for_kernel()[&p].source, RouteSource::Static);
+        // A pending kernel retry: nothing counts as installed.
+        assert!(show(&rib, false).iter().all(|e| !e.installed));
+    }
+
     fn static_rib(n: u8) -> Rib {
         let mut rib = Rib::new();
         for i in 0..n {
@@ -1242,7 +1355,7 @@ mod authz_tests {
     #[test]
     fn routes_pages_walk_the_table_by_cursor() {
         let rib = static_rib(5);
-        let (p, next) = page_of(routes_page(&rib, None, 2, usize::MAX));
+        let (p, next) = page_of(routes_page(&rib, &plain(), None, 2, usize::MAX));
         assert_eq!(
             (p.as_slice(), next.as_deref()),
             (
@@ -1250,10 +1363,22 @@ mod authz_tests {
                 Some("10.0.1.0/24")
             )
         );
-        let (p, next) = page_of(routes_page(&rib, "10.0.1.0/24".parse().ok(), 2, usize::MAX));
+        let (p, next) = page_of(routes_page(
+            &rib,
+            &plain(),
+            "10.0.1.0/24".parse().ok(),
+            2,
+            usize::MAX,
+        ));
         assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.3.0/24")));
         // The last, short page ends the walk; limit 0 means the maximum.
-        let (p, next) = page_of(routes_page(&rib, "10.0.3.0/24".parse().ok(), 0, usize::MAX));
+        let (p, next) = page_of(routes_page(
+            &rib,
+            &plain(),
+            "10.0.3.0/24".parse().ok(),
+            0,
+            usize::MAX,
+        ));
         assert_eq!((p, next), (vec!["10.0.4.0/24".to_string()], None));
     }
 
@@ -1261,11 +1386,11 @@ mod authz_tests {
     fn a_byte_budget_cuts_a_page_but_always_advances() {
         let rib = static_rib(5);
         // A 1-byte budget still returns one prefix and a cursor.
-        let (p, next) = page_of(routes_page(&rib, None, 100, 1));
+        let (p, next) = page_of(routes_page(&rib, &plain(), None, 100, 1));
         assert_eq!((p.len(), next.as_deref()), (1, Some("10.0.0.0/24")));
         let one = rib.routes_page(None, 1).0;
-        let len = to_prefix_routes(one[0].0, &one[0].1, &rib).wire_len();
-        let (p, next) = page_of(routes_page(&rib, None, 100, len * 2));
+        let len = to_prefix_routes(one[0].0, &one[0].1, &rib, &plain()).wire_len();
+        let (p, next) = page_of(routes_page(&rib, &plain(), None, 100, len * 2));
         assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.1.0/24")));
     }
 
