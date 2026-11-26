@@ -1106,6 +1106,7 @@ bgp instance r1:
 - One line per path (every ADD-PATH path), IPv4 and IPv6 unicast; EVPN stays in `show bgp evpn`. `>` marks the best path; `from local` is a redistributed route.
 - A path with retained unrecognized optional transitive attributes (see "Unrecognized path attributes") is followed by one line per attribute: `      attr 153 flags=0xc0 len=2 0102` (type, flags as stored, value length in bytes, value in lowercase hex). REST lists them as `unknown_attributes: [{attr_type, flags, value}]`, `[]` when none.
 - The state is `valid`, `invalid` or `not-found`. A route your import policy rejects (for example with `rpki.invalid`) is never held, so it is not listed; a route learned through RFC 8097 keeps the state its peer sent.
+- A route whose import or redistribute policy ran `set this.bgp.tag = <n>` (n not 0) ends its line with `tag <n>`, and REST lists `tag` (`null` when none). The tag is local to this router: it is not a path attribute, is never sent to a peer or a BMP station, and an export policy can read it (`if this.bgp.tag == 7`) but `set` there has no effect. A tag-only change does not re-announce the route.
 
 #### Authenticating the cache session (RFC 8210 §9)
 

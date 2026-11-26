@@ -215,7 +215,7 @@ fn to_policy_input<'a>(
     nos_rpl::Input {
         prefix,
         bgp: nos_rpl::BgpInput {
-            tag: 0,
+            tag: route.tag.unwrap_or(0),
             origin: match route.bgp_origin {
                 message::Origin::Igp => nos_rpl::Origin::Igp,
                 message::Origin::Egp => nos_rpl::Origin::Egp,
@@ -313,7 +313,7 @@ fn apply_verdict(
     let nos_rpl::Verdict::Accept {
         local_pref,
         med,
-        tag: _, // local-only route tag; no bgp consumer yet (#1591)
+        tag,
         communities,
         extended_communities,
         large_communities,
@@ -324,6 +324,8 @@ fn apply_verdict(
     };
     route.local_pref = local_pref;
     route.med = med;
+    // Local only: an export-side `set` lands on the per-peer copy and is dropped.
+    route.tag = (tag != 0).then_some(tag);
     route.communities = communities;
     route.extended_communities = extended_communities;
     route.large_communities = large_communities;
@@ -566,6 +568,9 @@ pub struct RibRoute {
     /// The RFC 8097 state an opted-in iBGP peer sent with this route, used
     /// instead of local validation while the VRP table is empty (`ov_state`).
     pub received_ov: Option<nos_rpl::ValidationState>,
+    /// Local route tag (`this.bgp.tag`, #1591): set by import/redistribute
+    /// policy, never sent to a peer and not a path attribute. `None` = 0.
+    pub tag: Option<u32>,
 }
 
 /// RFC 7999: `communities` carry BLACKHOLE and `prefix` is inside the peer's
@@ -1695,6 +1700,7 @@ impl BgpRib {
                 nos_rpl::ValidationState::Invalid => S::Invalid,
                 nos_rpl::ValidationState::NotFound => S::NotFound,
             },
+            tag: r.tag,
             unknown_attributes: r
                 .unknown
                 .iter()

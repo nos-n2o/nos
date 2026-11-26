@@ -895,6 +895,7 @@ impl BgpRib {
             unknown: attrs.unknown.clone(),
             validation_state: nos_rpl::ValidationState::NotFound,
             received_ov,
+            tag: None,
         };
         let origin_as = crate::rpki::origin_as(
             &base_route.as_path,

@@ -20,6 +20,7 @@ fn route(prefix: &str) -> BgpRouteSummary {
         best: true,
         validation_state: RpkiValidationState::NotFound,
         unknown_attributes: vec![],
+        tag: None,
     }
 }
 

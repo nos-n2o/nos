@@ -1856,7 +1856,7 @@ fn render_bgp_route_lines_raw(routes: &[nos_proto::BgpRouteSummary]) -> String {
                 opt(r.origin_as.map(|a| a.to_string())),
                 r.local_pref,
                 state
-            );
+            ) + &r.tag.map_or_else(String::new, |t| format!(" tag {t}"));
             let attrs = r.unknown_attributes.iter().map(|a| {
                 format!(
                     "      attr {} flags=0x{:02x} len={} {}",
@@ -3041,6 +3041,7 @@ mod tests {
             best,
             validation_state: state,
             unknown_attributes: vec![],
+            tag: None,
         };
         let local = BgpRouteSummary {
             as_path: String::new(),
@@ -3061,6 +3062,25 @@ mod tests {
     }
 
     #[test]
+    fn render_bgp_routes_shows_a_tag_only_when_set() {
+        let mut r = nos_proto::BgpRouteSummary {
+            prefix: "192.0.2.0/24".to_string(),
+            peer: None,
+            next_hop: None,
+            as_path: String::new(),
+            origin_as: None,
+            local_pref: 100,
+            best: true,
+            validation_state: nos_proto::RpkiValidationState::Valid,
+            unknown_attributes: vec![],
+            tag: None,
+        };
+        assert!(!render_bgp_route_lines(&[r.clone()]).contains("tag"));
+        r.tag = Some(7);
+        assert!(render_bgp_route_lines(&[r]).ends_with("valid tag 7"));
+    }
+
+    #[test]
     fn render_bgp_routes_lists_unknown_attributes_under_their_row() {
         use nos_proto::{BgpRouteSummary, RpkiValidationState as S, UnknownAttributeSummary as U};
         let r = |unknown_attributes| BgpRouteSummary {
@@ -3073,6 +3093,7 @@ mod tests {
             best: true,
             validation_state: S::Valid,
             unknown_attributes,
+            tag: None,
         };
         let u = |attr_type, flags, value: &str| U {
             attr_type,

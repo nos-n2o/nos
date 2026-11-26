@@ -11284,6 +11284,80 @@ pub async fn unknown_attribute(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #1591: polls `GET /v1/bgp/routes` until `prefix` lists `tag` (`None` =
+/// JSON null: no tag).
+async fn expect_route_tag(r: &Router, prefix: &str, tag: Option<u32>) -> anyhow::Result<()> {
+    let want = serde_json::json!(tag);
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bgp/routes", None, 200)
+            .await?;
+        let json: serde_json::Value = serde_json::from_str(&last)?;
+        if json.as_array().into_iter().flatten().any(|inst| {
+            inst["result"]["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|rt| rt["prefix"] == prefix && rt["tag"] == want)
+        }) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: GET /v1/bgp/routes never listed {prefix} with tag {tag:?}: {last}",
+        r.name()
+    )
+}
+
+/// #1591: the policy route tag is local state. Router-b's import policy sets
+/// `this.bgp.tag`, `GET /v1/bgp/routes` shows it, a changed tag follows in
+/// place without any session restart, and router-a (the sender) never sees it.
+pub async fn bgp_route_tag(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    a.provision(&redistribute()).await?;
+    b.wait(&learned()).await?;
+    for tag in [7u32, 9] {
+        refresh_gap().await;
+        let file = policy_file(
+            "set-route-tag",
+            &format!("set this.bgp.tag = {tag}\naccept\n"),
+        )?;
+        let applied = b.count(&in_place(IP_A.s(), "import"));
+        b.provision(&[
+            "--policy-name",
+            "set-route-tag",
+            "--policy-source-file",
+            &file,
+            "--import-policy",
+            "set-route-tag",
+        ])
+        .await?;
+        b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+            .await?;
+        log(format!(
+            "router-b lists {REDISTRIBUTE_PREFIX} with tag {tag}"
+        ));
+        expect_route_tag(b, REDISTRIBUTE_PREFIX, Some(tag)).await?;
+        // The sender holds the route locally: no tag came back over the wire.
+        expect_route_tag(a, REDISTRIBUTE_PREFIX, None).await?;
+    }
+    log("reverting router-b's import policy: the tag disappears");
+    refresh_gap().await;
+    let applied = b.count(&in_place(IP_A.s(), "import"));
+    b.provision::<&str>(&[]).await?;
+    b.wait_new(&in_place(IP_A.s(), "import"), applied, 30)
+        .await?;
+    expect_route_tag(b, REDISTRIBUTE_PREFIX, None).await?;
+    a.assert_quiet("bgp session established", est_a, 3).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await
+}
+
 /// #1036: polls `GET /v1/bgp/routes` until `prefix` lists attribute type 153
 /// with `flags` and the 2-byte value `0102` (hex `"0102"`).
 async fn expect_unknown_attribute(r: &Router, prefix: &str, flags: u8) -> anyhow::Result<()> {

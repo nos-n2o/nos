@@ -1647,6 +1647,15 @@
             "description": "The prefix, `192.0.2.0/24`.",
             "type": "string"
           },
+          "tag": {
+            "description": "Local route tag set by policy (`this.bgp.tag`); never sent to a peer.\nAppended last: postcard is positional.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "unknown_attributes": {
             "description": "Retained unrecognized optional transitive attributes (RFC 4271 §5),\nsorted by type; empty for a local route.",
             "items": {

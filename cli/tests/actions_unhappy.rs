@@ -429,6 +429,7 @@ fn world(wd: Wd, daemons: Daemons, configd: Configd) -> Lab {
                                 best: true,
                                 validation_state: nos_proto::RpkiValidationState::NotFound,
                                 unknown_attributes: vec![],
+                                tag: None,
                             }],
                             next: None,
                         },

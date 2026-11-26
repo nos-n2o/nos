@@ -514,6 +514,10 @@ pub struct BgpRouteSummary {
     /// Retained unrecognized optional transitive attributes (RFC 4271 §5),
     /// sorted by type; empty for a local route.
     pub unknown_attributes: Vec<UnknownAttributeSummary>,
+    /// Local route tag set by policy (`this.bgp.tag`); never sent to a peer.
+    /// Appended last: postcard is positional.
+    #[serde(default)]
+    pub tag: Option<u32>,
 }
 
 /// One retained unrecognized path attribute of a route, for `show bgp routes`.
