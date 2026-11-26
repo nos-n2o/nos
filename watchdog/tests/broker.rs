@@ -1101,6 +1101,16 @@ async fn tacacs_stub() -> std::net::SocketAddr {
 }
 
 fn use_tacacs(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBackend>) {
+    use_tacacs_with(e, addr, order, nos_proto::TacacsAuthentication::Pap, false);
+}
+
+fn use_tacacs_with(
+    e: &Env,
+    addr: std::net::SocketAddr,
+    order: Vec<nos_proto::LoginBackend>,
+    authentication: nos_proto::TacacsAuthentication,
+    single_connect: bool,
+) {
     let mut g = e.aaa.lock().unwrap();
     g.1.keys = vec![nos_proto::AdminKey {
         label: "tac".into(),
@@ -1114,10 +1124,34 @@ fn use_tacacs(e: &Env, addr: std::net::SocketAddr, order: Vec<nos_proto::LoginBa
             routing_table: None,
             key_ref: "tac".into(),
             timeout_secs: Some(1),
+            authentication,
+            single_connect,
         }],
         login_order: order,
         ..Aaa::default()
     };
+}
+
+#[tokio::test]
+async fn tacacs_ascii_and_single_connect_logins_give_the_same_role() {
+    use nos_proto::{LoginBackend::Tacacs, TacacsAuthentication::Ascii};
+    let e = env(vec![]).await;
+    use_tacacs_with(&e, tacacs_stub().await, vec![Tacacs], Ascii, true);
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    for _ in 0..2 {
+        let (csr, _) = generate_csr().unwrap();
+        let WatchdogEvent::Issued { cert_der, .. } =
+            ask(&mut conn, login("alice", "pw", csr)).await
+        else {
+            panic!("tacacs ascii login refused");
+        };
+        assert_eq!(claim_of(&cert_der).as_deref(), Some("operator"));
+    }
+    let (csr, _) = generate_csr().unwrap();
+    assert!(matches!(
+        ask(&mut conn, login("alice", "wrong", csr)).await,
+        WatchdogEvent::Denied(_)
+    ));
 }
 
 #[tokio::test]

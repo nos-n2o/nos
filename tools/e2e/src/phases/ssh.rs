@@ -353,6 +353,7 @@ async fn radius_accounts(w: &World, ip: &str) -> anyhow::Result<()> {
             routing_table: Some("rt1".into()),
             key_ref: "tacacs".into(),
             timeout_secs: Some(2),
+            ..Default::default()
         }];
         Ok(())
     })

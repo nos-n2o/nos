@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
 use nos_proto::{
-    safe_name, IpcCodec, LoginBackend, Role, RoleAttribute, UserRole, WatchdogEvent,
-    WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY, LOGIN_TICKET_TTL,
-    MAX_FAILURES_DEFAULT, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT, RADIUS_RETRIES_DEFAULT,
-    RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED, TACACS_PORT_DEFAULT, TACACS_TIMEOUT_DEFAULT_SECS,
+    safe_name, IpcCodec, LoginBackend, Role, RoleAttribute, TacacsAuthentication, UserRole,
+    WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS, INVALID_TICKET, LOGIN_BUSY,
+    LOGIN_TICKET_TTL, MAX_FAILURES_DEFAULT, RADIUS_ACCT_PORT_DEFAULT, RADIUS_PORT_DEFAULT,
+    RADIUS_RETRIES_DEFAULT, RADIUS_TIMEOUT_DEFAULT_SECS, SESSION_EXPIRED, TACACS_PORT_DEFAULT,
+    TACACS_TIMEOUT_DEFAULT_SECS,
 };
 use tokio::io::split;
 use tokio::sync::Semaphore;
@@ -92,6 +93,8 @@ struct Ctx {
     max_failures: Arc<AtomicU8>,
     /// Accounting records for the worker (#1153); bounded, never waited on.
     acct: accounting::Sender,
+    /// Single-connect TACACS+ connections (#1155), shared by logins and accounting.
+    tacacs_pool: nos_tacacs::Pool,
     /// When the over-cap warning last fired (at most one per second).
     last_cap_warn: Mutex<Option<Instant>>,
 }
@@ -141,6 +144,7 @@ pub fn start_with_limits(
         anonymous_idle: limits.anonymous_idle,
         max_failures,
         acct,
+        tacacs_pool: nos_tacacs::Pool::default(),
         last_cap_warn: Mutex::new(None),
     });
     tokio::spawn(account_worker(ctx.clone(), acct_rx));
@@ -811,12 +815,14 @@ async fn tacacs_servers(ctx: &Ctx, cfg: &nos_proto::Config) -> Vec<nos_tacacs::S
                 s.timeout_secs.unwrap_or(TACACS_TIMEOUT_DEFAULT_SECS),
             )),
             vrf,
+            ascii: s.authentication == TacacsAuthentication::Ascii,
+            pool: s.single_connect.then(|| ctx.tacacs_pool.clone()),
         });
     }
     servers
 }
 
-/// PAP login plus `service=nos` authorization; the role is the `role` AV pair
+/// PAP or ASCII login plus `service=nos` authorization; the role is the `role` AV pair
 /// (read-only when absent or unknown).
 async fn tacacs_login(
     ctx: &Ctx,
