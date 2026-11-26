@@ -197,3 +197,9 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 A loopback cannot have subinterfaces, a switching profile, a port aggregate or LLDP.
 
 Implementation notes for developers are in [`docs/internals/interface.md`](../internals/interface.md).
+
+## Adopted links keep foreign addresses and sub-interfaces
+
+- An address or `<if>.<tag>` sub-interface that NOS did not add is never removed, even when absent from config (#1515).
+- Remove such a leftover by hand (`ip addr del`, `ip link del`); an address you also put in config is adopted and then follows config.
+- Needs kernel >= 5.18 (`IFA_PROTO`); on older kernels the address marker is ignored and NOS-added addresses are never removed.

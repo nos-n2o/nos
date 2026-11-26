@@ -13,6 +13,7 @@ pub mod links;
 pub mod linux;
 pub mod mpls_input;
 pub mod noop;
+pub mod ownership;
 pub mod port_aggregate_registry;
 pub mod rib_client;
 pub mod steering;

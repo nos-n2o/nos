@@ -128,6 +128,103 @@ pub async fn vrf_unknown(w: &mut World) -> anyhow::Result<()> {
     a.established().await
 }
 
+async fn ip(w: &World, args: &[&str]) -> anyhow::Result<String> {
+    w.dock
+        .ip(NETNS_HELPER_IMAGE, Some("router-a"), false, args)
+        .await
+}
+
+/// #1515: `nos-interfaced` removes only what it added. An address and a VLAN
+/// sub-interface created behind its back on eth0 survive every resync, while
+/// an address and a sub-interface NOS added are still removed, also after a
+/// `nos-interfaced` restart (the marker lives in the kernel: `IFA_PROTO`,
+/// `IFLA_IFALIAS`).
+pub async fn adopted_link_guard(w: &mut World) -> anyhow::Result<()> {
+    const FOREIGN_ADDR: &str = "192.0.2.77/24";
+    const OWN_ADDR: &str = "198.51.100.1/24";
+    // `--address6-extra` requires `--address6`; any prefix works, it stays.
+    const KEEP_ADDR: &str = "198.51.100.9/24";
+    let a = w.a()?;
+    // Idempotent: a failed earlier run may have left the foreign state.
+    let _ = ip(w, &["addr", "del", FOREIGN_ADDR, "dev", "eth0"]).await;
+    let _ = ip(w, &["link", "del", "eth0.77"]).await;
+    ip(w, &["addr", "add", FOREIGN_ADDR, "dev", "eth0"]).await?;
+    ip(
+        w,
+        &[
+            "link", "add", "link", "eth0", "name", "eth0.77", "type", "vlan", "id", "77",
+        ],
+    )
+    .await?;
+
+    let foreign_removed = "removed interface address .*192.0.2.77";
+    let foreign_deleted = "deleted vlan sub-interface .*eth0.77";
+    let own_added = format!("added interface address interface=eth0 address={OWN_ADDR}");
+    let own_removed = format!("removed interface address interface=eth0 address={OWN_ADDR}");
+    let tag = SUBINTERFACE_TAG.to_string();
+    let sub_created = format!("created vlan sub-interface interface=eth0 sub_interface=eth0.{tag}");
+    let sub_deleted = format!("deleted vlan sub-interface interface=eth0 sub_interface=eth0.{tag}");
+    let sub = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--address",
+            SUBINTERFACE_ADDRESS,
+            "--subinterface-tag",
+            &tag,
+            "--routing-table",
+            "rt1",
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B.s(),
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+
+    // NOS adds an address and a sub-interface; the foreign ones stay.
+    let (fr, fd) = (a.count(foreign_removed), a.count(foreign_deleted));
+    let (added_base, created_base) = (a.count(&own_added), a.count(&sub_created));
+    a.provision(&["--address6", KEEP_ADDR, "--address6-extra", OWN_ADDR])
+        .await?;
+    a.wait_new(&own_added, added_base, 30).await?;
+    a.provision_flags(&sub(&[])).await?;
+    a.wait_new(&sub_created, created_base, 30).await?;
+    a.assert_quiet(foreign_removed, fr, 25).await?;
+    a.assert_quiet(foreign_deleted, fd, 1).await?;
+
+    // Positive control: what NOS added is removed, the sub-link too.
+    let (removed_base, deleted_base) = (a.count(&own_removed), a.count(&sub_deleted));
+    a.provision_flags(&sub(&["--delete-subinterface"])).await?;
+    a.provision(&["--address6", KEEP_ADDR, "--remove-address6-extra", OWN_ADDR])
+        .await?;
+    a.wait_new(&own_removed, removed_base, 30).await?;
+    a.wait_new(&sub_deleted, deleted_base, 30).await?;
+    a.assert_quiet(foreign_removed, fr, 25).await?;
+    a.assert_quiet(foreign_deleted, fd, 1).await?;
+
+    // The marker survives a `nos-interfaced` restart: removing the address
+    // from config afterwards still removes it, the foreign one stays.
+    let added_base = a.count(&own_added);
+    a.provision(&["--address6", KEEP_ADDR, "--address6-extra", OWN_ADDR])
+        .await?;
+    a.wait_new(&own_added, added_base, 30).await?;
+    w.dock.kill_process("router-a", "nos-interfaced").await?;
+    let removed_base = a.count(&own_removed);
+    a.provision(&["--address6", KEEP_ADDR, "--remove-address6-extra", OWN_ADDR])
+        .await?;
+    a.wait_new(&own_removed, removed_base, 90).await?;
+    a.assert_quiet(foreign_removed, fr, 25).await?;
+    a.assert_quiet(foreign_deleted, fd, 1).await?;
+
+    ip(w, &["addr", "del", FOREIGN_ADDR, "dev", "eth0"]).await?;
+    ip(w, &["link", "del", "eth0.77"]).await?;
+    a.established().await
+}
+
 /// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and
 /// REST reports what the link is held at. Leaves eth0 at the docker default
 /// for later phases.
