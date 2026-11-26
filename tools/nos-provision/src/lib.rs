@@ -2747,6 +2747,34 @@ fn apply_igp_bfd(args: &Args, config: &mut nos_proto::Config) {
     }
 }
 
+/// `static_route_field_paths` applied straight to a local `Config`.
+fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
+    for i in config
+        .static_routing_instances
+        .iter_mut()
+        .filter(|i| i.name == args.static_routing_instance)
+    {
+        for r in i
+            .routes
+            .iter_mut()
+            .filter(|r| args.static_route.contains(&r.subnet))
+        {
+            if args.static_distance.is_some() {
+                r.distance = args.static_distance;
+            }
+            if args.static_tag.is_some() {
+                r.tag = args.static_tag;
+            }
+            if args.static_interface.is_some() {
+                r.interface.clone_from(&args.static_interface);
+            }
+            if args.static_blackhole {
+                r.blackhole = true;
+            }
+        }
+    }
+}
+
 /// `bfd_paths` applied straight to a local `Config` (the e2e harness edits
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
@@ -2806,6 +2834,7 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             }
         }
     }
+    apply_static_route_fields(args, config);
     if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
         config
             .sbfd_reflector
@@ -7004,6 +7033,31 @@ mod tests {
         assert_eq!(
             cfg.static_routing_instances[0].routes[0].bfd.as_deref(),
             Some("sb")
+        );
+    }
+
+    #[test]
+    fn static_route_variant_flags_reach_the_local_config() {
+        let args = parse(&[
+            "--static-route",
+            "198.18.78.0/24",
+            "--static-gateway",
+            "0.0.0.0",
+            "--static-distance",
+            "250",
+            "--static-tag",
+            "77",
+            "--static-blackhole",
+        ]);
+        let mut cfg = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut cfg).unwrap();
+        }
+        apply_bfd(&args, &mut cfg);
+        let r = &cfg.static_routing_instances[0].routes[0];
+        assert_eq!(
+            (r.distance, r.tag, r.blackhole),
+            (Some(250), Some(77), true)
         );
     }
 

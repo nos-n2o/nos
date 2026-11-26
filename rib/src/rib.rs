@@ -414,10 +414,7 @@ impl Rib {
 
     /// The winning candidate for one prefix, if any exist.
     pub fn best_route(&self, prefix: &IpNet) -> Option<&RibEntry> {
-        self.entries
-            .get(prefix)?
-            .iter()
-            .min_by_key(|e| e.rank())
+        self.entries.get(prefix)?.iter().min_by_key(|e| e.rank())
     }
 
     /// The winning route for every known prefix.
@@ -752,7 +749,7 @@ fn resolving_best(candidates: &[RibEntry]) -> Option<&RibEntry> {
 /// first.
 fn sorted_by_preference(candidates: &[RibEntry]) -> Vec<RibEntry> {
     let mut sorted = candidates.to_vec();
-    sorted.sort_by_key(|e| e.rank());
+    sorted.sort_by_key(RibEntry::rank);
     sorted
 }
 
@@ -1159,8 +1156,20 @@ mod tests {
     fn variant_fields_are_part_of_equality() {
         let base = entry("10.0.0.0/24", "10.0.0.1", RouteSource::Static);
         assert_ne!(base, floating("10.0.0.0/24", 5));
-        assert_ne!(base, RibEntry { tag: Some(1), ..base.clone() });
-        assert_ne!(base, RibEntry { interface: Some("e".into()), ..base.clone() });
+        assert_ne!(
+            base,
+            RibEntry {
+                tag: Some(1),
+                ..base.clone()
+            }
+        );
+        assert_ne!(
+            base,
+            RibEntry {
+                interface: Some("e".into()),
+                ..base.clone()
+            }
+        );
     }
 
     fn entry(prefix: &str, gateway: &str, source: RouteSource) -> RibEntry {

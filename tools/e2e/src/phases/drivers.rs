@@ -6182,6 +6182,20 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             "250",
         ])
         .await?;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let shown = a.routes_walk("rt1", None).await?;
+        // The resync has applied the static (preference 250) beside eBGP's 20.
+        let pref = |source: &str| {
+            shown
+                .iter()
+                .filter(|p| p["prefix"] == FLOAT_PREFIX)
+                .flat_map(|p| p["candidates"].as_array().cloned().unwrap_or_default())
+                .find(|c| c["source"] == source)
+                .map(|c| c["preference"].clone())
+        };
+        if pref("Static") != Some(250.into()) || pref("Bgp") != Some(20.into()) {
+            bail!("router-a: show route {FLOAT_PREFIX} lacks Static 250 beside Bgp 20");
+        }
         a.assert_quiet(&own, own_base, 15).await?;
         b.provision(&["--remove-static-route", FLOAT_PREFIX]).await?;
         a.wait_new(&own, own_base, 60).await?;
@@ -6222,8 +6236,11 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
             .await?;
         let status: serde_json::Value = serde_json::from_str(&body)?;
-        let ll = status["link_local_address"]
-            .as_str()
+        // Observed kernel state: on the interface, or on the subinterface
+        // that carries its address.
+        let ll = std::iter::once(&status)
+            .chain(status["subinterfaces"].as_array().into_iter().flatten())
+            .find_map(|s| s["link_local_address"].as_str())
             .context("router-b: eth0 reports no link_local_address")?
             .to_string();
         let ll_added = format!("added route prefix={LINK_LOCAL_STATIC} gateway={ll} ");
