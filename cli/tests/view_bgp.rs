@@ -52,7 +52,7 @@ fn check(name: &str, got: &str) {
 }
 
 fn show(v: &[PeerSummary]) -> String {
-    render(&v.to_vec(), "bgp instance r1: no peers configured")
+    render(&v.to_vec(), "bgp instance r1: no peers")
 }
 
 fn established() -> PeerSummary {

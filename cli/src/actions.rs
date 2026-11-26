@@ -440,9 +440,9 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         Resolved::ShowBfdSessions { peer, detail } => {
             if let Some(r) = bfd_sessions_reply(watchdog_socket, peer).await {
                 if detail {
-                    emit_detail(&r, "no bfd sessions");
+                    emit_detail(&r, &format::none(None, "bfd sessions"));
                 } else {
-                    emit(&r, "no bfd sessions");
+                    emit(&r, &format::none(None, "bfd sessions"));
                 }
             }
             Outcome::Continue(mode)
@@ -649,25 +649,39 @@ async fn show_transaction(mode: &Mode, socket: &Path) {
     }
 }
 
+/// The daemon's socket via the broker, or `None` after printing why not
+/// (stderr): `<label> is not running` / `error: ...` (#1414). The one place
+/// that text is written.
+async fn resolve_service(
+    watchdog_socket: &Path,
+    svc: nos_proto::ServiceRef,
+    label: &str,
+) -> Option<std::path::PathBuf> {
+    match watchdog_client::resolve(watchdog_socket, svc).await {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => {
+            eprintln!("{}", format::not_running(label));
+            None
+        }
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            None
+        }
+    }
+}
+
 /// Resolves `table`'s nos-ribd instance fresh (not cached — tables come and
 /// go during a session) via the watchdog broker, then queries it either for
 /// the whole table (`address: None`) or a longest-prefix-match lookup.
 async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::net::IpAddr>) {
-    let rib_socket = match watchdog_client::resolve(
+    let Some(rib_socket) = resolve_service(
         watchdog_socket,
         nos_proto::ServiceRef::RibTable(table.to_string()),
+        &format!("routing table '{table}'"),
     )
     .await
-    {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("routing table '{table}' is not running");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+    else {
+        return;
     };
 
     match address {
@@ -692,7 +706,7 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
         }
         Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
-            Ok(None) => println!("no route matches {}", format::sanitize(&addr.to_string())),
+            Ok(None) => println!("{}", format::none(None, &format!("route matches {addr}"))),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
@@ -747,8 +761,10 @@ async fn show_fdb(
         match fdb_table(watchdog_socket, d).await {
             Ok(Some(t)) => emit(&t, ""),
             Ok(None) => eprintln!(
-                "nos-fdbd is not running for broadcast domain '{}' (needs a vni)",
-                format::sanitize(d)
+                "{}",
+                format::not_running(&format!(
+                    "nos-fdbd for broadcast domain '{d}' (needs a vni)"
+                ))
             ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e)),
         }
@@ -776,8 +792,9 @@ async fn show_fdb(
                 }
             }
             Ok(None) => eprintln!(
-                "fdb domain '{}': nos-fdbd is not running",
-                format::sanitize(d)
+                "fdb domain '{}': {}",
+                format::sanitize(d),
+                format::not_running("nos-fdbd")
             ),
             Err(e) => eprintln!(
                 "fdb domain '{}': {}",
@@ -794,7 +811,13 @@ async fn show_fdb(
 /// the watchdog broker, then queries it either for every interface
 /// (`name: None`) or one named interface.
 async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
-    let Some(interface_socket) = resolve_interfaced(watchdog_socket).await else {
+    let Some(interface_socket) = resolve_service(
+        watchdog_socket,
+        nos_proto::ServiceRef::Interfaces,
+        "nos-interfaced",
+    )
+    .await
+    else {
         return;
     };
 
@@ -805,31 +828,22 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
         },
         Some(name) => match interface_client::get_interface(&interface_socket, name).await {
             Ok(Some(status)) => println!("{}", format::render_interface_detail(&status)),
-            Ok(None) => println!("interface '{name}' not found"),
+            Ok(None) => eprintln!("{}", format::not_found("interface", name)),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
-    }
-}
-
-/// One watchdog resolution of `nos-interfaced`, reporting why on `None`.
-async fn resolve_interfaced(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
-    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
-        Ok(Some(path)) => Some(path),
-        Ok(None) => {
-            eprintln!("nos-interfaced is not running");
-            None
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            None
-        }
     }
 }
 
 /// `show interface brief`: one resolution, then the interface and the
 /// port-aggregate queries.
 async fn show_interface_brief(watchdog_socket: &Path) {
-    let Some(socket) = resolve_interfaced(watchdog_socket).await else {
+    let Some(socket) = resolve_service(
+        watchdog_socket,
+        nos_proto::ServiceRef::Interfaces,
+        "nos-interfaced",
+    )
+    .await
+    else {
         return;
     };
     let both = async {
@@ -846,18 +860,11 @@ async fn show_interface_brief(watchdog_socket: &Path) {
 /// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
 /// port-aggregate query instead.
 async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
-    let lacp_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lacp).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-lacpd is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {}", format::sanitize(&e.to_string()));
-                return;
-            }
-        };
+    let Some(lacp_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Lacp, "nos-lacpd").await
+    else {
+        return;
+    };
 
     let render = |s: &[nos_proto::PortAggregateLacpSummary]| {
         if detail {
@@ -875,7 +882,7 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
                     .filter(|s| s.aggregate == name)
                     .collect();
                 if one.is_empty() {
-                    println!("lacp port aggregate '{name}' not found");
+                    eprintln!("{}", format::not_found("lacp port aggregate", name));
                 } else {
                     println!("{}", render(&one));
                 }
@@ -885,25 +892,12 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
     }
 }
 
-/// `nos-lldpd`'s socket via the broker, or `None` after printing why not.
-async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
-    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lldp).await {
-        Ok(Some(path)) => Some(path),
-        Ok(None) => {
-            eprintln!("nos-lldpd is not running");
-            None
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            None
-        }
-    }
-}
-
 /// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
 /// query.
 async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool, interface: Option<&str>) {
-    let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
+    let Some(lldp_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Lldp, "nos-lldpd").await
+    else {
         return;
     };
     match lldp_client::get_neighbors(&lldp_socket).await {
@@ -911,7 +905,10 @@ async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool, interface: Op
             let i = interface.unwrap_or_default();
             let kept = filter_lldp_interface(neighbors, i);
             if kept.is_empty() {
-                println!("no lldp neighbors on '{}'", format::sanitize(i));
+                println!(
+                    "{}",
+                    format::none(None, &format!("lldp neighbors on '{i}'"))
+                );
             } else if detail {
                 println!("{}", format::render_lldp_neighbors_detail(&kept));
             } else {
@@ -937,21 +934,6 @@ fn filter_lldp_interface(
         .collect()
 }
 
-/// `nos-bfdd`'s socket via the broker, or `None` after printing why not.
-async fn resolve_bfd(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
-    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Bfd).await {
-        Ok(Some(path)) => Some(path),
-        Ok(None) => {
-            eprintln!("nos-bfdd is not running");
-            None
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            None
-        }
-    }
-}
-
 /// The single output point of a view-driven `show` (#1422): `| json`
 /// (#1415) and the jq filter (#1420) branch here, off `view::to_value`.
 fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
@@ -967,7 +949,8 @@ async fn bfd_sessions_reply(
     watchdog_socket: &Path,
     peer: Option<std::net::IpAddr>,
 ) -> Option<Vec<nos_proto::BfdSessionView>> {
-    let bfd_socket = resolve_bfd(watchdog_socket).await?;
+    let bfd_socket =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Bfd, "nos-bfdd").await?;
     match bfd_client::get_sessions(&bfd_socket, peer).await {
         Ok(sessions) => Some(sessions),
         Err(e) => {
@@ -978,7 +961,9 @@ async fn bfd_sessions_reply(
 }
 
 async fn show_bfd_reflector(watchdog_socket: &Path) {
-    let Some(bfd_socket) = resolve_bfd(watchdog_socket).await else {
+    let Some(bfd_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Bfd, "nos-bfdd").await
+    else {
         return;
     };
     match bfd_client::get_reflector(&bfd_socket).await {
@@ -988,16 +973,10 @@ async fn show_bfd_reflector(watchdog_socket: &Path) {
 }
 
 async fn clear_stp_mcheck(watchdog_socket: &Path, interface: Option<String>) {
-    let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("nos-stpd is not running");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+    let Some(socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Stp, "nos-stpd").await
+    else {
+        return;
     };
     match stp_client::mcheck(&socket, interface.clone()).await {
         Ok(0) => eprintln!(
@@ -1010,16 +989,10 @@ async fn clear_stp_mcheck(watchdog_socket: &Path, interface: Option<String>) {
 }
 
 async fn clear_stp_err_disabled(watchdog_socket: &Path, interface: String) {
-    let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("nos-stpd is not running");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+    let Some(socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Stp, "nos-stpd").await
+    else {
+        return;
     };
     match stp_client::clear_err_disabled(&socket, interface.clone()).await {
         Ok(true) => println!("{interface} is up again"),
@@ -1041,16 +1014,10 @@ enum SpanningTreeView {
 }
 
 async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
-    let socket = match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Stp).await {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("nos-stpd is not running");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+    let Some(socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Stp, "nos-stpd").await
+    else {
+        return;
     };
     match stp_client::get_summary(&socket).await {
         Ok(s) => println!(
@@ -1071,7 +1038,7 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
 /// Sentence for a `ClearCounters` reply (pure; the name is untrusted).
 fn clear_acl_message(name: Option<&str>, found: bool, attachments: u32) -> String {
     match (name, found, attachments) {
-        (Some(n), false, _) => format!("acl '{}' not found", format::sanitize_line(n)),
+        (Some(n), false, _) => format::not_found("acl", n),
         (Some(n), true, 0) => {
             format!(
                 "acl '{}' is not attached, its counters are 0",
@@ -1087,18 +1054,11 @@ fn clear_acl_message(name: Option<&str>, found: bool, attachments: u32) -> Strin
 }
 
 async fn clear_acl_counters(watchdog_socket: &Path, name: Option<&str>) {
-    let acl_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-acld is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {}", format::sanitize(&e.to_string()));
-                return;
-            }
-        };
+    let Some(acl_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Acl, "nos-acld").await
+    else {
+        return;
+    };
     match acl_client::clear_counters(&acl_socket, name).await {
         Ok((false, _)) => eprintln!("error: {}", clear_acl_message(name, false, 0)),
         Ok((found, n)) => println!("{}", clear_acl_message(name, found, n)),
@@ -1107,24 +1067,17 @@ async fn clear_acl_counters(watchdog_socket: &Path, name: Option<&str>) {
 }
 
 async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
-    let acl_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-acld is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {}", format::sanitize(&e.to_string()));
-                return;
-            }
-        };
+    let Some(acl_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Acl, "nos-acld").await
+    else {
+        return;
+    };
     match acl_client::show(&acl_socket, name).await {
-        Ok(acls) if acls.is_empty() && name.is_some() => {
-            println!("acl '{}' not found", name.unwrap_or_default());
-        }
-        Ok(acls) if acls.is_empty() => println!("no acls"),
-        Ok(acls) => emit(&acls, "no acls"),
+        Ok(acls) if acls.is_empty() => match name {
+            Some(n) => eprintln!("{}", format::not_found("acl", n)),
+            None => println!("{}", format::none(None, "acls")),
+        },
+        Ok(acls) => emit(&acls, &format::none(None, "acls")),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
     if name.is_none() {
@@ -1140,28 +1093,27 @@ async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
 }
 
 async fn show_lldp_statistics(watchdog_socket: &Path) {
-    let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
+    let Some(lldp_socket) =
+        resolve_service(watchdog_socket, nos_proto::ServiceRef::Lldp, "nos-lldpd").await
+    else {
         return;
     };
     match lldp_client::get_statistics(&lldp_socket).await {
-        Ok(stats) => emit(&stats, "no lldp links"),
+        Ok(stats) => emit(&stats, &format::none(None, "lldp links")),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 
 async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
-    let interface_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-interfaced is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {}", format::sanitize(&e.to_string()));
-                return;
-            }
-        };
+    let Some(interface_socket) = resolve_service(
+        watchdog_socket,
+        nos_proto::ServiceRef::Interfaces,
+        "nos-interfaced",
+    )
+    .await
+    else {
+        return;
+    };
 
     match name {
         None => match interface_client::get_port_aggregates(&interface_socket).await {
@@ -1170,7 +1122,7 @@ async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
         },
         Some(name) => match interface_client::get_port_aggregate(&interface_socket, name).await {
             Ok(Some(status)) => println!("{}", format::render_port_aggregate_statuses(&[status])),
-            Ok(None) => println!("port aggregate '{name}' not found"),
+            Ok(None) => eprintln!("{}", format::not_found("port aggregate", name)),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
@@ -1194,16 +1146,9 @@ async fn show_log(
     }
     let n = last.unwrap_or(DEFAULT_LOG_LAST);
     let filtered = level.is_some() || needle.is_some();
-    let log_socket = match watchdog_client::resolve(watchdog_socket, ServiceRef::Log).await {
-        Ok(Some(path)) => path,
-        Ok(None) => {
-            eprintln!("nos-logd is not running");
-            return;
-        }
-        Err(e) => {
-            eprintln!("error: {}", format::sanitize(&e.to_string()));
-            return;
-        }
+    let Some(log_socket) = resolve_service(watchdog_socket, ServiceRef::Log, "nos-logd").await
+    else {
+        return;
     };
 
     if !follow {
@@ -1313,14 +1258,14 @@ async fn show_bgp_summary(
     };
 
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
 
     if let Some(n) = only
         && !cfg.bgp_instances.iter().any(|i| i.name == n)
     {
-        eprintln!("bgp instance '{}' not found", format::sanitize_line(n));
+        eprintln!("{}", format::not_found("bgp instance", n));
         return;
     }
     let mut found = false;
@@ -1349,7 +1294,7 @@ async fn show_bgp_summary(
                         "bgp instance {name}, router-id {}, AS {}",
                         instance.router_id, instance.asn
                     );
-                    let none = format!("bgp instance {name}: no peers configured");
+                    let none = format::none(Some(&format!("bgp instance {name}")), "peers");
                     if neighbor {
                         emit_detail(&peers, &none);
                     } else {
@@ -1358,7 +1303,10 @@ async fn show_bgp_summary(
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1417,7 +1365,7 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
 
@@ -1436,7 +1384,10 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
                 .await;
                 out.finish(walked, &format::render_bgp_evpn(&instance.name, &[]));
             }
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1458,7 +1409,7 @@ async fn show_bgp_flowspec(
     };
 
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
 
@@ -1478,7 +1429,10 @@ async fn show_bgp_flowspec(
                     .await;
                 out.finish(walked, &format::render_bgp_flowspec(&instance.name, &[]));
             }
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1500,7 +1454,7 @@ async fn show_bgp_vpn(
     };
 
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
 
@@ -1520,7 +1474,10 @@ async fn show_bgp_vpn(
                     .await;
                 out.finish(walked, &format::render_bgp_vpn(&instance.name, family, &[]));
             }
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1536,7 +1493,7 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
         }
     };
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
     for instance in &cfg.bgp_instances {
@@ -1554,7 +1511,10 @@ async fn show_bgp_routes(config_socket: &Path, watchdog_socket: &Path) {
                 .await;
                 out.finish(walked, &format::render_bgp_routes(&instance.name, &[]));
             }
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1570,7 +1530,7 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
         }
     };
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
     for instance in &cfg.bgp_instances {
@@ -1582,7 +1542,13 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_rpki_summary(&bgp_socket).await {
                 Ok(caches) if caches.is_empty() => {
-                    println!("bgp instance {}: no rpki caches", instance.name);
+                    println!(
+                        "{}",
+                        format::none(
+                            Some(&format!("bgp instance {}", instance.name)),
+                            "rpki caches"
+                        )
+                    );
                 }
                 Ok(caches) => {
                     println!("bgp instance {}:", instance.name);
@@ -1590,7 +1556,10 @@ async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1606,7 +1575,7 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
         }
     };
     if cfg.bgp_instances.is_empty() {
-        println!("no bgp instances configured");
+        println!("{}", format::none(None, "bgp instances"));
         return;
     }
     for instance in &cfg.bgp_instances {
@@ -1622,7 +1591,10 @@ async fn show_bgp_bmp(config_socket: &Path, watchdog_socket: &Path) {
                 Ok(stations) => println!("{}", format::render_bgp_bmp(&instance.name, &stations)),
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("bgp instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1642,7 +1614,7 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospf_instances.is_empty() {
-        println!("no ospf instances configured");
+        println!("{}", format::none(None, "ospf instances"));
         return;
     }
 
@@ -1655,7 +1627,13 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(ospf_socket)) => match ospf_client::get_neighbors(&ospf_socket).await {
                 Ok(neighbors) if neighbors.is_empty() => {
-                    println!("ospf instance {}: no ospf links configured", instance.name);
+                    println!(
+                        "{}",
+                        format::none(
+                            Some(&format!("ospf instance {}", instance.name)),
+                            "ospf links"
+                        )
+                    );
                 }
                 Ok(neighbors) => {
                     println!("ospf instance {}:", instance.name);
@@ -1663,7 +1641,10 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1680,7 +1661,7 @@ async fn show_ospf_interface(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospf_instances.is_empty() {
-        println!("no ospf instances configured");
+        println!("{}", format::none(None, "ospf instances"));
         return;
     }
 
@@ -1694,11 +1675,14 @@ async fn show_ospf_interface(config_socket: &Path, watchdog_socket: &Path) {
             Ok(Some(socket)) => match ospf_client::get_interfaces(&socket).await {
                 Ok(interfaces) => {
                     println!("ospf instance {}:", instance.name);
-                    emit(&interfaces, "no ospf interfaces running");
+                    emit(&interfaces, &format::none(None, "ospf interfaces running"));
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1715,7 +1699,7 @@ async fn show_ospfv3_interface(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospfv3_instances.is_empty() {
-        println!("no ospfv3 instances configured");
+        println!("{}", format::none(None, "ospfv3 instances"));
         return;
     }
 
@@ -1729,11 +1713,17 @@ async fn show_ospfv3_interface(config_socket: &Path, watchdog_socket: &Path) {
             Ok(Some(socket)) => match ospfv3_client::get_interfaces(&socket).await {
                 Ok(interfaces) => {
                     println!("ospfv3 instance {}:", instance.name);
-                    emit(&interfaces, "no ospfv3 interfaces running");
+                    emit(
+                        &interfaces,
+                        &format::none(None, "ospfv3 interfaces running"),
+                    );
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospfv3 instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1750,7 +1740,7 @@ async fn show_ospf_route(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospf_instances.is_empty() {
-        println!("no ospf instances configured");
+        println!("{}", format::none(None, "ospf instances"));
         return;
     }
 
@@ -1764,11 +1754,14 @@ async fn show_ospf_route(config_socket: &Path, watchdog_socket: &Path) {
             Ok(Some(socket)) => match ospf_client::get_routes(&socket).await {
                 Ok(routes) => {
                     println!("ospf instance {}:", instance.name);
-                    emit(&routes, "no ospf routes");
+                    emit(&routes, &format::none(None, "ospf routes"));
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1785,7 +1778,7 @@ async fn show_ospfv3_route(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospfv3_instances.is_empty() {
-        println!("no ospfv3 instances configured");
+        println!("{}", format::none(None, "ospfv3 instances"));
         return;
     }
 
@@ -1799,11 +1792,14 @@ async fn show_ospfv3_route(config_socket: &Path, watchdog_socket: &Path) {
             Ok(Some(socket)) => match ospfv3_client::get_routes(&socket).await {
                 Ok(routes) => {
                     println!("ospfv3 instance {}:", instance.name);
-                    emit(&routes, "no ospfv3 routes");
+                    emit(&routes, &format::none(None, "ospfv3 routes"));
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospfv3 instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1851,7 +1847,7 @@ async fn show_ospf_database(
     };
 
     if cfg.ospf_instances.is_empty() {
-        println!("no ospf instances configured");
+        println!("{}", format::none(None, "ospf instances"));
         return;
     }
 
@@ -1874,7 +1870,10 @@ async fn show_ospf_database(
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1890,7 +1889,7 @@ async fn show_ospf_segment_routing(config_socket: &Path, watchdog_socket: &Path)
         }
     };
     if cfg.ospf_instances.is_empty() {
-        println!("no ospf instances configured");
+        println!("{}", format::none(None, "ospf instances"));
         return;
     }
     for instance in &cfg.ospf_instances {
@@ -1907,7 +1906,10 @@ async fn show_ospf_segment_routing(config_socket: &Path, watchdog_socket: &Path)
                 ),
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospf instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1925,7 +1927,7 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
     };
 
     if cfg.ospfv3_instances.is_empty() {
-        println!("no ospfv3 instances configured");
+        println!("{}", format::none(None, "ospfv3 instances"));
         return;
     }
 
@@ -1949,7 +1951,10 @@ async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospfv3 instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -1979,7 +1984,7 @@ async fn show_ospfv3_database(
     };
 
     if cfg.ospfv3_instances.is_empty() {
-        println!("no ospfv3 instances configured");
+        println!("{}", format::none(None, "ospfv3 instances"));
         return;
     }
 
@@ -2002,7 +2007,10 @@ async fn show_ospfv3_database(
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
-            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Ok(None) => eprintln!(
+                "{}",
+                format::not_running(&format!("ospfv3 instance \'{}\'", instance.name))
+            ),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }
@@ -2061,7 +2069,10 @@ async fn clear_bgp(
             Ok(false) => eprintln!("error: no peer {peer} on '{instance}'"),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
-        Ok(None) => println!("bgp instance '{instance}' is not running"),
+        Ok(None) => eprintln!(
+            "{}",
+            format::not_running(&format!("bgp instance '{instance}'"))
+        ),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
@@ -2077,7 +2088,7 @@ fn use_color() -> bool {
 async fn diff(mode: &Mode, socket: &Path) {
     let transaction = current_transaction(mode);
     match client::diff_transaction(socket, &transaction).await {
-        Ok(d) if d.is_empty() => println!("no changes"),
+        Ok(d) if d.is_empty() => println!("{}", format::none(None, "changes")),
         Ok(d) => println!("{}", format::render_diff(&d, use_color())),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
@@ -2098,7 +2109,9 @@ async fn aaa_users(socket: &Path, action: Resolved) {
     };
     let clear = matches!(req, Request::ClearExternalUser { .. });
     match client::external_users(socket, req).await {
-        Ok(Event::ExternalUsers(l)) if l.is_empty() => println!("no external users"),
+        Ok(Event::ExternalUsers(l)) if l.is_empty() => {
+            println!("{}", format::none(None, "external users"));
+        }
         Ok(Event::ExternalUsers(l)) => {
             println!("{}", format::render_aaa_users(&l));
         }
@@ -2113,7 +2126,7 @@ async fn aaa_users(socket: &Path, action: Resolved) {
 
 async fn show_history(socket: &Path) {
     match client::list_history(socket).await {
-        Ok(h) if h.is_empty() => println!("no history yet"),
+        Ok(h) if h.is_empty() => println!("{}", format::none(None, "history yet")),
         Ok(h) => {
             println!(
                 "{:>5}  {:<20}  {:<10}  actor",
@@ -2716,5 +2729,19 @@ mod clear_acl_tests {
         );
         assert_eq!(m(Some("E"), false, 0), "acl 'E' not found");
         assert!(!m(Some("a\x1b[2Jb"), false, 0).contains('\x1b'));
+    }
+
+    /// Every error text goes through `format::not_running`/`not_found` and
+    /// every empty state through `format::none` (#1414).
+    #[test]
+    fn error_and_empty_texts_only_come_from_the_helpers() {
+        let src = include_str!("actions.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        for bad in ["is not running\"", "not found\"", "println!(\"no "] {
+            assert!(
+                !body.contains(bad),
+                "actions.rs bypasses the helpers: {bad}"
+            );
+        }
     }
 }

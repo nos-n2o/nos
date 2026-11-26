@@ -78,6 +78,25 @@ pub fn sanitize_line(s: &str) -> Cow<'_, str> {
     escape(s, true)
 }
 
+/// `<label> is not running` (stderr), the one text of the convention (#1414).
+/// `label` is untrusted (instance/table names come from config).
+pub fn not_running(label: &str) -> String {
+    format!("{} is not running", sanitize_line(label))
+}
+
+/// `<kind> '<name>' not found` (stderr).
+pub fn not_found(kind: &str, name: &str) -> String {
+    format!("{kind} '{}' not found", sanitize_line(name))
+}
+
+/// The empty-state text (stdout): `no <what>`, or `<scope>: no <what>`.
+pub fn none(scope: Option<&str>, what: &str) -> String {
+    match scope {
+        Some(s) => format!("{}: no {what}", sanitize_line(s)),
+        None => format!("no {what}"),
+    }
+}
+
 fn needs_escape(c: char, line: bool) -> bool {
     match c {
         '\t' => false,
@@ -148,7 +167,7 @@ pub fn render_interface_detail(status: &InterfaceStatus) -> String {
 /// Bare `show interface`: the detail of every interface, blank-line separated.
 pub fn render_interface_details(statuses: &[InterfaceStatus]) -> String {
     if statuses.is_empty() {
-        return "no interfaces".to_string();
+        return none(None, "interfaces");
     }
     let all = statuses
         .iter()
@@ -331,7 +350,7 @@ pub fn render_interface_brief(
         ));
     }
     if rows.is_empty() {
-        return "no interfaces".to_string();
+        return none(None, "interfaces");
     }
     let cols = [
         Col::left("Interface"),
@@ -419,7 +438,7 @@ pub fn render_port_aggregate_statuses(statuses: &[PortAggregateStatus]) -> Strin
 
 fn render_port_aggregate_statuses_raw(statuses: &[PortAggregateStatus]) -> String {
     if statuses.is_empty() {
-        return "no port aggregates".to_string();
+        return none(None, "port aggregates");
     }
     statuses
         .iter()
@@ -448,7 +467,7 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
 
 fn render_lldp_neighbors_raw(neighbors: &[nos_proto::LldpNeighbor]) -> String {
     if neighbors.is_empty() {
-        return "no lldp neighbors".to_string();
+        return none(None, "lldp neighbors");
     }
     neighbors
         .iter()
@@ -492,7 +511,7 @@ pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> St
 
 fn render_lldp_neighbors_detail_raw(neighbors: &[nos_proto::LldpNeighbor]) -> String {
     if neighbors.is_empty() {
-        return "no lldp neighbors".to_string();
+        return none(None, "lldp neighbors");
     }
     let yes_no = |b: bool| if b { "yes" } else { "no" };
     neighbors
@@ -665,7 +684,7 @@ fn render_spanning_tree_raw(s: &nos_proto::StpSummary) -> String {
         ),
     ];
     if s.ports.is_empty() {
-        lines.push("no spanning-tree ports".to_string());
+        lines.push(none(Some("spanning-tree"), "ports"));
         return lines.join("\n");
     }
     lines.push(String::new());
@@ -725,7 +744,7 @@ fn render_stp_domain_raw(s: &nos_proto::StpSummary, domain: &str) -> String {
         .iter()
         .find(|i| i.domains.iter().any(|d| d == domain))
     else {
-        return format!("no spanning-tree tree for domain {domain}");
+        return none(Some("spanning-tree"), &format!("tree for domain {domain}"));
     };
     let root = match &i.root_port {
         Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
@@ -806,7 +825,7 @@ fn render_stp_instance_raw(s: &nos_proto::StpSummary, id: u16) -> String {
         return NOT_MSTP.to_string();
     };
     let Some(i) = m.instances.iter().find(|i| i.id == id) else {
-        return format!("no spanning-tree instance {id}");
+        return none(Some("spanning-tree"), &format!("instance {id}"));
     };
     let root = match &i.root_port {
         Some(p) => format!("root port {p}, cost {}", i.root_path_cost),
@@ -1142,7 +1161,7 @@ pub fn render_lacp_tables(summaries: &[PortAggregateLacpSummary]) -> String {
 
 fn render_lacp_tables_raw(summaries: &[PortAggregateLacpSummary]) -> String {
     if summaries.is_empty() {
-        return "no lacp port aggregates".to_string();
+        return none(None, "lacp port aggregates");
     }
     let aggs: Vec<Vec<String>> = summaries
         .iter()
@@ -1242,7 +1261,7 @@ pub fn render_lacp_detail(summaries: &[PortAggregateLacpSummary]) -> String {
 fn render_lacp_detail_raw(summaries: &[PortAggregateLacpSummary]) -> String {
     use nos_proto::LacpAgreement;
     if summaries.is_empty() {
-        return "no lacp port aggregates".to_string();
+        return none(None, "lacp port aggregates");
     }
     summaries
         .iter()
@@ -1431,7 +1450,7 @@ pub fn render_log_entries(entries: &[LogEntry]) -> String {
 
 fn render_log_entries_raw(entries: &[LogEntry]) -> String {
     if entries.is_empty() {
-        return "no log entries".to_string();
+        return none(None, "log entries");
     }
     entries
         .iter()
@@ -1535,7 +1554,7 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
 
 fn render_prefix_routes_raw(entries: &[PrefixRoutes]) -> String {
     if entries.is_empty() {
-        return "no routes".to_string();
+        return none(None, "routes");
     }
     let mut lines = Vec::new();
     for entry in entries {
@@ -1598,7 +1617,7 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
 
 fn render_bgp_evpn_raw(instance: &str, routes: &[EvpnRouteSummary]) -> String {
     if routes.is_empty() {
-        return format!("bgp instance {instance}: no evpn routes");
+        return none(Some(&format!("bgp instance {instance}")), "evpn routes");
     }
     format!(
         "{}\n{}",
@@ -1647,7 +1666,10 @@ fn render_bgp_vpn_raw(
     routes: &[nos_proto::VpnRouteSummary],
 ) -> String {
     if routes.is_empty() {
-        return format!("bgp instance {instance}: no {family} routes");
+        return none(
+            Some(&format!("bgp instance {instance}")),
+            &format!("{family} routes"),
+        );
     }
     format!(
         "{}\n{}",
@@ -1696,7 +1718,7 @@ pub fn render_bgp_flowspec(instance: &str, routes: &[FlowspecRouteSummary]) -> S
 
 fn render_bgp_flowspec_raw(instance: &str, routes: &[FlowspecRouteSummary]) -> String {
     if routes.is_empty() {
-        return format!("bgp instance {instance}: no flowspec routes");
+        return none(Some(&format!("bgp instance {instance}")), "flowspec routes");
     }
     format!(
         "{}\n{}",
@@ -1748,7 +1770,7 @@ pub fn render_bgp_routes(instance: &str, routes: &[nos_proto::BgpRouteSummary]) 
 
 fn render_bgp_routes_raw(instance: &str, routes: &[nos_proto::BgpRouteSummary]) -> String {
     if routes.is_empty() {
-        return format!("bgp instance {instance}: no routes");
+        return none(Some(&format!("bgp instance {instance}")), "routes");
     }
     format!(
         "{}\n{}",
@@ -1816,7 +1838,7 @@ pub fn render_bgp_bmp(instance: &str, stations: &[nos_proto::BmpStationStatus]) 
 
 fn render_bgp_bmp_raw(instance: &str, stations: &[nos_proto::BmpStationStatus]) -> String {
     if stations.is_empty() {
-        return format!("bgp instance {instance}: no bmp stations");
+        return none(Some(&format!("bgp instance {instance}")), "bmp stations");
     }
     let mut lines = vec![format!("bgp instance {instance}:")];
     for s in stations {
@@ -1974,12 +1996,8 @@ fn db_wrap(
 ) -> String {
     let instance = sanitize_line(instance);
     if rows.is_empty() {
-        let what = if filtered {
-            "no LSAs match"
-        } else {
-            "no LSAs installed"
-        };
-        return format!("{proto} instance {instance}: {what}");
+        let what = if filtered { "matching LSAs" } else { "LSAs" };
+        return none(Some(&format!("{proto} instance {instance}")), what);
     }
     format!("{proto} instance {instance}:\n{}", table(cols, rows))
 }
@@ -2039,7 +2057,10 @@ pub fn render_ospf_segment_routing(instance: &str, sr: &nos_proto::SrSummary) ->
         ));
     }
     if lines.len() == 1 {
-        lines[0] = format!("ospf instance {instance}: no segment routing state");
+        lines[0] = none(
+            Some(&format!("ospf instance {instance}")),
+            "segment routing state",
+        );
     }
     sanitize(&lines.join("\n")).into_owned()
 }
@@ -2187,7 +2208,7 @@ pub fn render_admin_config(config: &Config) -> String {
 fn render_admin_config_raw(config: &Config) -> String {
     let doc = serde_json::to_value(config).unwrap_or_default();
     if config.admin.keys.is_empty() {
-        return "no admin keys configured".to_string();
+        return none(None, "admin keys");
     }
     render::render_at(&doc, &["admin".to_string()])
         .map_or_else(String::new, |lines| render::indent(&lines))
@@ -3099,10 +3120,7 @@ mod tests {
 
     #[test]
     fn render_ospf_database_empty_list() {
-        assert_eq!(
-            render_ospf_database("o1", &[]),
-            "ospf instance o1: no LSAs installed"
-        );
+        assert_eq!(render_ospf_database("o1", &[]), "ospf instance o1: no LSAs");
     }
 
     #[test]
@@ -3188,7 +3206,7 @@ mod tests {
         assert_eq!(filter_ospf_database(&all, Some(1), Some(r1)).len(), 1);
         assert_eq!(
             render_ospf_database_filtered("o", &filter_ospf_database(&all, Some(9), None)),
-            "ospf instance o: no LSAs match"
+            "ospf instance o: no matching LSAs"
         );
     }
 
@@ -3732,7 +3750,7 @@ mod tests {
     fn render_ospfv3_neighbors_and_database() {
         assert_eq!(
             render_ospfv3_database("v3", &[]),
-            "ospfv3 instance v3: no LSAs installed"
+            "ospfv3 instance v3: no LSAs"
         );
         let lsa = |link: Option<&str>| Ospfv3LsaSummary {
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -3865,7 +3883,7 @@ mod tests {
         assert!(!out.contains("needle-secret"), "{out}");
         assert_eq!(
             render_admin_config(&config_from(&serde_json::json!({"hostname": "r1"}))),
-            "no admin keys configured"
+            "no admin keys"
         );
     }
 
@@ -4095,6 +4113,25 @@ mod tests {
         assert!(checked > 30);
     }
 
+    /// The error/empty-state convention texts (#1414); names are untrusted.
+    #[test]
+    fn convention_helpers_text_and_sanitizing() {
+        assert_eq!(not_running("nos-lacpd"), "nos-lacpd is not running");
+        assert_eq!(not_found("acl", "A"), "acl 'A' not found");
+        assert_eq!(none(None, "routes"), "no routes");
+        assert_eq!(
+            none(Some("bgp instance r1"), "peers"),
+            "bgp instance r1: no peers"
+        );
+        for out in [
+            not_running("a\nb\x1b"),
+            not_found("acl", "a\nb\x1b"),
+            none(Some("a\nb\x1b"), "x"),
+        ] {
+            assert!(!out.contains('\n') && !out.contains('\x1b'), "{out}");
+        }
+    }
+
     /// No Debug formatting in production code: output words are explicit.
     #[test]
     fn no_debug_formatting_outside_tests() {
@@ -4203,7 +4240,7 @@ mod mst_tests {
         assert!(render_stp_instance(&summary(), 0).starts_with("instance 0 (CIST)"));
         assert_eq!(
             render_stp_instance(&summary(), 9),
-            "no spanning-tree instance 9"
+            "spanning-tree: no instance 9"
         );
     }
 
@@ -4240,7 +4277,7 @@ mod mst_tests {
         assert!(rows[1].ends_with("  PVID-inconsistent"), "{out}");
         assert_eq!(
             render_stp_domain(&s, "bd9"),
-            "no spanning-tree tree for domain bd9"
+            "spanning-tree: no tree for domain bd9"
         );
         assert_eq!(
             render_stp_domain(&StpSummary::default(), "bd1"),
@@ -4338,7 +4375,7 @@ mod stp_detail_tests {
         let out = render_stp_detail(&s, Some(5), None);
         assert!(out.starts_with("instance 5 (MSTI)"));
         assert!(out.contains("eth1: edge no, point-to-point yes, boundary"));
-        assert!(render_stp_detail(&s, Some(9), None).ends_with("no spanning-tree instance 9"));
+        assert!(render_stp_detail(&s, Some(9), None).ends_with("spanning-tree: no instance 9"));
 
         let p = StpSummary {
             enabled: true,
