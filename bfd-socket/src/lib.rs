@@ -14,6 +14,19 @@ use std::os::fd::RawFd;
 
 use socket2::SockAddr;
 
+/// The name of interface `index`, `None` if it is gone.
+pub fn ifname(index: u32) -> Option<String> {
+    let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
+    // SAFETY: `buf` is IF_NAMESIZE bytes, as if_indextoname requires.
+    let r = unsafe { libc::if_indextoname(index, buf.as_mut_ptr()) };
+    if r.is_null() {
+        return None;
+    }
+    // SAFETY: on success the buffer holds a NUL-terminated name.
+    let c = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    c.to_str().ok().map(str::to_owned)
+}
+
 /// The interface index of `name`, 0 if unknown.
 pub fn ifindex(name: &str) -> u32 {
     CString::new(name)
@@ -40,11 +53,39 @@ pub fn set_int(fd: RawFd, level: libc::c_int, opt: libc::c_int, v: libc::c_int) 
     Ok(())
 }
 
-/// One datagram: its source and TTL/hop limit (when the kernel gave it).
+/// One datagram: its source, TTL/hop limit and, when `IP_PKTINFO` /
+/// `IPV6_RECVPKTINFO` is on, the arrival interface index and the address it
+/// was sent to (the kernel's own, in a VRF possibly the VRF device's index).
 pub struct Datagram {
     pub src: IpAddr,
     pub ttl: Option<u8>,
     pub len: usize,
+    pub ifindex: u32,
+    pub dst: Option<IpAddr>,
+}
+
+/// The `(destination, ifindex)` of an `IP_PKTINFO`/`IPV6_PKTINFO` cmsg.
+///
+/// # Safety
+/// `c` must point to a valid cmsg header inside a received message.
+unsafe fn pktinfo(c: *const libc::cmsghdr) -> Option<(IpAddr, u32)> {
+    // SAFETY: the caller's contract; the data is a pktinfo of the matching type.
+    unsafe {
+        let h = &*c;
+        if h.cmsg_level == libc::IPPROTO_IP && h.cmsg_type == libc::IP_PKTINFO {
+            let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in_pktinfo>());
+            let a = IpAddr::V4(Ipv4Addr::from(u32::from_be(i.ipi_addr.s_addr)));
+            Some((a, u32::try_from(i.ipi_ifindex).unwrap_or(0)))
+        } else if h.cmsg_level == libc::IPPROTO_IPV6 && h.cmsg_type == libc::IPV6_PKTINFO {
+            let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in6_pktinfo>());
+            Some((
+                IpAddr::V6(Ipv6Addr::from(i.ipi6_addr.s6_addr)),
+                i.ipi6_ifindex,
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 pub fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
@@ -74,9 +115,13 @@ pub fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
             .map(|s| s.ip())
             .ok_or_else(|| io::Error::other("datagram without an IP source"))?;
         let mut ttl = None;
+        let (mut dst, mut ifindex) = (None, 0);
         let mut c = libc::CMSG_FIRSTHDR(&raw const msg);
         while !c.is_null() {
             let h = &*c;
+            if let Some((a, i)) = pktinfo(c) {
+                (dst, ifindex) = (Some(a), i);
+            }
             let is_ttl = (h.cmsg_level == libc::IPPROTO_IP && h.cmsg_type == libc::IP_TTL)
                 || (h.cmsg_level == libc::IPPROTO_IPV6 && h.cmsg_type == libc::IPV6_HOPLIMIT);
             if is_ttl {
@@ -89,6 +134,8 @@ pub fn recv_one(fd: RawFd, buf: &mut [u8]) -> io::Result<Datagram> {
             src,
             ttl,
             len: usize::try_from(n).unwrap_or(0),
+            ifindex,
+            dst,
         })
     }
 }
@@ -135,13 +182,8 @@ pub fn recv_probe(fd: RawFd, buf: &mut [u8]) -> io::Result<Probe> {
         };
         let mut c = libc::CMSG_FIRSTHDR(&raw const msg);
         while !c.is_null() {
-            let h = &*c;
-            if h.cmsg_level == libc::IPPROTO_IP && h.cmsg_type == libc::IP_PKTINFO {
-                let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in_pktinfo>());
-                dst = IpAddr::V4(Ipv4Addr::from(u32::from_be(i.ipi_addr.s_addr)));
-            } else if h.cmsg_level == libc::IPPROTO_IPV6 && h.cmsg_type == libc::IPV6_PKTINFO {
-                let i = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::in6_pktinfo>());
-                dst = IpAddr::V6(Ipv6Addr::from(i.ipi6_addr.s6_addr));
+            if let Some((a, _)) = pktinfo(c) {
+                dst = a;
             }
             c = libc::CMSG_NXTHDR(&raw const msg, c);
         }
