@@ -9963,16 +9963,25 @@ pub async fn vpn_export_chunked(w: &mut World) -> anyhow::Result<()> {
     .await?;
     // Counted on GoBGP: 25 000 `vpn route advertised` lines overrun the
     // harness's log follower.
+    // n statics + the loopback's connected 198.19.0.0/24 (`rib::vpn::originated`
+    // exports every non-Vpn/Evpn best route) (#1501).
+    let want = n + 1;
     let mut held = 0;
     for _ in 0..120 {
         held = gobgp_vpnv4_count(w).await?;
-        if held >= n {
+        if held >= want {
             break;
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
-    if held < n {
-        bail!("GoBGP holds only {held} of {n} VPNv4 routes");
+    if held < want {
+        bail!("GoBGP holds only {held} of {want} VPNv4 routes");
+    }
+    // Settle, so `>=` cannot hide a duplicate or extra route.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    held = gobgp_vpnv4_count(w).await?;
+    if held != want {
+        bail!("GoBGP holds {held} VPNv4 routes, expected exactly {want}");
     }
     log(format!(
         "GoBGP holds {held} VPNv4 routes after {}s",
