@@ -186,7 +186,7 @@ A statement after `accept` or `reject` in the same block can never run, and is r
 - `accept` ends the policy and keeps the route, with any changes made so far.
 - `reject` ends the policy and drops the route.
 - `if <condition>:`, followed by optional `elif <condition>:` and `else:` branches, runs the first block whose condition is true.
-- `set this.bgp.local_pref = <number>` and `set this.bgp.med = <number>` set a value. `+= <number>` and `-= <number>` add to it or subtract from it; an unset MED counts as 0. Results stay between 0 and 4294967295.
+- `set this.bgp.local_pref = <number>` and `set this.bgp.med = <number>` and `set this.bgp.tag = <number>` set a value. `+= <number>` and `-= <number>` add to it or subtract from it; an unset MED counts as 0. Results stay between 0 and 4294967295.
 - `set this.bgp.origin = origin.igp` (or `origin.egp`, `origin.incomplete`) sets the origin.
 - `set this.bgp.next_hop = <address>` sets the next hop. In an export policy, `set this.bgp.next_hop = self` sets it to this router's own address on the session, whatever the peer-group's `next-hop` setting. On import, `self` has no effect.
   - The next hop must fit the route's family: an IPv6 prefix needs an IPv6 next hop; an IPv4 prefix needs IPv4, or IPv6 only on an IPv6 session with RFC 8950 extended next hop. EVPN, VPN and Flowspec are exempt.
@@ -231,6 +231,7 @@ Every field starts with `this.`. The prefix and the BGP attributes are:
 - `this.bgp.as_path`: the AS path, as a list of AS numbers. Read it with `.length`, `.contains(<asn>)`, `.matches("<regex>")` or `in <as-path-list>`; change it with `.prepend(…)`.
 - `this.bgp.local_pref`: a number. Readable and settable.
 - `this.bgp.med`: a number. Readable and settable; an absent MED reads as 0, and a `set` earlier in the script is visible to a later read. MED is only comparable between routes from the same neighbouring AS (RFC 4271 §5.1.4); the language does not enforce that.
+- `this.bgp.tag`: a number between 0 and 4294967295, readable and settable (`=`, `+=`, `-=`); an untagged route reads as 0, and a `set` earlier in the script is visible to a later read. The tag is local to the router and is never sent to a peer: in an export policy `set this.bgp.tag` compiles but has no effect.
 - Integer literals run from 0 to 4294967295; a larger plain integer is a compile error (colon-literal parts such as `0:2:279172874250000` are unaffected). Arithmetic saturates and `+=`/`-=` results stay within 0 to 4294967295.
 - `this.bgp.first_as`, `this.bgp.neighbor_as`, `this.bgp.origin_as`: read-only AS numbers of the path, which may be absent. Compare only against an integer literal on the right (`this.bgp.neighbor_as == 65001`, not `65001 == …` and not another field). `first_as` is the first AS only when the first segment is an AS_SEQUENCE; `neighbor_as` skips leading confederation segments and is the first AS of the next AS_SEQUENCE; `origin_as` is the last AS of the last segment when that is an AS_SEQUENCE. When absent, every comparison is false except `!=`.
 - `this.bgp.as_path.path_length`: the path length as BGP counts it (RFC 4271 §9.1.2.2): each AS in an AS_SEQUENCE counts 1, a whole AS_SET counts 1, confederation segments count 0. `.length` stays the plain number of ASNs.

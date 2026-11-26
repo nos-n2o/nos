@@ -215,6 +215,7 @@ fn to_policy_input<'a>(
     nos_rpl::Input {
         prefix,
         bgp: nos_rpl::BgpInput {
+            tag: 0,
             origin: match route.bgp_origin {
                 message::Origin::Igp => nos_rpl::Origin::Igp,
                 message::Origin::Egp => nos_rpl::Origin::Egp,
@@ -312,6 +313,7 @@ fn apply_verdict(
     let nos_rpl::Verdict::Accept {
         local_pref,
         med,
+        tag: _, // local-only route tag; no bgp consumer yet (#1591)
         communities,
         extended_communities,
         large_communities,

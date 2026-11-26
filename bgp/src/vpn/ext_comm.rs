@@ -133,6 +133,7 @@ mod tests {
         nos_rpl::Input {
             prefix,
             bgp: nos_rpl::BgpInput {
+                tag: 0,
                 origin: nos_rpl::Origin::Igp,
                 as_path: &[],
                 as_path_segments: &[],
