@@ -340,6 +340,8 @@ impl Resolved {
             | Resolved::ShowAdminConfig
             | Resolved::ShowConfigPath(_)
             | Resolved::ShowTransaction
+            | Resolved::ShowOspfInstance
+            | Resolved::ShowOspfv3Instance
             | Resolved::ShowFdb { .. }
             | Resolved::ShowInterface { .. }
             | Resolved::ShowInterfaceBrief
@@ -347,6 +349,8 @@ impl Resolved {
             | Resolved::ShowLacp { .. }
             | Resolved::ShowLldpNeighbors { .. }
             | Resolved::ShowLldpStatistics
+            | Resolved::ShowOspfInstance
+            | Resolved::ShowOspfv3Instance
             | Resolved::ShowVersion
             | Resolved::ShowAcl { .. }
             | Resolved::ShowSpanningTree
@@ -396,8 +400,6 @@ impl Resolved {
             | Resolved::ShowOspfRoute
             | Resolved::ShowOspfv3Interface
             | Resolved::ShowOspfv3Route
-            | Resolved::ShowOspfInstance
-            | Resolved::ShowOspfv3Instance
             | Resolved::Error(_) => false,
         }
     }

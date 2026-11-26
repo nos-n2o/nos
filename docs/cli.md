@@ -81,6 +81,12 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Units are decimal: `human_duration` (`45s`, `3m05s`, `1h02m`, `3d00h00m`), `human_bytes` (`512 B`, `1.5 KB`, `840.3 MB`, base 1000), `human_count` (`1.2M`), `human_us` (`250us`, `3.3ms`, `1.5s`).
 - Output words for enums are explicit `match`es (no `{:?}`), so a new variant fails to compile; a unit test forbids `{:?}` in `format.rs`.
 
+### Errors and empty states in `show` (#1414)
+
+- Errors go to stderr: `<daemon or object> is not running`, `<kind> '<name>' not found`, `error: ...` (reserved for IPC failures). A valid result, even an empty one, goes to stdout, so `| json` or a filter sees an empty stdout only on error.
+- Empty state is `no <what>`, or `<scope>: no <what>` (`bgp instance r1: no peers`, `ospf instance o1: no LSAs`), with no trailing verb. `no route matches <addr>` is a valid empty result (stdout).
+- Texts come from `format::not_running`, `not_found` and `none` (names are sanitized); daemons are resolved by `actions::resolve_service`. A source-scan test pins that `actions.rs` writes none of them inline.
+
 ### `| json` on `show` commands (#1415)
 
 - `show <command> | json` prints the reply as pretty JSON instead of text; the line is split at its first `|` (`cli/src/pipe.rs`), and the word after it must be `json`. `show log` is never split (`match <text>` takes the rest of the line); a non-`show` line is untouched.
@@ -490,7 +496,7 @@ Optional clauses in a `cmd!` row (#1450):
 | `delete route <subnet>` / `delete static-routing-instance <name> route <subnet>` | Removes a static route (relative / fully-qualified) |
 | `delete` / `delete static-routing-instance <name>` | Deletes the current static routing instance (returns to the transaction root) or a named one |
 | `show interface` | Resolves `nos-interfaced`'s single instance via the watchdog broker, then `InterfaceRequest::GetInterfaces` — the detail view (`format::render_interface_detail`) of every interface (works in any mode) |
-| `show interface <name>` | Same resolution, then `InterfaceRequest::GetInterface { name }`, or "not found" if unconfigured (works in any mode) |
+| `show interface <name>` | Same resolution, then `InterfaceRequest::GetInterface { name }`, or `interface '<name>' not found` (stderr) if unconfigured (works in any mode) |
 | `show interface brief` | One resolution, then `GetInterfaces` and `GetPortAggregates` over two connections; `format::render_interface_brief` builds one table (works in any mode) |
 | `show log [<source>] [last <n>] [level <l>] [--follow] [match <text>]` | Resolves `nos-logd`'s single instance via the watchdog broker, then `LogRequest::GetLogs` — the buffer, optionally of the one source that exactly matches `<source>` (first). No `level`/`match`: `limit` is `last` (default 200). With either: `limit: None`, filter in the CLI (`level` by `LogLevel::rank`, `match` case-insensitively over the rendered line), then keep the last `n`. With `--follow`: `LogRequest::Tail` — the backlog filtered and trimmed the same way, then new entries that pass the filters until Ctrl-C or the connection is lost (works in any mode) |
 | `show bgp summary [instance <name>]` (also `show bgp brief`) | Fetches the running config for the list of `BgpInstance`s (the named one only, else `bgp instance '<n>' not found`), resolves each one's `nos-bgpd` via the watchdog broker, then `BgpRequest::GetSummary`, printed by `emit` (`PeerSummary` derives `View`) under a `bgp instance <n>, router-id <id>, AS <asn>` line — each peer's FSM state, `Status`, remote AS/ID, uptime, hold-time, keepalive, accepted prefixes per family; an instance whose `nos-bgpd` isn't running is reported individually rather than aborting the command (works in any mode) |

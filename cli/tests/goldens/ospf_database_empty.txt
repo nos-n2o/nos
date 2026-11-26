@@ -1,1 +1,1 @@
-ospf instance o1: no LSAs installed
+ospf instance o1: no LSAs
