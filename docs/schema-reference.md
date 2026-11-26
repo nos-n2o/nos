@@ -21,7 +21,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 ## Nesting one level under a parent
 
-- `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`; `StaticRoute` nests one level under `StaticRoutingInstance` the same way.
+- `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`; `StaticRoute` nests one level under `StaticRoutingInstance` the same way. `StaticRoute.distance`/`tag`/`interface`/`blackhole` (appended last, `#[serde(default)]`) are inert until `nos-ribd` honours them; `interface` is checked from `StaticRoutingInstance.routes` (needs the instance name), the rest on the route itself.
 
 ## EVPN IP-VRF on a routing table
 

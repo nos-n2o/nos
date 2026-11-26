@@ -972,6 +972,7 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
                         age_secs: 0,
                         interfaces: vec![],
                         installed: false,
+                        tag: None,
                     }],
                 }],
                 next: Some("10.0.0.0/8".parse().unwrap()),

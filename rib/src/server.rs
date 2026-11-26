@@ -838,6 +838,7 @@ fn to_prefix_routes(
                 discard: e.is_discard(),
                 // A BGP discard is an RFC 7999 blackhole; an OSPF ABR's is not.
                 blackhole: e.is_discard() && e.source == RouteSource::Bgp,
+                tag: None,
                 evpn: evpn_info(e, evpn),
                 backup_tunnel: e.backup_tunnel,
                 mpls_labels: e.next_hops.iter().map(|h| h.labels.clone()).collect(),

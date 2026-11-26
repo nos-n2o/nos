@@ -2568,6 +2568,7 @@ mod tests {
             age_secs: 3723,
             interfaces: vec![Some("eth0".to_string()), None],
             installed: true,
+            tag: None,
         };
         let mut loser = e.clone();
         loser.installed = false;
@@ -2622,6 +2623,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2649,6 +2651,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2680,6 +2683,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2710,6 +2714,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2743,6 +2748,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2771,6 +2777,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(
@@ -2798,6 +2805,7 @@ mod tests {
                 age_secs: 0,
                 interfaces: vec![],
                 installed: false,
+                tag: None,
             }],
         }];
         assert_eq!(

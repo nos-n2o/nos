@@ -23,10 +23,20 @@ pub struct StaticRoutingInstance {
     /// Instance name, 1 to 64 characters (letters, digits, `_`, `-`), unique among static routing instances.
     pub name: String,
 
-    #[garde(dive, custom(|routes, _ctx: &Config| unique_subnets(routes)))]
+    #[garde(
+        dive,
+        custom(|routes, _ctx: &Config| unique_subnets(routes)),
+        custom(|routes, ctx: &Config| routes_interfaces_valid(routes, &self.name, ctx))
+    )]
     #[cli(topic = StaticRoute)]
     /// Routes of this instance, keyed by destination prefix.
     pub routes: Vec<StaticRoute>,
+}
+
+fn routes_interfaces_valid(routes: &[StaticRoute], name: &str, ctx: &Config) -> garde::Result {
+    routes
+        .iter()
+        .try_for_each(|r| super::static_route::interface_valid(r, name, ctx))
 }
 
 /// No two routes within the same instance may share a subnet — see
@@ -55,6 +65,7 @@ mod tests {
             bfd: None,
             subnet: subnet.parse().unwrap(),
             gateway: gateway.parse().unwrap(),
+            ..Default::default()
         }
     }
 

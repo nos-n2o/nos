@@ -796,6 +796,7 @@ mod tests {
             subnet: format!("10.0.{}.0/24", r.below(40)).parse().unwrap(),
             gateway: format!("192.0.2.{}", r.below(4)).parse().unwrap(),
             bfd: (r.below(4) == 0).then(|| "b".to_string()),
+            ..Default::default()
         };
         let pick = |r: &mut Rng, len: usize| r.below(len);
         match r.below(16) {

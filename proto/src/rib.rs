@@ -248,6 +248,9 @@ pub struct RouteEntry {
     /// write is pending retry).
     #[serde(default)]
     pub installed: bool,
+    /// The route's tag (a static route's `tag`); `None` where the source has none.
+    #[serde(default)]
+    pub tag: Option<u32>,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -941,6 +944,7 @@ mod tests {
             age_secs: 7,
             interfaces: vec![Some("eth0.5".into())],
             installed: true,
+            tag: None,
         };
         let bytes = postcard::to_allocvec(&e).unwrap();
         assert_eq!(postcard::from_bytes::<RouteEntry>(&bytes).unwrap(), e);
@@ -952,6 +956,7 @@ mod tests {
             "age_secs",
             "interfaces",
             "installed",
+            "tag",
         ] {
             j.as_object_mut().unwrap().remove(k);
         }

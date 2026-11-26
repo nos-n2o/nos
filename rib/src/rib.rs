@@ -1757,6 +1757,7 @@ mod tests {
                 bfd: None,
                 subnet: "10.0.0.0/24".parse().unwrap(),
                 gateway: "10.0.0.1".parse().unwrap(),
+                ..Default::default()
             }],
         }];
         let rib = build_from_config(&cfg(tables, instances), "rt1", &HashSet::new()).unwrap();
@@ -1783,11 +1784,13 @@ mod tests {
                         subnet: "10.1.0.0/24".parse().unwrap(),
                         gateway: "10.0.0.1".parse().unwrap(),
                         bfd: Some("fast".into()),
+                        ..Default::default()
                     },
                     StaticRoute {
                         subnet: "10.2.0.0/24".parse().unwrap(),
                         gateway: "10.0.0.2".parse().unwrap(),
                         bfd: None,
+                        ..Default::default()
                     },
                 ],
             }],

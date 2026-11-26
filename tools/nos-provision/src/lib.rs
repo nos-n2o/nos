@@ -392,6 +392,19 @@ pub struct Args {
     pub static_gateway: Option<IpAddr>,
     #[arg(long, default_value = "sri1")]
     pub static_routing_instance: String,
+    /// `distance` on every `--static-route`.
+    #[arg(long)]
+    pub static_distance: Option<u8>,
+    /// `tag` on every `--static-route`.
+    #[arg(long)]
+    pub static_tag: Option<u32>,
+    /// `interface` on every `--static-route`.
+    #[arg(long)]
+    pub static_interface: Option<String>,
+    /// Makes every `--static-route` a blackhole (gateway `0.0.0.0`/`::`
+    /// per family; `--static-gateway` not needed).
+    #[arg(long)]
+    pub static_blackhole: bool,
 
     /// If set, configures `redistribute from static to bgp` on
     /// `--routing-table` — requires `--static-route` to also be set (so the
@@ -2333,6 +2346,39 @@ fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
+/// `--static-distance`/`--static-tag`/`--static-interface`/`--static-blackhole`
+/// as path edits on every `--static-route` (no `ConfigOp` carries them).
+fn static_route_field_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    let mut v = Vec::new();
+    for subnet in &args.static_route {
+        let mut field = |name: &str, value: String| {
+            v.push((
+                vec![
+                    "static-routing-instance".to_string(),
+                    args.static_routing_instance.clone(),
+                    "route".to_string(),
+                    subnet.to_string(),
+                    name.to_string(),
+                ],
+                Some(value),
+            ));
+        };
+        if let Some(d) = args.static_distance {
+            field("distance", d.to_string());
+        }
+        if let Some(t) = args.static_tag {
+            field("tag", t.to_string());
+        }
+        if let Some(i) = &args.static_interface {
+            field("interface", format!("\"{i}\""));
+        }
+        if args.static_blackhole {
+            field("blackhole", "true".to_string());
+        }
+    }
+    v
+}
+
 /// `EditTransactionPath` edits for `--bfd-static`: `ConfigOp` has no variant
 /// for a profile's intervals or a route's `bfd` reference, so these go in
 /// through the generic path edit after the ops.
@@ -2398,6 +2444,7 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         ));
     }
     v.extend(sbfd_static_paths(args));
+    v.extend(static_route_field_paths(args));
     if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
         v.push((
             vec!["sbfd-reflector".to_string(), "discriminator".to_string()],
@@ -3005,9 +3052,10 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
 
     if !args.static_route.is_empty() {
-        let gateway = args
-            .static_gateway
-            .context("--static-gateway is required when --static-route is set")?;
+        let gateway = args.static_gateway;
+        if gateway.is_none() && !args.static_blackhole {
+            bail!("--static-gateway is required when --static-route is set");
+        }
         ops.push(ConfigOp::StaticRoutingInstance(
             StaticRoutingInstanceOp::Ensure {
                 name: args.static_routing_instance.clone(),
@@ -3017,7 +3065,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             ops.push(ConfigOp::StaticRoute(StaticRouteOp::Set {
                 instance: args.static_routing_instance.clone(),
                 subnet,
-                gateway,
+                gateway: match (gateway, subnet) {
+                    (Some(g), _) => g,
+                    (None, IpNet::V4(_)) => IpAddr::from([0u8; 4]),
+                    (None, IpNet::V6(_)) => IpAddr::from([0u8; 16]),
+                },
             }));
         }
         ops.push(ConfigOp::RoutingTable(
@@ -6518,6 +6570,69 @@ mod tests {
                 source: "accept\n".into(),
             }),
         );
+    }
+
+    #[test]
+    fn static_route_field_flags_become_path_edits() {
+        let argv = [
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "65001",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "65002",
+            "--peer",
+            "10.0.0.2",
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-route",
+            "2001:db8::/32",
+            "--static-blackhole",
+            "--static-distance",
+            "5",
+            "--static-tag",
+            "7",
+            "--static-interface",
+            "eth1.10",
+        ]
+        .map(String::from);
+        let parsed = std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || Args::try_parse_from(argv).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        let paths = bfd_paths(&parsed);
+        let get = |subnet: &str, f: &str| {
+            paths
+                .iter()
+                .find(|(p, _)| {
+                    p.get(3).map(String::as_str) == Some(subnet)
+                        && p.get(4).map(String::as_str) == Some(f)
+                })
+                .and_then(|(_, v)| v.clone())
+        };
+        assert_eq!(get("192.0.2.0/24", "distance").as_deref(), Some("5"));
+        assert_eq!(get("2001:db8::/32", "tag").as_deref(), Some("7"));
+        assert_eq!(
+            get("2001:db8::/32", "interface").as_deref(),
+            Some("\"eth1.10\"")
+        );
+        assert_eq!(get("192.0.2.0/24", "blackhole").as_deref(), Some("true"));
+        let result = build_ops(&parsed).unwrap();
+        for (subnet, gw) in [("192.0.2.0/24", "0.0.0.0"), ("2001:db8::/32", "::")] {
+            has(
+                &result,
+                &ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: "sri1".into(),
+                    subnet: subnet.parse().unwrap(),
+                    gateway: gw.parse().unwrap(),
+                }),
+            );
+        }
     }
 
     #[test]
