@@ -6085,3 +6085,65 @@ fn strip_ansi(s: &str) -> String {
     }
     out
 }
+
+/// #1514: `nos-ribd` owns only the routes it installed (`rtm_protocol` 200).
+/// A hand-added `proto boot` route in its table survives every reconcile,
+/// while a stray route of protocol 200 is removed as unwanted; a foreign route
+/// on a prefix NOS config wants is replaced once and then owned.
+pub async fn foreign_route(w: &mut World) -> anyhow::Result<()> {
+    const BOOT: &str = "203.0.113.0/24";
+    const OURS: &str = "203.0.113.128/25";
+    const CLASH: &str = "192.0.2.0/24";
+    let a = w.a()?;
+    let dock = &w.dock;
+    let table = RT1_KERNEL_TABLE.to_string();
+    let gw = REDISTRIBUTE_GATEWAY.s();
+    let stub = |op: &'static str, prefix: &'static str, proto: &'static str| {
+        let table = table.clone();
+        async move {
+            let cmd = ["nos-route-stub", op, prefix, gw, &table, proto];
+            match dock.exec_root("router-a", &cmd).await? {
+                (0, _) => anyhow::Ok(()),
+                (code, out) => bail!("nos-route-stub {op} {prefix} exit {code}: {out}"),
+            }
+        }
+    };
+    let has = |prefix: &'static str| {
+        let table = table.clone();
+        async move {
+            let cmd = ["nos-route-stub", "has", prefix, &table];
+            anyhow::Ok(dock.exec_root("router-a", &cmd).await?.0 == 0)
+        }
+    };
+    let removed = |prefix: &str| format!("removed route prefix={prefix}");
+    let boot_base = a.count(&removed(BOOT));
+    let clash_base = a.count(&removed(CLASH));
+
+    log("hand-adding a proto boot route, a proto 200 route and a boot route on a wanted prefix");
+    let res: anyhow::Result<()> = async {
+        stub("add", BOOT, "3").await?;
+        stub("add", OURS, "200").await?;
+        stub("add", CLASH, "3").await?;
+        a.provision(&["--static-route", CLASH, "--static-gateway", gw])
+            .await?;
+        a.wait(&format!("replaced foreign route prefix={CLASH}"))
+            .await?;
+        a.wait(&format!("added route prefix={CLASH}")).await?;
+        // Our own protocol, not wanted: removed by the reconcile.
+        a.wait(&removed(OURS)).await?;
+        // > 2 reapply ticks (10 s): the boot route is never touched.
+        a.assert_quiet(&removed(BOOT), boot_base, 25).await?;
+        if !has(BOOT).await? {
+            bail!("the proto boot route {BOOT} was removed");
+        }
+        a.provision(&["--remove-static-route", CLASH]).await?;
+        a.wait_new(&removed(CLASH), clash_base, 30).await?;
+        if !has(BOOT).await? {
+            bail!("the proto boot route {BOOT} was removed with the static route");
+        }
+        Ok(())
+    }
+    .await;
+    let _ = stub("del", BOOT, "3").await;
+    res
+}
