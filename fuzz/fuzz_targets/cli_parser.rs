@@ -45,6 +45,7 @@ fuzz_target!(|data: &[u8]| {
             dirty: false,
         }
     };
+    let _ = nos_cli::pipe::split(line);
     let _ = session::resolve(&mode, Command::parse(line));
     let _ = config_grammar::parse(line, &ctx, config());
     let words: Vec<&str> = line.split_whitespace().collect();

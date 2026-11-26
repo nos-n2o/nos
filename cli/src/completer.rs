@@ -136,6 +136,19 @@ impl NosCompleter {
             let span = Span::new(line.len() - partial.len(), line.len());
             out.push(self.pipe_suggestion("json".into(), span));
         }
+        if self.json_capable(head)
+            && !partial.contains(char::is_whitespace)
+            && "jq".starts_with(partial)
+        {
+            let span = Span::new(line.len() - partial.len(), line.len());
+            let s = self.suggestion(
+                "jq".into(),
+                Some(Doc::FromConfig(Topic::PipeJq)),
+                "show ... | jq <expression>".into(),
+                span,
+            );
+            out.push(s);
+        }
         Some(CompletionResult::fresh(out))
     }
 
@@ -520,8 +533,17 @@ mod tests {
         assert!(values(op(), "show bfd sessions ").contains(&"|".to_string()));
         assert!(values(op(), "show route rt1 ").contains(&"|".to_string()));
         assert!(!values(op(), "show bfd reflector ").contains(&"|".to_string()));
-        assert_eq!(values(op(), "show bfd sessions | "), ["json"]);
+        assert_eq!(values(op(), "show bfd sessions | "), ["jq", "json"]);
         assert_eq!(values(op(), "show bfd sessions | js"), ["json"]);
+        assert_eq!(values(op(), "show bfd sessions | j"), ["jq", "json"]);
+        assert_eq!(
+            values(op(), "show bfd sessions | jq "),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            values(op(), "show bfd reflector | jq"),
+            Vec::<String>::new()
+        );
         assert_eq!(
             values(op(), "show bfd sessions | json "),
             Vec::<String>::new()

@@ -237,12 +237,17 @@ pub async fn handle_action_out(
         }
         return Outcome::Continue(mode);
     }
-    if out == Output::Json {
+    if matches!(out, Output::Json | Output::Jq(_)) {
         match action {
             Resolved::ShowBfdSessions { peer, .. } => {
                 if let Some(r) = bfd_sessions_reply(watchdog_socket, peer).await {
-                    emit_out(&r, "", out);
+                    emit_out(&r, "", &out);
                 }
+                return Outcome::Continue(mode);
+            }
+            Resolved::ShowRoute { .. } | Resolved::ShowBgpRoutes if out != Output::Json => {
+                // ponytail: streamed walks are not filtered yet (#1508)
+                eprintln!("error: jq is not supported on this command yet");
                 return Outcome::Continue(mode);
             }
             Resolved::ShowRoute { table, query } => {
@@ -250,11 +255,11 @@ pub async fn handle_action_out(
                 return Outcome::Continue(mode);
             }
             Resolved::ShowRouteTables => {
-                show_route_tables(socket, watchdog_socket, out).await;
+                show_route_tables(socket, watchdog_socket, &out).await;
                 return Outcome::Continue(mode);
             }
             Resolved::ShowRouteSummary { table } => {
-                show_route_summary(watchdog_socket, &table, out).await;
+                show_route_summary(watchdog_socket, &table, &out).await;
                 return Outcome::Continue(mode);
             }
             Resolved::ShowBgpRoutes => {
@@ -476,11 +481,11 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             Outcome::Continue(mode)
         }
         Resolved::ShowRouteTables => {
-            show_route_tables(socket, watchdog_socket, Output::Text).await;
+            show_route_tables(socket, watchdog_socket, &Output::Text).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowRouteSummary { table } => {
-            show_route_summary(watchdog_socket, &table, Output::Text).await;
+            show_route_summary(watchdog_socket, &table, &Output::Text).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowFdb { domain, mac } => {
@@ -860,7 +865,7 @@ async fn show_route(watchdog_socket: &Path, table: &str, query: RouteQuery) {
 }
 
 /// `show route <table> summary`.
-async fn show_route_summary(watchdog_socket: &Path, table: &str, out: Output) {
+async fn show_route_summary(watchdog_socket: &Path, table: &str, out: &Output) {
     let Some(rib_socket) = resolve_rib(watchdog_socket, table).await else {
         return;
     };
@@ -872,7 +877,7 @@ async fn show_route_summary(watchdog_socket: &Path, table: &str, out: Output) {
 
 /// `show route`: every configured table's summary, sorted by name. A table
 /// whose ribd is down or fails is a trailing line (text) or stderr (JSON).
-async fn show_route_tables(config_socket: &Path, watchdog_socket: &Path, out: Output) {
+async fn show_route_tables(config_socket: &Path, watchdog_socket: &Path, out: &Output) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -903,6 +908,12 @@ async fn show_route_tables(config_socket: &Path, watchdog_socket: &Path, out: Ou
     }
     rows.sort_by(|a, b| a.table.cmp(&b.table));
     match out {
+        Output::Jq(p) => {
+            for (name, e) in &down {
+                eprintln!("{}: {}", format::sanitize(name), format::sanitize(e));
+            }
+            print_jq(p, &view::to_value(&rows));
+        }
         Output::Json => {
             for (name, e) in &down {
                 eprintln!("{}: {}", format::sanitize(name), format::sanitize(e));
@@ -1157,10 +1168,28 @@ fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str
 }
 
 /// `emit`, or the reply as JSON (an empty list is `[]`, never the text).
-fn emit_out<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str, out: Output) {
+fn emit_out<T: serde::Serialize + nos_proto::view::ViewValue>(
+    reply: &T,
+    empty: &str,
+    out: &Output,
+) {
     match out {
+        Output::Jq(p) => print_jq(p, &view::to_value(reply)),
         Output::Text | Output::Set => emit(reply, empty),
         Output::Json => println!("{}", pipe::json_pretty(reply)),
+    }
+}
+
+/// `| jq`: each result as compact, escape-safe JSON on its own line (strings
+/// stay quoted); an error goes to stderr.
+fn print_jq(p: &crate::jq::Program, reply: &serde_json::Value) {
+    match p.run(reply) {
+        Ok(rs) => {
+            for r in rs {
+                println!("{}", pipe::escape(&r.to_string()));
+            }
+        }
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
 }
 

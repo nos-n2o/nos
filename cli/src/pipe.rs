@@ -2,22 +2,27 @@
 //! the pipe grammar (#1420 adds the jq expression here), plus the escape-safe
 //! JSON printer. Pure: no I/O besides the `Write` handed in.
 
+use crate::jq::{self, Program};
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::io::Write;
 
 /// What follows the `|`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pipe {
     Json,
     DisplaySet,
+    /// `| jq <expression>` (#1507), already parsed
+    Jq(Program),
 }
 
 /// How a reply is printed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Output {
     Text,
     Json,
+    /// `| jq <expression>` (#1507)
+    Jq(Program),
     /// `| display set` (#1462)
     Set,
 }
@@ -28,6 +33,7 @@ impl Output {
             None => Output::Text,
             Some(Pipe::Json) => Output::Json,
             Some(Pipe::DisplaySet) => Output::Set,
+            Some(Pipe::Jq(p)) => Output::Jq(p),
         }
     }
 }
@@ -41,12 +47,35 @@ pub fn split(line: &str) -> Result<(&str, Option<Pipe>), String> {
     let Some((head, tail)) = line.split_once('|').filter(|_| is_show) else {
         return Ok((line, None));
     };
+    if let Some(rest) = tail
+        .trim_start()
+        .strip_prefix("jq")
+        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+    {
+        {
+            let expr = rest.trim();
+            // The expression may be wrapped in single quotes, as in a shell.
+            let expr = expr
+                .strip_prefix('\'')
+                .and_then(|e| e.strip_suffix('\''))
+                .unwrap_or(expr);
+            if expr.is_empty() {
+                return Err("usage: | jq <expression>".into());
+            }
+            return Ok((
+                head,
+                Some(Pipe::Jq(jq::parse(expr).map_err(|e| e.to_string())?)),
+            ));
+        }
+    }
     match tail.split_whitespace().collect::<Vec<_>>()[..] {
         ["json"] => Ok((head, Some(Pipe::Json))),
         ["display", "set"] => Ok((head, Some(Pipe::DisplaySet))),
-        [] => Err("'|' needs a pipe: json, display set".into()),
+        [] => Err("'|' needs a pipe: json, display set, jq".into()),
         ["display", ..] => Err("usage: | display set".into()),
-        [other, ..] => Err(format!("unknown pipe '{other}' (known: json, display set)")),
+        [other, ..] => Err(format!(
+            "unknown pipe '{other}' (known: json, display set, jq)"
+        )),
     }
 }
 
@@ -112,9 +141,23 @@ mod tests {
         );
         assert_eq!(split("show x |json"), Ok(("show x ", Some(Pipe::Json))));
         assert!(split("show x |").unwrap_err().contains("needs a pipe"));
-        assert!(split("show x | jq .")
+        assert!(split("show x | yq .")
             .unwrap_err()
-            .contains("unknown pipe 'jq'"));
+            .contains("unknown pipe 'yq'"));
+        assert!(split("show x | jqx").is_err());
+        assert!(split("show x | jq").unwrap_err().contains("usage: | jq"));
+        assert!(split("show x | jq ''").unwrap_err().contains("usage: | jq"));
+        assert!(split("show x | jq .a.").unwrap_err().starts_with("jq:"));
+        assert!(split("show x | json | jq .").is_err());
+        let jq = |l| match split(l) {
+            Ok((h, Some(Pipe::Jq(p)))) => (h, p),
+            o => panic!("{o:?}"),
+        };
+        assert_eq!(jq("show x | jq .").0, "show x ");
+        let want = jq::parse(r#".[] | select(.a == "x|y")"#).unwrap();
+        assert_eq!(jq(r#"show x | jq '.[] | select(.a == "x|y")'"#).1, want);
+        assert_eq!(jq(r#"show x | jq .[] | select(.a == "x|y")"#).1, want);
+        assert_eq!(Output::of(Some(Pipe::Jq(want.clone()))), Output::Jq(want));
         assert!(split("show x | json | json").is_err());
         assert_eq!(
             split("show config | display set"),

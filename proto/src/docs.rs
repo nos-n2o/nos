@@ -727,6 +727,8 @@ topics! {
     TacacsAuthentication,
     /// `TacacsServer.single_connect`
     TacacsSingleConnect,
+    /// the `| jq <expression>` output pipe of `show` commands
+    PipeJq,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

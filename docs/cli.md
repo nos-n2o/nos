@@ -97,6 +97,16 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - `show config [<path>] | display set` and `show this | display set` (#1462) print flat, absolute `set` lines instead of the indented tree: paste them from the top of the config. A secret is a `# ... <hidden>` comment; a policy's source is an `edit` block of `set source line <n> <text>` closed by `top`. Any other command (incl. `show config admin`) is refused with `error: this command has no display set output`. CLI-only: REST returns the JSON `Config`.
 - Tab offers `|` after a supported command, then `json`; `?` explains it (`Topic::PipeJson`).
 
+### `| jq <expression>` on `show` commands (#1507, #1420)
+
+- `show <command> | jq <expression>` runs a small jq subset (`cli/src/jq.rs`, no dependency) over the `| json` data on every `| json` command; the expression may be wrapped in single quotes. A bad expression is refused before any IPC.
+- Grammar: `.a.b`, `.a[2]`, `.[]`, `.\"key\"`, `|`, `select(path)`, `select(path == != < <= > >= literal)`, `length`, `{key: path, ...}`. No `and`/`or`, `,`, `[...]`, negative indices or variables.
+- Each result prints as compact JSON on its own line; strings stay quoted (`"up"`), escaped like `| json`. Example: `show bfd sessions | jq '.[] | select(.state == "up") | .peer'`.
+- A missing key or out-of-range index is `null`; indexing a scalar, `.[]` on a scalar or `null`, and `length` of a number are errors on stderr. Comparing different kinds is false (`!=` true), unlike jq's total order.
+- Limits: 512 bytes, 16 pipe stages, 100000 results per run.
+- `show route <table>` and `show bgp routes` (streamed) print `error: jq is not supported on this command yet` until #1508.
+- Tab offers `jq` next to `json`; `?` explains it (`Topic::PipeJq`).
+
 ### Adding a view (#1422)
 
 - A reply type that derives `nos_proto::view::View` (`#[view(...)]` on every field) prints through `cli/src/view.rs`, with no hand-written renderer: a list as a table of its `brief` fields, one object as a `header  value` block of every non-hidden field.
