@@ -20,7 +20,7 @@ use ipnet::{IpNet, Ipv6Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
     BfdDiag, LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3InterfaceSummary,
-    Ospfv3LsaSummary, Ospfv3NeighborSummary, RedistributeUpdate,
+    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3RouteSummary, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -3889,6 +3889,43 @@ impl LinkManager {
             .collect()
     }
 
+    /// `show ospfv3 route` (#1453): the computed routes sorted by prefix; a
+    /// next hop's interface is the link whose ifindex it was learned on.
+    pub async fn route_summaries(&self) -> Vec<Ospfv3RouteSummary> {
+        let mut routes = self.compute_routes().await;
+        routes.sort_by_key(|r| r.prefix);
+        let devs: HashMap<u32, String> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .map(|e| (e.config.interface_id, e.config.kernel_interface.clone()))
+            .collect();
+        routes
+            .iter()
+            .map(|r| {
+                let (class, type2_cost, cost) = r.display_class();
+                Ospfv3RouteSummary {
+                    prefix: r.prefix.to_string(),
+                    class,
+                    cost,
+                    type2_cost,
+                    area: r.area,
+                    next_hops: r
+                        .next_hops
+                        .iter()
+                        .map(|(a, i)| match devs.get(i) {
+                            Some(dev) => format!("{a} dev {dev}"),
+                            None => a.to_string(),
+                        })
+                        .collect(),
+                    advertising_router: r.advertising_router(),
+                }
+            })
+            .collect()
+    }
+
     /// `show ospfv3 interface` (#1438): one row per running link, sorted by
     /// name. A virtual link is not an attach point and is skipped.
     pub async fn interface_summaries(&self) -> Vec<Ospfv3InterfaceSummary> {
@@ -3999,7 +4036,8 @@ impl LinkManager {
             if ctx.skip_summaries {
                 transit.extend(spf::transit_summaries(router_id, &lsas));
             }
-            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+            for mut entry in spf::compute_in(router_id, &lsas, &ctx) {
+                entry.area = area_id;
                 let prefix = entry.prefix;
                 match merged.get_mut(&prefix) {
                     Some(existing) if entry.rank() >= existing.rank() => continue,
@@ -6197,6 +6235,17 @@ pub(crate) mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, stub);
         assert_eq!(routes[0].next_hop, w_link_local);
+        // `show ospfv3 route` (#1453).
+        let rows = manager.route_summaries().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prefix, "2001:db8:1::/64");
+        assert_eq!(rows[0].class, nos_proto::RoutePathClass::IntraArea);
+        assert_eq!(rows[0].area, cfg.area_id);
+        assert_eq!(rows[0].advertising_router, Some(w));
+        assert_eq!(
+            rows[0].next_hops,
+            [format!("fe80::2 dev {}", cfg.kernel_interface)]
+        );
     }
 
     #[tokio::test]

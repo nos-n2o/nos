@@ -196,6 +196,8 @@ pub enum Resolved {
     ShowOspfNeigh,
     /// `show ospf interface` (#1438).
     ShowOspfInterface,
+    /// `show ospf route` (#1453).
+    ShowOspfRoute,
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowOspfNeigh`.
     ShowOspfDatabase {
@@ -209,6 +211,8 @@ pub enum Resolved {
     ShowOspfv3Neigh,
     /// `show ospfv3 interface` (#1438).
     ShowOspfv3Interface,
+    /// `show ospfv3 route` (#1453).
+    ShowOspfv3Route,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -382,6 +386,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpRoutes => Resolved::ShowBgpRoutes,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
         Command::ShowOspfInterface => Resolved::ShowOspfInterface,
+        Command::ShowOspfRoute => Resolved::ShowOspfRoute,
         Command::ShowOspfDatabase {
             lsa_type,
             adv_router,
@@ -392,6 +397,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowOspfSegmentRouting => Resolved::ShowOspfSegmentRouting,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
         Command::ShowOspfv3Interface => Resolved::ShowOspfv3Interface,
+        Command::ShowOspfv3Route => Resolved::ShowOspfv3Route,
         Command::ShowOspfv3Database {
             lsa_type,
             adv_router,
@@ -523,10 +529,12 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowBgpRoutes
         | Command::ShowOspfNeigh
         | Command::ShowOspfInterface
+        | Command::ShowOspfRoute
         | Command::ShowOspfDatabase { .. }
         | Command::ShowOspfSegmentRouting
         | Command::ShowOspfv3Neigh
         | Command::ShowOspfv3Interface
+        | Command::ShowOspfv3Route
         | Command::ShowOspfv3Database { .. }
         | Command::ClearBgpSoftIn { .. }
         | Command::ClearBgpPeer { .. }

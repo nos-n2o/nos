@@ -145,6 +145,7 @@ impl RouteEntry {
             metric,
             backup_next_hop: None,
             backup_interface_id: None,
+            area: Ipv4Addr::UNSPECIFIED,
             egress,
         }
     }
@@ -181,7 +182,33 @@ impl RouteEntry {
             metric,
             backup_next_hop: None,
             backup_interface_id: None,
+            area: Ipv4Addr::UNSPECIFIED,
             egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+
+    /// The class and the cost split `show ospfv3 route` reports (an external-2
+    /// route: its own metric apart, the internal distance as the cost).
+    pub fn display_class(&self) -> (nos_proto::RoutePathClass, Option<u32>, u32) {
+        use nos_proto::RoutePathClass as C;
+        match self.class {
+            PathClass::Intra => (C::IntraArea, None, self.metric),
+            PathClass::Inter => (C::InterArea, None, self.metric),
+            PathClass::External1 => (C::External1, None, self.metric),
+            PathClass::External2 => (
+                C::External2,
+                Some(self.e2_metric),
+                self.metric.saturating_sub(self.e2_metric),
+            ),
+        }
+    }
+
+    /// The router the cost was built toward; `None` for a transit network or
+    /// a discard route.
+    pub fn advertising_router(&self) -> Option<Ipv4Addr> {
+        match self.egress {
+            Vertex::Router(r) if !r.is_unspecified() => Some(r),
+            _ => None,
         }
     }
 }
@@ -224,6 +251,9 @@ pub struct RouteEntry {
     /// Filled in by `compute` after `collect_prefix_routes`.
     pub backup_next_hop: Option<Ipv6Addr>,
     pub backup_interface_id: Option<u32>,
+    /// The area whose SPF produced the route (`0.0.0.0` until `compute_routes`
+    /// sets it; a discard route has none).
+    pub area: Ipv4Addr,
     /// The vertex this prefix hangs off — what the loop-free test is
     /// evaluated against, since the prefix metric cancels out of it.
     egress: Vertex,
@@ -2914,6 +2944,22 @@ mod tests {
     }
 
     /// An LFA must differ from every member of the ECMP set.
+    #[test]
+    fn display_class_splits_the_e2_metric() {
+        use nos_proto::RoutePathClass as C;
+        let mut r = RouteEntry::discard("2001:db8::/32".parse().unwrap(), 30);
+        assert_eq!(r.display_class(), (C::IntraArea, None, 30));
+        assert_eq!(r.advertising_router(), None);
+        r = r.classed(PathClass::External2, 20);
+        assert_eq!(r.display_class(), (C::External2, Some(20), 10));
+        r.class = PathClass::Inter;
+        assert_eq!(r.display_class().0, C::InterArea);
+        r.class = PathClass::External1;
+        assert_eq!(r.display_class().0, C::External1);
+        r.egress = Vertex::Router(Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(r.advertising_router(), Some(Ipv4Addr::new(1, 1, 1, 1)));
+    }
+
     #[test]
     fn backup_differs_from_every_ecmp_member() {
         let mut lsas = diamond(1);

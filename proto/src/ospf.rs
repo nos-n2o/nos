@@ -315,6 +315,57 @@ pub struct LsaSummary {
     pub virtual_links: Vec<Ipv4Addr>,
 }
 
+/// How an OSPF route was learned (RFC 2328 section 11).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoutePathClass {
+    /// Inside the area.
+    #[serde(rename = "intra-area")]
+    IntraArea,
+    /// Via an area border router (Summary-LSA).
+    #[serde(rename = "inter-area")]
+    InterArea,
+    /// AS-external, metric type 1.
+    #[serde(rename = "external-1")]
+    External1,
+    /// AS-external, metric type 2.
+    #[serde(rename = "external-2")]
+    External2,
+}
+
+/// One computed route, for `show ospf route` (#1453).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct RouteSummary {
+    /// The destination, `"<address>/<prefix-len>"`.
+    #[view(brief, sort, header = "prefix", order = 0)]
+    pub prefix: String,
+    /// How the route was learned.
+    #[view(brief, header = "class", text, order = 1)]
+    pub class: RoutePathClass,
+    /// Cost to the destination (for an external-2 route: the internal distance
+    /// to the advertising router).
+    #[view(brief, header = "cost", order = 2)]
+    pub cost: u32,
+    /// An external-2 route's own metric.
+    #[view(brief, header = "e2-cost", order = 3)]
+    pub type2_cost: Option<u32>,
+    /// Area the route was computed in.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "area", text, order = 4)]
+    pub area: Ipv4Addr,
+    /// Next hops, `"<address>"` or `"<address> dev <interface>"`.
+    #[view(brief, header = "next-hops", text, order = 5)]
+    pub next_hops: Vec<String>,
+    /// The router the cost was built toward; `None` for a transit network or
+    /// a discard route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "adv-router", text, order = 6)]
+    pub advertising_router: Option<Ipv4Addr>,
+}
+
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -337,6 +388,8 @@ pub enum OspfRequest {
     GetSegmentRouting,
     /// One-shot: every running interface's summary (#1438).
     GetInterfaces,
+    /// One-shot: the computed routes (#1453).
+    GetRoutes,
 }
 
 /// Messages sent from `nos-ospfd` to a query client.
@@ -350,6 +403,8 @@ pub enum OspfEvent {
     SegmentRouting(SrSummary),
     /// Reply with the interfaces.
     Interfaces(Vec<InterfaceSummary>),
+    /// Reply with the routes.
+    Routes(Vec<RouteSummary>),
 }
 
 /// `show ospf segment-routing` (#1382): what this router advertises and what

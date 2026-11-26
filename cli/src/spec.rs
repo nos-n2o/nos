@@ -305,6 +305,19 @@ const OSPFV3_IF_DOC: Doc = Doc::Local {
              instead of the IPv4 address.",
 };
 
+const OSPF_ROUTE_DOC: Doc = Doc::Local {
+    summary: "Show the OSPF routes across every instance.",
+    detail: "Queries every configured OSPF instance's nos-ospfd for its computed routes: \
+             prefix, class (intra-area, inter-area, external-1, external-2), cost, the \
+             external-2 metric, area, next hops with their interface and the advertising \
+             router.",
+};
+
+const OSPFV3_ROUTE_DOC: Doc = Doc::Local {
+    summary: "Show the OSPFv3 routes across every instance.",
+    detail: "Mirrors 'show ospf route' for OSPFv3: IPv6 prefixes and link-local next hops.",
+};
+
 const OSPF_DB_DOC: Doc = Doc::Local {
     summary: "Show every installed LSA's header across every OSPF instance, optionally of one type and advertising router.",
     detail: "Queries every configured OSPF instance's daemon (each resolved via nos-watchdogd) for \
@@ -1152,6 +1165,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["show" "ospf" "neighbors"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
     cmd!(["show" "ospf" "interface"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
     cmd!(["show" "ospf" "interfaces"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
+    cmd!(["show" "ospf" "route"], OSPF_ROUTE_DOC, Always, Command::ShowOspfRoute),
     cmd!(["show" "ospf" "database"],
         OSPF_DB_DOC,
         Always,
@@ -1185,6 +1199,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["show" "ospfv3" "neighbors"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
     cmd!(["show" "ospfv3" "interface"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
     cmd!(["show" "ospfv3" "interfaces"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
+    cmd!(["show" "ospfv3" "route"], OSPFV3_ROUTE_DOC, Always, Command::ShowOspfv3Route),
     cmd!(["show" "ospfv3" "database"],
         OSPFV3_DB_DOC,
         Always,

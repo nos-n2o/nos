@@ -6065,6 +6065,16 @@
         ],
         "type": "object"
       },
+      "RoutePathClass": {
+        "description": "How an OSPF route was learned (RFC 2328 section 11).",
+        "enum": [
+          "intra-area",
+          "inter-area",
+          "external-1",
+          "external-2"
+        ],
+        "type": "string"
+      },
       "RouteSourceKind": {
         "description": "Wire twin of `nos-rib`'s internal `RouteSource` — kept separate so\n`nos-rib`'s own domain type doesn't need to derive wire traits it has no\nother use for.",
         "enum": [
@@ -9965,6 +9975,37 @@
         ]
       }
     },
+    "/v1/ospf/routes": {
+      "get": {
+        "operationId": "ospf_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF routes, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/ospf/segment-routing": {
       "get": {
         "operationId": "ospf_segment_routing",
@@ -10084,6 +10125,37 @@
           }
         },
         "summary": "OSPFv3 neighbors, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospfv3/routes": {
+      "get": {
+        "operationId": "ospfv3_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPFv3 routes, per instance",
         "tags": [
           "show"
         ]

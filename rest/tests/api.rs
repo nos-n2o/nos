@@ -1277,6 +1277,13 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
         send(app, Method::GET, "/v1/ospf/neighbors", None).await.1,
         json!([])
     );
+    for uri in ["/v1/ospf/routes", "/v1/ospfv3/routes"] {
+        assert_eq!(
+            send(app, Method::GET, uri, None).await.1,
+            json!([]),
+            "{uri}"
+        );
+    }
 }
 
 /// Every error is an RFC 9457 problem document whose `status` repeats the
@@ -2846,13 +2853,15 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         "/v1/ospf/neighbors",
         "/v1/ospf/database",
         "/v1/ospf/segment-routing",
+        "/v1/ospf/routes",
         "/v1/ospfv3/neighbors",
         "/v1/ospfv3/database",
+        "/v1/ospfv3/routes",
     ] {
         let (s, _) = send(&app, Method::GET, uri, None).await;
         assert_eq!(s, StatusCode::OK, "{uri}");
     }
-    assert_eq!(lists.load(Ordering::SeqCst), 9);
+    assert_eq!(lists.load(Ordering::SeqCst), 11);
     assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");
