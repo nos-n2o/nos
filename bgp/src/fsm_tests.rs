@@ -1159,7 +1159,7 @@ async fn collision_verdict_publishes_the_winner_and_rewrites_the_loser() {
     assert!(slot.begin(Role::Active).await);
     let v = apply_collision_verdict(rem, Role::Active, &local(), &slot, Arc::default()).await;
     assert!(v.is_none());
-    let s = *slot.status_receiver().borrow();
+    let s = slot.status_receiver().borrow().clone();
     assert_eq!(s.state, PeerState::OpenConfirm);
     assert_eq!(s.remote_asn, Some(65002));
     assert_eq!(s.remote_bgp_id, Some(Ipv4Addr::new(2, 2, 2, 2)));
@@ -1582,7 +1582,7 @@ async fn the_open_advertises_and_negotiates_add_path_role_and_graceful_restart()
         |c| matches!(c, Capability::GracefulRestart(g) if g.time == 90 && !g.restart)
     ));
     assert!(!has(|c| matches!(c, Capability::ExtendedNextHop { .. })));
-    let status = *s.slot.status_receiver().borrow();
+    let status = s.slot.status_receiver().borrow().clone();
     assert_eq!(status.state, PeerState::Established);
     s.task.abort();
 }

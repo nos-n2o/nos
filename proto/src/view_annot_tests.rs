@@ -286,3 +286,124 @@ fn brief_columns_follow_the_decisions() {
         ["version", "revision"]
     );
 }
+
+#[test]
+fn interface_summaries_keys_and_wire_index() {
+    use crate::ospf::{InterfaceSummary, OspfEvent, OspfRequest};
+    use crate::ospfv3::{Ospfv3Event, Ospfv3InterfaceSummary, Ospfv3Request};
+    use crate::schema::NetworkType;
+    let v2 = InterfaceSummary {
+        link: "eth0.0".into(),
+        kernel_interface: "eth0".into(),
+        area_id: Ipv4Addr::new(0, 0, 0, 1),
+        address: "10.0.0.1/24".into(),
+        network_type: NetworkType::Broadcast,
+        state: LinkInterfaceState::Dr,
+        cost: 1,
+        hello_interval: 10,
+        dead_interval: 40,
+        retransmit_interval: 5,
+        priority: 1,
+        dr: Some(Ipv4Addr::new(1, 1, 1, 1)),
+        bdr: None,
+        neighbor_count: 2,
+        full_neighbor_count: 1,
+        mtu: 1500,
+        mtu_ignore: false,
+    };
+    assert_keys_match(
+        view_of::<InterfaceSummary>().unwrap(),
+        &serde_json::to_value(&v2).unwrap(),
+    );
+    let v3 = Ospfv3InterfaceSummary {
+        link: v2.link,
+        kernel_interface: v2.kernel_interface,
+        interface_id: 2,
+        area_id: v2.area_id,
+        address: "fe80::1".parse().unwrap(),
+        network_type: v2.network_type,
+        state: v2.state,
+        cost: 1,
+        hello_interval: 10,
+        dead_interval: 40,
+        retransmit_interval: 5,
+        priority: 1,
+        dr: v2.dr,
+        bdr: None,
+        neighbor_count: 2,
+        full_neighbor_count: 1,
+        mtu: 1500,
+        mtu_ignore: false,
+        prefixes: vec!["2001:db8::/64".into()],
+    };
+    assert_keys_match(
+        view_of::<Ospfv3InterfaceSummary>().unwrap(),
+        &serde_json::to_value(&v3).unwrap(),
+    );
+    // Append-only enums: the new variants sit after the existing ones.
+    let first = |v: Vec<u8>| v[0];
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfRequest::GetInterfaces).unwrap()),
+        4
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfEvent::Interfaces(vec![])).unwrap()),
+        3
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Request::GetInterfaces).unwrap()),
+        3
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Event::Interfaces(vec![])).unwrap()),
+        2
+    );
+}
+
+#[test]
+fn route_summaries_keys_and_wire_index() {
+    use crate::ospf::{OspfEvent, OspfRequest, RoutePathClass, RouteSummary};
+    use crate::ospfv3::{Ospfv3Event, Ospfv3Request, Ospfv3RouteSummary};
+    let v2 = RouteSummary {
+        prefix: "10.0.0.0/24".into(),
+        class: RoutePathClass::External2,
+        cost: 2,
+        type2_cost: Some(20),
+        area: Ipv4Addr::UNSPECIFIED,
+        next_hops: vec!["10.0.0.2 dev eth0".into()],
+        advertising_router: Some(Ipv4Addr::new(1, 1, 1, 1)),
+    };
+    let j = serde_json::to_value(&v2).unwrap();
+    assert_eq!(j["class"], "external-2");
+    assert_keys_match(view_of::<RouteSummary>().unwrap(), &j);
+    let v3 = Ospfv3RouteSummary {
+        prefix: "2001:db8::/64".into(),
+        class: RoutePathClass::IntraArea,
+        cost: 1,
+        type2_cost: None,
+        area: v2.area,
+        next_hops: vec![],
+        advertising_router: None,
+    };
+    assert_keys_match(
+        view_of::<Ospfv3RouteSummary>().unwrap(),
+        &serde_json::to_value(&v3).unwrap(),
+    );
+    let first = |v: Vec<u8>| v[0];
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfRequest::GetRoutes).unwrap()),
+        5
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfEvent::Routes(vec![])).unwrap()),
+        4
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Request::GetRoutes).unwrap()),
+        4
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Event::Routes(vec![])).unwrap()),
+        3
+    );
+}

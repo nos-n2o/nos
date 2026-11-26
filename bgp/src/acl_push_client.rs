@@ -594,7 +594,7 @@ mod tests {
         let acld = serve(&acld_path, "acld", "", move |req: &AclRequest| match req {
             AclRequest::PushFlowspec(_) => Reply::One(AclEvent::Ack),
             AclRequest::ShowFlowspec => Reply::One(AclEvent::Flowspec(shown.clone())),
-            AclRequest::Show { .. } => Reply::Close,
+            AclRequest::Show { .. } | AclRequest::ClearCounters { .. } => Reply::Close,
         });
         let watchdog = FakeWatchdog::new(&tmp.path().join("wd.sock"));
         assert_eq!(show(watchdog.path()).await, None);

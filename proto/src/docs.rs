@@ -717,6 +717,8 @@ topics! {
     ShowLog,
     /// `Request::GetHistoryConfig`
     ShowConfigurationDiff,
+    /// `Request::ListExternalUsers`
+    ShowAaaUsers,
     /// the `| json` output pipe of `show` commands
     PipeJson,
 }

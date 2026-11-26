@@ -29,7 +29,9 @@ pub fn start<D: Driver>(
 /// `show bgp flowspec` (#562).
 pub fn allowed(role: Role, request: &AclRequest) -> bool {
     match request {
-        AclRequest::Show { .. } => matches!(role, Role::User | Role::Restd),
+        AclRequest::Show { .. } | AclRequest::ClearCounters { .. } => {
+            matches!(role, Role::User | Role::Restd)
+        }
         AclRequest::ShowFlowspec => matches!(role, Role::User | Role::Restd | Role::Bgpd),
         AclRequest::PushFlowspec(_) => role == Role::Bgpd,
     }
@@ -43,6 +45,10 @@ fn answer<D: Driver>(engine: &Shared<D>, request: AclRequest) -> AclEvent {
         AclRequest::Show { name } => {
             trace!(?name, "serving acl query");
             AclEvent::Acls(engine.show(name.as_deref()))
+        }
+        AclRequest::ClearCounters { name } => {
+            let (found, attachments) = engine.clear_counters(name.as_deref());
+            AclEvent::Cleared { found, attachments }
         }
         AclRequest::ShowFlowspec => AclEvent::Flowspec(engine.show_flowspec()),
         AclRequest::PushFlowspec(set) => {
@@ -119,6 +125,11 @@ mod tests {
             let people = matches!(role, Role::User | Role::Restd);
             assert_eq!(
                 allowed(role, &AclRequest::Show { name: None }),
+                people,
+                "{role:?}"
+            );
+            assert_eq!(
+                allowed(role, &AclRequest::ClearCounters { name: None }),
                 people,
                 "{role:?}"
             );

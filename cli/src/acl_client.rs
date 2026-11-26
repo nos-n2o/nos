@@ -45,7 +45,9 @@ pub async fn show(acl_socket: &Path, name: Option<&str>) -> Result<Vec<AclStatus
     let name = name.map(Into::into);
     match ask(acl_socket, AclRequest::Show { name }).await? {
         AclEvent::Acls(acls) => Ok(acls),
-        AclEvent::Ack | AclEvent::Flowspec(_) => Err(AclClientError::Unexpected),
+        AclEvent::Ack | AclEvent::Flowspec(_) | AclEvent::Cleared { .. } => {
+            Err(AclClientError::Unexpected)
+        }
     }
 }
 
@@ -53,6 +55,23 @@ pub async fn show(acl_socket: &Path, name: Option<&str>) -> Result<Vec<AclStatus
 pub async fn show_flowspec(acl_socket: &Path) -> Result<Vec<FlowspecRuleStatus>, AclClientError> {
     match ask(acl_socket, AclRequest::ShowFlowspec).await? {
         AclEvent::Flowspec(rules) => Ok(rules),
-        AclEvent::Ack | AclEvent::Acls(_) => Err(AclClientError::Unexpected),
+        AclEvent::Ack | AclEvent::Acls(_) | AclEvent::Cleared { .. } => {
+            Err(AclClientError::Unexpected)
+        }
+    }
+}
+
+/// Reinstalls the ACLs on their idle chain so the counters restart at 0;
+/// `(found, attachments replaced)`.
+pub async fn clear_counters(
+    acl_socket: &Path,
+    name: Option<&str>,
+) -> Result<(bool, u32), AclClientError> {
+    let name = name.map(Into::into);
+    match ask(acl_socket, AclRequest::ClearCounters { name }).await? {
+        AclEvent::Cleared { found, attachments } => Ok((found, attachments)),
+        AclEvent::Ack | AclEvent::Acls(_) | AclEvent::Flowspec(_) => {
+            Err(AclClientError::Unexpected)
+        }
     }
 }

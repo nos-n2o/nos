@@ -3916,10 +3916,14 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     for route in [
         "/v1/bgp/rpki",
         "/v1/ospf/neighbors",
+        "/v1/ospf/interfaces",
         "/v1/ospf/database",
         "/v1/ospf/segment-routing",
+        "/v1/ospf/routes",
         "/v1/ospfv3/neighbors",
+        "/v1/ospfv3/interfaces",
         "/v1/ospfv3/database",
+        "/v1/ospfv3/routes",
     ] {
         a.rest_expect(Method::GET, route, None, 200).await?;
     }
@@ -5605,6 +5609,29 @@ pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
     }
     if seen != prefixes {
         bail!("paged walk of rt1 returned {seen:?}, expected {prefixes:?}");
+    }
+
+    log("a static candidate carries its attributes (#1444)");
+    let all = a.routes_walk("rt1", None).await?;
+    let cand = |prefix: &str, source: &str| {
+        all.iter()
+            .filter(|p| p["prefix"] == prefix)
+            .flat_map(|p| p["candidates"].as_array().cloned().unwrap_or_default())
+            .find(|c| c["source"] == source)
+    };
+    let st = cand("10.88.0.0/24", "Static")
+        .ok_or_else(|| anyhow::anyhow!("no static candidate for 10.88.0.0/24"))?;
+    if st["preference"] != 1
+        || st["installed"] != true
+        || st["interfaces"] != serde_json::json!([ROUTES_PAGING_IFACE])
+        || st["age_secs"].as_u64().is_none_or(|n| n >= 120)
+    {
+        bail!("static candidate attributes are wrong: {st}");
+    }
+    let conn = cand(SUBNET.s(), "Connected")
+        .ok_or_else(|| anyhow::anyhow!("no connected candidate for {}", SUBNET.s()))?;
+    if conn["preference"] != 0 || conn["installed"] != false {
+        bail!("connected candidate attributes are wrong: {conn}");
     }
 
     log("the first page is full and points at the next one");

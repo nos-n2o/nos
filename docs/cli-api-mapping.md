@@ -17,20 +17,23 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
 | `show interface brief` | `GET /v1/interfaces` + `GET /v1/port-aggregates` |
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
-| `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
+| `show lacp [<name>] [detail]` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show acl` / `show acl <name>` | `GET /v1/acl` / `GET /v1/acl/{name}` |
 | `show acl` (flowspec rules, at the end) | `GET /v1/flowspec` |
-| `show lldp neighbors` / `show lldp neighbors detail` | `GET /v1/lldp/neighbors` |
+| `show lldp neighbors [interface <if>] [detail]` (`interface` filters client-side) | `GET /v1/lldp/neighbors` |
 | `show lldp statistics` | `GET /v1/lldp/statistics` |
 | `show version` | `GET /v1/version` |
 | `show spanning-tree` / `... detail` | `GET /v1/spanning-tree` (always carries topology and counters) |
 | `show spanning-tree instance <id> [detail]` / `domain <bd> [detail]` | `GET /v1/spanning-tree/instance/{id}` / `.../domain/{name}` |
 | (counters as a flat table) | `GET /v1/spanning-tree/counters` |
 | `clear spanning-tree err-disabled <if>` | `POST /v1/spanning-tree/port/{interface}/err-disabled/clear` |
+| `clear acl counters` | `POST /v1/acl/counters/clear` |
+| `clear acl <name> counters` | `POST /v1/acl/{name}/counters/clear` |
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
 | `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
-| `show bgp summary` | `GET /v1/bgp/summary` |
+| `show bgp summary [instance <n>]` | `GET /v1/bgp/summary[?instance=<n>]` |
+| `show bgp neighbor [<ip>] [instance <n>]` | `GET /v1/bgp/summary?peer=<ip>[&instance=<n>]` (the detail block is client-side only) |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` |
 | `show bgp vpnv4` / `show bgp vpnv4 rd <rd>` | `GET /v1/bgp/vpnv4` / `GET /v1/bgp/vpnv4?rd=<rd>` |
@@ -38,6 +41,10 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show bgp rpki` | `GET /v1/bgp/rpki` |
 | `show bgp bmp` | `GET /v1/bgp/bmp` |
 | `show bgp routes` | `GET /v1/bgp/routes` |
+| `show ospf interface` | `GET /v1/ospf/interfaces` |
+| `show ospfv3 interface` | `GET /v1/ospfv3/interfaces` |
+| `show ospf route` | `GET /v1/ospf/routes` |
+| `show ospfv3 route` | `GET /v1/ospfv3/routes` |
 | `show ospf neigh` / `show ospf database` | `GET /v1/ospf/neighbors` / `GET /v1/ospf/database` |
 | `show ospf segment-routing` | `GET /v1/ospf/segment-routing` |
 | `show ospfv3 neigh` / `show ospfv3 database` | `GET /v1/ospfv3/neighbors` / `GET /v1/ospfv3/database` |

@@ -38,19 +38,27 @@ pub enum Command {
     ShowPortAggregate {
         name: Option<String>,
     },
-    /// `show lacp` (every aggregate) or `show lacp <name>` (one).
+    /// `show lacp [<name>] [detail]` (every aggregate or one), as tables or
+    /// (`detail`) one key/value block per aggregate and port.
     ShowLacp {
         name: Option<String>,
+        detail: bool,
     },
-    /// `show lldp neighbors [detail]` — every LLDP neighbor heard on any
-    /// interface, one line each or (`detail`) one block each.
+    /// `show lldp neighbors [interface <if>] [detail]` — the LLDP neighbors
+    /// heard on any (or one) interface, one line each or (`detail`) one block
+    /// each.
     ShowLldpNeighbors {
         detail: bool,
+        interface: Option<String>,
     },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
     /// `show version` — local, valid in any mode.
     ShowVersion,
+    /// `clear acl [<name>] counters` (#1419).
+    ClearAclCounters {
+        name: Option<String>,
+    },
     /// `show acl` (every ACL) or `show acl <name>` (one): counters included.
     ShowAcl {
         name: Option<String>,
@@ -97,6 +105,12 @@ pub enum Command {
     ShowBgpSummary {
         instance: Option<String>,
     },
+    /// `show bgp neighbor [<ip>] [instance <name>]` — one detail block per
+    /// peer (#1443).
+    ShowBgpNeighbor {
+        peer: Option<IpAddr>,
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
@@ -123,6 +137,10 @@ pub enum Command {
     /// `show ospf neigh` — a one-line-per-link neighbor summary across every
     /// configured OSPF instance.
     ShowOspfNeigh,
+    /// `show ospf interface` (#1438): every running OSPF interface.
+    ShowOspfInterface,
+    /// `show ospf route` (#1453): the computed routes of every OSPF instance.
+    ShowOspfRoute,
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase {
@@ -135,6 +153,10 @@ pub enum Command {
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
+    /// `show ospfv3 interface` (#1438).
+    ShowOspfv3Interface,
+    /// `show ospfv3 route` (#1453).
+    ShowOspfv3Route,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -363,6 +385,20 @@ mod tests {
     }
 
     #[test]
+    fn clear_acl_counters() {
+        assert_eq!(
+            Command::parse("clear acl counters"),
+            Command::ClearAclCounters { name: None }
+        );
+        assert_eq!(
+            Command::parse("clear acl EDGE counters"),
+            Command::ClearAclCounters {
+                name: Some("EDGE".into())
+            }
+        );
+    }
+
+    #[test]
     fn clear_spanning_tree_err_disabled() {
         assert_eq!(
             Command::parse("clear spanning-tree err-disabled eth1"),
@@ -423,11 +459,31 @@ mod tests {
     fn show_lldp_neighbors() {
         assert_eq!(
             Command::parse("show lldp neighbors"),
-            Command::ShowLldpNeighbors { detail: false }
+            Command::ShowLldpNeighbors {
+                detail: false,
+                interface: None
+            }
         );
         assert_eq!(
             Command::parse("show lldp neighbors detail"),
-            Command::ShowLldpNeighbors { detail: true }
+            Command::ShowLldpNeighbors {
+                detail: true,
+                interface: None
+            }
+        );
+        assert_eq!(
+            Command::parse("show lldp neighbors interface eth0"),
+            Command::ShowLldpNeighbors {
+                detail: false,
+                interface: Some("eth0".into())
+            }
+        );
+        assert_eq!(
+            Command::parse("show lldp neighbors interface eth0 detail"),
+            Command::ShowLldpNeighbors {
+                detail: true,
+                interface: Some("eth0".into())
+            }
         );
         assert_eq!(
             Command::parse("show lldp statistics"),
@@ -502,12 +558,30 @@ mod tests {
     fn show_lacp() {
         assert_eq!(
             Command::parse("show lacp"),
-            Command::ShowLacp { name: None }
+            Command::ShowLacp {
+                name: None,
+                detail: false
+            }
+        );
+        assert_eq!(
+            Command::parse("show lacp detail"),
+            Command::ShowLacp {
+                name: None,
+                detail: true
+            }
         );
         assert_eq!(
             Command::parse("show lacp bond1"),
             Command::ShowLacp {
                 name: Some("bond1".to_string()),
+                detail: false
+            }
+        );
+        assert_eq!(
+            Command::parse("show lacp bond1 detail"),
+            Command::ShowLacp {
+                name: Some("bond1".to_string()),
+                detail: true
             }
         );
     }
@@ -820,6 +894,27 @@ mod tests {
     }
 
     #[test]
+    fn show_bgp_neighbor() {
+        let n = |peer: Option<&str>, instance: Option<&str>| Command::ShowBgpNeighbor {
+            peer: peer.map(|p| p.parse().unwrap()),
+            instance: instance.map(String::from),
+        };
+        assert_eq!(Command::parse("show bgp neighbor"), n(None, None));
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2"),
+            n(Some("10.0.0.2"), None)
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor instance r1"),
+            n(None, Some("r1"))
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2 instance r1"),
+            n(Some("10.0.0.2"), Some("r1"))
+        );
+    }
+
+    #[test]
     fn show_bgp_evpn() {
         assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
         assert_eq!(
@@ -860,6 +955,29 @@ mod tests {
                 rd: Some("65001:1".into())
             }
         );
+    }
+
+    #[test]
+    fn show_ospf_route() {
+        assert_eq!(Command::parse("show ospf route"), Command::ShowOspfRoute);
+        assert_eq!(
+            Command::parse("show ospfv3 route"),
+            Command::ShowOspfv3Route
+        );
+    }
+
+    #[test]
+    fn show_ospf_interface() {
+        for w in ["interface", "interfaces"] {
+            assert_eq!(
+                Command::parse(&format!("show ospf {w}")),
+                Command::ShowOspfInterface
+            );
+            assert_eq!(
+                Command::parse(&format!("show ospfv3 {w}")),
+                Command::ShowOspfv3Interface
+            );
+        }
     }
 
     #[test]

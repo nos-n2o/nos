@@ -1,0 +1,19 @@
+lacp x\nFORGED\x1b[2J
+  system           02:00:00:00:00:ab
+  key              7
+  rate             fast
+  system-priority  100
+  min-links        2: not met, bond emptied
+  port x\nFORGED\x1b[2J
+    port-number               4
+    port-priority             50
+    mode                      passive
+    receive                   current
+    mux                       waiting
+    selected                  yes
+    synchronized              yes
+    churn                     none
+    individual                no
+    unsupported-version-pdus  0
+    partner                   02:00:00:00:00:01 key 3 port 9
+    partner-priority          200/60

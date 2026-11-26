@@ -32,8 +32,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ipnet::{IpNet, Ipv4Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    BfdDiag, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole, NeighborSummary,
-    NetworkType, OspfNeighborState, RedistributeUpdate,
+    BfdDiag, InterfaceSummary, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole,
+    NeighborSummary, NetworkType, OspfNeighborState, RedistributeUpdate, RouteSummary,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -1750,6 +1750,66 @@ impl LinkManager {
             .collect()
     }
 
+    /// `show ospf interface` (#1438): one row per running link, sorted by
+    /// name. A virtual link is not an attach point and is skipped.
+    pub async fn interface_summaries(&self) -> Vec<InterfaceSummary> {
+        let mut rows: Vec<_> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .map(to_interface_summary)
+            .collect();
+        rows.sort_by(|a, b| a.link.cmp(&b.link));
+        rows
+    }
+
+    /// `show ospf route` (#1453): the computed routes, sorted by prefix. A
+    /// next hop's interface is the link whose subnet holds it (none for a
+    /// virtual-link hop: v2 routes carry addresses only).
+    pub async fn route_summaries(&self) -> Vec<RouteSummary> {
+        let routes = self.compute_routes().await;
+        let subnets: Vec<(Ipv4Net, String)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .filter_map(|e| {
+                let c = &e.config;
+                Some((
+                    Ipv4Net::new(c.local_addr, c.local_prefix_len).ok()?,
+                    c.kernel_interface.clone(),
+                ))
+            })
+            .collect();
+        let mut routes = routes;
+        routes.sort_by_key(|r| r.prefix);
+        routes
+            .iter()
+            .map(|r| {
+                let (class, type2_cost) = r.path_class();
+                RouteSummary {
+                    prefix: r.prefix.to_string(),
+                    class,
+                    cost: r.display_cost(),
+                    type2_cost,
+                    area: r.area,
+                    next_hops: r
+                        .next_hops
+                        .iter()
+                        .map(|h| match subnets.iter().find(|(n, _)| n.contains(h)) {
+                            Some((_, dev)) => format!("{h} dev {dev}"),
+                            None => h.to_string(),
+                        })
+                        .collect(),
+                    advertising_router: r.advertising_router(),
+                }
+            })
+            .collect()
+    }
+
     /// Every link's type-9 store, with the link's area.
     async fn link_local_lsdbs(&self) -> Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> {
         self.links
@@ -1867,7 +1927,8 @@ impl LinkManager {
                 virtual_links: &virtual_hops,
                 remote_lfa: self.remote_lfa.load(Ordering::Relaxed),
             };
-            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+            for mut entry in spf::compute_in(router_id, &lsas, &ctx) {
+                entry.area = area_id;
                 let prefix = entry.prefix;
                 match merged.get_mut(&prefix) {
                     None => {
@@ -1981,6 +2042,37 @@ fn to_neighbor_state(state: NeighborState) -> OspfNeighborState {
         NeighborState::Exchange => OspfNeighborState::Exchange,
         NeighborState::Loading => OspfNeighborState::Loading,
         NeighborState::Full => OspfNeighborState::Full,
+    }
+}
+
+fn to_interface_summary(entry: &LinkEntry) -> InterfaceSummary {
+    let c = &entry.config;
+    let status = entry.status.borrow();
+    let count = |n| u32::try_from(n).unwrap_or(u32::MAX);
+    InterfaceSummary {
+        link: c.attach_point.clone(),
+        kernel_interface: c.kernel_interface.clone(),
+        area_id: c.area_id,
+        address: format!("{}/{}", c.local_addr, c.local_prefix_len),
+        network_type: c.network_type,
+        state: to_interface_state(status.interface_state),
+        cost: c.cost,
+        hello_interval: c.hello_interval,
+        dead_interval: c.dead_interval,
+        retransmit_interval: u16::try_from(RXMT_INTERVAL.as_secs()).unwrap_or(u16::MAX),
+        priority: c.priority,
+        dr: status.dr,
+        bdr: status.bdr,
+        neighbor_count: count(status.neighbors.len()),
+        full_neighbor_count: count(
+            status
+                .neighbors
+                .values()
+                .filter(|n| n.state == NeighborState::Full)
+                .count(),
+        ),
+        mtu: c.mtu,
+        mtu_ignore: c.mtu_ignore,
     }
 }
 

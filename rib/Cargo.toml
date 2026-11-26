@@ -13,6 +13,7 @@ dev-args = []
 workspace = true
 
 [dependencies]
+libc = { workspace = true }
 nos-pki            = { workspace = true }
 nos-daemon         = { workspace = true }
 tokio              = { workspace = true, features = ["signal"] }

@@ -368,6 +368,7 @@ async fn handle_text_action(
         | Resolved::ShowLldpNeighbors { .. }
         | Resolved::ShowLldpStatistics
         | Resolved::ShowAcl { .. }
+        | Resolved::ClearAclCounters { .. }
         | Resolved::ShowSpanningTree
         | Resolved::ShowSpanningTreeInstance { .. }
         | Resolved::ShowSpanningTreeMstConfig
@@ -377,6 +378,7 @@ async fn handle_text_action(
         | Resolved::ShowBfdSessions { .. }
         | Resolved::ShowLog { .. }
         | Resolved::ShowBgpSummary { .. }
+        | Resolved::ShowBgpNeighbor { .. }
         | Resolved::ShowBgpEvpn
         | Resolved::ShowBgpFlowspec { .. }
         | Resolved::ShowBgpRpki
@@ -384,9 +386,13 @@ async fn handle_text_action(
         | Resolved::ShowBgpVpn { .. }
         | Resolved::ShowBgpRoutes
         | Resolved::ShowOspfNeigh
+        | Resolved::ShowOspfInterface
+        | Resolved::ShowOspfRoute
         | Resolved::ShowOspfDatabase { .. }
         | Resolved::ShowOspfSegmentRouting
         | Resolved::ShowOspfv3Neigh
+        | Resolved::ShowOspfv3Interface
+        | Resolved::ShowOspfv3Route
         | Resolved::ShowOspfv3Database { .. }
         | Resolved::ClearBgpSoftIn { .. }
         | Resolved::ClearBgpPeer { .. }
@@ -441,16 +447,20 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             show_port_aggregate(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowLacp { name } => {
-            show_lacp(watchdog_socket, name.as_deref()).await;
+        Resolved::ShowLacp { name, detail } => {
+            show_lacp(watchdog_socket, name.as_deref(), detail).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowLldpNeighbors { detail } => {
-            show_lldp_neighbors(watchdog_socket, detail).await;
+        Resolved::ShowLldpNeighbors { detail, interface } => {
+            show_lldp_neighbors(watchdog_socket, detail, interface.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLldpStatistics => {
             show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ClearAclCounters { name } => {
+            clear_acl_counters(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowAcl { name } => {
@@ -506,7 +516,11 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpSummary { instance } => {
-            show_bgp_summary(socket, watchdog_socket, instance.as_deref()).await;
+            show_bgp_summary(socket, watchdog_socket, instance.as_deref(), false, None).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowBgpNeighbor { peer, instance } => {
+            show_bgp_summary(socket, watchdog_socket, instance.as_deref(), true, peer).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowBgpEvpn => {
@@ -535,6 +549,22 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowOspfNeigh => {
             show_ospf_neigh(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfRoute => {
+            show_ospf_route(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Route => {
+            show_ospfv3_route(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfInterface => {
+            show_ospf_interface(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Interface => {
+            show_ospfv3_interface(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowOspfSegmentRouting => {
@@ -873,7 +903,7 @@ async fn show_interface_brief(watchdog_socket: &Path) {
 
 /// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
 /// port-aggregate query instead.
-async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
+async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
     let lacp_socket =
         match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lacp).await {
             Ok(Some(path)) => path,
@@ -887,9 +917,16 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
             }
         };
 
+    let render = |s: &[nos_proto::PortAggregateLacpSummary]| {
+        if detail {
+            format::render_lacp_detail(s)
+        } else {
+            format::render_lacp_tables(s)
+        }
+    };
     match lacp_client::get_summary(&lacp_socket).await {
         Ok(summaries) => match name {
-            None => println!("{}", format::render_lacp_summaries(&summaries)),
+            None => println!("{}", render(&summaries)),
             Some(name) => {
                 let one: Vec<_> = summaries
                     .into_iter()
@@ -898,7 +935,7 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
                 if one.is_empty() {
                     println!("lacp port aggregate '{name}' not found");
                 } else {
-                    println!("{}", format::render_lacp_summaries(&one));
+                    println!("{}", render(&one));
                 }
             }
         },
@@ -923,17 +960,39 @@ async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
 
 /// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
 /// query.
-async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool) {
+async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool, interface: Option<&str>) {
     let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
         return;
     };
     match lldp_client::get_neighbors(&lldp_socket).await {
+        Ok(neighbors) if interface.is_some() => {
+            let i = interface.unwrap_or_default();
+            let kept = filter_lldp_interface(neighbors, i);
+            if kept.is_empty() {
+                println!("no lldp neighbors on '{}'", format::sanitize(i));
+            } else if detail {
+                println!("{}", format::render_lldp_neighbors_detail(&kept));
+            } else {
+                println!("{}", format::render_lldp_neighbors(&kept));
+            }
+        }
         Ok(neighbors) if detail => {
             println!("{}", format::render_lldp_neighbors_detail(&neighbors));
         }
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
         Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
     }
+}
+
+/// The neighbors heard on `interface` (exact match on `local_interface`).
+fn filter_lldp_interface(
+    neighbors: Vec<nos_proto::LldpNeighbor>,
+    interface: &str,
+) -> Vec<nos_proto::LldpNeighbor> {
+    neighbors
+        .into_iter()
+        .filter(|n| n.local_interface == interface)
+        .collect()
 }
 
 /// `nos-bfdd`'s socket via the broker, or `None` after printing why not.
@@ -1156,6 +1215,44 @@ async fn show_spanning_tree(watchdog_socket: &Path, view: SpanningTreeView) {
     }
 }
 
+/// Sentence for a `ClearCounters` reply (pure; the name is untrusted).
+fn clear_acl_message(name: Option<&str>, found: bool, attachments: u32) -> String {
+    match (name, found, attachments) {
+        (Some(n), false, _) => format!("acl '{}' not found", format::sanitize_line(n)),
+        (Some(n), true, 0) => {
+            format!(
+                "acl '{}' is not attached, its counters are 0",
+                format::sanitize_line(n)
+            )
+        }
+        (Some(n), true, k) => format!(
+            "acl '{}': cleared the counters on {k} attachment(s)",
+            format::sanitize_line(n)
+        ),
+        (None, _, k) => format!("cleared the counters of {k} acl attachment(s)"),
+    }
+}
+
+async fn clear_acl_counters(watchdog_socket: &Path, name: Option<&str>) {
+    let acl_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-acld is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+        };
+    match acl_client::clear_counters(&acl_socket, name).await {
+        Ok((false, _)) => eprintln!("error: {}", clear_acl_message(name, false, 0)),
+        Ok((found, n)) => println!("{}", clear_acl_message(name, found, n)),
+        Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+    }
+}
+
 async fn show_acl(watchdog_socket: &Path, name: Option<&str>) {
     let acl_socket =
         match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Acl).await {
@@ -1345,7 +1442,15 @@ fn trim(mut entries: Vec<LogEntry>, n: usize) -> Vec<LogEntry> {
 /// independently — an unreachable instance prints its own line rather than
 /// aborting the whole command, matching `show_route`/`show_interface`'s
 /// per-command resolve-then-query shape.
-async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Option<&str>) {
+/// `neighbor` is set for `show bgp neighbor` (one detail block per peer, only
+/// `peer`'s when given), clear for the summary table.
+async fn show_bgp_summary(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    only: Option<&str>,
+    neighbor: bool,
+    peer: Option<std::net::IpAddr>,
+) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1365,6 +1470,7 @@ async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Op
         eprintln!("bgp instance '{}' not found", format::sanitize_line(n));
         return;
     }
+    let mut found = false;
     for instance in cfg
         .bgp_instances
         .iter()
@@ -1377,19 +1483,36 @@ async fn show_bgp_summary(config_socket: &Path, watchdog_socket: &Path, only: Op
         .await
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_summary(&bgp_socket).await {
-                Ok(peers) => {
+                Ok(mut peers) => {
                     let name = format::sanitize_line(&instance.name);
+                    if let Some(want) = peer {
+                        peers.retain(|p| p.remote_address == want);
+                        if peers.is_empty() {
+                            continue;
+                        }
+                    }
+                    found = true;
                     println!(
                         "bgp instance {name}, router-id {}, AS {}",
                         instance.router_id, instance.asn
                     );
-                    emit(&peers, &format!("bgp instance {name}: no peers configured"));
+                    let none = format!("bgp instance {name}: no peers configured");
+                    if neighbor {
+                        emit_detail(&peers, &none);
+                    } else {
+                        emit(&peers, &none);
+                    }
                 }
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
+    }
+    if let Some(want) = peer
+        && !found
+    {
+        eprintln!("error: no bgp neighbor {want}");
     }
 }
 
@@ -1693,6 +1816,146 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
     }
 }
 
+/// `show ospf interface` (#1438): per instance, the running interfaces.
+async fn show_ospf_interface(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(socket)) => match ospf_client::get_interfaces(&socket).await {
+                Ok(interfaces) => {
+                    println!("ospf instance {}:", instance.name);
+                    emit(&interfaces, "no ospf interfaces running");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospfv3 interface` (#1438): per instance, the running interfaces.
+async fn show_ospfv3_interface(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+
+    if cfg.ospfv3_instances.is_empty() {
+        println!("no ospfv3 instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(socket)) => match ospfv3_client::get_interfaces(&socket).await {
+                Ok(interfaces) => {
+                    println!("ospfv3 instance {}:", instance.name);
+                    emit(&interfaces, "no ospfv3 interfaces running");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospf route` (#1453): per instance, the routes.
+async fn show_ospf_route(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(socket)) => match ospf_client::get_routes(&socket).await {
+                Ok(routes) => {
+                    println!("ospf instance {}:", instance.name);
+                    emit(&routes, "no ospf routes");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospfv3 route` (#1453): per instance, the routes.
+async fn show_ospfv3_route(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+
+    if cfg.ospfv3_instances.is_empty() {
+        println!("no ospfv3 instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(socket)) => match ospfv3_client::get_routes(&socket).await {
+                Ok(routes) => {
+                    println!("ospfv3 instance {}:", instance.name);
+                    emit(&routes, "no ospfv3 routes");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
 /// Validate `show ospf[v3] database [<type> [<adv-router>]]`'s arguments
 /// before any daemon is queried.
 fn parse_db_filter<T>(
@@ -1984,9 +2247,7 @@ async fn aaa_users(socket: &Path, action: Resolved) {
     match client::external_users(socket, req).await {
         Ok(Event::ExternalUsers(l)) if l.is_empty() => println!("no external users"),
         Ok(Event::ExternalUsers(l)) => {
-            for (name, uid) in l {
-                println!("{name:<32} {uid}");
-            }
+            println!("{}", format::render_aaa_users(&l));
         }
         Ok(Event::ExternalUser { uid }) if clear => {
             println!("{name}: entry removed, uid {uid} stays reserved");
@@ -2559,5 +2820,48 @@ mod diff_text_tests {
         let r = diff_text(&b, &a, false);
         assert!(r.find("new").unwrap() < r.find("old").unwrap(), "{r}");
         assert_eq!(diff_text(&a, &a, false), "no changes");
+    }
+}
+
+#[cfg(test)]
+mod lldp_filter_tests {
+    use super::filter_lldp_interface;
+    use nos_proto::LldpNeighbor;
+
+    fn n(i: &str) -> LldpNeighbor {
+        LldpNeighbor {
+            local_interface: i.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn keeps_only_the_exact_interface() {
+        let all = vec![n("eth0"), n("eth1"), n("eth0\nFORGED")];
+        assert_eq!(filter_lldp_interface(all.clone(), "eth0").len(), 1);
+        assert_eq!(filter_lldp_interface(all, "eth9").len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod clear_acl_tests {
+    use super::clear_acl_message as m;
+
+    #[test]
+    fn the_four_replies_and_a_forged_name() {
+        assert_eq!(
+            m(None, true, 3),
+            "cleared the counters of 3 acl attachment(s)"
+        );
+        assert_eq!(
+            m(Some("E"), true, 2),
+            "acl 'E': cleared the counters on 2 attachment(s)"
+        );
+        assert_eq!(
+            m(Some("E"), true, 0),
+            "acl 'E' is not attached, its counters are 0"
+        );
+        assert_eq!(m(Some("E"), false, 0), "acl 'E' not found");
+        assert!(!m(Some("a\x1b[2Jb"), false, 0).contains('\x1b'));
     }
 }

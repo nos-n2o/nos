@@ -50,9 +50,16 @@ pub struct Book {
     registered: HashMap<IpAddr, Want>,
     /// Peers whose session has been `Up` since they were registered.
     was_up: HashSet<IpAddr>,
+    /// The last state each registered peer's session reported.
+    states: HashMap<IpAddr, BfdState>,
 }
 
 impl Book {
+    /// The last reported state per registered peer (`show bgp summary`).
+    pub fn states(&self) -> HashMap<IpAddr, BfdState> {
+        self.states.clone()
+    }
+
     fn key(&self, peer: IpAddr, want: &Want) -> SessionKey {
         SessionKey {
             aggregate: None,
@@ -76,6 +83,7 @@ impl Book {
             }
             self.registered.clear();
             self.was_up.clear();
+            self.states.clear();
             self.table.clone_from(&target.table);
         }
         for (peer, want) in &target.peers {
@@ -90,6 +98,7 @@ impl Book {
                     key: self.key(*peer, old),
                 });
                 self.was_up.remove(peer);
+                self.states.remove(peer);
             }
             reqs.push(BfdRequest::Register {
                 table: self.table.clone(),
@@ -110,6 +119,7 @@ impl Book {
         for peer in gone {
             let want = self.registered.remove(&peer).expect("just listed");
             self.was_up.remove(&peer);
+            self.states.remove(&peer);
             reqs.push(BfdRequest::Deregister {
                 key: self.key(peer, &want),
             });
@@ -128,6 +138,7 @@ impl Book {
         if key.table != self.table || !self.registered.contains_key(&key.peer) {
             return None;
         }
+        self.states.insert(key.peer, state);
         match state {
             BfdState::Up => {
                 self.was_up.insert(key.peer);
@@ -149,6 +160,7 @@ impl Book {
     pub fn reset(&mut self) {
         self.registered.clear();
         self.was_up.clear();
+        self.states.clear();
     }
 }
 
@@ -217,6 +229,7 @@ async fn run(
                         break;
                     }
                 }
+                sessions.set_bfd_states(book.states());
                 if failed {
                     break;
                 }
@@ -228,7 +241,9 @@ async fn run(
                 }
                 ev = reader.next() => match ev {
                     Some(Ok(BfdEvent::State { key, state, diag, control_plane_independent })) => {
-                        if let Some(cpi) = book.on_state(&key, state, control_plane_independent) {
+                        let down = book.on_state(&key, state, control_plane_independent);
+                        sessions.set_bfd_states(book.states());
+                        if let Some(cpi) = down {
                             info!(peer = %key.peer, diag = %diag, control_plane_independent = cpi, "bgp: bfd session down, closing");
                             sessions.bfd_down(key.peer, cpi).await;
                         }
@@ -241,6 +256,7 @@ async fn run(
         }
         warn!("lost nos-bfdd, BGP sessions are no longer bfd-guarded");
         book.reset();
+        sessions.set_bfd_states(book.states());
         if wait_retry(&mut shutdown).await {
             return;
         }
@@ -376,5 +392,29 @@ mod tests {
             b.on_state(&key("rt1", "192.0.2.9"), BfdState::Down, true),
             None
         );
+    }
+
+    #[test]
+    fn states_follow_events_and_clear_on_reset_and_deregister() {
+        let mut b = Book::default();
+        b.sync(&target("rt1", &["192.0.2.1"]));
+        assert!(b.states().is_empty());
+        let k = key("rt1", "192.0.2.1");
+        b.on_state(&k, BfdState::Init, true);
+        assert_eq!(b.states()[&ip("192.0.2.1")], BfdState::Init);
+        b.on_state(&k, BfdState::Up, true);
+        assert_eq!(b.states()[&ip("192.0.2.1")], BfdState::Up);
+        // A stranger's event is not recorded.
+        b.on_state(&key("rt1", "192.0.2.9"), BfdState::Up, true);
+        assert_eq!(b.states().len(), 1);
+        b.sync(&target("rt2", &["192.0.2.1"]));
+        assert!(b.states().is_empty(), "table move");
+        b.on_state(&key("rt2", "192.0.2.1"), BfdState::Up, true);
+        b.sync(&target("rt2", &[]));
+        assert!(b.states().is_empty(), "deregistered");
+        b.sync(&target("rt2", &["192.0.2.1"]));
+        b.on_state(&key("rt2", "192.0.2.1"), BfdState::Up, true);
+        b.reset();
+        assert!(b.states().is_empty(), "connection lost");
     }
 }

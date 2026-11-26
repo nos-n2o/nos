@@ -86,6 +86,10 @@ pub struct EvpnRouteInfo {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "wire flags, one per independent fact"
+)]
 pub struct RouteEntry {
     /// Every next hop of this candidate — two or more is an equal-cost
     /// multipath (ECMP) route, installed as one kernel route.
@@ -121,6 +125,26 @@ pub struct RouteEntry {
     /// stays `false`).
     #[serde(default)]
     pub blackhole: bool,
+    /// The route's metric (an OSPF SPF cost, a BGP best path's MED); `None`
+    /// for a source without one.
+    #[serde(default)]
+    pub metric: Option<u32>,
+    /// The source's administrative preference (lower wins).
+    #[serde(default)]
+    pub preference: u8,
+    /// Seconds since the candidate last appeared or its next hops changed
+    /// (reset when `nos-ribd` restarts).
+    #[serde(default)]
+    pub age_secs: u64,
+    /// The local interface each of `gateways` leaves over, in `gateways`
+    /// order; `None` where unknown (loopback, bond and SVI are not named).
+    #[serde(default)]
+    pub interfaces: Vec<Option<String>>,
+    /// The candidate is the one `nos-ribd` handed to the kernel (logical, not
+    /// read back: false for a `Connected` route, a loser, or while a kernel
+    /// write is pending retry).
+    #[serde(default)]
+    pub installed: bool,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -169,6 +193,9 @@ pub struct BgpRoute {
     /// An RFC 7999 blackhole: install a discard route; `next_hops` is empty.
     #[serde(default)]
     pub discard: bool,
+    /// The best path's `MULTI_EXIT_DISC`, for `show route`.
+    #[serde(default)]
+    pub metric: Option<u32>,
 }
 
 /// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
@@ -693,6 +720,7 @@ mod tests {
             next_hops: vec![IpAddr::from([10, 0, 0, 1])],
             backup_next_hop: None,
             discard: false,
+            metric: None,
         }
     }
 
@@ -773,6 +801,7 @@ mod tests {
             next_hops: (0..255).map(v6).collect(),
             backup_next_hop: Some(v6(999)),
             discard: false,
+            metric: Some(u32::MAX),
         };
         let frame =
             RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(vec![worst; BGP_PUSH_CHUNK])]);
@@ -782,6 +811,44 @@ mod tests {
         IpcCodec::<RibRequest>::default()
             .encode(frame, &mut buf)
             .unwrap();
+    }
+
+    #[test]
+    fn route_entry_attributes_round_trip_and_default_in_json() {
+        let e = RouteEntry {
+            gateways: vec![IpAddr::from([10, 0, 0, 1])],
+            source: RouteSourceKind::Ospf,
+            backup: None,
+            discard: false,
+            evpn: None,
+            backup_tunnel: false,
+            mpls_labels: vec![vec![]],
+            vpn: vec![],
+            blackhole: false,
+            metric: Some(20),
+            preference: 110,
+            age_secs: 7,
+            interfaces: vec![Some("eth0.5".into())],
+            installed: true,
+        };
+        let bytes = postcard::to_allocvec(&e).unwrap();
+        assert_eq!(postcard::from_bytes::<RouteEntry>(&bytes).unwrap(), e);
+        let mut j = serde_json::to_value(&e).unwrap();
+        assert_eq!(serde_json::from_value::<RouteEntry>(j.clone()).unwrap(), e);
+        for k in [
+            "metric",
+            "preference",
+            "age_secs",
+            "interfaces",
+            "installed",
+        ] {
+            j.as_object_mut().unwrap().remove(k);
+        }
+        let old: RouteEntry = serde_json::from_value(j).unwrap();
+        assert_eq!(
+            (old.metric, old.preference, old.installed),
+            (None, 0, false)
+        );
     }
 
     fn vpn_route(i: u32, paths: usize) -> VpnRoute {

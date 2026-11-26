@@ -245,12 +245,16 @@ fn lab() -> Lab {
             "ospf" => serve(role, name, &path, |r: OspfRequest| {
                 vec![match r {
                     OspfRequest::GetDatabase => OspfEvent::Database(Vec::new()),
+                    OspfRequest::GetInterfaces => OspfEvent::Interfaces(Vec::new()),
+                    OspfRequest::GetRoutes => OspfEvent::Routes(Vec::new()),
                     _ => OspfEvent::Neighbors(Vec::new()),
                 }]
             }),
             _ => serve(role, name, &path, |r: Ospfv3Request| {
                 vec![match r {
                     Ospfv3Request::GetDatabase => Ospfv3Event::Database(Vec::new()),
+                    Ospfv3Request::GetInterfaces => Ospfv3Event::Interfaces(Vec::new()),
+                    Ospfv3Request::GetRoutes => Ospfv3Event::Routes(Vec::new()),
                     _ => Ospfv3Event::Neighbors(Vec::new()),
                 }]
             }),
@@ -325,6 +329,10 @@ async fn every_show_command_runs_against_its_daemon() {
             "show port-aggregate bond9",
             "show lacp",
             "show lacp bond9",
+            "show lacp detail",
+            "show lacp bond9 detail",
+            "show lldp neighbors interface eth0",
+            "show lldp neighbors interface eth0 detail",
             "show lldp neighbors",
             "show spanning-tree",
             "show spanning-tree detail",
@@ -345,6 +353,12 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bgp summary",
             "show bgp summary instance b1",
             "show bgp summary instance nope",
+            "show bgp neighbor",
+            "show bgp neighbor 192.0.2.2",
+            "show bgp neighbor 192.0.2.99",
+            "show bgp neighbor instance b1",
+            "show bgp neighbor 192.0.2.2 instance b1",
+            "show bgp neighbor instance nope",
             "show bgp evpn",
             "show bgp flowspec",
             "show bgp flowspec",
@@ -353,6 +367,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show bgp vpnv4",
             "show bgp vpnv6 rd 65001:1",
             "show ospf neigh",
+            "show ospf interface",
+            "show ospf route",
             "show ospf database",
             "show ospf database router 1.1.1.1",
             "show ospf database bogus",
@@ -360,6 +376,8 @@ async fn every_show_command_runs_against_its_daemon() {
             "show ospf neighbors",
             "show ospf segment-routing",
             "show ospfv3 neigh",
+            "show ospfv3 interface",
+            "show ospfv3 route",
             "show ospfv3 database",
             "show ospfv3 database link 0x2001",
             "show ospfv3 database bogus",

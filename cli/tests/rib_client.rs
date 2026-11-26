@@ -17,6 +17,11 @@ fn sample_prefix_routes() -> PrefixRoutes {
             mpls_labels: vec![],
             vpn: vec![],
             blackhole: false,
+            metric: None,
+            preference: 0,
+            age_secs: 0,
+            interfaces: vec![],
+            installed: false,
         }],
     }
 }

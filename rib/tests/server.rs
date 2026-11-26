@@ -386,6 +386,7 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
                 next_hops: vec![next_hop, sibling],
                 backup_next_hop: None,
                 discard: false,
+                metric: None,
             }]),
         ]))
         .await
@@ -441,6 +442,7 @@ async fn push_bgp_full_past_max_frame_is_chunked_and_applied_atomically() {
             next_hops: vec![v6(N + 1)],
             backup_next_hop: Some(v6(N + 2)),
             discard: false,
+            metric: None,
         })
         .collect();
     let whole = RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(routes.clone())]);
@@ -674,6 +676,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
         next_hops: vec![next_hop],
         backup_next_hop: None,
         discard: false,
+        metric: None,
     };
 
     // A genuinely new prefix triggers apply_delta.
@@ -709,6 +712,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
                 next_hops: vec![next_hop],
                 backup_next_hop: None,
                 discard: false,
+                metric: None,
             }),
         ]))
         .await
@@ -752,6 +756,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
                     next_hops: vec!["10.0.0.1".parse().unwrap()],
                     backup_next_hop: None,
                     discard: false,
+                    metric: None,
                 }),
             ]))
             .await
@@ -981,6 +986,7 @@ async fn bgp_pushes_are_refused_to_every_other_role() {
                 next_hops: vec!["10.0.0.1".parse().unwrap()],
                 backup_next_hop: None,
                 discard: false,
+                metric: None,
             }),
         ]))
         .await

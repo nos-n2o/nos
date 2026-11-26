@@ -856,7 +856,7 @@ fn push_snapshot_includes_peer_learned_route_with_next_hop() {
     let (_, routes) = rib.push_snapshot();
     assert_eq!(
         routes.get(&prefix("1.2.3.0/24")),
-        Some(&(vec![addr("10.0.0.9")], None, false))
+        Some(&(vec![addr("10.0.0.9")], None, false, None))
     );
 }
 

@@ -120,6 +120,27 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
             "graceful restart negotiated peer={IP_A} .*notification=true"
         ))
         .await?;
+    // #1443: `?instance=` and `?peer=` narrow the summary; unknown ones are 404.
+    let a = w.a()?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/summary?instance=r1", None, 200)
+        .await?;
+    expect_body(&body, "Established")?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bgp/summary?instance=r1&peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    if body.matches("\"remote_address\"").count() != 1 {
+        bail!("?peer={IP_B} should return exactly one peer: {body}");
+    }
+    for q in ["instance=nope", "peer=203.0.113.99"] {
+        a.rest_expect(Method::GET, &format!("/v1/bgp/summary?{q}"), None, 404)
+            .await?;
+    }
     // #473: both images were built from one tree, so `nos-restd` reports the
     // same baked-in revision; `unknown` means `NOS_BUILD_REV` never arrived.
     let (ra, rb) = (revision(w.a()?).await?, revision(w.b()?).await?);
@@ -1024,7 +1045,7 @@ async fn wait_summary(r: &Router, needles: &[&str], secs: u64) -> anyhow::Result
 
 /// Polls `GET /v1/bgp/summary` until the peer's JSON entry satisfies `ok`
 /// (a substring cannot assert "non-zero", #1441).
-async fn wait_peer(
+pub(super) async fn wait_peer(
     r: &Router,
     peer: &str,
     what: &str,
@@ -1529,6 +1550,32 @@ async fn soft_reconfig(w: &mut World) -> anyhow::Result<()> {
         .await?;
     b.assert_quiet("bgp session established", est_b, 6).await?;
     a.assert_quiet("bgp session established", est_a, 1).await?;
+
+    // #1442: the per-session detail of the summary, on both routers; the
+    // pre-policy received count exists only where soft reconfiguration is on.
+    log("summary detail: negotiated caps, local endpoint, advertised/received counts");
+    wait_peer(b, IP_A.s(), "received >= 1 (soft-in)", 30, |p| {
+        p["received_prefixes"]["ipv4"].as_u64() >= Some(1)
+    })
+    .await?;
+    wait_peer(a, IP_B.s(), "advertised >= 1", 30, |p| {
+        p["advertised_prefixes"]["ipv4"].as_u64() >= Some(1)
+    })
+    .await?;
+    for (r, local, peer) in [(a, IP_A.s(), IP_B.s()), (b, IP_B.s(), IP_A.s())] {
+        wait_peer(r, peer, "negotiated, local endpoint", 30, |p| {
+            p["negotiated"]["four_octet_as"] == true
+                && p["negotiated"]["route_refresh"] == true
+                && p["local_address"] == local
+                && p["local_port"].as_u64().is_some()
+                && p["advertised_prefixes"]["ipv4"].is_u64()
+        })
+        .await?;
+    }
+    wait_peer(a, IP_B.s(), "no soft-reconfig: received unknown", 5, |p| {
+        p["received_prefixes"].is_null()
+    })
+    .await?;
 
     log("tightening router-b's import policy: re-evaluated in place, route rejected");
     let file = policy_file(

@@ -3,8 +3,8 @@
 
 use nos_cli::view::{render, render_detail_list};
 use nos_proto::{
-    AddressFamily, BgpSessionState, GrFamily, GrSummary, MessageCounts, NotificationInfo,
-    PeerIdleStatus, PeerSummary, PrefixCounts, ResetReason,
+    AddressFamily, BgpBfdState, BgpSessionState, GrFamily, GrSummary, MessageCounts,
+    NegotiatedSummary, NotificationInfo, PeerIdleStatus, PeerSummary, PrefixCounts, ResetReason,
 };
 
 fn base(addr: &str) -> PeerSummary {
@@ -36,6 +36,12 @@ fn base(addr: &str) -> PeerSummary {
         last_notification_received: None,
         last_reset_reason: None,
         flap_count: 0,
+        received_prefixes: None,
+        advertised_prefixes: None,
+        negotiated: None,
+        local_address: None,
+        local_port: None,
+        bfd_state: nos_proto::BgpBfdState::None,
     }
 }
 
@@ -85,6 +91,28 @@ fn established() -> PeerSummary {
     });
     p.last_reset_reason = Some(ResetReason::NotificationSent);
     p.flap_count = 2;
+    p.advertised_prefixes = Some(PrefixCounts {
+        ipv4: 2,
+        ipv6: 1,
+        evpn: 0,
+    });
+    p.received_prefixes = Some(PrefixCounts {
+        ipv4: 4,
+        ipv6: 0,
+        evpn: 2,
+    });
+    p.negotiated = Some(NegotiatedSummary {
+        four_octet_as: true,
+        route_refresh: true,
+        enhanced_route_refresh: true,
+        extended_message: false,
+        graceful_restart: false,
+        families: vec!["ipv4-unicast".into(), "l2vpn-evpn".into()],
+        add_path: vec!["ipv4-unicast both".into()],
+    });
+    p.local_address = Some("10.0.0.1".parse().unwrap());
+    p.local_port = Some(41234);
+    p.bfd_state = BgpBfdState::Up;
     p
 }
 

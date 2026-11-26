@@ -11,6 +11,8 @@ use std::net::Ipv4Addr;
 use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
+use crate::schema::NetworkType;
+
 /// One neighbor's state, as reported by `nos-ospfd` — the full RFC 2328
 /// §10.5 ladder. `Down` is an ongoing, valid state (no Hello received yet,
 /// or the dead-interval expired) — a point-to-point link always reports at
@@ -193,6 +195,70 @@ pub struct NeighborSummary {
     pub uptime_secs: Option<u64>,
 }
 
+/// One running OSPF interface, for `show ospf interface` (#1438). Only links
+/// that run are listed (a passive interface or one without an address has no
+/// link, a virtual link is not an attach point).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, View)]
+pub struct InterfaceSummary {
+    /// The attach point's display name (`"<interface>.<tag>"` or
+    /// `"broadcast-domain:<name>"`).
+    #[view(brief, sort, header = "link", order = 0)]
+    pub link: String,
+    /// The kernel device the link runs on.
+    #[view(brief, header = "device", text, order = 1)]
+    pub kernel_interface: String,
+    /// Area the interface belongs to.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "area", text, order = 2)]
+    pub area_id: Ipv4Addr,
+    /// The interface address, `"<address>/<prefix-len>"`.
+    #[view(brief, header = "address", text, order = 3)]
+    pub address: String,
+    /// The RFC 2328 network type.
+    #[view(brief, header = "type", text, order = 4)]
+    pub network_type: NetworkType,
+    /// State of the interface (RFC 2328 section 9.1).
+    #[view(brief, header = "state", text, order = 5)]
+    pub state: LinkInterfaceState,
+    /// Interface output cost.
+    #[view(brief, header = "cost", order = 6)]
+    pub cost: u16,
+    /// `HelloInterval` in seconds.
+    #[view(brief, header = "hello", unit = secs, order = 7)]
+    pub hello_interval: u16,
+    /// `RouterDeadInterval` in seconds.
+    #[view(brief, header = "dead", unit = secs, order = 8)]
+    pub dead_interval: u16,
+    /// `RxmtInterval` in seconds (the fixed protocol constant, not configurable).
+    #[view(brief, header = "rxmt", unit = secs, order = 9)]
+    pub retransmit_interval: u16,
+    /// This link's configured Router Priority.
+    #[view(order = 10)]
+    pub priority: u8,
+    /// The elected Designated Router, if any.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "dr", text, order = 11)]
+    pub dr: Option<Ipv4Addr>,
+    /// The elected Backup Designated Router, if any.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "bdr", text, order = 12)]
+    pub bdr: Option<Ipv4Addr>,
+    /// Known neighbors on the link.
+    #[view(brief, header = "neighbors", unit = count, order = 13)]
+    pub neighbor_count: u32,
+    /// Neighbors that reached `Full`.
+    #[view(brief, header = "full", unit = count, order = 14)]
+    pub full_neighbor_count: u32,
+    /// The link's MTU.
+    #[view(order = 15)]
+    pub mtu: u16,
+    /// Whether the DBD MTU mismatch check is off.
+    #[view(unit = bool, order = 16)]
+    pub mtu_ignore: bool,
+}
+
 /// A neighbor's RFC 5613 Link-Local Signaling data (EOF TLV).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -249,6 +315,57 @@ pub struct LsaSummary {
     pub virtual_links: Vec<Ipv4Addr>,
 }
 
+/// How an OSPF route was learned (RFC 2328 section 11).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoutePathClass {
+    /// Inside the area.
+    #[serde(rename = "intra-area")]
+    IntraArea,
+    /// Via an area border router (Summary-LSA).
+    #[serde(rename = "inter-area")]
+    InterArea,
+    /// AS-external, metric type 1.
+    #[serde(rename = "external-1")]
+    External1,
+    /// AS-external, metric type 2.
+    #[serde(rename = "external-2")]
+    External2,
+}
+
+/// One computed route, for `show ospf route` (#1453).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct RouteSummary {
+    /// The destination, `"<address>/<prefix-len>"`.
+    #[view(brief, sort, header = "prefix", order = 0)]
+    pub prefix: String,
+    /// How the route was learned.
+    #[view(brief, header = "class", text, order = 1)]
+    pub class: RoutePathClass,
+    /// Cost to the destination (for an external-2 route: the internal distance
+    /// to the advertising router).
+    #[view(brief, header = "cost", order = 2)]
+    pub cost: u32,
+    /// An external-2 route's own metric.
+    #[view(brief, header = "e2-cost", order = 3)]
+    pub type2_cost: Option<u32>,
+    /// Area the route was computed in.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[view(brief, header = "area", text, order = 4)]
+    pub area: Ipv4Addr,
+    /// Next hops, `"<address>"` or `"<address> dev <interface>"`.
+    #[view(brief, header = "next-hops", text, order = 5)]
+    pub next_hops: Vec<String>,
+    /// The router the cost was built toward; `None` for a transit network or
+    /// a discard route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[view(brief, header = "adv-router", text, order = 6)]
+    pub advertising_router: Option<Ipv4Addr>,
+}
+
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -269,6 +386,10 @@ pub enum OspfRequest {
     /// One-shot: the segment routing state (SRGBs, Prefix-SIDs, Adj-SIDs),
     /// local and received (#1382).
     GetSegmentRouting,
+    /// One-shot: every running interface's summary (#1438).
+    GetInterfaces,
+    /// One-shot: the computed routes (#1453).
+    GetRoutes,
 }
 
 /// Messages sent from `nos-ospfd` to a query client.
@@ -280,6 +401,10 @@ pub enum OspfEvent {
     Database(Vec<LsaSummary>),
     /// Reply with the segment routing state.
     SegmentRouting(SrSummary),
+    /// Reply with the interfaces.
+    Interfaces(Vec<InterfaceSummary>),
+    /// Reply with the routes.
+    Routes(Vec<RouteSummary>),
 }
 
 /// `show ospf segment-routing` (#1382): what this router advertises and what

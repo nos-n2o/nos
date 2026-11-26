@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ipnet::{IpNet, Ipv6Net};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
-    BfdDiag, LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, RedistributeUpdate,
+    BfdDiag, LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3InterfaceSummary,
+    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3RouteSummary, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
@@ -3889,6 +3889,58 @@ impl LinkManager {
             .collect()
     }
 
+    /// `show ospfv3 route` (#1453): the computed routes sorted by prefix; a
+    /// next hop's interface is the link whose ifindex it was learned on.
+    pub async fn route_summaries(&self) -> Vec<Ospfv3RouteSummary> {
+        let mut routes = self.compute_routes().await;
+        routes.sort_by_key(|r| r.prefix);
+        let devs: HashMap<u32, String> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .map(|e| (e.config.interface_id, e.config.kernel_interface.clone()))
+            .collect();
+        routes
+            .iter()
+            .map(|r| {
+                let (class, type2_cost, cost) = r.display_class();
+                Ospfv3RouteSummary {
+                    prefix: r.prefix.to_string(),
+                    class,
+                    cost,
+                    type2_cost,
+                    area: r.area,
+                    next_hops: r
+                        .next_hops
+                        .iter()
+                        .map(|(a, i)| match devs.get(i) {
+                            Some(dev) => format!("{a} dev {dev}"),
+                            None => a.to_string(),
+                        })
+                        .collect(),
+                    advertising_router: r.advertising_router(),
+                }
+            })
+            .collect()
+    }
+
+    /// `show ospfv3 interface` (#1438): one row per running link, sorted by
+    /// name. A virtual link is not an attach point and is skipped.
+    pub async fn interface_summaries(&self) -> Vec<Ospfv3InterfaceSummary> {
+        let mut rows: Vec<_> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.virtual_link.is_none())
+            .map(to_interface_summary)
+            .collect();
+        rows.sort_by(|a, b| a.link.cmp(&b.link));
+        rows
+    }
+
     /// Every installed LSA's header: the area stores' rows carry
     /// `link: None`, each link's own store's rows carry its attach point, and
     /// the AS-scope store's rows carry area `0.0.0.0` and `link: None`.
@@ -3984,7 +4036,8 @@ impl LinkManager {
             if ctx.skip_summaries {
                 transit.extend(spf::transit_summaries(router_id, &lsas));
             }
-            for entry in spf::compute_in(router_id, &lsas, &ctx) {
+            for mut entry in spf::compute_in(router_id, &lsas, &ctx) {
+                entry.area = area_id;
                 let prefix = entry.prefix;
                 match merged.get_mut(&prefix) {
                     Some(existing) if entry.rank() >= existing.rank() => continue,
@@ -4105,6 +4158,39 @@ fn to_neighbor_state(state: NeighborState) -> OspfNeighborState {
         NeighborState::Exchange => OspfNeighborState::Exchange,
         NeighborState::Loading => OspfNeighborState::Loading,
         NeighborState::Full => OspfNeighborState::Full,
+    }
+}
+
+fn to_interface_summary(entry: &LinkEntry) -> Ospfv3InterfaceSummary {
+    let c = &entry.config;
+    let status = entry.status.borrow();
+    let count = |n| u32::try_from(n).unwrap_or(u32::MAX);
+    Ospfv3InterfaceSummary {
+        link: c.attach_point.clone(),
+        kernel_interface: c.kernel_interface.clone(),
+        interface_id: c.interface_id,
+        area_id: c.area_id,
+        address: c.link_local_address,
+        network_type: c.network_type,
+        state: to_interface_state(status.interface_state),
+        cost: c.cost,
+        hello_interval: c.hello_interval,
+        dead_interval: c.dead_interval,
+        retransmit_interval: u16::try_from(RXMT_INTERVAL.as_secs()).unwrap_or(u16::MAX),
+        priority: c.priority,
+        dr: status.dr,
+        bdr: status.bdr,
+        neighbor_count: count(status.neighbors.len()),
+        full_neighbor_count: count(
+            status
+                .neighbors
+                .values()
+                .filter(|n| n.state == NeighborState::Full)
+                .count(),
+        ),
+        mtu: c.mtu,
+        mtu_ignore: c.mtu_ignore,
+        prefixes: c.prefixes.iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -6149,6 +6235,17 @@ pub(crate) mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, stub);
         assert_eq!(routes[0].next_hop, w_link_local);
+        // `show ospfv3 route` (#1453).
+        let rows = manager.route_summaries().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prefix, "2001:db8:1::/64");
+        assert_eq!(rows[0].class, nos_proto::RoutePathClass::IntraArea);
+        assert_eq!(rows[0].area, cfg.area_id);
+        assert_eq!(rows[0].advertising_router, Some(w));
+        assert_eq!(
+            rows[0].next_hops,
+            [format!("fe80::2 dev {}", cfg.kernel_interface)]
+        );
     }
 
     #[tokio::test]
@@ -8258,6 +8355,12 @@ pub(crate) mod tests {
             [1, 2, 3, 4].map(|n| joined(&wire, n)),
             [false, false, true, true]
         );
+        let ifs = segment[0].interface_summaries().await;
+        assert_eq!(ifs.len(), 1, "{ifs:?}");
+        assert_eq!((ifs[0].dr, ifs[0].bdr), (Some(id(4)), Some(id(3))));
+        assert_eq!((ifs[0].neighbor_count, ifs[0].full_neighbor_count), (3, 2));
+        assert!(ifs[0].address.to_string().starts_with("fe80::"), "{ifs:?}");
+        assert!(!ifs[0].prefixes.is_empty(), "{ifs:?}");
         let one = segment[0].neighbor_summaries().await;
         assert_eq!(one.len(), 3, "{one:?}");
         for n in &one {

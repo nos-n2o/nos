@@ -1443,14 +1443,17 @@ impl BgpRib {
             .filter_map(|(prefix, route)| {
                 route.next_hop.map(|next_hop| {
                     if self.is_blackhole(*prefix, route) {
-                        return (*prefix, (vec![], None, true));
+                        return (*prefix, (vec![], None, true, None));
                     }
                     let hops = self
                         .multipaths
                         .get(prefix)
                         .cloned()
                         .unwrap_or_else(|| vec![next_hop]);
-                    (*prefix, (hops, self.backups.get(prefix).copied(), false))
+                    (
+                        *prefix,
+                        (hops, self.backups.get(prefix).copied(), false, route.med),
+                    )
                 })
             })
             .collect();
@@ -1729,6 +1732,19 @@ impl BgpRib {
         let [v4, v6] = self.path_counts.get(&peer).copied().unwrap_or_default();
         let evpn = len(self.evpn_adj_rib_in.get(&peer).map_or(0, HashMap::len));
         [v4, v6, evpn]
+    }
+
+    /// Prefixes currently advertised to `peer`, `[ipv4, ipv6, evpn]`.
+    // ponytail: counts `adj_rib_out` per call (O(advertised) under the RIB
+    // lock, only for an `Established` peer in `show bgp summary`); upgrade
+    // to counters kept at each `adj_rib_out` mutation site if it shows up.
+    pub fn advertised_prefixes(&self, peer: IpAddr) -> [u32; 3] {
+        let len = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let sent = self.adj_rib_out.get(&peer).into_iter().flatten();
+        let v4 = sent.clone().filter(|p| matches!(p, IpNet::V4(_))).count();
+        let v6 = sent.count() - v4;
+        let evpn = self.evpn_adj_rib_out.get(&peer).map_or(0, HashMap::len);
+        [len(v4), len(v6), len(evpn)]
     }
 
     /// Flowspec routes held from `peer`, `[ipv4, ipv6]`.

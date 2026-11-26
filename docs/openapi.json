@@ -86,6 +86,20 @@
         ],
         "type": "object"
       },
+      "AclClearResult": {
+        "properties": {
+          "cleared": {
+            "description": "(device, direction) attachments whose counters restarted at 0.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "type": "object"
+      },
       "AclDirection": {
         "description": "Which way an ACL filters on its device.",
         "enum": [
@@ -824,6 +838,17 @@
             "type": "object"
           }
         ]
+      },
+      "BgpBfdState": {
+        "description": "Whether a peer is guarded by a BFD session, and its state (`nos-bgpd`'s own\nBFD client).",
+        "enum": [
+          "None",
+          "Down",
+          "Init",
+          "Up",
+          "AdminDown"
+        ],
+        "type": "string"
       },
       "BgpBlackhole": {
         "description": "RFC 7999 remotely triggered blackhole: a unicast route from this group's\npeers that carries BLACKHOLE (65535:666) and falls inside `prefix_list`\n(the authorisation, with normal prefix-list `range` rules: write\n`10.0.0.0/8 upto 32` to cover host routes) is tagged `NO_EXPORT` and, once\nbest, installed as a discard route. It still runs through `import_policy`,\nwhich under the default deny-all must accept it. eBGP peer-groups only.",
@@ -4220,6 +4245,55 @@
         ],
         "type": "object"
       },
+      "NegotiatedSummary": {
+        "description": "What an `Established` session negotiated (OPEN capabilities, RFC 5492).",
+        "properties": {
+          "add_path": {
+            "description": "RFC 7911 add-path direction per family, as `<family> <none|receive|send|both>`\n(only families with a direction).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "enhanced_route_refresh": {
+            "description": "RFC 7313 enhanced route refresh.",
+            "type": "boolean"
+          },
+          "extended_message": {
+            "description": "RFC 8654 extended message size.",
+            "type": "boolean"
+          },
+          "families": {
+            "description": "Address families both sides carry, by their config name.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "four_octet_as": {
+            "description": "RFC 6793 four-octet AS numbers.",
+            "type": "boolean"
+          },
+          "graceful_restart": {
+            "description": "RFC 4724 graceful restart (both sides).",
+            "type": "boolean"
+          },
+          "route_refresh": {
+            "description": "RFC 2918 route refresh.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "four_octet_as",
+          "route_refresh",
+          "enhanced_route_refresh",
+          "extended_message",
+          "graceful_restart",
+          "families",
+          "add_path"
+        ],
+        "type": "object"
+      },
       "NeighEntry": {
         "description": "One IP-to-MAC neighbor entry of an IP-VRF.",
         "properties": {
@@ -5924,6 +5998,12 @@
       "RouteEntry": {
         "description": "One candidate route for a prefix.",
         "properties": {
+          "age_secs": {
+            "description": "Seconds since the candidate last appeared or its next hops changed\n(reset when `nos-ribd` restarts).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "backup": {
             "description": "Pre-computed backup next hop, installed in the kernel at a higher\nmetric so it takes over the instant the primary is withdrawn.",
             "type": [
@@ -5961,6 +6041,29 @@
             },
             "type": "array"
           },
+          "installed": {
+            "description": "The candidate is the one `nos-ribd` handed to the kernel (logical, not\nread back: false for a `Connected` route, a loser, or while a kernel\nwrite is pending retry).",
+            "type": "boolean"
+          },
+          "interfaces": {
+            "description": "The local interface each of `gateways` leaves over, in `gateways`\norder; `None` where unknown (loopback, bond and SVI are not named).",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": "array"
+          },
+          "metric": {
+            "description": "The route's metric (an OSPF SPF cost, a BGP best path's MED); `None`\nfor a source without one.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "mpls_labels": {
             "description": "The MPLS label stack each of `gateways` is forwarded with (RFC 4364\nsection 4.3.4), outermost first, in `gateways` order; every stack is\nempty for a source other than `Vpn`.",
             "items": {
@@ -5972,6 +6075,12 @@
               "type": "array"
             },
             "type": "array"
+          },
+          "preference": {
+            "description": "The source's administrative preference (lower wins).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "source": {
             "$ref": "#/components/schemas/RouteSourceKind",
@@ -5990,6 +6099,16 @@
           "source"
         ],
         "type": "object"
+      },
+      "RoutePathClass": {
+        "description": "How an OSPF route was learned (RFC 2328 section 11).",
+        "enum": [
+          "intra-area",
+          "inter-area",
+          "external-1",
+          "external-2"
+        ],
+        "type": "string"
       },
       "RouteSourceKind": {
         "description": "Wire twin of `nos-rib`'s internal `RouteSource` — kept separate so\n`nos-rib`'s own domain type doesn't need to derive wire traits it has no\nother use for.",
@@ -8151,6 +8270,37 @@
         ]
       }
     },
+    "/v1/acl/counters/clear": {
+      "post": {
+        "operationId": "acl_clear_all",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AclClearResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-acld is not running"
+          }
+        },
+        "summary": "Reset the counters of every ACL",
+        "tags": [
+          "clear"
+        ]
+      }
+    },
     "/v1/acl/{name}": {
       "get": {
         "operationId": "acl_one",
@@ -8200,6 +8350,58 @@
         "summary": "One ACL with its counters",
         "tags": [
           "show"
+        ]
+      }
+    },
+    "/v1/acl/{name}/counters/clear": {
+      "post": {
+        "operationId": "acl_clear_one",
+        "parameters": [
+          {
+            "description": "ACL name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AclClearResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such ACL"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-acld is not running"
+          }
+        },
+        "summary": "Reset the counters of one ACL",
+        "tags": [
+          "clear"
         ]
       }
     },
@@ -8620,7 +8822,28 @@
     },
     "/v1/bgp/summary": {
       "get": {
+        "description": "`instance` keeps one instance, `peer` keeps the one session with that address (searched in every instance unless `instance` is given).",
         "operationId": "bgp_summary",
+        "parameters": [
+          {
+            "description": "only this BGP instance",
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "only the session with this peer address",
+            "in": "query",
+            "name": "peer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -8631,6 +8854,26 @@
               }
             },
             "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "peer is not an IP address"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such bgp instance or peer"
           },
           "503": {
             "content": {
@@ -9746,6 +9989,37 @@
         ]
       }
     },
+    "/v1/ospf/interfaces": {
+      "get": {
+        "operationId": "ospf_interfaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF interfaces, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/ospf/neighbors": {
       "get": {
         "operationId": "ospf_neighbors",
@@ -9772,6 +10046,37 @@
           }
         },
         "summary": "OSPF neighbors, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospf/routes": {
+      "get": {
+        "operationId": "ospf_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF routes, per instance",
         "tags": [
           "show"
         ]
@@ -9839,6 +10144,37 @@
         ]
       }
     },
+    "/v1/ospfv3/interfaces": {
+      "get": {
+        "operationId": "ospfv3_interfaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPFv3 interfaces, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/ospfv3/neighbors": {
       "get": {
         "operationId": "ospfv3_neighbors",
@@ -9865,6 +10201,37 @@
           }
         },
         "summary": "OSPFv3 neighbors, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospfv3/routes": {
+      "get": {
+        "operationId": "ospfv3_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPFv3 routes, per instance",
         "tags": [
           "show"
         ]
