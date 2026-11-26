@@ -2044,6 +2044,35 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(send_err, err_a, 5).await?;
     b.assert_quiet(send_err, err_b, 5).await?;
 
+    // #1519: carrier loss / admin-down flushes the neighbors at once (not at
+    // the 15s TTL), keeps the socket, and the fast-start path relearns.
+    let flushed = |r: &str| format!("lldp neighbors flushed interface=eth1 reason=\"{r}\"");
+    let (fl_a, fl_b) = (
+        a.count(&flushed("no-carrier")),
+        b.count(&flushed("admin-down")),
+    );
+    let (base_exp, base_a, base_b) = (
+        a.count(expired),
+        a.count(&learned_a("")),
+        b.count(&learned_b("")),
+    );
+    log("router-b's eth1 down: router-a loses carrier, router-b is admin-down");
+    w.set_link("router-b", "eth1", false).await?;
+    a.wait_new(&flushed("no-carrier"), fl_a, 10).await?;
+    b.wait_new(&flushed("admin-down"), fl_b, 10).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/lldp/neighbors", None, 200)
+        .await?;
+    if body.contains("\"eth1\"") {
+        bail!("router-a still lists an eth1 neighbor after carrier loss: {body}");
+    }
+    if a.count(expired) != base_exp {
+        bail!("the flush came from the ttl ageout, not the carrier loss");
+    }
+    w.set_link("router-b", "eth1", true).await?;
+    a.wait_new(&learned_a(""), base_a, 30).await?;
+    b.wait_new(&learned_b(""), base_b, 30).await?;
+
     // Drop receive on router-a: its link restarts as transmit-only.
     a.provision(&host("router-a", &["--no-lldp-receive-interface", "eth1"]))
         .await?;

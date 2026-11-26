@@ -436,6 +436,15 @@ fn needs_reopen(opened_epoch: u64, has_socket: bool, table: &LinkTable, name: &s
     }
 }
 
+/// Why a link's neighbors are forgotten while its device stays: 802.1AB
+/// portEnabled false on carrier loss or admin-down (#1519).
+fn flush_reason(g: Gate) -> Option<&'static str> {
+    match g {
+        Gate::Down(r @ ("no-carrier" | "admin-down")) => Some(r),
+        _ => None,
+    }
+}
+
 /// Applies [`needs_reopen`]; true when a fresh socket was opened (the caller
 /// restarts the fast-start burst). A closed or failed open leaves `socket`
 /// `None`, retried on the next link event or transmit tick.
@@ -451,6 +460,15 @@ fn follow_link(
             port.neighbors = NeighborTable::default();
         }
     };
+    if let Some(reason) = flush_reason(gate(table, &cfg.interface)) {
+        // The non-empty guard makes this fire once per up-to-down transition.
+        if let Some(port) = ports.lock().unwrap().get_mut(&cfg.interface)
+            && !port.neighbors.is_empty()
+        {
+            port.neighbors = NeighborTable::default();
+            info!(interface = %cfg.interface, reason, "lldp neighbors flushed");
+        }
+    }
     match needs_reopen(*opened_epoch, socket.is_some(), table, &cfg.interface) {
         Reopen::Keep => false,
         Reopen::Close => {
@@ -683,6 +701,57 @@ mod tests {
             },
         );
         assert!(!follow_link(&c, &ports, &table, &mut socket, &mut epoch));
+    }
+
+    #[test]
+    fn flush_reason_cases() {
+        assert_eq!(flush_reason(Gate::Down("no-carrier")), Some("no-carrier"));
+        assert_eq!(flush_reason(Gate::Down("admin-down")), Some("admin-down"));
+        assert_eq!(flush_reason(Gate::Down("absent")), None);
+        assert_eq!(flush_reason(Gate::Up), None);
+        assert_eq!(flush_reason(Gate::Ungated), None);
+    }
+
+    #[test]
+    fn follow_link_flushes_on_carrier_loss_and_admin_down_only() {
+        use nos_proto::{InterfaceEvent as E, LinkState};
+        let (me, peer) = (cfg(1), cfg(2));
+        let ports = shared();
+        let ls = |admin_up, carrier| LinkState {
+            name: me.interface.clone(),
+            ifindex: 3,
+            admin_up,
+            carrier,
+            port_aggregate: None,
+        };
+        let mut table = LinkTable::default();
+        let learn = || {
+            rx(&me, &ports, &frame_from(&peer, 120), Instant::now());
+        };
+        let empty = || {
+            let g = ports.lock().unwrap();
+            g[&me.interface].neighbors.is_empty()
+        };
+        let (mut socket, mut epoch) = (None, 0);
+        // Carrier lost: flushed, a second pass is a no-op.
+        crate::link_client::apply(&mut table, E::LinkAdded(ls(true, false)));
+        learn();
+        assert!(!empty());
+        follow_link(&me, &ports, &table, &mut socket, &mut epoch);
+        assert!(empty());
+        follow_link(&me, &ports, &table, &mut socket, &mut epoch);
+        assert!(empty());
+        // Carrier back: nothing is cleared by the gate itself.
+        crate::link_client::apply(&mut table, E::LinkAdded(ls(true, true)));
+        learn();
+        follow_link(&me, &ports, &table, &mut socket, &mut epoch);
+        // (a reopen on the new epoch may clear; only the down cases are asserted)
+        learn();
+        // Admin down: flushed.
+        crate::link_client::apply(&mut table, E::LinkAdded(ls(false, true)));
+        assert!(!empty());
+        follow_link(&me, &ports, &table, &mut socket, &mut epoch);
+        assert!(empty());
     }
 
     /// `handle_rx` with a fresh log bucket.

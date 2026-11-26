@@ -45,6 +45,10 @@ pub struct NeighborTable {
 }
 
 impl NeighborTable {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn apply(&mut self, pdu: Lldpdu, now: Instant) -> Update {
         let key = (pdu.chassis_id.clone(), pdu.port_id.clone());
         if pdu.ttl == 0 {
