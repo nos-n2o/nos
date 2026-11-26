@@ -8748,42 +8748,51 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
     let target = OSPF_BROADCAST_ADDRESS_C.trim_end_matches("/28");
     let host = format!("{target}/32");
     let (rx0, _) = mpls_packets(w, "router-b").await?;
-    w.dock
-        .in_netns(
-            NETNS_HELPER_IMAGE,
-            "router-a",
-            &[
-                "ip",
-                "route",
-                "add",
-                &host,
-                "encap",
-                "mpls",
-                &sid.to_string(),
-                "via",
-                IP_B.s(),
-                "dev",
-                "eth0",
-                "table",
-                "100",
-            ],
-        )
-        .await?;
-    // The host route may not be in use for the first packets (#1468): log it,
-    // ping, and retry the batch once before failing.
+    let sid_s = sid.to_string();
+    let add = [
+        "ip",
+        "route",
+        "replace",
+        &host,
+        "encap",
+        "mpls",
+        &sid_s,
+        "via",
+        IP_B.s(),
+        "dev",
+        "eth0",
+        "table",
+        "100",
+    ];
+    // The host route may be overwritten in table 100 under us (#1468: seen as
+    // a plain route at the first ping): re-add it before every batch, ping
+    // only once `route get` shows the label, and retry the batch once.
     let mut seen: Vec<String> = Vec::new();
     let mut moved = false;
     let mut last = Ok(());
     for attempt in 1..=2 {
-        let r = w
-            .dock
-            .in_netns(
-                NETNS_HELPER_IMAGE,
-                "router-a",
-                &["ip", "route", "get", target, "oif", "eth0"],
-            )
-            .await
-            .unwrap_or_else(|e| e.to_string());
+        w.dock
+            .in_netns(NETNS_HELPER_IMAGE, "router-a", &add)
+            .await?;
+        let mut r = String::new();
+        for _ in 0..5 {
+            r = w
+                .dock
+                .in_netns(
+                    NETNS_HELPER_IMAGE,
+                    "router-a",
+                    &["ip", "route", "get", target, "oif", "eth0"],
+                )
+                .await
+                .unwrap_or_else(|e| e.to_string());
+            if r.contains("encap mpls") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            w.dock
+                .in_netns(NETNS_HELPER_IMAGE, "router-a", &add)
+                .await?;
+        }
         let tbl = w
             .dock
             .in_netns(
