@@ -270,11 +270,10 @@ pub const ESI3_MAC: (&str, &str) = ("aa:bb:cc:00:00:05", "192.0.2.35");
 pub const EVPN_DP_RT: &str = "65000:10100";
 pub const EVPN_DP_RD_A: &str = "65001:1";
 pub const EVPN_DP_RD_B: &str = "65002:1";
-// `evpn-dataplane` runs HRW on both PEs. With `ESI` and `EVPN_VNI` (CRC-32 of
-// the tag + ESI = 1003094399), RFC 8584 §3.2 weighs `IP_A` (10.50.0.2) at
-// 51651125 and `IP_B` (10.50.0.3) at 1988780236 — router-b is the HRW DF,
-// where modulo ([.2, .3][10100 % 2]) would pick router-a. Deterministic: the
-// addresses, ESI and VNI are all fixed constants.
+// `evpn-dataplane` runs HRW on both PEs. The HRW DF depends on the lab's
+// addresses, so the phase asks `hrw::df_for_lab` (RFC 8584 §3.2, with
+// `ESI`/`EVPN_VNI`): router-b on labs 0 and 1, router-a on lab 2 (pinned by
+// `hrw`'s unit tests). Modulo ([.2, .3][10100 % 2]) is router-a on every lab.
 pub const NET_CE_A: &str = "nos-verify-net-ce-a";
 pub const NET_CE_B: &str = "nos-verify-net-ce-b";
 pub const NET_H: &str = "nos-verify-net-h";
