@@ -2,7 +2,11 @@
 //! fake daemons over real TLS sockets (#131): a stateful fake `nos-configd`,
 //! a fake broker, and one canned fake per queried daemon.
 
-#![allow(clippy::excessive_nesting, clippy::match_wildcard_for_single_variants)]
+#![allow(
+    clippy::excessive_nesting,
+    clippy::match_wildcard_for_single_variants,
+    clippy::too_many_lines
+)]
 
 mod common;
 
@@ -147,6 +151,7 @@ fn fdb_table() -> FdbEvent {
     })
 }
 
+#[allow(clippy::too_many_lines, reason = "one fixture row per daemon reply")]
 fn lab() -> Lab {
     shared().install("user", "admin");
     let dir = tempfile::tempdir().unwrap();
@@ -306,6 +311,7 @@ fn lab() -> Lab {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines, reason = "one fixture row per show command")]
 async fn every_show_command_runs_against_its_daemon() {
     let lab = lab();
     let (mode, exited) = run(
