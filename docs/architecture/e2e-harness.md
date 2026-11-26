@@ -81,3 +81,8 @@ A container cannot `modprobe`, so the docker host must have every module the lab
 ## Host tools
 
 - `restconf-conformance` (#1177) runs `yanglint` (`libyang3-tools`; `libyang2-tools` on older Ubuntu/Debian) on the host as an independent oracle against `docs/yang/nos-config.yang`; it is never in the runtime image. A missing binary fails the phase (no silent skip). CI installs it in `verify-e2e.yml`; locally `apt-get install libyang3-tools`.
+
+## Hand-added kernel routes (#1512)
+
+- Never `ip route add` into a table `nos-ribd` owns (`rt1` is always table 100): its reconcile deletes every route it does not want, within milliseconds to 10 s.
+- Put a test-only route in an unmanaged table (`ospf-sr` uses 200) and steer with `ip rule add to <host>/32 lookup 200 pref 900`: below the VRF l3mdev rule, so a VRF-bound ping still hits it; delete both on every exit path.
