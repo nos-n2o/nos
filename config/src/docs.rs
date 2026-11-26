@@ -2355,8 +2355,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              missing key is `null`; comparing different kinds is false (`!=` true). The \
              expression holds at most 512 bytes and 16 stages, and a run at most 100000 \
              results. Example: `show bfd sessions | jq '.[] | select(.state == \"up\")'`. \
-             Only commands that list `| json` support it; `show route <table>` and `show \
-             bgp routes` are not filterable yet.",
+             Only commands that list `| json` support it. `show route <table>` and `show \
+             bgp routes` stream: the program must start with `.[]` (it then runs per row, in \
+             one page of memory) or be `length` (a row count); `show bgp routes` presents the \
+             rows of every instance as one stream.",
         ),
     };
     CommandDoc {
