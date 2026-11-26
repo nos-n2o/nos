@@ -33,6 +33,7 @@ pub(super) fn redistributed_route() -> RibRoute {
         large_communities: Vec::new(),
         validation_state: nos_rpl::ValidationState::NotFound,
         received_ov: None,
+        tag: None,
     }
 }
 

@@ -444,6 +444,7 @@ mod tests {
             unknown: std::sync::Arc::default(),
             validation_state: nos_rpl::ValidationState::NotFound,
             received_ov: None,
+            tag: None,
         }
     }
 

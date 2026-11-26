@@ -2583,6 +2583,7 @@ async fn bgp_routes_are_paged_per_instance_with_an_opaque_cursor() {
                             flags: 0xe0,
                             value: "deadbeef".into(),
                         }],
+                        tag: None,
                     })
                     .collect(),
                 next: (take.len() < rest.len()).then(|| key(*take.last().unwrap())),

@@ -61,6 +61,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "reflector" => bgp::reflector(w).await,
         "route-server" => bgp::route_server(w).await,
         "bgp-multipath" => bgp::bgp_multipath(w).await,
+        "bgp-route-tag" => bgp::bgp_route_tag(w).await,
         "as4" => bgp::as4(w).await,
         "malformed-update" => bgp::malformed_update(w).await,
         "unknown-attribute" => bgp::unknown_attribute(w).await,
@@ -344,6 +345,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         ],
         "multi" => &[
             "as4",
+            "bgp-route-tag",
             "malformed-update",
             "unknown-attribute",
             "maximum-prefix",
@@ -481,6 +483,7 @@ pub const ALL: &[&str] = &[
     "reflector",
     "route-server",
     "bgp-multipath",
+    "bgp-route-tag",
     "bgp-gr-frr",
     "soft-reconfig-frr",
     "bgp-v6-over-v4",
