@@ -312,7 +312,13 @@ async fn tacacs(w: &World) -> anyhow::Result<()> {
     let accepted = a.count(needle);
     let (code, out) = run_provision(
         w,
-        &["--login-user", "tac-admin", "--login-password", "pw-admin"],
+        &[
+            "--login-user",
+            "tac-admin",
+            "--login-password",
+            "pw-admin",
+            "--save",
+        ],
     )
     .await?;
     if code != 0 || !out.contains("provisioning complete") {
@@ -326,6 +332,8 @@ async fn tacacs(w: &World) -> anyhow::Result<()> {
         "author pass user=tac-admin role=admin",
         "accounting flags=2 user=tac-admin",
         "accounting flags=4 user=tac-admin service=nos task_id=commit:",
+        // #1155: the REST `save` is accounted by nos-configd as a command record
+        "accounting flags=4 user=tac-admin service=nos task_id=cmd:",
     ] {
         let mut seen = false;
         for _ in 0..15 {
