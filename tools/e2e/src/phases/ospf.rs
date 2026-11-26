@@ -3065,6 +3065,11 @@ async fn wait_lsa(
 /// their interface addresses: FRR's own `drAddress`/`bdrAddress` must be those.
 pub async fn ospf_dr_frr(w: &mut World) -> anyhow::Result<()> {
     w.up(&[]).await?;
+    // #887: a router-c left running by an earlier phase is still on the
+    // bd-ospf segment (9.9.9.8, priority 1); whoever comes up first wins the
+    // BDR election, so it could take BDR from router-a and leave router-a a
+    // DROther that stays 2-Way with FRR. Only a/b/f may be on the segment.
+    w.remove(C).await;
     let (a, b) = (w.a()?, w.b()?);
     let mut fa = ospf_instance_only(OSPF_ROUTER_ID);
     fa.extend(ospf_broadcast(OSPF_BROADCAST_ADDRESS_A));
