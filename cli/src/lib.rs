@@ -11,6 +11,7 @@ pub mod fdb_client;
 pub mod format;
 pub mod help_menu;
 pub mod interface_client;
+pub mod jq;
 pub mod lacp_client;
 pub mod lldp_client;
 pub mod log_client;

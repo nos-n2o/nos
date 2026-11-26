@@ -2346,6 +2346,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              unterminated and the error goes to stderr, so a consumer never mistakes \
              truncated data for a complete result.",
         ),
+        Topic::PipeJq => (
+            "Filter a show command's JSON output with a jq expression.",
+            "`show <command> | jq <expression>` runs a small subset of jq over the `| json` \
+             data and prints each result as compact JSON, one per line (strings stay quoted). \
+             Supported: paths (`.a.b`, `.a[2]`, `.[]`, `.\"key\"`), `|`, `select(path)`, \
+             `select(path == != < <= > >= literal)`, `length` and `{key: path, ...}`. A \
+             missing key is `null`; comparing different kinds is false (`!=` true). The \
+             expression holds at most 512 bytes and 16 stages, and a run at most 100000 \
+             results. Example: `show bfd sessions | jq '.[] | select(.state == \"up\")'`. \
+             Only commands that list `| json` support it; `show route <table>` and `show \
+             bgp routes` are not filterable yet.",
+        ),
     };
     CommandDoc {
         topic,
