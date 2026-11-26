@@ -8774,9 +8774,9 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
         w.dock
             .in_netns(NETNS_HELPER_IMAGE, "router-a", &add)
             .await?;
-        let mut r = String::new();
+        let mut got = String::new();
         for _ in 0..5 {
-            r = w
+            got = w
                 .dock
                 .in_netns(
                     NETNS_HELPER_IMAGE,
@@ -8785,7 +8785,7 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
                 )
                 .await
                 .unwrap_or_else(|e| e.to_string());
-            if r.contains("encap mpls") {
+            if got.contains("encap mpls") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -8803,7 +8803,7 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
             .await
             .unwrap_or_else(|e| e.to_string());
         seen.push(format!(
-            "\nattempt {attempt}: route get: {r}\ntable 100: {tbl}"
+            "\nattempt {attempt}: route get: {got}\ntable 100: {tbl}"
         ));
         last = ping_from_a(w, target, 10).await;
         if last.is_err() {
