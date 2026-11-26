@@ -424,6 +424,9 @@ fn vpn_entry(r: &VpnRoute) -> RibEntry {
         backup: None,
         backup_interface_id: None,
         backup_tunnel: false,
+        distance: None,
+        tag: None,
+        interface: None,
     }
 }
 
@@ -759,6 +762,9 @@ fn bgp_entry(r: BgpRoute) -> RibEntry {
         backup: r.backup_next_hop.filter(|_| !r.discard),
         backup_interface_id: None,
         backup_tunnel: false,
+        distance: None,
+        tag: None,
+        interface: None,
     }
 }
 
@@ -785,6 +791,9 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
         backup: r.backup_next_hop.or(r.backup_tunnel).filter(|_| !r.discard),
         backup_interface_id: r.backup_interface_id,
         backup_tunnel: r.backup_next_hop.is_none() && r.backup_tunnel.is_some() && !r.discard,
+        distance: None,
+        tag: None,
+        interface: None,
     }
 }
 
@@ -818,7 +827,7 @@ fn to_prefix_routes(
             .enumerate()
             .map(|(i, e)| RouteEntry {
                 metric: rib.metric(&prefix, e.source),
-                preference: e.source.preference(),
+                preference: e.preference(),
                 age_secs: rib.age_secs(&prefix, e.source),
                 interfaces: e
                     .next_hops
@@ -836,9 +845,11 @@ fn to_prefix_routes(
                 source: to_source_kind(e.source),
                 backup: e.backup,
                 discard: e.is_discard(),
-                // A BGP discard is an RFC 7999 blackhole; an OSPF ABR's is not.
-                blackhole: e.is_discard() && e.source == RouteSource::Bgp,
-                tag: None,
+                // A BGP discard is an RFC 7999 blackhole, a static one an
+                // operator blackhole; an OSPF ABR's is neither.
+                blackhole: e.is_discard()
+                    && matches!(e.source, RouteSource::Bgp | RouteSource::Static),
+                tag: e.tag,
                 evpn: evpn_info(e, evpn),
                 backup_tunnel: e.backup_tunnel,
                 mpls_labels: e.next_hops.iter().map(|h| h.labels.clone()).collect(),
@@ -970,6 +981,29 @@ mod authz_tests {
     }
 
     #[test]
+    fn a_static_shows_its_tag_distance_and_blackhole() {
+        let e = RibEntry {
+            next_hops: Vec::new(),
+            distance: Some(250),
+            tag: Some(77),
+            ..RibEntry {
+                prefix: "10.9.0.0/24".parse().unwrap(),
+                next_hops: Vec::new(),
+                source: RouteSource::Static,
+                backup: None,
+                backup_interface_id: None,
+                backup_tunnel: false,
+                distance: None,
+                tag: None,
+                interface: None,
+            }
+        };
+        let c = &to_prefix_routes(e.prefix, &[e], &Rib::new(), &plain()).candidates[0];
+        assert_eq!((c.tag, c.preference), (Some(77), 250));
+        assert!(c.discard && c.blackhole);
+    }
+
+    #[test]
     fn a_remote_lfa_becomes_a_tunnel_backup() {
         let pq: std::net::IpAddr = "10.255.0.4".parse().unwrap();
         let entry = ospf_entry(OspfRoute {
@@ -1059,6 +1093,9 @@ mod authz_tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         let evpn = EvpnState {
             remotes: [(vtep, [2, 0, 0, 0, 0, 3])].into(),
@@ -1312,6 +1349,9 @@ mod authz_tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         rib.insert(mk(RouteSource::Bgp, "10.0.0.1", Some(7)));
         rib.insert(mk(RouteSource::Static, "10.0.0.2", None));
@@ -1361,6 +1401,9 @@ mod authz_tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                distance: None,
+                tag: None,
+                interface: None,
             });
         }
         rib

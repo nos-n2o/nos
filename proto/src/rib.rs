@@ -224,8 +224,8 @@ pub struct RouteEntry {
     /// `Vpn` candidate; empty otherwise.
     #[serde(default)]
     pub vpn: Vec<VpnRouteInfo>,
-    /// `discard` came from a BGP RFC 7999 blackhole (an OSPF ABR discard
-    /// stays `false`).
+    /// `discard` came from a BGP RFC 7999 blackhole or a static `blackhole`
+    /// (an OSPF ABR discard stays `false`).
     #[serde(default)]
     pub blackhole: bool,
     /// The route's metric (an OSPF SPF cost, a BGP best path's MED); `None`

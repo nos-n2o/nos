@@ -6147,3 +6147,133 @@ pub async fn foreign_route(w: &mut World) -> anyhow::Result<()> {
     let _ = stub("del", BOOT, "3").await;
     res
 }
+
+/// #1523: `nos-ribd` honours a static route's `distance`, `tag`, `blackhole`
+/// and `interface` against the real kernel: a floating static yields to eBGP
+/// and takes over when it is withdrawn, a blackhole is an `RTN_BLACKHOLE`
+/// carrying its tag in `show route`, and an IPv6 link-local gateway installs
+/// over its pinned interface.
+pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let gw = REDISTRIBUTE_GATEWAY.s();
+    let added = |p: &str, g: &str| format!("added route prefix={p} gateway={g} ");
+    let removed = |p: &str| format!("removed route prefix={p} ");
+    let res: anyhow::Result<()> = async {
+        log("floating: router-b originates the prefix over BGP, router-a adds a distance-250 static");
+        let bgp = added(FLOAT_PREFIX, IP_B.s());
+        let bgp_base = a.count(&bgp);
+        b.provision(&[
+            "--static-route",
+            FLOAT_PREFIX,
+            "--static-gateway",
+            gw,
+            "--redistribute",
+        ])
+        .await?;
+        a.wait_new(&bgp, bgp_base, 60).await?;
+        let own = added(FLOAT_PREFIX, gw);
+        let own_base = a.count(&own);
+        a.provision(&[
+            "--static-route",
+            FLOAT_PREFIX,
+            "--static-gateway",
+            gw,
+            "--static-distance",
+            "250",
+        ])
+        .await?;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let shown = a.routes_walk("rt1", None).await?;
+        // The resync has applied the static (preference 250) beside eBGP's 20.
+        let pref = |source: &str| {
+            shown
+                .iter()
+                .filter(|p| p["prefix"] == FLOAT_PREFIX)
+                .flat_map(|p| p["candidates"].as_array().cloned().unwrap_or_default())
+                .find(|c| c["source"] == source)
+                .map(|c| c["preference"].clone())
+        };
+        if pref("Static") != Some(250.into()) || pref("Bgp") != Some(20.into()) {
+            bail!("router-a: show route {FLOAT_PREFIX} lacks Static 250 beside Bgp 20");
+        }
+        a.assert_quiet(&own, own_base, 15).await?;
+        b.provision(&["--remove-static-route", FLOAT_PREFIX]).await?;
+        a.wait_new(&own, own_base, 60).await?;
+        a.provision(&["--remove-static-route", FLOAT_PREFIX]).await?;
+
+        log("blackhole: a tagged blackhole static is a kernel discard route");
+        let hole = format!("added route prefix={BLACKHOLE_STATIC} .*discard=true");
+        let hole_base = a.count(&hole);
+        a.provision(&[
+            "--static-route",
+            BLACKHOLE_STATIC,
+            "--static-blackhole",
+            "--static-tag",
+            "77",
+        ])
+        .await?;
+        a.wait_new(&hole, hole_base, 30).await?;
+        let shown = a.routes_walk("rt1", None).await?;
+        let seen = shown
+            .iter()
+            .filter(|p| p["prefix"] == BLACKHOLE_STATIC)
+            .any(|p| {
+                p["candidates"].as_array().into_iter().flatten().any(|c| {
+                    c["source"] == "Static" && c["tag"] == 77 && c["discard"] == true
+                })
+            });
+        if !seen {
+            bail!("router-a: show route lacks the tag-77 discard Static for {BLACKHOLE_STATIC}");
+        }
+        let gone = removed(BLACKHOLE_STATIC);
+        let gone_base = a.count(&gone);
+        a.provision(&["--remove-static-route", BLACKHOLE_STATIC])
+            .await?;
+        a.wait_new(&gone, gone_base, 30).await?;
+
+        log("link-local: router-b's observed fe80 address as a gateway pinned to eth0");
+        let body = b
+            .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+            .await?;
+        let status: serde_json::Value = serde_json::from_str(&body)?;
+        // Observed kernel state: on the interface, or on the subinterface
+        // that carries its address.
+        let ll = std::iter::once(&status)
+            .chain(status["subinterfaces"].as_array().into_iter().flatten())
+            .find_map(|s| s["link_local_address"].as_str())
+            .context("router-b: eth0 reports no link_local_address")?
+            .to_string();
+        let ll_added = format!("added route prefix={LINK_LOCAL_STATIC} gateway={ll} ");
+        let ll_base = a.count(&ll_added);
+        a.provision(&[
+            "--static-route",
+            LINK_LOCAL_STATIC,
+            "--static-gateway",
+            &ll,
+            "--static-interface",
+            "eth0",
+        ])
+        .await?;
+        a.wait_new(&ll_added, ll_base, 30).await?;
+        let ll_gone = removed(LINK_LOCAL_STATIC);
+        let ll_gone_base = a.count(&ll_gone);
+        a.provision(&["--remove-static-route", LINK_LOCAL_STATIC])
+            .await?;
+        a.wait_new(&ll_gone, ll_gone_base, 30).await
+    }
+    .await;
+    // Best effort on every path, so a failure leaves no static behind.
+    let _ = a
+        .provision(&[
+            "--remove-static-route",
+            FLOAT_PREFIX,
+            "--remove-static-route",
+            BLACKHOLE_STATIC,
+            "--remove-static-route",
+            LINK_LOCAL_STATIC,
+        ])
+        .await;
+    let _ = b.provision(&["--remove-static-route", FLOAT_PREFIX]).await;
+    res?;
+    a.established().await
+}

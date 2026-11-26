@@ -169,6 +169,9 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

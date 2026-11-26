@@ -406,6 +406,10 @@ pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
 /// the connected prefix `SUBNET` is named `eth0` and `REDISTRIBUTE_GATEWAY`
 /// (10.50.0.99, inside it) resolves to it by the connected-prefix match.
 pub const ROUTES_PAGING_IFACE: &str = "eth0";
+/// `static-variants` (#1523): benchmark-range prefixes no other phase uses.
+pub const FLOAT_PREFIX: &str = "198.18.77.0/24";
+pub const BLACKHOLE_STATIC: &str = "198.18.78.0/24";
+pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
 pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is
