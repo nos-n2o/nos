@@ -760,6 +760,9 @@ fn connected_entries(
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         });
     }
     entries
@@ -817,7 +820,7 @@ fn compute_redistribute_target(
     let redistributed = if active_rule {
         routes
             .values()
-            .filter(|entry| entry.source == RouteSource::Static)
+            .filter(|entry| entry.source == RouteSource::Static && !entry.is_discard())
             .map(|entry| RedistributedRoute {
                 prefix: entry.prefix,
                 gateway: entry.next_hops[0].gateway,
@@ -878,7 +881,7 @@ fn compute_redistribute_targets_ospf(
             let redistributed = if active_rule {
                 routes
                     .values()
-                    .filter(|entry| entry.source == RouteSource::Static)
+                    .filter(|entry| entry.source == RouteSource::Static && !entry.is_discard())
                     .filter(|entry| !v3 || matches!(entry.prefix, IpNet::V6(_)))
                     .map(|entry| RedistributedRoute {
                         prefix: entry.prefix,
@@ -942,6 +945,9 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         }
     }
 
@@ -1190,6 +1196,9 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                distance: None,
+                tag: None,
+                interface: None,
             },
         );
 
@@ -1227,6 +1236,9 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         routes.insert(entry.prefix, entry);
 
@@ -1238,6 +1250,31 @@ mod tests {
                 gateway: "2001:db8::1".parse().unwrap(),
             }]
         );
+    }
+
+    #[test]
+    fn a_blackhole_static_is_not_redistributed() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            redistribute: vec![Redistribute {
+                instance: None,
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+                policy: None,
+                metric: None,
+                metric_type: None,
+            }],
+            ..Default::default()
+        };
+        let cfg = cfg_with_table(table);
+        let mut hole = static_entry("10.7.0.0/24", "10.0.0.1");
+        hole.next_hops.clear();
+        let live = static_entry("10.8.0.0/24", "10.0.0.1");
+        let routes = HashMap::from([(hole.prefix, hole), (live.prefix, live)]);
+        let target = compute_redistribute_target(&cfg, "rt1", &routes);
+        assert_eq!(target.routes.len(), 1);
+        assert_eq!(target.routes[0].prefix.to_string(), "10.8.0.0/24");
     }
 
     #[test]
@@ -1390,6 +1427,9 @@ mod tests {
                 backup: None,
                 backup_interface_id: None,
                 backup_tunnel: false,
+                distance: None,
+                tag: None,
+                interface: None,
             },
         );
 

@@ -95,7 +95,9 @@ Optional per-route fields, set one per line under `route <subnet>`:
 - `tag <n>`: opaque route tag.
 - `interface <name>`: outgoing interface, or `<interface>.<tag>` for a subinterface. It must sit in a routing table bound to this instance, and is required when the gateway is an IPv6 link-local address.
 - `blackhole true`: discard the traffic. The gateway must be `0.0.0.0` (or `::` for IPv6), and `bfd` and `interface` must stay unset. Any other route must not use the unspecified gateway.
-- These four are accepted and validated at commit but not yet honoured: `nos-ribd` ignores them (#1523).
+- A static with a `distance` competes against other sources on that number (eBGP 20, OSPF 110): `distance 250` is a floating static that takes over when the dynamic route is withdrawn. On a tie the static wins.
+- A `blackhole` route is installed as a kernel blackhole, shows as `discard` in `show route`, and is not redistributed into BGP or OSPF.
+- `tag` is shown by `show route`. If the `interface` does not exist yet, the route is retried every tick until it does.
 
 The same over REST. An instance is `{"name", "routes"}`, and a route is `{"subnet", "gateway"}`, keyed by its prefix with `/` encoded as `%2F`:
 

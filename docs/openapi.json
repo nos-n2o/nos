@@ -6182,7 +6182,7 @@
             "type": "boolean"
           },
           "blackhole": {
-            "description": "`discard` came from a BGP RFC 7999 blackhole (an OSPF ABR discard\nstays `false`).",
+            "description": "`discard` came from a BGP RFC 7999 blackhole or a static `blackhole`\n(an OSPF ABR discard stays `false`).",
             "type": "boolean"
           },
           "discard": {
@@ -7088,11 +7088,11 @@
             ]
           },
           "blackhole": {
-            "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`. Inert until `nos-ribd` honours it.",
+            "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`.",
             "type": "boolean"
           },
           "distance": {
-            "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1). Inert until `nos-ribd`\nhonours it.",
+            "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1).",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -7105,7 +7105,7 @@
             "type": "string"
           },
           "interface": {
-            "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance. Inert\nuntil `nos-ribd` honours it.",
+            "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
             "type": [
               "string",
               "null"
@@ -7116,7 +7116,7 @@
             "type": "string"
           },
           "tag": {
-            "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone. Inert until `nos-ribd` honours it.",
+            "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone.",
             "format": "int32",
             "minimum": 0,
             "type": [
@@ -123222,7 +123222,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`. Inert until `nos-ribd` honours it.",
+                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`.",
                   "type": "boolean"
                 }
               }
@@ -123301,7 +123301,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`. Inert until `nos-ribd` honours it.",
+                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`.",
                   "type": "boolean"
                 }
               }
@@ -123347,7 +123347,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`. Inert until `nos-ribd` honours it.",
+                "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`.",
                 "type": "boolean"
               }
             }
@@ -123359,7 +123359,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`. Inert until `nos-ribd` honours it.",
+                  "description": "Discard the traffic instead of forwarding it; `gateway` must then be\nthe unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and\n`interface`.",
                   "type": "boolean"
                 }
               }
@@ -123434,7 +123434,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1). Inert until `nos-ribd`\nhonours it.",
+                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1).",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -123518,7 +123518,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1). Inert until `nos-ribd`\nhonours it.",
+                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1).",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -123569,7 +123569,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1). Inert until `nos-ribd`\nhonours it.",
+                "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1).",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -123586,7 +123586,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1). Inert until `nos-ribd`\nhonours it.",
+                  "description": "Administrative distance (1 to 255) of this route against other\nsources; `None` keeps the source default (1).",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -123878,7 +123878,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance. Inert\nuntil `nos-ribd` honours it.",
+                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
                   "type": [
                     "string",
                     "null"
@@ -123960,7 +123960,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance. Inert\nuntil `nos-ribd` honours it.",
+                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
                   "type": [
                     "string",
                     "null"
@@ -124009,7 +124009,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance. Inert\nuntil `nos-ribd` honours it.",
+                "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
                 "type": [
                   "string",
                   "null"
@@ -124024,7 +124024,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance. Inert\nuntil `nos-ribd` honours it.",
+                  "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
                   "type": [
                     "string",
                     "null"
@@ -124102,7 +124102,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone. Inert until `nos-ribd` honours it.",
+                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -124186,7 +124186,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone. Inert until `nos-ribd` honours it.",
+                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [
@@ -124237,7 +124237,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone. Inert until `nos-ribd` honours it.",
+                "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone.",
                 "format": "int32",
                 "minimum": 0,
                 "type": [
@@ -124254,7 +124254,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone. Inert until `nos-ribd` honours it.",
+                  "description": "Opaque tag carried on the route (for policy matching); `None` sets\nnone.",
                   "format": "int32",
                   "minimum": 0,
                   "type": [

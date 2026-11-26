@@ -19,6 +19,12 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 - A `Vpn` winner is installed like any other (#581, "L3VPN data plane" below); a label-only change is a changed winner (`diff_best`), so `apply_delta` re-installs it.
 - `Rib::resolve(addr)` answers `RibRequest::ResolveNextHop`: the best non-`Bgp`/`Evpn`/`Vpn`, non-discard candidate of the longest covering prefix (`resolving_best`, shared with `igp_costs`), its first next hop, or `addr` itself with no ifindex for `Connected`.
 
+## Static variants (#1523)
+
+- `RibEntry.distance` is a static's own preference (`RibEntry::preference`, then the source default as a tie-break, so a static wins a tie); `tag` and `interface` ride along, all part of entry equality.
+- A `blackhole` static has an empty `next_hops` (`is_discard`, installed as `RTN_BLACKHOLE`), is never redistributed and never resolves a BGP next hop.
+- `interface` is a kernel link name: `LinuxRibDriver::resolve_pinned` turns it into the hops' ifindex before install; a missing link defers the route and fails the apply, so it is retried on the next tick.
+
 ## L3VPN VRF export (#580)
 
 - Config (`vpn::resolve`, from `reconcile::vpn_export` each resync): RD, export RTs and `vpn.bgp_instance` (never `table.bgp_instance`); idle without RD and instance.

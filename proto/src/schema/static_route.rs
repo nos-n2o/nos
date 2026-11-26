@@ -50,15 +50,14 @@ pub struct StaticRoute {
     pub bfd: Option<String>,
 
     /// Administrative distance (1 to 255) of this route against other
-    /// sources; `None` keeps the source default (1). Inert until `nos-ribd`
-    /// honours it.
+    /// sources; `None` keeps the source default (1).
     #[serde(default)]
     #[garde(custom(|d: &Option<u8>, _ctx: &Config| distance_valid(*d)))]
     #[cli(topic = StaticRouteDistance)]
     pub distance: Option<u8>,
 
     /// Opaque tag carried on the route (for policy matching); `None` sets
-    /// none. Inert until `nos-ribd` honours it.
+    /// none.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = StaticRouteTag)]
@@ -66,8 +65,7 @@ pub struct StaticRoute {
 
     /// Outgoing interface (or `<interface>.<tag>` subinterface) pinned for
     /// this route; required when `gateway` is an IPv6 link-local address.
-    /// Must be in a routing table bound to this route's instance. Inert
-    /// until `nos-ribd` honours it.
+    /// Must be in a routing table bound to this route's instance.
     #[serde(default)]
     #[garde(skip)] // needs the owning instance: checked by `StaticRoutingInstance.routes`
     #[cli(topic = StaticRouteInterface)]
@@ -75,7 +73,7 @@ pub struct StaticRoute {
 
     /// Discard the traffic instead of forwarding it; `gateway` must then be
     /// the unspecified address (`0.0.0.0`/`::`). Excludes `bfd` and
-    /// `interface`. Inert until `nos-ribd` honours it.
+    /// `interface`.
     #[serde(default)]
     #[garde(custom(blackhole_exclusive(self.bfd.is_some(), self.interface.is_some())))]
     #[cli(topic = StaticRouteBlackhole)]

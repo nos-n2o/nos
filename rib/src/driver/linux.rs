@@ -232,6 +232,15 @@ type Hops = Vec<NextHop>;
 /// change is a changed route (replace).
 type Key = Vec<(IpAddr, Option<u32>, Vec<u32>)>;
 
+/// `entry` with every next hop leaving over `ifindex`.
+fn pin_interface(entry: &RibEntry, ifindex: u32) -> RibEntry {
+    let mut e = entry.clone();
+    for hop in &mut e.next_hops {
+        hop.interface_id = Some(ifindex);
+    }
+    e
+}
+
 fn is_link_local(gateway: IpAddr) -> bool {
     matches!(gateway, IpAddr::V6(a) if a.segments()[0] & 0xffc0 == 0xfe80)
 }
@@ -360,6 +369,38 @@ impl LinuxRibDriver {
             Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -ENODEV => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Resolves each entry's pinned `interface` name to its ifindex (the
+    /// hops' `interface_id`, so the link-local/`RTA_OIF` path takes over). An
+    /// entry whose link does not exist yet is left out and reported as an
+    /// error, so the caller `mark_dirty`s and retries on the next tick (#686).
+    // ponytail: the slot key ignores the ifindex of a non-link-local gateway, so
+    // re-pinning such a route to another interface alone does not re-install.
+    async fn resolve_pinned<'a>(
+        &self,
+        entries: impl Iterator<Item = (IpNet, &'a RibEntry)>,
+    ) -> (HashMap<IpNet, RibEntry>, Option<DriverError>) {
+        let mut out = HashMap::new();
+        let mut err = None;
+        for (prefix, entry) in entries {
+            let Some(name) = &entry.interface else {
+                out.insert(prefix, entry.clone());
+                continue;
+            };
+            match self.find_link(name).await {
+                Ok(Some(link)) => {
+                    out.insert(prefix, pin_interface(entry, link.header.index));
+                }
+                other => {
+                    warn!(%prefix, interface = %name, "static route interface not found, install deferred");
+                    err = Some(other.err().unwrap_or_else(|| {
+                        DriverError::Other(format!("interface {name} not found"))
+                    }));
+                }
+            }
+        }
+        (out, err)
     }
 
     /// Sends one raw `RTM_NEWNEIGH`/`RTM_DELNEIGH` (an FDB entry needs flags
@@ -1113,12 +1154,12 @@ impl RibDriver for LinuxRibDriver {
         let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         self.ensure_vrf(&vrf_ifname, table_id).await?;
-        self.reconcile_routes(
-            table_id,
-            best_routes,
-            self.keep_stale.load(Ordering::SeqCst),
-        )
-        .await
+        let (resolved, pending) = self
+            .resolve_pinned(best_routes.iter().map(|(p, e)| (*p, e)))
+            .await;
+        self.reconcile_routes(table_id, &resolved, self.keep_stale.load(Ordering::SeqCst))
+            .await?;
+        pending.map_or(Ok(()), Err)
     }
 
     fn keep_stale(&self, on: bool) {
@@ -1150,7 +1191,19 @@ impl RibDriver for LinuxRibDriver {
         let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         self.ensure_vrf(&vrf_ifname, table_id).await?;
-        self.apply_delta_impl(table_id, changes).await
+        let (resolved, pending) = self
+            .resolve_pinned(changes.iter().filter_map(|(p, e)| Some((*p, e.as_ref()?))))
+            .await;
+        // A removal passes through; an unresolved change is left out.
+        let changes: HashMap<_, _> = changes
+            .iter()
+            .filter_map(|(p, e)| match e {
+                None => Some((*p, None)),
+                Some(_) => resolved.get(p).map(|r| (*p, Some(r.clone()))),
+            })
+            .collect();
+        self.apply_delta_impl(table_id, &changes).await?;
+        pending.map_or(Ok(()), Err)
     }
 
     async fn teardown(&self, table_name: &str) -> Result<(), DriverError> {
@@ -1759,6 +1812,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_interface_sets_the_oif_of_a_link_local_route() {
+        let entry = RibEntry {
+            prefix: net("2001:db8:9::/48"),
+            next_hops: vec![plain("fe80::1")],
+            source: RouteSource::Static,
+            backup: None,
+            backup_interface_id: None,
+            backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: Some("eth1".into()),
+        };
+        let pinned = pin_interface(&entry, 7);
+        assert_eq!(pinned.next_hops[0].interface_id, Some(7));
+        let msg = build_route(pinned.prefix, &pinned.next_hops, 100, false, false).unwrap();
+        assert_eq!(
+            hops_of(&extract_route(&wire(&msg)).unwrap().1)[0].interface_id,
+            Some(7)
+        );
+    }
+
+    #[test]
     fn slot_op_replaces_instead_of_remove_then_add() {
         let one = k(&[("10.0.0.1", &[])]);
         let two = k(&[("10.0.0.1", &[]), ("10.0.0.2", &[])]);
@@ -1912,6 +1987,9 @@ mod tests {
             backup: Some(addr("10.0.0.2")),
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         assert_eq!(
             slots(p, &entry),
@@ -2204,6 +2282,9 @@ mod tests {
             backup: None,
             backup_interface_id: None,
             backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interface: None,
         };
         let keyed = |e: &RibEntry| -> HashMap<Slot, Key> {
             slots(p, e).iter().map(|(s, h)| (*s, key(h))).collect()
