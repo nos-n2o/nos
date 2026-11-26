@@ -3,6 +3,17 @@ use std::net::IpAddr;
 use crate::spec;
 use nos_proto::TransactionBase;
 
+/// What `show route <table> ...` asks of the table (#1446).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteQuery {
+    /// Every prefix.
+    Table,
+    /// Longest-prefix match for one address.
+    Lookup(IpAddr),
+    /// Every prefix passing the filter.
+    Filter(nos_proto::RouteFilter),
+}
+
 /// A parsed REPL input line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -14,11 +25,16 @@ pub enum Command {
     ShowConfigPath(String),
     /// `show this` — only meaningful in configuration mode.
     Show,
-    /// `show route <table>` (whole table) or `show route <table> <address>`
-    /// (longest-prefix-match lookup).
+    /// `show route <table> [<address> | protocol <p> | prefix <cidr> [longer]]`.
     ShowRoute {
         table: String,
-        address: Option<IpAddr>,
+        query: RouteQuery,
+    },
+    /// `show route` — every routing table, one line each (#1446).
+    ShowRouteTables,
+    /// `show route <table> summary` — the table's counts (#1446).
+    ShowRouteSummary {
+        table: String,
     },
     /// `show fdb [<domain>] [mac <mac>]` — one broadcast domain's forwarding
     /// database, or every domain's flat table, optionally for one MAC.
@@ -346,9 +362,54 @@ mod tests {
             Command::parse("show route rt1"),
             Command::ShowRoute {
                 table: "rt1".to_string(),
-                address: None,
+                query: RouteQuery::Table,
             }
         );
+    }
+
+    #[test]
+    fn show_route_list_summary_and_filters() {
+        use nos_proto::{RouteFilter, RouteSourceKind};
+        let route = |query| Command::ShowRoute {
+            table: "rt1".to_string(),
+            query: RouteQuery::Filter(query),
+        };
+        assert_eq!(Command::parse("show route"), Command::ShowRouteTables);
+        assert_eq!(
+            Command::parse("show route rt1 summary"),
+            Command::ShowRouteSummary {
+                table: "rt1".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("show route rt1 protocol ospf"),
+            route(RouteFilter {
+                source: Some(RouteSourceKind::Ospf),
+                ..RouteFilter::default()
+            })
+        );
+        assert_eq!(
+            Command::parse("show route rt1 prefix 10.0.0.0/8"),
+            route(RouteFilter {
+                prefix: Some("10.0.0.0/8".parse().unwrap()),
+                ..RouteFilter::default()
+            })
+        );
+        assert_eq!(
+            Command::parse("show route rt1 prefix 2001:db8::/32 longer"),
+            route(RouteFilter {
+                prefix: Some("2001:db8::/32".parse().unwrap()),
+                longer: true,
+                ..RouteFilter::default()
+            })
+        );
+        for bad in [
+            "show route rt1 protocol nope",
+            "show route rt1 prefix 10.0.0.0",
+            "show route rt1 prefix nope longer",
+        ] {
+            assert_eq!(Command::parse(bad), Command::Unknown(bad.to_string()));
+        }
     }
 
     #[test]
@@ -357,7 +418,7 @@ mod tests {
             Command::parse("show route rt1 10.0.0.5"),
             Command::ShowRoute {
                 table: "rt1".to_string(),
-                address: Some("10.0.0.5".parse().unwrap()),
+                query: RouteQuery::Lookup("10.0.0.5".parse().unwrap()),
             }
         );
     }

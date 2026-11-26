@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_daemon::ipc::{self, IpcError};
-use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, Role, ROUTES_PAGE_MAX};
+use nos_proto::{
+    IpcCodec, PrefixRoutes, RibEvent, RibRequest, RibSummary, Role, RouteFilter, ROUTES_PAGE_MAX,
+};
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -41,6 +43,7 @@ async fn ask(rib_socket: &Path, req: RibRequest) -> Result<RibEvent, RibClientEr
 /// an error, never a loop.
 pub async fn for_each_routes_page(
     rib_socket: &Path,
+    filter: RouteFilter,
     mut on_page: impl FnMut(&[PrefixRoutes]),
 ) -> Result<(), RibClientError> {
     let stream = nos_pki::connect_role(rib_socket, Role::Ribd)
@@ -58,7 +61,7 @@ pub async fn for_each_routes_page(
             .send(RibRequest::GetRoutesPage {
                 after,
                 limit: ROUTES_PAGE_MAX,
-                filter: nos_proto::RouteFilter::default(),
+                filter: filter.clone(),
             })
             .await?;
         match reader.next().await {
@@ -83,6 +86,17 @@ pub async fn for_each_routes_page(
             Some(Err(e)) => return Err(RibClientError::Io(e)),
             None => return Err(RibClientError::ConnectionClosed),
         }
+    }
+}
+
+/// The table's [`RibSummary`] (`GetSummary`, #1445).
+pub async fn get_summary(rib_socket: &Path) -> Result<RibSummary, RibClientError> {
+    match ask(rib_socket, RibRequest::GetSummary).await? {
+        RibEvent::Summary(s) => Ok(s),
+        RibEvent::Error(msg) => Err(RibClientError::Daemon(msg)),
+        _ => Err(RibClientError::Daemon(
+            "unexpected event in reply to GetSummary".to_string(),
+        )),
     }
 }
 

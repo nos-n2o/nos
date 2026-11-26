@@ -365,7 +365,7 @@ mod tests {
     fn named_show_arguments_complete_from_the_config() {
         assert_eq!(
             values(Mode::Operational, "show route "),
-            vec!["rt1".to_string()]
+            vec!["rt1".to_string(), "|".to_string()]
         );
     }
 
@@ -425,6 +425,19 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         let v = values_with(Mode::Operational, "show log ", Box::new(Vec::new));
         assert_eq!(v, strs(&["--follow", "last", "level", "match"]));
+    }
+
+    #[test]
+    fn route_filters_complete() {
+        let v = values(Mode::Operational, "show route rt1 ");
+        for w in ["summary", "protocol", "prefix"] {
+            assert!(v.contains(&w.to_string()), "{w} in {v:?}");
+        }
+        let v = values(Mode::Operational, "show route rt1 protocol ");
+        assert_eq!(
+            v,
+            strs(&["bgp", "connected", "evpn", "ospf", "static", "vpn"])
+        );
     }
 
     #[test]

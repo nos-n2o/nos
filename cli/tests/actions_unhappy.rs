@@ -509,6 +509,9 @@ fn configuration(transaction: &str, path: &[&str], dirty: bool) -> Mode {
 const QUERIES: &[&str] = &[
     "show route rt1",
     "show route rt1 10.0.0.1",
+    "show route",
+    "show route rt1 summary",
+    "show route rt1 protocol static",
     "show fdb bd1",
     "show fdb",
     "show fdb mac 02:00:00:00:00:01",

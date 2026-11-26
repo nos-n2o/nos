@@ -84,7 +84,7 @@ If the router's login service cannot be reached, the shell refuses to start: not
 ### `| json` on `show` commands (#1415)
 
 - `show <command> | json` prints the reply as pretty JSON instead of text; the line is split at its first `|` (`cli/src/pipe.rs`), and the word after it must be `json`. `show log` is never split (`match <text>` takes the rest of the line); a non-`show` line is untouched.
-- Supported: `show bfd sessions`, `show route <table> [<addr>]`, `show bgp routes`. Any other `show` line is refused with `error: this command has no JSON output` before any IPC; a view-driven command gains it when it prints through `emit` (set its arm in `Resolved::json_capable`).
+- Supported: `show bfd sessions`, `show route [<table> [<addr>|summary|protocol <p>|prefix <cidr> [longer]]]`, `show bgp routes`. Any other `show` line is refused with `error: this command has no JSON output` before any IPC; a view-driven command gains it when it prints through `emit` (set its arm in `Resolved::json_capable`).
 - Keys keep the declaration order of the REST body (the reply is serialized directly). An empty list is `[]`; `show route <table> <addr>` with no match is `null`.
 - `show route <table>` and `show bgp routes` stream one array, one element per line, a page at a time. `show bgp routes` prints one object keyed by instance name, each value such an array. If a walk fails midway the closing bracket is never written and the error goes to stderr, so a consumer gets invalid JSON, never silently truncated data.
 - DEL and U+0080-U+009F (a CSI on some terminals) are written as `\u00XX`: the JSON stays valid and lossless, and a daemon-supplied string cannot inject terminal escapes.
@@ -98,7 +98,7 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - `emit` is the one output point: `| json` (#1415) and the jq filter (#1420) branch there, off `view::to_value`.
 - Enums print by their raw serde name (`Up`, `AdminDown`), units go through `table.rs`, a missing or null value is `-`, every string is sanitized in `view::cell`.
 - Nesting: in a list, a nested struct's `brief` fields lead the table as plain columns (the row identity); in a detail view a nested struct is a title line then its indented block, a nested list a title then a sub-table.
-- Migrated: `show bfd sessions` (table, and the `detail` blocks through `view::render_detail_list`). Still hand-written: everything else in `format.rs`.
+- Migrated: `show bfd sessions`, `show route` (table list) and `show route <table> summary` (table, and the `detail` blocks through `view::render_detail_list`). Still hand-written: everything else in `format.rs`.
 
 ## The two modes
 
@@ -334,6 +334,10 @@ hostname: draft
     show config <path>                            Show the running configuration of one object.
     show route <table>                            Show every route in a routing table, best to worst per prefix.
     show route <table> <address>                  Look up the best route(s) for one destination address.
+    show route                                    List every routing table with its prefix counts.
+    show route <table> summary                    Show a routing table's prefix and per-source route counts.
+    show route <table> protocol <source>          Show the routes of one source in a routing table.
+    show route <table> prefix <cidr> [longer]     Show one prefix, or it and every longer prefix.
     …
     configure <name>                              Open or resume a named, server-held in-progress configuration.
     configure <name> from blank                   Open or resume a named, server-held in-progress configuration.
@@ -361,7 +365,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
   routing-table rt1
     ospfv3-instance o3
   ```
-- `show route <table>`: every prefix in a routing table, with every candidate route best first; `*` marks the one in use. `show route <table> <address>` looks up the longest-prefix match for one address.
+- `show route <table>`: every prefix in a routing table, with every candidate route best first; `*` marks the selected one, `>` the one in the FIB. A header (table, VRF, kernel table, codes) and the VPN label print once, then per prefix a line per candidate: `*> via 10.0.0.3 dev eth0 [ospf/110] metric 30, 01:02:03` (source/preference, metric when known, age `hh:mm:ss`, `backup` suffix). `show route <table> <address>` looks up the longest-prefix match for one address. `protocol <source>` keeps the prefixes with a candidate of that source (and only those candidates); `prefix <cidr>` is an exact match, `longer` adds every prefix it covers. `show route` lists every configured table (one `nos-ribd` query each; a table that is down is a trailing `not running` line); `summary` prints the VRF, kernel table and counts per family and source.
 - `show interface [<name>]`: the detail of one interface, or of every interface (blank-line separated). A header line gives the link state, `eth0 is up, oper up (last change 2d03h00m ago)`, `eth0 is administratively down, oper down (admin-down)` or `eth0 is up, oper down (no-carrier)`; then speed, MTU, addresses, link-local address (the interface's own, else the first subinterface that has one), routing table and a subinterfaces sub-table. `last change` is the age since `nos-interfaced` last saw an admin or carrier transition, else since it first saw the link (a lower bound after a restart); it counts no flaps. Under the `noop` driver nothing is observed and the header prints `-`.
 - `show interface brief`: one table row per interface, tagged subinterface (`eth0.10`) and port aggregate: `Interface  Admin  Oper  Speed  MTU  VRF  Member  Addresses`, the down reason as a suffix on `Oper` (`down (no-carrier)`). An interface literally named `brief` is only reachable over REST.
 - `show port-aggregate [<name>]` and `show lacp [<name>] [detail]`: LACP negotiation state as an aggregate table and a member-port table; `detail` prints every field as `key value` lines.
@@ -451,6 +455,8 @@ Optional clauses in a `cmd!` row (#1450):
 | `edit admin` / `set admin key <label> secret <value>` / `delete admin key <label>` | The keystore edits, through the generic grammar. A secret is write-only: `show this` inside the transaction prints `<hidden>`, and `diff` prints `<hidden>`/`<changed>`. At the transaction root `show this` omits the section like `show config` |
 | `set <list element> first\|last\|before <key>\|after <key>` / `move <list element> first\|last\|before <key>\|after <key>` | Inserts or moves a list element: one `EditTransactionPath` write of the element with `position` set (`move` re-sends the element as it is). Handled in `config_grammar.rs` (`Walk::positioned`, `parse_move`) |
 | `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutesPage` over one connection — every prefix, every candidate route ordered best to worst, printed page by page as it arrives (works in any mode). The table is not snapshotted: routes that change during the walk may be missed or shown, but never repeated |
+| `show route`, `show route <table> summary` | `show route` reads the running config's routing tables and sends `RibRequest::GetSummary` to each (`emit` of a `Vec<RibSummary>`, sorted by table; a down table is a trailing `not running` line, on stderr under `\| json`); `summary` is one `GetSummary` through `emit` (the per-source counts as a nested table) |
+| `show route <table> protocol <p>`, `prefix <cidr> [longer]` | As `show route <table>`, with a `RouteFilter` in every `GetRoutesPage` (`protocol` is an `ArgKind::RouteSource` with fixed values, `prefix` an `ArgKind::Cidr`); the one-time header comes from `GetSummary` |
 | `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `show configuration history` | `Request::ListHistory`; prints index, UTC time, kind and user of the commits kept on disk (works in any mode) |
 | `show configuration diff <n> [<m>]` | `Request::GetHistoryConfig` for `n` and `m` (default 0 = running), `diff_configs`, `render_diff`; `no changes` when equal; any mode |
@@ -610,7 +616,7 @@ Full module table, before it was condensed in `cli/CLAUDE.md` (#263):
 | `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
 | `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op` (only `edit source`'s policy source now), `edit_transaction_path` (every config edit), `get_transaction`, `commit_transaction`, `discard_transaction`, `diff_transaction`, `get_history_config`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
 | `watchdog_client.rs` | `resolve(watchdog_socket, service) -> Result<Option<PathBuf>, _>` — one-shot `WatchdogRequest::ResolveEndpoint` call against `nos-watchdogd`'s broker socket; `Ok(None)` means the broker is reachable but reports the service unavailable |
-| `rib_client.rs` | One-shot IPC calls to a resolved `nos-ribd` instance: `for_each_routes_page` (`RibRequest::GetRoutesPage`, one connection, a non-advancing cursor is an error), `lookup` (`RibRequest::Lookup`) |
+| `rib_client.rs` | One-shot IPC calls to a resolved `nos-ribd` instance: `get_summary` (`RibRequest::GetSummary`), `for_each_routes_page` (`RibRequest::GetRoutesPage` with a `RouteFilter`, one connection, a non-advancing cursor is an error), `lookup` (`RibRequest::Lookup`) |
 | `interface_client.rs` | One-shot IPC calls to the resolved `nos-interfaced` instance: `get_interfaces` (`InterfaceRequest::GetInterfaces`), `get_interface` (`InterfaceRequest::GetInterface`) |
 | `log_client.rs` | IPC calls to the resolved `nos-logd` instance: `get_logs` (one-shot `LogRequest::GetLogs`) and `tail` (long-lived, like `client::subscribe` — sends `LogRequest::Tail` and returns the reader for the caller to loop on) |
 | `bgp_client.rs` | One-shot IPC call to a resolved `nos-bgpd` instance: `get_summary` (`BgpRequest::GetSummary`), `for_each_routes_page`, `for_each_evpn_routes_page`, `for_each_flowspec_routes_page`, `for_each_vpn_routes_page` (the paged `BgpRequest::Get*Page` queries, one connection, a non-advancing cursor is an error) |

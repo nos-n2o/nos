@@ -174,6 +174,14 @@ fn lab() -> Lab {
             "rib" => serve(role, name, &path, |r: RibRequest| {
                 vec![match r {
                     RibRequest::Lookup { .. } => RibEvent::NoMatch,
+                    RibRequest::GetSummary => RibEvent::Summary(nos_proto::RibSummary {
+                        table: "rt1".to_string(),
+                        vrf: Some("vrf-rt1".to_string()),
+                        kernel_table: Some(100),
+                        ipv4_prefixes: 1,
+                        ipv6_prefixes: 0,
+                        sources: vec![],
+                    }),
                     _ => RibEvent::RoutesPage {
                         routes: Vec::new(),
                         next: None,
@@ -444,6 +452,29 @@ async fn every_show_command_runs_against_its_daemon() {
     );
     assert_eq!(*hostname.lock().unwrap(), "r1");
     assert!(repainted.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn route_tables_summary_and_filters_run() {
+    let lab = lab();
+    let (mode, exited) = run(
+        &lab,
+        Mode::Operational,
+        &[
+            "show route",
+            "show route | json",
+            "show route rt1 summary",
+            "show route rt1 summary | json",
+            "show route rt1 protocol static",
+            "show route rt1 protocol static | json",
+            "show route rt1 prefix 10.0.0.0/24 longer",
+            "show route gone summary",
+        ],
+        leave_open,
+    )
+    .await;
+    assert_eq!(mode, Mode::Operational);
+    assert!(!exited);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
