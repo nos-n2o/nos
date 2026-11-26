@@ -36,7 +36,7 @@ A change to any of these restarts the affected links (`LinkConfig` equality): a 
 - Neighbor identity is (chassis id, port id); `NeighborTable` is capped at `MAX_NEIGHBORS_PER_LINK` (32), since input is untrusted.
 - Own frames are dropped twice (source MAC in `socket::payload_of_foreign_frame`, own chassis id in `link::handle_rx`); a down link is retried (`LINK_DOWN_RETRY` 1s), never fatal; never leave an elapsed deadline armed (as in `nos-lacp`).
 - The chassis MAC is derived (FNV-1a of hostname + machine-id, `reconcile::local_system_id`, `ponytail:` collision caveat as in `nos-lacp`).
-- Sockets follow `nos-interfaced`'s `LinkRemoved`/`LinkAdded` (`link_client`, #1431, no polling): `absent` closes the socket and clears neighbors, a new epoch reopens it with a fast-start burst; the task survives.
+- Sockets follow `nos-interfaced`'s `LinkRemoved`/`LinkAdded` (`link_client`, #1431, no polling): `absent` closes the socket and clears neighbors, a new epoch reopens it with a fast-start burst; the task survives. `no-carrier` and `admin-down` flush the neighbor table once per transition (`lldp neighbors flushed … reason=`, 802.1AB portEnabled false, #1519) and keep the socket.
 - Destination group is one per interface; a different group on each end never sees the other.
 
 ## Modules
