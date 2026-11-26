@@ -2,7 +2,11 @@
 //! fake daemons over real TLS sockets (#131): a stateful fake `nos-configd`,
 //! a fake broker, and one canned fake per queried daemon.
 
-#![allow(clippy::excessive_nesting, clippy::match_wildcard_for_single_variants)]
+#![allow(
+    clippy::excessive_nesting,
+    clippy::match_wildcard_for_single_variants,
+    clippy::too_many_lines
+)]
 
 mod common;
 
