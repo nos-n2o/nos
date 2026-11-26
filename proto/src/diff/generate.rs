@@ -690,6 +690,30 @@ mod tests {
         }
     }
 
+    /// A next-hop edit inside an unchanged-otherwise route is not dropped.
+    #[test]
+    fn next_hop_changes_are_diffed() {
+        use crate::schema::StaticNextHop;
+        let hop = |g: &str| StaticNextHop {
+            gateway: g.parse().unwrap(),
+            ..Default::default()
+        };
+        let mut base = statics([(1, 1)]);
+        let mut cand = base.clone();
+        assert_eq!(diff_configs(&base, &cand).static_routing_instances, vec![]);
+        cand.static_routing_instances[0].routes[0].next_hops = vec![hop("192.0.2.9")];
+        for (b, c) in [(&base, &cand), (&cand, &base)] {
+            let d = diff_configs(b, c);
+            assert_eq!(route_sections(&d).len(), 1);
+            let r = &d.static_routing_instances[0].subsections[0];
+            assert_eq!(r.status, DiffStatus::Modified);
+            assert_ne!(r.subsections, vec![], "next-hops section present");
+        }
+        base.static_routing_instances[0].routes[0].next_hops = vec![hop("192.0.2.9")];
+        base.static_routing_instances[0].routes[0].next_hops[0].interface = Some("e".into());
+        assert_ne!(diff_configs(&base, &cand).static_routing_instances, vec![]);
+    }
+
     fn route_sections(d: &ConfigDiff) -> Vec<(String, DiffStatus)> {
         d.static_routing_instances[0]
             .subsections
@@ -796,6 +820,12 @@ mod tests {
             subnet: format!("10.0.{}.0/24", r.below(40)).parse().unwrap(),
             gateway: format!("192.0.2.{}", r.below(4)).parse().unwrap(),
             bfd: (r.below(4) == 0).then(|| "b".to_string()),
+            next_hops: (0..r.below(3))
+                .map(|_| crate::schema::StaticNextHop {
+                    gateway: format!("192.0.2.{}", 10 + r.below(3)).parse().unwrap(),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         };
         let pick = |r: &mut Rng, len: usize| r.below(len);

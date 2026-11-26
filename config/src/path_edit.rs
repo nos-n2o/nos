@@ -612,6 +612,30 @@ mod tests {
     }
 
     #[test]
+    fn a_next_hop_is_added_and_removed_below_a_route() {
+        let cfg = start();
+        let path = segs(&[
+            "static-routing-instance",
+            "s0",
+            "route",
+            "10.0.0.0/8",
+            "next-hops",
+            "192.0.2.7",
+        ]);
+        let hop = json!({"gateway": "192.0.2.7"});
+        let Ok(Planned::Apply(apply)) = plan(&cfg, &cfg, &path, Some(hop), None) else {
+            panic!("a next-hop edit applies in place");
+        };
+        let mut c = cfg.clone();
+        apply(&mut c);
+        let hops = &c.static_routing_instances[0].routes[0].next_hops;
+        assert_eq!(hops.len(), 1);
+        assert_eq!(hops[0].gateway.to_string(), "192.0.2.7");
+        let c2 = edit_value(&c, &c, &path, None, None).unwrap();
+        assert_eq!(c2.static_routing_instances[0].routes[0].next_hops, vec![]);
+    }
+
+    #[test]
     fn exact_key_wins_and_ambiguous_selector_fails_without_a_change() {
         let mut cfg = start();
         cfg.community_aliases = serde_json::from_value(json!([

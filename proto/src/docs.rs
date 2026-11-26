@@ -199,6 +199,8 @@ topics! {
     StaticRouteInterface,
     /// `StaticRoute.blackhole`
     StaticRouteBlackhole,
+    /// `StaticRoute.next_hops`
+    StaticRouteNextHops,
     /// `Config.interfaces`
     Interface,
     /// `Interface.addresses` (also a subinterface's)

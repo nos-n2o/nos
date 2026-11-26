@@ -33,6 +33,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "remote_address",
     "broadcast_domain",
     "subnet",
+    "gateway",
     "cidr",
     "router_id",
     "key_id",
@@ -429,6 +430,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn static_route_keys_on_subnet_and_next_hop_on_gateway() {
+        assert_eq!(key_field(["subnet", "gateway", "bfd"]), Some("subnet"));
+        assert_eq!(key_field(["gateway", "interface", "bfd"]), Some("gateway"));
+    }
 
     fn p(s: &str) -> Vec<String> {
         s.split('/')

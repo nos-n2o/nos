@@ -7077,8 +7077,35 @@
         ],
         "type": "object"
       },
+      "StaticNextHop": {
+        "description": "An additional gateway of a `StaticRoute` (see its `next_hops`).",
+        "properties": {
+          "bfd": {
+            "description": "Name of a `BfdProfile` to run BFD with on this hop; `None` runs none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gateway": {
+            "description": "Next-hop address, in the same family as the route's `subnet`; the key within `next_hops`.",
+            "type": "string"
+          },
+          "interface": {
+            "description": "Outgoing interface pinned for this hop; required for an IPv6\nlink-local gateway. Same rules as `StaticRoute.interface`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "gateway"
+        ],
+        "type": "object"
+      },
       "StaticRoute": {
-        "description": "A single static route within a `StaticRoutingInstance`.\n\nKnown simplification: exactly one gateway per subnet is supported — ECMP\n(multiple gateways for one subnet) is not modeled in this iteration.\nPer-instance uniqueness of `subnet` is enforced on the *parent's*\n`routes` field (`static_routing_instance::unique_subnets`), not here — a\n`StaticRoute` in isolation has no notion of which instance owns it under\ngarde's whole-`Config` validation context.",
+        "description": "A single static route within a `StaticRoutingInstance`.\n\n`gateway` is the first next hop and `next_hops` the others: the ECMP set\nis both. `distance`/`tag` are per route, so every hop shares them.\nPer-instance uniqueness of `subnet` is enforced on the *parent's*\n`routes` field (`static_routing_instance::unique_subnets`), not here — a\n`StaticRoute` in isolation has no notion of which instance owns it under\ngarde's whole-`Config` validation context.",
         "properties": {
           "bfd": {
             "description": "Name of a `BfdProfile` to run BFD with; `None` runs no BFD.\nInert until `nos-bfdd` exists.",
@@ -7110,6 +7137,13 @@
               "string",
               "null"
             ]
+          },
+          "next_hops": {
+            "description": "Further ECMP next hops besides `gateway`, keyed by gateway address;\nempty for a single-hop route and for a blackhole.",
+            "items": {
+              "$ref": "#/components/schemas/StaticNextHop"
+            },
+            "type": "array"
           },
           "subnet": {
             "description": "Destination prefix; the key within the instance.",
@@ -124025,6 +124059,954 @@
               "application/json": {
                 "schema": {
                   "description": "Outgoing interface (or `<interface>.<tag>` subinterface) pinned for\nthis route; required when `gateway` is an IPv6 link-local address.\nMust be in a routing table bound to this route's instance.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `interface` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/static-routing-instance/{static_routing_instance}/route/{route}/next-hop": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: Every `next-hop` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Further ECMP next hops besides `gateway`, keyed by gateway address;\nempty for a single-hop route and for a blackhole.",
+                  "items": {
+                    "$ref": "#/components/schemas/StaticNextHop"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: Every `next-hop` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "static_routing_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "route",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Further ECMP next hops besides `gateway`, keyed by gateway address;\nempty for a single-hop route and for a blackhole.",
+                  "items": {
+                    "$ref": "#/components/schemas/StaticNextHop"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: Every `next-hop` entry.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Further ECMP next hops besides `gateway`, keyed by gateway address;\nempty for a single-hop route and for a blackhole.",
+                "items": {
+                  "$ref": "#/components/schemas/StaticNextHop"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Further ECMP next hops besides `gateway`, keyed by gateway address;\nempty for a single-hop route and for a blackhole.",
+                  "items": {
+                    "$ref": "#/components/schemas/StaticNextHop"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: Every `next-hop` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/static-routing-instance/{static_routing_instance}/route/{route}/next-hop/{next_hop}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: One `next-hop`, addressed by its `gateway`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaticNextHop"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: One `next-hop`, addressed by its `gateway`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "static_routing_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "route",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "next_hop",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaticNextHop"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: One `next-hop`, addressed by its `gateway`.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element before every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "first",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": true,
+            "description": "Put the element after every other one. Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "last",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just before the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "allowEmptyValue": false,
+            "description": "Put the element just after the sibling with this key (404 if unknown). Give at most one of first, last, before, after.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StaticNextHop"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaticNextHop"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: One `next-hop`, addressed by its `gateway`.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/static-routing-instance/{static_routing_instance}/route/{route}/next-hop/{next_hop}/bfd": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `bfd` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Name of a `BfdProfile` to run BFD with on this hop; `None` runs none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `bfd` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "static_routing_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "route",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "next_hop",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Name of a `BfdProfile` to run BFD with on this hop; `None` runs none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `bfd` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Name of a `BfdProfile` to run BFD with on this hop; `None` runs none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Name of a `BfdProfile` to run BFD with on this hop; `None` runs none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `bfd` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/static-routing-instance/{static_routing_instance}/route/{route}/next-hop/{next_hop}/interface": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `interface` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Outgoing interface pinned for this hop; required for an IPv6\nlink-local gateway. Same rules as `StaticRoute.interface`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `interface` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "static_routing_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "route",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "next_hop",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Outgoing interface pinned for this hop; required for an IPv6\nlink-local gateway. Same rules as `StaticRoute.interface`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `interface` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Outgoing interface pinned for this hop; required for an IPv6\nlink-local gateway. Same rules as `StaticRoute.interface`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Outgoing interface pinned for this hop; required for an IPv6\nlink-local gateway. Same rules as `StaticRoute.interface`.",
                   "type": [
                     "string",
                     "null"

@@ -39,8 +39,8 @@ fn routes_interfaces_valid(routes: &[StaticRoute], name: &str, ctx: &Config) -> 
         .try_for_each(|r| super::static_route::interface_valid(r, name, ctx))
 }
 
-/// No two routes within the same instance may share a subnet — see
-/// `StaticRoute`'s doc comment on the ECMP simplification. Scoped to
+/// No two routes within the same instance may share a subnet (extra
+/// gateways go in `StaticRoute.next_hops`). Scoped to
 /// `self.routes` only (not global), since this uniqueness is genuinely
 /// per-parent, unlike peer-group name/peer-address uniqueness.
 fn unique_subnets(routes: &[StaticRoute]) -> garde::Result {
