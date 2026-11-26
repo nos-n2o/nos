@@ -16,9 +16,9 @@ use nos_proto::{
     LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogLevel, LogRequest,
     LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
-    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, ServiceRef, StpEvent,
-    StpInstance, StpMst, StpPortCounters, StpRequest, StpSummary, VersionInfo, BGP_PAGE_MAX,
-    ROUTES_PAGE_MAX,
+    PortAggregateStatus, PrefixRoutes, ReflectorView, RibEvent, RibRequest, RibSummary,
+    RouteFilter, RouteSourceKind, ServiceRef, StpEvent, StpInstance, StpMst, StpPortCounters,
+    StpRequest, StpSummary, VersionInfo, BGP_PAGE_MAX, ROUTES_PAGE_MAX,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,14 +63,102 @@ pub struct RoutesPage {
 pub struct PageQuery {
     after: Option<String>,
     limit: Option<u32>,
+    protocol: Option<String>,
+    prefix: Option<String>,
+    longer: Option<bool>,
 }
 
-#[utoipa::path(get, path = "/v1/routes/{table}", tag = "show", summary = "One page of a table's routes, best to worst per prefix", description = "Pages of prefixes in ascending CIDR order; follow `pagination.next` as `?after=` until it is null. The table is not snapshotted: a walk may miss or include routes that change meanwhile, but never loops or repeats a prefix.", params(("table" = String, Path, description = "routing table name"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (a prefix such as 10.0.0.0/8)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)")), responses((status = 200, body = RoutesPage), (status = 400, body = ErrorBody, description = "after is not a prefix"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+/// One routing table of `GET /v1/routes`.
+#[derive(Serialize, ToSchema)]
+pub struct RouteTable {
+    /// The table's name.
+    table: String,
+    /// Whether its `nos-ribd` answered.
+    running: bool,
+    /// Its summary; `null` while `nos-ribd` is not running.
+    summary: Option<RibSummary>,
+}
+
+async fn summary_of(d: &Daemons, table: String) -> ApiResult<RibSummary> {
+    match d
+        .service(ServiceRef::RibTable(table), RibRequest::GetSummary)
+        .await?
+    {
+        RibEvent::Summary(s) => Ok(s),
+        RibEvent::Error(e) => Err(ApiError::BadGateway(e)),
+        other => Err(unexpected("nos-ribd", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/routes", tag = "show", summary = "Every routing table with its prefix counts", responses((status = 200, body = Vec<RouteTable>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn route_tables(State(d): State<Daemons>) -> ApiResult<Json<Vec<RouteTable>>> {
+    let tables = d.running_config().await?.routing_tables;
+    let answers = futures::future::join_all(tables.into_iter().map(|t| {
+        let d = d.clone();
+        async move { (t.name.clone(), summary_of(&d, t.name).await) }
+    }))
+    .await;
+    answers
+        .into_iter()
+        .map(|(table, r)| match r {
+            Ok(s) => Ok(RouteTable {
+                table,
+                running: true,
+                summary: Some(s),
+            }),
+            Err(ApiError::Unavailable(_)) => Ok(RouteTable {
+                table,
+                running: false,
+                summary: None,
+            }),
+            Err(e) => Err(e),
+        })
+        .collect::<ApiResult<Vec<_>>>()
+        .map(Json)
+}
+
+#[utoipa::path(get, path = "/v1/routes/{table}/summary", tag = "show", summary = "A routing table's prefix counts per family and candidates per source", params(("table" = String, Path, description = "routing table name")), responses((status = 200, body = RibSummary), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn route_summary(
+    State(d): State<Daemons>,
+    Path(table): Path<String>,
+) -> ApiResult<Json<RibSummary>> {
+    summary_of(&d, table).await.map(Json)
+}
+
+/// The `protocol`/`prefix`/`longer` query as a ribd filter.
+fn route_filter(q: &PageQuery) -> ApiResult<RouteFilter> {
+    let bad = ApiError::BadRequest;
+    let source = q
+        .protocol
+        .as_deref()
+        .map(|p| p.parse::<RouteSourceKind>().map_err(bad))
+        .transpose()?;
+    let prefix = q
+        .prefix
+        .as_deref()
+        .map(|p| {
+            p.parse()
+                .map_err(|_| ApiError::BadRequest(format!("prefix '{p}' is not a CIDR prefix")))
+        })
+        .transpose()?;
+    let longer = q.longer.unwrap_or(false);
+    if longer && prefix.is_none() {
+        return Err(ApiError::BadRequest("longer needs a prefix".into()));
+    }
+    Ok(RouteFilter {
+        source,
+        prefix,
+        longer,
+    })
+}
+
+#[utoipa::path(get, path = "/v1/routes/{table}", tag = "show", summary = "One page of a table's routes, best to worst per prefix", description = "Pages of prefixes in ascending CIDR order; follow `pagination.next` as `?after=` until it is null. The table is not snapshotted: a walk may miss or include routes that change meanwhile, but never loops or repeats a prefix.", params(("table" = String, Path, description = "routing table name"), ("after" = Option<String>, Query, description = "cursor: the previous page's pagination.next (a prefix such as 10.0.0.0/8)"), ("limit" = Option<u32>, Query, description = "page size, 1 to 1000 (default 1000)"), ("protocol" = Option<String>, Query, description = "only this source: static, bgp, ospf, connected, evpn, vpn (other sources' candidates are dropped)"), ("prefix" = Option<String>, Query, description = "only this prefix (exact)"), ("longer" = Option<bool>, Query, description = "with prefix: it and every longer prefix under it")), responses((status = 200, body = RoutesPage), (status = 400, body = ErrorBody, description = "after, prefix or protocol is invalid, or longer without prefix"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
 pub async fn routes(
     State(d): State<Daemons>,
     Path(table): Path<String>,
     Query(q): Query<PageQuery>,
 ) -> ApiResult<Json<RoutesPage>> {
+    let filter = route_filter(&q)?;
     let after = q
         .after
         .map(|a| {
@@ -82,7 +170,11 @@ pub async fn routes(
     match d
         .service(
             ServiceRef::RibTable(table),
-            RibRequest::GetRoutesPage { after, limit },
+            RibRequest::GetRoutesPage {
+                after,
+                limit,
+                filter,
+            },
         )
         .await?
     {

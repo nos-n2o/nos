@@ -126,8 +126,8 @@ pub use paths::{
 };
 pub use rib::{
     BgpRoute, BgpRouteUpdate, EvpnRouteInfo, IlmRoute, NextHop, OspfRoute, OspfRouteUpdate,
-    PrefixRoutes, ResolvedNextHop, RibEvent, RibRequest, RouteEntry, RouteSourceKind, VpnPath,
-    VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
+    PrefixRoutes, ResolvedNextHop, RibEvent, RibRequest, RibSummary, RouteEntry, RouteFilter,
+    RouteSourceKind, SourceCount, VpnPath, VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
 };
 pub use schema::{
     loopback_table_name, parse_fingerprint, redact_at, Aaa, AddressFamily, Admin, AdminKey,

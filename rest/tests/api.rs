@@ -15,8 +15,8 @@ use nos_config::{Config, ConfigStore, ListenAddr};
 use nos_pki::testing::shared;
 use nos_proto::{
     BfdEvent, BfdRequest, BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent,
-    LogLevel, LogRequest, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
-    ServiceRef, User, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS,
+    LogLevel, LogRequest, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteFilter,
+    RouteSourceKind, ServiceRef, User, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS,
 };
 use nos_rest::auth::PeerUser;
 use nos_rest::{api, ipc::Daemons};
@@ -112,6 +112,12 @@ async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<
             password: PASSWORD.to_string(),
             ..Default::default()
         }],
+        routing_tables: ["rt1", "rt2"]
+            .map(|name| nos_proto::RoutingTable {
+                name: name.into(),
+                ..Default::default()
+            })
+            .into(),
         ..Config::default()
     };
     ConfigStore::new(config, config_file)
@@ -942,8 +948,12 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
     let dir = tempfile::tempdir().unwrap();
     let rib = dir.path().join("rib.sock");
     serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
-        RibRequest::GetRoutesPage { after, limit } => {
-            assert_eq!((after, limit), (None, 1000));
+        RibRequest::GetRoutesPage {
+            after,
+            limit,
+            filter,
+        } => {
+            assert_eq!((after, limit, filter), (None, 1000, RouteFilter::default()));
             RibEvent::RoutesPage {
                 routes: vec![PrefixRoutes {
                     prefix: "10.0.0.0/8".parse().unwrap(),
@@ -2217,7 +2227,7 @@ async fn routes_pagination_params_are_forwarded_and_validated() {
     let dir = tempfile::tempdir().unwrap();
     let rib = dir.path().join("rib.sock");
     serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
-        RibRequest::GetRoutesPage { after, limit } => {
+        RibRequest::GetRoutesPage { after, limit, .. } => {
             assert_eq!(after, Some("10.0.0.0/8".parse().unwrap()));
             RibEvent::RoutesPage {
                 routes: vec![],
@@ -3186,4 +3196,66 @@ async fn restconf_crud_etag_and_errors() {
         let (s, ..) = send_full(app, Method::POST, &uri, None, Some(USER), None).await;
         assert_eq!(s, StatusCode::CREATED, "{i}");
     }
+}
+
+fn summary(table: &str) -> nos_proto::RibSummary {
+    nos_proto::RibSummary {
+        table: table.into(),
+        vrf: None,
+        kernel_table: None,
+        ipv4_prefixes: 2,
+        ipv6_prefixes: 0,
+        sources: vec![],
+    }
+}
+
+/// The route filter reaches `nos-ribd`; bad filters are 400s; `/summary` is a
+/// passthrough and not parsed as an address; the table list marks a table
+/// whose ribd is down as not running (#1445).
+#[tokio::test]
+async fn route_filter_summary_and_table_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let rib = dir.path().join("rib.sock");
+    serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
+        RibRequest::GetRoutesPage { filter, .. } => {
+            assert_eq!(
+                filter,
+                RouteFilter {
+                    source: Some(RouteSourceKind::Bgp),
+                    prefix: Some("10.0.0.0/8".parse().unwrap()),
+                    longer: true,
+                }
+            );
+            RibEvent::RoutesPage {
+                routes: vec![],
+                next: None,
+            }
+        }
+        RibRequest::GetSummary => RibEvent::Summary(summary("rt1")),
+        _ => RibEvent::Error("unsupported".into()),
+    });
+    let f = fixture(vec![(ServiceRef::RibTable("rt1".into()), rib)]).await;
+    let (s, _) = send(
+        &f.app,
+        Method::GET,
+        "/v1/routes/rt1?protocol=bgp&prefix=10.0.0.0/8&longer=true",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    for bad in ["protocol=nope", "prefix=nope", "longer=true"] {
+        let uri = format!("/v1/routes/rt1?{bad}");
+        let (s, _) = send(&f.app, Method::GET, &uri, None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (s, v) = send(&f.app, Method::GET, "/v1/routes/rt1/summary", None).await;
+    assert_eq!((s, v["ipv4_prefixes"].clone()), (StatusCode::OK, 2.into()));
+    let (s, v) = send(&f.app, Method::GET, "/v1/routes", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v[0]["table"], "rt1");
+    assert_eq!(v[0]["running"], true);
+    assert_eq!(v[0]["summary"]["table"], "rt1");
+    assert_eq!(v[1]["table"], "rt2");
+    assert_eq!(v[1]["running"], false);
+    assert!(v[1]["summary"].is_null());
 }

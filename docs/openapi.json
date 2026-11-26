@@ -5986,6 +5986,57 @@
         ],
         "type": "object"
       },
+      "RibSummary": {
+        "description": "One routing table's summary, for `show route summary` and the table list.",
+        "properties": {
+          "ipv4_prefixes": {
+            "description": "Distinct IPv4 prefixes.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ipv6_prefixes": {
+            "description": "Distinct IPv6 prefixes.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kernel_table": {
+            "description": "The kernel routing table id; `None` as for `vrf`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sources": {
+            "description": "Candidates per source (only sources with one), declaration order.",
+            "items": {
+              "$ref": "#/components/schemas/SourceCount"
+            },
+            "type": "array"
+          },
+          "table": {
+            "description": "The routing table's name.",
+            "type": "string"
+          },
+          "vrf": {
+            "description": "The VRF device backing it; `None` until created (or with the noop\ndriver).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "table",
+          "ipv4_prefixes",
+          "ipv6_prefixes",
+          "sources"
+        ],
+        "type": "object"
+      },
       "RoleAttribute": {
         "description": "The Access-Accept attribute whose text names the user's role\n(`admin`, `operator` or `read-only`; anything else is read-only).",
         "enum": [
@@ -6121,6 +6172,35 @@
           "Vpn"
         ],
         "type": "string"
+      },
+      "RouteTable": {
+        "description": "One routing table of `GET /v1/routes`.",
+        "properties": {
+          "running": {
+            "description": "Whether its `nos-ribd` answered.",
+            "type": "boolean"
+          },
+          "summary": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RibSummary",
+                "description": "Its summary; `null` while `nos-ribd` is not running."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "table": {
+            "description": "The table's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table",
+          "running"
+        ],
+        "type": "object"
       },
       "RoutesPage": {
         "description": "One page of `GET /v1/routes/{table}`.",
@@ -6601,6 +6681,33 @@
             "type": "object"
           }
         ]
+      },
+      "SourceCount": {
+        "description": "Candidates of one source in a table, per address family.",
+        "properties": {
+          "ipv4": {
+            "description": "IPv4 candidates.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ipv6": {
+            "description": "IPv6 candidates.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RouteSourceKind",
+            "description": "The source."
+          }
+        },
+        "required": [
+          "source",
+          "ipv4",
+          "ipv6"
+        ],
+        "type": "object"
       },
       "SpanningTree": {
         "description": "Bridge-wide spanning-tree parameters; there is exactly one per device.",
@@ -10418,6 +10525,40 @@
         ]
       }
     },
+    "/v1/routes": {
+      "get": {
+        "operationId": "route_tables",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RouteTable"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every routing table with its prefix counts",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/routes/{table}": {
       "get": {
         "description": "Pages of prefixes in ascending CIDR order; follow `pagination.next` as `?after=` until it is null. The table is not snapshotted: a walk may miss or include routes that change meanwhile, but never loops or repeats a prefix.",
@@ -10451,6 +10592,33 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "description": "only this source: static, bgp, ospf, connected, evpn, vpn (other sources' candidates are dropped)",
+            "in": "query",
+            "name": "protocol",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "only this prefix (exact)",
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "with prefix: it and every longer prefix under it",
+            "in": "query",
+            "name": "longer",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -10472,7 +10640,7 @@
                 }
               }
             },
-            "description": "after is not a prefix"
+            "description": "after, prefix or protocol is invalid, or longer without prefix"
           },
           "503": {
             "content": {
@@ -10486,6 +10654,48 @@
           }
         },
         "summary": "One page of a table's routes, best to worst per prefix",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/routes/{table}/summary": {
+      "get": {
+        "operationId": "route_summary",
+        "parameters": [
+          {
+            "description": "routing table name",
+            "in": "path",
+            "name": "table",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RibSummary"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "A routing table's prefix counts per family and candidates per source",
         "tags": [
           "show"
         ]

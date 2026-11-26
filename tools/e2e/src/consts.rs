@@ -6,6 +6,10 @@
 use crate::lab::Addr;
 /// The user every router's *seeded* config carries, and what the harness logs
 /// in as (`POST /v1/login`) to get the client certificate its REST calls use.
+/// Kernel table of `rt1`: the first and only routing table each router
+/// configures, and `table_registry` allocates from 100, so it is always 100
+/// (same reasoning as the other table ids).
+pub const RT1_KERNEL_TABLE: u32 = 100;
 pub const E2E_USER: &str = "e2e";
 pub const E2E_PASSWORD: &str = "e2e-password";
 /// The `pam` phase: the service file the image ships (`pam/nos-sshd.pam`), a wrong

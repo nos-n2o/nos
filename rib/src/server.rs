@@ -6,8 +6,8 @@ use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
     BgpRoute, BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, NextHop, OspfRoute,
-    OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind,
-    VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
+    OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, RibSummary, Role, RouteEntry, RouteFilter,
+    RouteSourceKind, VpnRoute, VpnRouteInfo, VpnRouteUpdate, ROUTES_PAGE_MAX,
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -79,6 +79,7 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         RibRequest::GetRoutes
         | RibRequest::GetRoutesPage { .. }
         | RibRequest::Lookup { .. }
+        | RibRequest::GetSummary
         | RibRequest::GetVpnLabel => {
             matches!(role, Role::User | Role::Restd)
         }
@@ -281,13 +282,14 @@ fn routes_page(
     render: &Render<'_>,
     after: Option<IpNet>,
     limit: u32,
+    filter: &RouteFilter,
     budget: usize,
 ) -> RibEvent {
     let limit = match limit {
         0 => ROUTES_PAGE_MAX,
         n => n.min(ROUTES_PAGE_MAX),
     };
-    let (page, mut more) = rib.routes_page(after, limit as usize);
+    let (page, mut more) = rib.routes_page(after, limit as usize, filter);
     let mut routes = Vec::with_capacity(page.len());
     let mut bytes = 0;
     for (prefix, candidates) in page {
@@ -309,14 +311,20 @@ async fn dispatch(ctx: &Context, v3: bool, req: RibRequest) -> Option<RibEvent> 
         RibRequest::GetRoutes => Some(RibEvent::Error(
             "GetRoutes removed, use GetRoutesPage".to_string(),
         )),
-        RibRequest::GetRoutesPage { after, limit } => {
+        RibRequest::GetRoutesPage {
+            after,
+            limit,
+            filter,
+        } => {
             let guard = ctx.rib.read().await;
             let ifname = |i| ctx.driver.interface_name(i);
             let render = Render {
                 kernel_ok: !ctx.kernel.is_dirty(),
                 ifname: &ifname,
             };
-            Some(routes_page(&guard, &render, after, limit, PAGE_BYTES))
+            Some(routes_page(
+                &guard, &render, after, limit, &filter, PAGE_BYTES,
+            ))
         }
         RibRequest::Lookup { addr } => {
             let guard = ctx.rib.read().await;
@@ -331,6 +339,17 @@ async fn dispatch(ctx: &Context, v3: bool, req: RibRequest) -> Option<RibEvent> 
                 }
                 None => RibEvent::NoMatch,
             })
+        }
+        RibRequest::GetSummary => {
+            let (ipv4_prefixes, ipv6_prefixes, sources) = ctx.rib.read().await.summary_counts();
+            Some(RibEvent::Summary(RibSummary {
+                table: ctx.table.clone(),
+                vrf: ctx.driver.vrf_name(&ctx.table).await,
+                kernel_table: ctx.driver.table_id(&ctx.table).await,
+                ipv4_prefixes,
+                ipv6_prefixes,
+                sources,
+            }))
         }
         RibRequest::GetVrfName => Some(RibEvent::VrfName(ctx.driver.vrf_name(&ctx.table).await)),
         RibRequest::GetTableId => Some(RibEvent::TableId(ctx.driver.table_id(&ctx.table).await)),
@@ -1247,6 +1266,7 @@ mod authz_tests {
             RibRequest::GetRoutesPage {
                 after: None,
                 limit: 0,
+                filter: RouteFilter::default(),
             },
         )
         .await
@@ -1304,7 +1324,10 @@ mod authz_tests {
                 kernel_ok: ok,
                 ifname: &name,
             };
-            let (_, c) = rib.routes_page(None, 1).0.remove(0);
+            let (_, c) = rib
+                .routes_page(None, 1, &RouteFilter::default())
+                .0
+                .remove(0);
             to_prefix_routes(p, &c, rib, &r).candidates
         };
         let c = show(&rib, true);
@@ -1355,7 +1378,14 @@ mod authz_tests {
     #[test]
     fn routes_pages_walk_the_table_by_cursor() {
         let rib = static_rib(5);
-        let (p, next) = page_of(routes_page(&rib, &plain(), None, 2, usize::MAX));
+        let (p, next) = page_of(routes_page(
+            &rib,
+            &plain(),
+            None,
+            2,
+            &RouteFilter::default(),
+            usize::MAX,
+        ));
         assert_eq!(
             (p.as_slice(), next.as_deref()),
             (
@@ -1368,6 +1398,7 @@ mod authz_tests {
             &plain(),
             "10.0.1.0/24".parse().ok(),
             2,
+            &RouteFilter::default(),
             usize::MAX,
         ));
         assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.3.0/24")));
@@ -1377,6 +1408,7 @@ mod authz_tests {
             &plain(),
             "10.0.3.0/24".parse().ok(),
             0,
+            &RouteFilter::default(),
             usize::MAX,
         ));
         assert_eq!((p, next), (vec!["10.0.4.0/24".to_string()], None));
@@ -1386,11 +1418,25 @@ mod authz_tests {
     fn a_byte_budget_cuts_a_page_but_always_advances() {
         let rib = static_rib(5);
         // A 1-byte budget still returns one prefix and a cursor.
-        let (p, next) = page_of(routes_page(&rib, &plain(), None, 100, 1));
+        let (p, next) = page_of(routes_page(
+            &rib,
+            &plain(),
+            None,
+            100,
+            &RouteFilter::default(),
+            1,
+        ));
         assert_eq!((p.len(), next.as_deref()), (1, Some("10.0.0.0/24")));
-        let one = rib.routes_page(None, 1).0;
+        let one = rib.routes_page(None, 1, &RouteFilter::default()).0;
         let len = to_prefix_routes(one[0].0, &one[0].1, &rib, &plain()).wire_len();
-        let (p, next) = page_of(routes_page(&rib, &plain(), None, 100, len * 2));
+        let (p, next) = page_of(routes_page(
+            &rib,
+            &plain(),
+            None,
+            100,
+            &RouteFilter::default(),
+            len * 2,
+        ));
         assert_eq!((p.len(), next.as_deref()), (2, Some("10.0.1.0/24")));
     }
 
@@ -1416,8 +1462,10 @@ mod authz_tests {
             let page = RibRequest::GetRoutesPage {
                 after: None,
                 limit: 1,
+                filter: RouteFilter::default(),
             };
             assert_eq!(allowed(role, &page), expected, "{role:?}");
+            assert_eq!(allowed(role, &RibRequest::GetSummary), expected, "{role:?}");
             assert_eq!(
                 allowed(role, &RibRequest::GetVpnLabel),
                 expected,

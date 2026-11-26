@@ -58,6 +58,7 @@ pub async fn for_each_routes_page(
             .send(RibRequest::GetRoutesPage {
                 after,
                 limit: ROUTES_PAGE_MAX,
+                filter: nos_proto::RouteFilter::default(),
             })
             .await?;
         match reader.next().await {

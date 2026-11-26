@@ -82,6 +82,7 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
         .send(RibRequest::GetRoutesPage {
             after: None,
             limit: 0,
+            filter: nos_proto::RouteFilter::default(),
         })
         .await
         .unwrap();
@@ -840,7 +841,7 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
     // `nos-sshd` binds inside the VRF but never needs the table id.
     let vrf_name = [&vrf[..], &[Role::Sshd, Role::Watchdog]].concat();
     let igp = [Role::User, Role::Restd, Role::Bgpd];
-    let cases: [Case; 7] = [
+    let cases: [Case; 8] = [
         (
             "GetRoutes",
             || RibRequest::GetRoutes,
@@ -852,9 +853,16 @@ async fn each_query_is_served_to_its_roles_and_refused_to_the_rest() {
             || RibRequest::GetRoutesPage {
                 after: None,
                 limit: 10,
+                filter: nos_proto::RouteFilter::default(),
             },
             &people,
             |e| matches!(e, RibEvent::RoutesPage { routes, next: None } if routes.is_empty()),
+        ),
+        (
+            "GetSummary",
+            || RibRequest::GetSummary,
+            &people,
+            |e| matches!(e, RibEvent::Summary(s) if s.vrf.is_none() && s.kernel_table.is_none()),
         ),
         (
             "GetVrfName",
