@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
 use nos_proto::{Config, IpNet, NextHop};
+use tokio::time::Instant;
 use tracing::warn;
 
 /// Where a route came from. New sources are appended as new variants.
@@ -49,7 +51,7 @@ impl RouteSource {
     /// defaults: a directly-connected prefix beats an explicit operator
     /// override beats eBGP beats an interior IGP route beats a route learned over the
     /// overlay (EVPN, at iBGP's conventional distance).
-    fn preference(self) -> u8 {
+    pub(crate) fn preference(self) -> u8 {
         match self {
             RouteSource::Connected => 0,
             RouteSource::Static => 1,
@@ -158,6 +160,15 @@ pub struct Rib {
     /// SPF cost per `Ospf`-sourced prefix, kept beside `entries` (not in
     /// `RibEntry`) since the kernel diff must not see a metric-only change.
     ospf_metrics: HashMap<IpNet, u32>,
+    /// MED per `Bgp`-sourced prefix, kept beside `entries` like `ospf_metrics`.
+    bgp_metrics: HashMap<IpNet, u32>,
+    /// When each candidate appeared or last changed its next hops, with a
+    /// fingerprint of them: `show route`'s age. Beside `entries`, so time
+    /// never counts as a change of the winner.
+    first_seen: HashMap<(IpNet, RouteSource), (u64, Instant)>,
+    /// Interface name of each `Connected` prefix (physical and subinterface
+    /// only), for `show route`; set by `reconcile::resync`.
+    pub connected_iface: HashMap<IpNet, String>,
     /// Each OSPF owner's own routes and SPF costs (#1277). `entries` holds one
     /// derived `Ospf` candidate per prefix, the best across owners
     /// (`refresh_ospf`), so the rest of the table never sees owners.
@@ -221,7 +232,75 @@ impl Rib {
     }
 
     pub fn insert(&mut self, entry: RibEntry) {
-        self.entries.entry(entry.prefix).or_default().push(entry);
+        let prefix = entry.prefix;
+        self.entries.entry(prefix).or_default().push(entry);
+        self.touch(&prefix);
+    }
+
+    /// Stamps `prefix`'s candidates: a candidate whose next hops are unchanged
+    /// keeps its stamp, a new or changed one starts now, a gone one is dropped.
+    fn touch(&mut self, prefix: &IpNet) {
+        let now = Instant::now();
+        let candidates = self.entries.get(prefix).map_or(&[][..], Vec::as_slice);
+        for src in ALL_SOURCES {
+            let key = (*prefix, src);
+            match candidates.iter().find(|e| e.source == src) {
+                Some(e) => {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    e.next_hops.hash(&mut h);
+                    let fp = h.finish();
+                    match self.first_seen.get(&key) {
+                        Some((old, _)) if *old == fp => {}
+                        _ => {
+                            self.first_seen.insert(key, (fp, now));
+                        }
+                    }
+                }
+                None => {
+                    self.first_seen.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Seconds `source`'s candidate for `prefix` has been as it is now.
+    pub fn age_secs(&self, prefix: &IpNet, source: RouteSource) -> u64 {
+        self.first_seen
+            .get(&(*prefix, source))
+            .map_or(0, |(_, t)| t.elapsed().as_secs())
+    }
+
+    /// The metric of `source`'s candidate for `prefix` (`Ospf` SPF cost,
+    /// `Bgp` MED), if it has one.
+    pub fn metric(&self, prefix: &IpNet, source: RouteSource) -> Option<u32> {
+        match source {
+            RouteSource::Ospf => self.ospf_metrics.get(prefix).copied(),
+            RouteSource::Bgp => self.bgp_metrics.get(prefix).copied(),
+            _ => None,
+        }
+    }
+
+    /// Records (`Some`) or forgets (`None`) one prefix's BGP MED.
+    pub fn set_bgp_metric(&mut self, prefix: IpNet, metric: Option<u32>) {
+        match metric {
+            Some(m) => self.bgp_metrics.insert(prefix, m),
+            None => self.bgp_metrics.remove(&prefix),
+        };
+    }
+
+    /// Replaces every prefix's BGP MED (a `Full` push).
+    pub fn set_bgp_metrics(&mut self, metrics: HashMap<IpNet, u32>) {
+        self.bgp_metrics = metrics;
+    }
+
+    /// The interface a next hop `addr` leaves over, by the longest
+    /// `Connected` prefix covering it that has a name.
+    pub fn iface_for_gateway(&self, addr: IpAddr) -> Option<&str> {
+        self.connected_iface
+            .iter()
+            .filter(|(net, _)| net.contains(&addr))
+            .max_by_key(|(net, _)| net.prefix_len())
+            .map(|(_, n)| n.as_str())
     }
 
     /// Replaces every `source`-sourced candidate across the whole table with
@@ -237,11 +316,23 @@ impl Rib {
         for candidates in self.entries.values_mut() {
             candidates.retain(|e| e.source != source);
         }
+        let mut added = Vec::new();
         for entry in entries {
             debug_assert_eq!(entry.source, source);
+            added.push(entry.prefix);
             self.entries.entry(entry.prefix).or_default().push(entry);
         }
         self.entries.retain(|_, c| !c.is_empty());
+        for prefix in &added {
+            self.touch(prefix);
+        }
+        let entries = &self.entries;
+        self.first_seen.retain(|(p, s), _| {
+            *s != source
+                || entries
+                    .get(p)
+                    .is_some_and(|c| c.iter().any(|e| e.source == *s))
+        });
     }
 
     /// How many `source`-sourced candidates the table holds
@@ -262,7 +353,9 @@ impl Rib {
         debug_assert_ne!(entry.source, RouteSource::Ospf, "use upsert_ospf_and_diff");
         let candidates = self.entries.entry(entry.prefix).or_default();
         candidates.retain(|e| e.source != entry.source);
+        let prefix = entry.prefix;
         candidates.push(entry);
+        self.touch(&prefix);
     }
 
     /// Removes `source`'s candidate for `prefix`, if any — used for a BGP
@@ -275,6 +368,7 @@ impl Rib {
             if candidates.is_empty() {
                 self.entries.remove(prefix);
             }
+            self.touch(prefix);
         }
     }
 
@@ -429,6 +523,7 @@ impl Rib {
                 self.entries.remove(prefix);
             }
         }
+        self.touch(prefix);
     }
 
     /// Replaces every route of one OSPF owner (a `Full` push), leaving the
@@ -563,6 +658,15 @@ impl Rib {
     }
 }
 
+const ALL_SOURCES: [RouteSource; 6] = [
+    RouteSource::Static,
+    RouteSource::Bgp,
+    RouteSource::Ospf,
+    RouteSource::Connected,
+    RouteSource::Evpn,
+    RouteSource::Vpn,
+];
+
 /// The best candidate a next hop may resolve through: no overlay source
 /// (`Bgp`/`Evpn`/`Vpn`, so nothing resolves recursively) and no discard
 /// route (RFC 4271 section 9.1.2: unresolvable, not selectable-then-dropped).
@@ -678,6 +782,85 @@ mod tests {
             static_routing_instances: instances,
             ..Default::default()
         }
+    }
+
+    fn hop_entry(p: &str, gw: &str, source: RouteSource) -> RibEntry {
+        RibEntry {
+            prefix: p.parse().unwrap(),
+            next_hops: vec![(gw.parse().unwrap(), None).into()],
+            source,
+            backup: None,
+            backup_interface_id: None,
+            backup_tunnel: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn age_is_outside_equality_and_restarts_on_a_next_hop_change() {
+        let mut rib = Rib::new();
+        let p: IpNet = "10.1.0.0/16".parse().unwrap();
+        let e = hop_entry("10.1.0.0/16", "10.0.0.1", RouteSource::Bgp);
+        rib.upsert_and_diff(e.clone());
+        tokio::time::advance(std::time::Duration::from_secs(90)).await;
+        assert_eq!(rib.age_secs(&p, RouteSource::Bgp), 90);
+        // Re-sent identical: no change, stamp kept.
+        assert_eq!(rib.upsert_and_diff(e), BestPathChange::Unchanged);
+        assert_eq!(rib.age_secs(&p, RouteSource::Bgp), 90);
+        // New next hop: restamped.
+        rib.upsert_and_diff(hop_entry("10.1.0.0/16", "10.0.0.2", RouteSource::Bgp));
+        assert_eq!(rib.age_secs(&p, RouteSource::Bgp), 0);
+        // A wholesale replace keeps an unchanged candidate's stamp too.
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        rib.replace_source(
+            RouteSource::Bgp,
+            [hop_entry("10.1.0.0/16", "10.0.0.2", RouteSource::Bgp)],
+        );
+        assert_eq!(rib.age_secs(&p, RouteSource::Bgp), 5);
+        rib.remove(&p, RouteSource::Bgp);
+        assert_eq!(rib.age_secs(&p, RouteSource::Bgp), 0);
+        assert!(rib.first_seen.is_empty());
+    }
+
+    #[test]
+    fn a_metric_only_change_is_unchanged_but_visible() {
+        let mut rib = Rib::new();
+        let p: IpNet = "10.1.0.0/16".parse().unwrap();
+        let e = hop_entry("10.1.0.0/16", "10.0.0.1", RouteSource::Bgp);
+        rib.set_bgp_metric(p, Some(10));
+        rib.upsert_and_diff(e.clone());
+        rib.set_bgp_metric(p, Some(20));
+        assert_eq!(rib.upsert_and_diff(e), BestPathChange::Unchanged);
+        assert_eq!(rib.metric(&p, RouteSource::Bgp), Some(20));
+        assert_eq!(rib.metric(&p, RouteSource::Static), None);
+        let o = hop_entry("10.2.0.0/16", "10.0.0.1", RouteSource::Ospf);
+        let owner = OspfOwner::new(false, "a");
+        rib.upsert_ospf_and_diff(&owner, o.clone(), 5);
+        assert_eq!(
+            rib.upsert_ospf_and_diff(&owner, o, 9),
+            BestPathChange::Unchanged
+        );
+        assert_eq!(
+            rib.metric(&"10.2.0.0/16".parse().unwrap(), RouteSource::Ospf),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn iface_for_gateway_takes_the_longest_named_prefix() {
+        let mut rib = Rib::new();
+        rib.connected_iface
+            .insert("10.0.0.0/8".parse().unwrap(), "eth0".into());
+        rib.connected_iface
+            .insert("10.1.0.0/16".parse().unwrap(), "eth1.5".into());
+        assert_eq!(
+            rib.iface_for_gateway("10.1.2.3".parse().unwrap()),
+            Some("eth1.5")
+        );
+        assert_eq!(
+            rib.iface_for_gateway("10.9.2.3".parse().unwrap()),
+            Some("eth0")
+        );
+        assert_eq!(rib.iface_for_gateway("192.0.2.1".parse().unwrap()), None);
     }
 
     #[test]

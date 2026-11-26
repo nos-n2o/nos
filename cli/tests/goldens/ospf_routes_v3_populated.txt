@@ -1,0 +1,4 @@
+prefix           class       cost  e2-cost  area     next-hops         adv-router
+---------------  ----------  ----  -------  -------  ----------------  ----------
+2001:db8:2::/64  intra-area  2     -        0.0.0.0  fe80::2 dev eth0  2.2.2.2
+2001:db8:9::/64  external-2  1     20       0.0.0.0  fe80::2 dev eth0  3.3.3.3

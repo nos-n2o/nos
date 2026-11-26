@@ -823,9 +823,10 @@ async fn fetch_connected_asks_for_aggregates_and_domains_only_when_the_table_use
         },
     );
     let wd = f.watchdog_socket();
-    let prefixes = |v: Option<Vec<RibEntry>>| {
+    let prefixes = |v: Option<(Vec<RibEntry>, _)>| {
         let mut p: Vec<String> = v
             .expect("answered")
+            .0
             .iter()
             .map(|e| e.prefix.to_string())
             .collect();

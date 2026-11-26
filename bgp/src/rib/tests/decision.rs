@@ -614,7 +614,7 @@ fn runner_up_backup_also_requires_resolvable_next_hop() {
     }
     assert_eq!(
         rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-        (vec![addr("10.1.0.1")], None, false)
+        (vec![addr("10.1.0.1")], None, false, None)
     );
 
     // Once peer_b's resolves too, it becomes the backup.
@@ -624,7 +624,7 @@ fn runner_up_backup_also_requires_resolvable_next_hop() {
     ]));
     assert_eq!(
         rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-        (vec![addr("10.1.0.1")], Some(addr("10.2.0.1")), false)
+        (vec![addr("10.1.0.1")], Some(addr("10.2.0.1")), false, None)
     );
 }
 
@@ -801,7 +801,7 @@ fn push_snapshot_carries_runner_up_as_backup() {
     let (_, routes) = rib.push_snapshot();
     assert_eq!(
         routes.get(&prefix("1.2.3.0/24")),
-        Some(&(vec![addr("10.0.0.9")], Some(addr("10.0.0.8")), false))
+        Some(&(vec![addr("10.0.0.9")], Some(addr("10.0.0.8")), false, None))
     );
 
     // Losing the runner-up drops the backup.
@@ -809,7 +809,7 @@ fn push_snapshot_carries_runner_up_as_backup() {
     let (_, routes) = rib.push_snapshot();
     assert_eq!(
         routes.get(&prefix("1.2.3.0/24")),
-        Some(&(vec![addr("10.0.0.9")], None, false))
+        Some(&(vec![addr("10.0.0.9")], None, false, None))
     );
 }
 
@@ -835,8 +835,33 @@ fn learn_mp(
 }
 
 fn mp_hops(rib: &BgpRib) -> (Vec<IpAddr>, Option<IpAddr>) {
-    let (hops, backup, _) = rib.push_snapshot().1[&prefix("1.2.3.0/24")].clone();
+    let (hops, backup, _, _) = rib.push_snapshot().1[&prefix("1.2.3.0/24")].clone();
     (hops, backup)
+}
+
+#[test]
+fn push_snapshot_carries_the_best_path_med() {
+    let mut rib = new_rib(65000);
+    learn_mp(
+        &mut rib,
+        "10.0.0.1",
+        false,
+        vec![65001],
+        "10.0.0.10",
+        Some(77),
+    );
+    assert_eq!(rib.push_snapshot().1[&prefix("1.2.3.0/24")].3, Some(77));
+    // A MED change alone is a different `Hops`, so it is re-pushed.
+    let before = rib.push_snapshot().1;
+    learn_mp(
+        &mut rib,
+        "10.0.0.1",
+        false,
+        vec![65001],
+        "10.0.0.10",
+        Some(5),
+    );
+    assert_ne!(before, rib.push_snapshot().1);
 }
 
 #[test]

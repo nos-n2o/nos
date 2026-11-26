@@ -218,7 +218,9 @@ async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
         .await?
     {
         AclEvent::Acls(v) => Ok(v),
-        other @ (AclEvent::Ack | AclEvent::Flowspec(_)) => Err(unexpected("nos-acld", &other)),
+        other @ (AclEvent::Ack | AclEvent::Flowspec(_) | AclEvent::Cleared { .. }) => {
+            Err(unexpected("nos-acld", &other))
+        }
     }
 }
 
@@ -226,7 +228,9 @@ async fn acls(d: &Daemons, name: Option<String>) -> ApiResult<Vec<AclStatus>> {
 pub async fn flowspec_rules(State(d): State<Daemons>) -> ApiResult<Json<Vec<FlowspecRuleStatus>>> {
     match d.service(ServiceRef::Acl, AclRequest::ShowFlowspec).await? {
         AclEvent::Flowspec(v) => Ok(Json(v)),
-        other @ (AclEvent::Ack | AclEvent::Acls(_)) => Err(unexpected("nos-acld", &other)),
+        other @ (AclEvent::Ack | AclEvent::Acls(_) | AclEvent::Cleared { .. }) => {
+            Err(unexpected("nos-acld", &other))
+        }
     }
 }
 
@@ -501,6 +505,10 @@ pub type OspfInstanceReport = Vec<InstanceReport<nos_proto::InstanceSummary>>;
 /// `GET /v1/ospfv3/instance` (#1439).
 pub type Ospfv3InstanceReport = OspfInstanceReport;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
+/// `GET /v1/ospf/routes`: the computed routes of every OSPF instance.
+pub type OspfRoutesReport = Vec<InstanceReport<Vec<nos_proto::RouteSummary>>>;
+/// `GET /v1/ospfv3/routes`: the computed routes of every `OSPFv3` instance.
+pub type Ospfv3RoutesReport = Vec<InstanceReport<Vec<nos_proto::Ospfv3RouteSummary>>>;
 pub type Ospfv3InterfacesReport = Vec<InstanceReport<Vec<nos_proto::Ospfv3InterfaceSummary>>>;
 pub type Ospfv3DatabaseReport = Vec<InstanceReport<Vec<Ospfv3LsaSummary>>>;
 
@@ -620,22 +628,57 @@ where
     out
 }
 
-#[utoipa::path(get, path = "/v1/bgp/summary", tag = "show", summary = "BGP session summary, per instance", responses((status = 200, body = BgpSummaryReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
-pub async fn bgp_summary(State(d): State<Daemons>) -> ApiResult<Json<BgpSummaryReport>> {
-    let names = d.bgp_instance_names().await?;
-    Ok(Json(
-        per_instance(
-            &d,
-            names,
-            ServiceRef::BgpInstance,
-            |_| BgpRequest::GetSummary,
-            |e| match e {
-                BgpEvent::Summary(v) => Some(v),
-                _ => None,
-            },
-        )
-        .await,
-    ))
+/// `GET /v1/bgp/summary` filters.
+#[derive(Deserialize)]
+pub struct BgpSummaryQuery {
+    /// Only this BGP instance.
+    instance: Option<String>,
+    /// Only the session with this peer address.
+    peer: Option<String>,
+}
+
+#[utoipa::path(get, path = "/v1/bgp/summary", tag = "show", summary = "BGP session summary, per instance", description = "`instance` keeps one instance, `peer` keeps the one session with that address (searched in every instance unless `instance` is given).", params(("instance" = Option<String>, Query, description = "only this BGP instance"), ("peer" = Option<String>, Query, description = "only the session with this peer address")), responses((status = 200, body = BgpSummaryReport), (status = 400, body = ErrorBody, description = "peer is not an IP address"), (status = 404, body = ErrorBody, description = "no such bgp instance or peer"), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_summary(
+    State(d): State<Daemons>,
+    Query(q): Query<BgpSummaryQuery>,
+) -> ApiResult<Json<BgpSummaryReport>> {
+    let peer: Option<IpAddr> = q
+        .peer
+        .as_deref()
+        .map(|p| {
+            p.parse()
+                .map_err(|_| ApiError::BadRequest(format!("peer '{p}' is not an IP address")))
+        })
+        .transpose()?;
+    let names = bgp_scope(d.bgp_instance_names().await?, q.instance.as_deref())?;
+    let mut report = per_instance(
+        &d,
+        names,
+        ServiceRef::BgpInstance,
+        |_| BgpRequest::GetSummary,
+        |e| match e {
+            BgpEvent::Summary(v) => Some(v),
+            _ => None,
+        },
+    )
+    .await;
+    if let Some(peer) = peer {
+        // ponytail: filtered after the fetch (bgpd returns every peer); a
+        // GetSummary { peer } request would need a nos-proto change.
+        for r in &mut report {
+            if let Some(v) = &mut r.result {
+                v.retain(|p| p.remote_address == peer);
+            }
+        }
+        if report.iter().all(|r| r.error.is_none())
+            && !report
+                .iter()
+                .any(|r| r.result.as_ref().is_some_and(|v| !v.is_empty()))
+        {
+            return Err(ApiError::NotFound(format!("no bgp peer '{peer}'")));
+        }
+    }
+    Ok(Json(report))
 }
 
 /// One page of one instance's `GET /v1/bgp/evpn`.
@@ -662,6 +705,17 @@ pub struct BgpVpnPage {
     pagination: Pagination,
 }
 
+/// `names` narrowed to `instance`; an unknown one is `404`.
+fn bgp_scope(mut names: Vec<String>, instance: Option<&str>) -> ApiResult<Vec<String>> {
+    if let Some(want) = instance {
+        names.retain(|n| n == want);
+        if names.is_empty() {
+            return Err(ApiError::NotFound(format!("no bgp instance '{want}'")));
+        }
+    }
+    Ok(names)
+}
+
 /// The instances a paged BGP query asks and its page size. `after`/`limit`
 /// without `instance` is `400`; an unknown `instance` is `404`.
 async fn bgp_page_scope(d: &Daemons, q: &BgpPageQuery) -> ApiResult<(Vec<String>, u32)> {
@@ -670,15 +724,8 @@ async fn bgp_page_scope(d: &Daemons, q: &BgpPageQuery) -> ApiResult<(Vec<String>
             "pagination requires ?instance=".to_string(),
         ));
     }
-    let mut names: Vec<String> = d.bgp_instance_names().await?;
-    if let Some(want) = &q.instance {
-        names.retain(|n| n == want);
-        if names.is_empty() {
-            return Err(ApiError::NotFound(format!("no bgp instance '{want}'")));
-        }
-    }
     Ok((
-        names,
+        bgp_scope(d.bgp_instance_names().await?, q.instance.as_deref())?,
         q.limit.unwrap_or(BGP_PAGE_MAX).clamp(1, BGP_PAGE_MAX),
     ))
 }
@@ -952,6 +999,7 @@ pub async fn ospf_neighbors(State(d): State<Daemons>) -> ApiResult<Json<OspfNeig
                 OspfEvent::Database(_)
                 | OspfEvent::SegmentRouting(_)
                 | OspfEvent::Interfaces(_)
+                | OspfEvent::Routes(_)
                 | OspfEvent::Instance(_) => None,
             },
         )
@@ -973,6 +1021,7 @@ pub async fn ospf_interfaces(State(d): State<Daemons>) -> ApiResult<Json<OspfInt
                 OspfEvent::Neighbors(_)
                 | OspfEvent::Database(_)
                 | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Routes(_)
                 | OspfEvent::Instance(_) => None,
             },
         )
@@ -994,6 +1043,7 @@ pub async fn ospf_database(State(d): State<Daemons>) -> ApiResult<Json<OspfDatab
                 OspfEvent::Neighbors(_)
                 | OspfEvent::SegmentRouting(_)
                 | OspfEvent::Interfaces(_)
+                | OspfEvent::Routes(_)
                 | OspfEvent::Instance(_) => None,
             },
         )
@@ -1015,7 +1065,8 @@ pub async fn ospf_instance(State(d): State<Daemons>) -> ApiResult<Json<OspfInsta
                 OspfEvent::Neighbors(_)
                 | OspfEvent::Database(_)
                 | OspfEvent::SegmentRouting(_)
-                | OspfEvent::Interfaces(_) => None,
+                | OspfEvent::Interfaces(_)
+                | OspfEvent::Routes(_) => None,
             },
         )
         .await,
@@ -1038,7 +1089,51 @@ pub async fn ospf_segment_routing(
                 OspfEvent::Neighbors(_)
                 | OspfEvent::Database(_)
                 | OspfEvent::Interfaces(_)
+                | OspfEvent::Routes(_)
                 | OspfEvent::Instance(_) => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/ospf/routes", tag = "show", summary = "OSPF routes, per instance", responses((status = 200, body = OspfRoutesReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn ospf_routes(State(d): State<Daemons>) -> ApiResult<Json<OspfRoutesReport>> {
+    let names = d.ospf_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::OspfInstance,
+            |_| OspfRequest::GetRoutes,
+            |e| match e {
+                OspfEvent::Routes(v) => Some(v),
+                OspfEvent::Neighbors(_)
+                | OspfEvent::Database(_)
+                | OspfEvent::SegmentRouting(_)
+                | OspfEvent::Interfaces(_)
+                | OspfEvent::Instance(_) => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/ospfv3/routes", tag = "show", summary = "OSPFv3 routes, per instance", responses((status = 200, body = Ospfv3RoutesReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn ospfv3_routes(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3RoutesReport>> {
+    let names = d.ospfv3_instance_names().await?;
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::Ospfv3Instance,
+            |_| Ospfv3Request::GetRoutes,
+            |e| match e {
+                Ospfv3Event::Routes(v) => Some(v),
+                Ospfv3Event::Neighbors(_)
+                | Ospfv3Event::Database(_)
+                | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Instance(_) => None,
             },
         )
         .await,
@@ -1058,6 +1153,7 @@ pub async fn ospfv3_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3
                 Ospfv3Event::Neighbors(v) => Some(v),
                 Ospfv3Event::Database(_)
                 | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Routes(_)
                 | Ospfv3Event::Instance(_) => None,
             },
         )
@@ -1078,9 +1174,10 @@ pub async fn ospfv3_interfaces(
             |_| Ospfv3Request::GetInterfaces,
             |e| match e {
                 Ospfv3Event::Interfaces(v) => Some(v),
-                Ospfv3Event::Neighbors(_) | Ospfv3Event::Database(_) | Ospfv3Event::Instance(_) => {
-                    None
-                }
+                Ospfv3Event::Neighbors(_)
+                | Ospfv3Event::Database(_)
+                | Ospfv3Event::Routes(_)
+                | Ospfv3Event::Instance(_) => None,
             },
         )
         .await,
@@ -1100,6 +1197,7 @@ pub async fn ospfv3_database(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3D
                 Ospfv3Event::Database(v) => Some(v),
                 Ospfv3Event::Neighbors(_)
                 | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Routes(_)
                 | Ospfv3Event::Instance(_) => None,
             },
         )
@@ -1120,7 +1218,8 @@ pub async fn ospfv3_instance(State(d): State<Daemons>) -> ApiResult<Json<Ospfv3I
                 Ospfv3Event::Instance(v) => Some(v),
                 Ospfv3Event::Neighbors(_)
                 | Ospfv3Event::Database(_)
-                | Ospfv3Event::Interfaces(_) => None,
+                | Ospfv3Event::Interfaces(_)
+                | Ospfv3Event::Routes(_) => None,
             },
         )
         .await,

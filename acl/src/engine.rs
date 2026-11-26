@@ -165,10 +165,23 @@ impl<D: Driver> Engine<D> {
     }
 
     fn apply(&mut self, key: &Key, ifindex: u32, name: &str, acl: &Arc<Compiled>) {
+        self.apply_with(key, ifindex, name, acl, false);
+    }
+
+    /// `force` reinstalls an unchanged ACL (a counter clear).
+    fn apply_with(
+        &mut self,
+        key: &Key,
+        ifindex: u32,
+        name: &str,
+        acl: &Arc<Compiled>,
+        force: bool,
+    ) {
         let current = self.installed.get(key);
-        if current
-            .and_then(|c| c.acl.as_ref())
-            .is_some_and(|c| c == acl)
+        if !force
+            && current
+                .and_then(|c| c.acl.as_ref())
+                .is_some_and(|c| c == acl)
         {
             return;
         }
@@ -214,6 +227,34 @@ impl<D: Driver> Engine<D> {
         };
         self.installed.insert(key.clone(), at);
         info!(interface = %dev, direction = %dir, acl = %name, chain, "acl attached");
+    }
+
+    /// Reinstalls every ACL (or the named one) on its idle chain and
+    /// switches, so the kernel counters restart at 0 without a window
+    /// without a filter. `(found, attachments replaced)`. Entries adopted
+    /// from a previous run (contents unknown) are skipped: the next pass
+    /// replaces them anyway.
+    pub fn clear_counters(&mut self, only: Option<&str>) -> (bool, u32) {
+        let found = only.is_none_or(|n| self.acls.contains_key(n));
+        let targets: Vec<(Key, u32, String, Arc<Compiled>)> = self
+            .installed
+            .iter()
+            .filter_map(|(k, at)| {
+                let (name, acl) = (at.name.as_ref()?, at.acl.as_ref()?);
+                only.is_none_or(|n| n == name)
+                    .then(|| (k.clone(), at.ifindex, name.clone(), acl.clone()))
+            })
+            .collect();
+        let mut n = 0;
+        for (key, ifindex, name, acl) in targets {
+            let before = self.installed.get(&key).map(|a| a.chain);
+            self.apply_with(&key, ifindex, &name, &acl, true);
+            if self.installed.get(&key).map(|a| a.chain) != before {
+                n += 1;
+            }
+        }
+        info!(acl = %only.unwrap_or("*"), attachments = n, "acl counters cleared");
+        (found, n)
     }
 
     fn detach(&mut self, key: &Key) {

@@ -6,7 +6,7 @@ Levels           2
 Filters          5
 Attached         
 Rules
-  Name  Action  Dropped   Packets   Bytes
-  ----  ------  --------  -------  ------
-  r10   Permit  -              12  3.4 KB
-  r20   Deny    shadowed        0     0 B
+  Name  Action  Dropped   Level  Packets   Bytes
+  ----  ------  --------  -----  -------  ------
+  r10   Permit  -             0       12  3.4 KB
+  r20   Deny    shadowed      -        0     0 B

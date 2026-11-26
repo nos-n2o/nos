@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
     InstanceSummary, InterfaceSummary, IpcCodec, LsaSummary, NeighborSummary, OspfEvent,
-    OspfRequest, Role, SrSummary,
+    OspfRequest, Role, RouteSummary, SrSummary,
 };
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -65,6 +65,18 @@ pub async fn get_interfaces(ospf_socket: &Path) -> Result<Vec<InterfaceSummary>,
     match reader.next().await {
         Some(Ok(OspfEvent::Interfaces(v))) => Ok(v),
         Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetInterfaces")),
+        Some(Err(e)) => Err(OspfClientError::Io(e)),
+        None => Err(OspfClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches the computed routes (#1453).
+pub async fn get_routes(ospf_socket: &Path) -> Result<Vec<RouteSummary>, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
+    writer.send(OspfRequest::GetRoutes).await?;
+    match reader.next().await {
+        Some(Ok(OspfEvent::Routes(v))) => Ok(v),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetRoutes")),
         Some(Err(e)) => Err(OspfClientError::Io(e)),
         None => Err(OspfClientError::ConnectionClosed),
     }

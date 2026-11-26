@@ -2277,6 +2277,11 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              replaced. Both come from the same history that `show history` lists and \
              `rollback` restores, so an index beyond it is refused.",
         ),
+        Topic::ShowAaaUsers => (
+            "Show the externally authenticated users that have an ssh account entry.",
+            "Lists the names (RADIUS or TACACS+ users) nos-configd gave a persistent \
+             uid after an accepted login, or an administrator allocated. Admin only.",
+        ),
         Topic::ShowHistory => (
             "Show the commit history that `rollback` can go back to.",
             "Lists the last 20 running configs a commit replaced, newest first, with the \

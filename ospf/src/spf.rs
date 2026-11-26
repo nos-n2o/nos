@@ -35,6 +35,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use ipnet::Ipv4Net;
+use nos_proto::RoutePathClass;
 
 use crate::lsa::{
     AdjSid, AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, PrefixSid, RouterLink, RouterLsaBody,
@@ -93,6 +94,9 @@ pub struct RouteEntry {
     egress: Vertex,
     /// RFC 2328 §16.4 path class, what `prefer` ranks first.
     class: PathClass,
+    /// The area whose SPF produced the route (`0.0.0.0` until `compute_routes`
+    /// sets it; a discard route has none).
+    pub area: Ipv4Addr,
     /// Segment routing (#1169): the label stack to push toward each next hop
     /// (outermost first); an empty stack is a PHP hop, a next hop with no
     /// entry is plain IP. Set only for an intra-area route whose destination
@@ -146,6 +150,35 @@ pub(crate) fn prefer(a: &RouteEntry, b: &RouteEntry) -> Ordering {
 }
 
 impl RouteEntry {
+    /// The RFC 2328 class and the cost split `show ospf route` reports: an
+    /// external-2 route is `(class, Some(own metric))` with the internal
+    /// distance X as the cost, every other class its plain metric.
+    pub fn path_class(&self) -> (RoutePathClass, Option<u32>) {
+        match self.class {
+            PathClass::Intra => (RoutePathClass::IntraArea, None),
+            PathClass::Inter => (RoutePathClass::InterArea, None),
+            PathClass::External1 => (RoutePathClass::External1, None),
+            PathClass::External2 { ext } => (RoutePathClass::External2, Some(ext)),
+        }
+    }
+
+    /// The cost `show ospf route` prints: `metric`, minus the E2 metric.
+    pub fn display_cost(&self) -> u32 {
+        match self.class {
+            PathClass::External2 { ext } => self.metric.saturating_sub(ext),
+            _ => self.metric,
+        }
+    }
+
+    /// The router the cost was built toward; `None` for a transit network or
+    /// a discard route.
+    pub fn advertising_router(&self) -> Option<Ipv4Addr> {
+        match self.egress {
+            Vertex::Router(r) if !r.is_unspecified() => Some(r),
+            _ => None,
+        }
+    }
+
     /// An ABR's discard route for one of its active advertised area ranges
     /// (RFC 2328 §3.5): no next hop, so `nos-ribd` installs a blackhole.
     pub fn discard(prefix: Ipv4Net, metric: u32) -> Self {
@@ -157,6 +190,7 @@ impl RouteEntry {
             backup_tunnel: None,
             egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
             class: PathClass::Inter,
+            area: Ipv4Addr::UNSPECIFIED,
             labels: BTreeMap::new(),
             sid: None,
         }
@@ -1361,6 +1395,7 @@ fn collect_network_routes(
                 backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Intra,
+                area: Ipv4Addr::UNSPECIFIED,
                 labels: BTreeMap::new(),
                 sid: None,
             },
@@ -1411,6 +1446,7 @@ fn collect_stub_routes(
                     backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
+                    area: Ipv4Addr::UNSPECIFIED,
                     labels: BTreeMap::new(),
                     sid: None,
                 },
@@ -1469,6 +1505,7 @@ fn collect_intra_area_stub_routes(
                     backup_tunnel: None,
                     egress: vertex,
                     class: PathClass::Intra,
+                    area: Ipv4Addr::UNSPECIFIED,
                     labels: BTreeMap::new(),
                     sid: None,
                 },
@@ -1514,6 +1551,7 @@ fn collect_summary_routes(
                 backup_tunnel: None,
                 egress: vertex,
                 class: PathClass::Inter,
+                area: Ipv4Addr::UNSPECIFIED,
                 labels: BTreeMap::new(),
                 sid: None,
             },
@@ -1611,6 +1649,7 @@ fn collect_external_routes(
                 } else {
                     PathClass::External1
                 },
+                area: Ipv4Addr::UNSPECIFIED,
                 labels: BTreeMap::new(),
                 sid: None,
             },
@@ -2042,6 +2081,7 @@ mod tests {
             backup_tunnel: None,
             egress: Vertex::Router(router_id(3)),
             class,
+            area: Ipv4Addr::UNSPECIFIED,
             labels: BTreeMap::new(),
             sid: None,
         };
@@ -3749,6 +3789,22 @@ mod tests {
         assert_eq!(db.srgb[&router_id(2)], (17000, 8000));
         assert_eq!(db.prefix_sids.len(), 2);
         assert_eq!(db.adj_sids[&router_id(2)][0].2.value, 24001);
+    }
+
+    #[test]
+    fn path_class_splits_the_e2_metric() {
+        let mut r = RouteEntry::discard("10.0.0.0/8".parse().unwrap(), 30);
+        assert_eq!(r.path_class(), (RoutePathClass::InterArea, None));
+        assert_eq!((r.display_cost(), r.advertising_router()), (30, None));
+        r.class = PathClass::External2 { ext: 20 };
+        assert_eq!(r.path_class(), (RoutePathClass::External2, Some(20)));
+        assert_eq!(r.display_cost(), 10);
+        r.class = PathClass::External1;
+        assert_eq!(r.path_class(), (RoutePathClass::External1, None));
+        r.class = PathClass::Intra;
+        r.egress = Vertex::Router(Ipv4Addr::new(1, 1, 1, 1));
+        assert_eq!(r.path_class().0, RoutePathClass::IntraArea);
+        assert_eq!(r.advertising_router(), Some(Ipv4Addr::new(1, 1, 1, 1)));
     }
 
     #[test]

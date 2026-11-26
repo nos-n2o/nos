@@ -319,6 +319,19 @@ const OSPFV3_IF_DOC: Doc = Doc::Local {
              instead of the IPv4 address.",
 };
 
+const OSPF_ROUTE_DOC: Doc = Doc::Local {
+    summary: "Show the OSPF routes across every instance.",
+    detail: "Queries every configured OSPF instance's nos-ospfd for its computed routes: \
+             prefix, class (intra-area, inter-area, external-1, external-2), cost, the \
+             external-2 metric, area, next hops with their interface and the advertising \
+             router.",
+};
+
+const OSPFV3_ROUTE_DOC: Doc = Doc::Local {
+    summary: "Show the OSPFv3 routes across every instance.",
+    detail: "Mirrors 'show ospf route' for OSPFv3: IPv6 prefixes and link-local next hops.",
+};
+
 const OSPF_DB_DOC: Doc = Doc::Local {
     summary: "Show every installed LSA's header across every OSPF instance, optionally of one type and advertising router.",
     detail: "Queries every configured OSPF instance's daemon (each resolved via nos-watchdogd) for \
@@ -430,11 +443,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::Save
     ),
     cmd!(["show" "aaa" "users"],
-        Doc::Local {
-            summary: "Show the externally authenticated users that have an ssh account entry.",
-            detail: "Lists the names (RADIUS or TACACS+ users) nos-configd gave a persistent \
-                     uid after an accepted login, or an administrator allocated. Admin only.",
-        },
+        Doc::FromConfig(Topic::ShowAaaUsers),
         Always,
         Command::ShowAaaUsers),
     cmd!(["allocate" "aaa" "user" (name: Plain)],
@@ -700,7 +709,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      attached, its default action and, per rule, the packets and bytes it \
                      matched (summed over every device it is attached to). Rules the optimiser \
                      dropped (shadowed by an earlier rule, or trailing and equal to the default) \
-                     are marked and stay at 0. Counters reset when the ACL is edited.",
+                     are marked and stay at 0. 'clear acl counters' resets them.",
         },
         Always,
         Command::ShowAcl { name: None }),
@@ -711,6 +720,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         |name| Command::ShowAcl {
+            name: Some(name.to_string()),
+        }),
+    cmd!(["clear" "acl" "counters"],
+        Doc::Local {
+            summary: "Reset the counters of every access list.",
+            detail: "Asks nos-acld to reinstall every attached ACL on its idle chain and switch, \
+                     so the kernel counters restart at 0 without a moment unfiltered. Flowspec \
+                     rule counters are not touched.",
+        },
+        Always,
+        Command::ClearAclCounters { name: None }),
+    cmd!(["clear" "acl" (name: AclName) "counters"],
+        Doc::Local {
+            summary: "Reset the counters of one access list.",
+            detail: "Same as clear acl counters, for the named ACL only. Reported as an error \
+                     if no such ACL exists; an ACL attached nowhere has no counters to reset.",
+        },
+        Always,
+        |name| Command::ClearAclCounters {
             name: Some(name.to_string()),
         }),
     cmd!(["show" "version"],
@@ -974,6 +1002,40 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         |name| Command::ShowBgpSummary { instance: Some(name.to_string()) }),
+    cmd!(["show" "bgp" "neighbor"],
+        Doc::Local {
+            summary: "Show every BGP session in full, per instance.",
+            detail: "One block per peer of every configured BGP instance: session state, \
+                     timers, message and prefix counters, last notification, negotiated \
+                     capabilities, local endpoint, BFD state, and the TCP-AO and graceful \
+                     restart state when present.",
+        },
+        Always,
+        Command::ShowBgpNeighbor { peer: None, instance: None }),
+    cmd!(["show" "bgp" "neighbor" (peer: IpAddr)],
+        Doc::Local {
+            summary: "Show the BGP session with one peer in full.",
+            detail: "Like show bgp neighbor, restricted to the peer with this address.",
+        },
+        Always,
+        |peer| Command::ShowBgpNeighbor { peer: Some(peer.parse().ok()?), instance: None }),
+    cmd!(["show" "bgp" "neighbor" "instance" (name: BgpInstanceName)],
+        Doc::Local {
+            summary: "Show the BGP sessions of one instance in full.",
+            detail: "Like show bgp neighbor, restricted to the instance <name>.",
+        },
+        Always,
+        |name| Command::ShowBgpNeighbor { peer: None, instance: Some(name.to_string()) }),
+    cmd!(["show" "bgp" "neighbor" (peer: IpAddr) "instance" (name: BgpInstanceName)],
+        Doc::Local {
+            summary: "Show the BGP session with one peer of one instance in full.",
+            detail: "Like show bgp neighbor <peer>, restricted to the instance <name>.",
+        },
+        Always,
+        |peer, name| Command::ShowBgpNeighbor {
+            peer: Some(peer.parse().ok()?),
+            instance: Some(name.to_string()),
+        }),
     cmd!(["show" "bgp" "brief"],
         Doc::Local {
             summary: "The old name of show bgp summary.",
@@ -1151,6 +1213,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["show" "ospf" "neighbors"], OSPF_NEIGH_DOC, Always, Command::ShowOspfNeigh),
     cmd!(["show" "ospf" "interface"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
     cmd!(["show" "ospf" "interfaces"], OSPF_IF_DOC, Always, Command::ShowOspfInterface),
+    cmd!(["show" "ospf" "route"], OSPF_ROUTE_DOC, Always, Command::ShowOspfRoute),
     cmd!(["show" "ospf" "database"],
         OSPF_DB_DOC,
         Always,
@@ -1188,6 +1251,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     cmd!(["show" "ospfv3" "neighbors"], OSPFV3_NEIGH_DOC, Always, Command::ShowOspfv3Neigh),
     cmd!(["show" "ospfv3" "interface"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
     cmd!(["show" "ospfv3" "interfaces"], OSPFV3_IF_DOC, Always, Command::ShowOspfv3Interface),
+    cmd!(["show" "ospfv3" "route"], OSPFV3_ROUTE_DOC, Always, Command::ShowOspfv3Route),
     cmd!(["show" "ospfv3" "database"],
         OSPFV3_DB_DOC,
         Always,

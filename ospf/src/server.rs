@@ -34,6 +34,7 @@ fn allowed(role: Role, req: &OspfRequest) -> bool {
         | OspfRequest::GetDatabase
         | OspfRequest::GetSegmentRouting
         | OspfRequest::GetInterfaces
+        | OspfRequest::GetRoutes
         | OspfRequest::GetInstance => {
             matches!(role, Role::User | Role::Restd)
         }
@@ -96,6 +97,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            OspfRequest::GetRoutes => {
+                let event = OspfEvent::Routes(links.route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             OspfRequest::GetDatabase => {
                 let event = OspfEvent::Database(links.database_summaries().await);
                 if writer.send(event).await.is_err() {
@@ -145,6 +152,7 @@ mod authz_tests {
             for q in [
                 OspfRequest::GetNeighbors,
                 OspfRequest::GetInterfaces,
+                OspfRequest::GetRoutes,
                 OspfRequest::GetInstance,
             ] {
                 assert_eq!(

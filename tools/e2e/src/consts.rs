@@ -391,6 +391,12 @@ pub const RID_C: &str = "3.3.3.3";
 
 /// TEST-NET-2 — a fake redistributed prefix.
 pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
+/// `routes-paging` (#1444): the interface `show route` names for a gateway in
+/// `SUBNET`. Deterministic: router-a's seeded config puts `IP_A/24` in `rt1`
+/// on `eth0` (nos-provision's default `--interface`, subinterface tag 0), so
+/// the connected prefix `SUBNET` is named `eth0` and `REDISTRIBUTE_GATEWAY`
+/// (10.50.0.99, inside it) resolves to it by the connected-prefix match.
+pub const ROUTES_PAGING_IFACE: &str = "eth0";
 pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is

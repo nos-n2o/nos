@@ -717,6 +717,8 @@ topics! {
     ShowLog,
     /// `Request::GetHistoryConfig`
     ShowConfigurationDiff,
+    /// `Request::ListExternalUsers`
+    ShowAaaUsers,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

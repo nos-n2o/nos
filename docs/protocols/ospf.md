@@ -83,6 +83,7 @@ Within a few seconds both routers reach `Full`.
 ```
 show ospf neigh                      (also: neighbor, neighbors)
 show ospf interface                  (also: interfaces)
+show ospf route
 show ospf database
 show ospf database external 1.1.1.1
 show route rt1
@@ -90,6 +91,14 @@ show route rt1
 
 - `show ospf neigh` prints one line per link and neighbour with the columns `neighbor-id`, `pri`, `State` (`Init`, `2-Way`, `ExStart`, `Exchange`, `Loading`, `Full`), `Role` (`Dr`/`Bdr`/`DrOther`; `-` on point-to-point or before an election), `dead` (dead interval minus the time since the neighbour was last heard, any packet counts), `Address`, `Link` and `uptime` (since `Full`; `-` before). Area, interface state, last Hello, timers, DR/BDR and LLS are in the detail view.
 - `show ospf interface` prints one line per running link, per instance: `link`, `device`, `area`, `address` (`<ip>/<len>`), `type`, `state`, `cost`, `hello`, `dead`, `rxmt` (the fixed 5 s retransmit interval), `dr`, `bdr`, `neighbors` (known) and `full` (in `Full`). Priority, MTU and `mtu-ignore` are in the detail view. A passive interface, one without an address and a virtual link are not listed; no running link prints `no ospf interfaces running`.
+- `show ospf route` prints the computed routes per instance, sorted by prefix: `class` (`intra-area`, `inter-area`, `external-1`, `external-2`), `cost` (for an external-2 route the internal distance), `e2-cost` (its own metric), `area`, `next-hops` (`<address> dev <interface>`), `adv-router` (the router the cost was built toward; `-` for a discard route). `GET /v1/ospf/routes` returns the same.
+
+  ```
+  prefix           class       cost  e2-cost  area     next-hops          adv-router
+  ---------------  ----------  ----  -------  -------  -----------------  ----------
+  192.0.2.2/32     intra-area  11    -        0.0.0.0  10.0.0.2 dev eth0  2.2.2.2
+  203.0.113.0/24   external-2  10    100      0.0.0.0  10.0.0.2 dev eth0  2.2.2.2
+  ```
 - A bad LSA inside a Link State Update is discarded alone (RFC 2328 section 13): a wrong checksum, an unknown type or an unparseable body skips that LSA, the others in the packet are processed and acked, and the sender retransmits only the bad one. The daemon logs `lsu: discarded LSAs that failed to decode` (rate limited) with the count and the last error. A header whose length cannot be framed still drops the whole packet.
 - `show ospf database` lists the header of every LSA held, as a table: area, type by name (`router`, `network`, `summary`, `asbr-summary`, `external`, `nssa`, `opaque-link`, `opaque-area`, `opaque-as`, see [Opaque LSAs](#features-and-behaviour); an unknown type shows its number), link-state ID, advertising router, sequence number, age, checksum and `Info`.
 - `Info` holds an external LSA's `metric <n> E1` or `E2`, and a router LSA's `B`/`E`/`V` flags and `vlink <router-id>` virtual links; `-` otherwise.

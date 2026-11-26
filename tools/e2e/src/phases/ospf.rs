@@ -466,6 +466,19 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     // metric-type 2`: the LSA is re-originated with the E bit, and flipping
     // to type 1 clears it again (the sequence number moves each time).
     let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
+    // #1453: the default metric type is 1.
+    expect_route(
+        b,
+        "/v1/ospf/routes",
+        ASBR_PREFIX,
+        WantRoute {
+            class: "external-1",
+            adv_router: OSPF_ROUTER_ID,
+            hops: 0,
+            e2_cost: None,
+        },
+    )
+    .await?;
     let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
     wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 20, false).await?;
     for (metric_type, type2) in [("2", true), ("1", false)] {
@@ -480,6 +493,18 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
         a.provision_flags(&flags).await?;
         a.wait_new(&reorig_pat, before, 60).await?;
         wait_external_lsa(b, OSPF_ROUTER_ID, prefix_lsid, 50, type2).await?;
+        expect_route(
+            b,
+            "/v1/ospf/routes",
+            ASBR_PREFIX,
+            WantRoute {
+                class: if type2 { "external-2" } else { "external-1" },
+                adv_router: OSPF_ROUTER_ID,
+                hops: 0,
+                e2_cost: type2.then_some(50),
+            },
+        )
+        .await?;
     }
     // Back to the defaults for the flush checks below.
     a.provision_flags(&with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID)))))
@@ -793,6 +818,19 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!(
         "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*next_hops=2.*source=Some(Ospf)"
     ))
+    .await?;
+    // #1453: `show ospf route` reports the same route.
+    expect_route(
+        a,
+        "/v1/ospf/routes",
+        OSPF_SPF_LOOPBACK_ADDRESS,
+        WantRoute {
+            class: "intra-area",
+            adv_router: OSPF_ROUTER_ID_B,
+            hops: 2,
+            e2_cost: None,
+        },
+    )
     .await?;
     // Issue #20: router-a's nos-bgpd polls nos-ribd's IGP costs (BGP decision
     // step d) and must see the OSPF route with its real, non-zero SPF metric.
@@ -1317,6 +1355,20 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!(
         "added route prefix={OSPF_ABR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
     ))
+    .await?;
+
+    // #1453: the area-1 loopback is an inter-area route via the ABR.
+    expect_route(
+        a,
+        "/v1/ospf/routes",
+        OSPF_ABR_LOOPBACK_ADDRESS,
+        WantRoute {
+            class: "inter-area",
+            adv_router: OSPF_ROUTER_ID_B,
+            hops: 0,
+            e2_cost: None,
+        },
+    )
     .await?;
 
     // RFC 3509 §2.1 (Cisco, #1170): the backbone counts only with a Full
@@ -4548,6 +4600,18 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait("ospfv3 lsa originated").await?;
     b.wait_new(&prefix_lsa, lsa_installed, 60).await?;
     b.wait_new(&route_pat, route_before, 60).await?;
+    expect_route(
+        b,
+        "/v1/ospfv3/routes",
+        OSPFV3_LOOPBACK_ADDRESS,
+        WantRoute {
+            class: "intra-area",
+            adv_router: OSPFV3_ROUTER_ID,
+            hops: 0,
+            e2_cost: None,
+        },
+    )
+    .await?;
     // #190: pushed on the LSDB change, not on the next 2s poll.
     if let Err(e) = b.assert_delay_under(
         (&prefix_lsa, lsa_installed),
@@ -4934,6 +4998,18 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&originated, o0, 60).await?;
     b.wait_new(&installed, i0, 60).await?;
     b.wait_new(&route, r0, 60).await?;
+    expect_route(
+        b,
+        "/v1/ospfv3/routes",
+        OSPFV3_ASBR_PREFIX,
+        WantRoute {
+            class: "external-1",
+            adv_router: OSPFV3_ROUTER_ID,
+            hops: 0,
+            e2_cost: None,
+        },
+    )
+    .await?;
     a.wait_new("ospf lsa originated.*lsa_type=5", v2_o0, 60)
         .await?;
     b.wait_new("ospf lsa installed.*lsa_type=5", v2_i0, 60)
@@ -5038,6 +5114,18 @@ pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&originated, o0, 60).await?;
     a.wait_new(&installed, i0, 60).await?;
     a.wait_new(&route, r0, 60).await?;
+    expect_route(
+        a,
+        "/v1/ospfv3/routes",
+        OSPFV3_ABR_LOOPBACK_ADDRESS,
+        WantRoute {
+            class: "inter-area",
+            adv_router: OSPFV3_ROUTER_ID_B,
+            hops: 0,
+            e2_cost: None,
+        },
+    )
+    .await?;
 
     let aged = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa prematurely aged lsa_type={t} ")
@@ -8685,6 +8773,54 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
     last?;
     both_full_p2p(a, b).await?;
     a.established().await
+}
+
+/// What `expect_route` checks of one route of `GET /v1/{ospf,ospfv3}/routes`.
+struct WantRoute<'a> {
+    class: &'a str,
+    adv_router: &'a str,
+    /// Exact next-hop count; 0 = any (but at least one).
+    hops: usize,
+    /// An external-2 route's own metric.
+    e2_cost: Option<u64>,
+}
+
+/// Polls `r`'s `path` (up to 60s) until the route for `prefix` matches `want`
+/// (#1453): class, advertising router, next-hop count, E2 metric.
+async fn expect_route(
+    r: &Router,
+    path: &str,
+    prefix: &str,
+    want: WantRoute<'_>,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r.rest_expect(Method::GET, path, None, 200).await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let hit = v[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|x| x["prefix"] == prefix);
+        if let Some(x) = hit {
+            let hops = x["next_hops"].as_array().map_or(0, Vec::len);
+            if x["class"] == want.class
+                && x["advertising_router"] == want.adv_router
+                && (hops == want.hops || (want.hops == 0 && hops > 0))
+                && want.e2_cost.is_none_or(|c| x["type2_cost"] == c)
+                && x["cost"].as_u64().is_some_and(|c| c >= 1)
+            {
+                return Ok(());
+            }
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{path} never held {prefix} as {} via {}: {last}",
+        want.class,
+        want.adv_router
+    )
 }
 
 /// The label of router-b's Adj-SID toward router-c, from router-a's

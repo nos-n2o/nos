@@ -25,10 +25,13 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show spanning-tree instance <id> [detail]` / `domain <bd> [detail]` | `GET /v1/spanning-tree/instance/{id}` / `.../domain/{name}` |
 | (counters as a flat table) | `GET /v1/spanning-tree/counters` |
 | `clear spanning-tree err-disabled <if>` | `POST /v1/spanning-tree/port/{interface}/err-disabled/clear` |
+| `clear acl counters` | `POST /v1/acl/counters/clear` |
+| `clear acl <name> counters` | `POST /v1/acl/{name}/counters/clear` |
 | `clear spanning-tree detected-protocols` / `... interface <if>` | `POST /v1/spanning-tree/mcheck` / `POST /v1/spanning-tree/port/{interface}/mcheck` |
 | `show bfd sessions` / `show bfd sessions <peer>` (and `… [<peer>] detail`) | `GET /v1/bfd/sessions` / `GET /v1/bfd/sessions?peer=<peer>` (`detail` is client-side only: the same reply carries the fields) |
 | `show bfd reflector` | `GET /v1/bfd/reflector` |
-| `show bgp summary` | `GET /v1/bgp/summary` |
+| `show bgp summary [instance <n>]` | `GET /v1/bgp/summary[?instance=<n>]` |
+| `show bgp neighbor [<ip>] [instance <n>]` | `GET /v1/bgp/summary?peer=<ip>[&instance=<n>]` (the detail block is client-side only) |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp flowspec [family <f> \| vrf <table>]` | `GET /v1/bgp/flowspec[?family=<f>\|?vrf=<table>]` |
 | `show bgp vpnv4` / `show bgp vpnv4 rd <rd>` | `GET /v1/bgp/vpnv4` / `GET /v1/bgp/vpnv4?rd=<rd>` |
@@ -38,6 +41,8 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show bgp routes` | `GET /v1/bgp/routes` |
 | `show ospf interface` | `GET /v1/ospf/interfaces` |
 | `show ospfv3 interface` | `GET /v1/ospfv3/interfaces` |
+| `show ospf route` | `GET /v1/ospf/routes` |
+| `show ospfv3 route` | `GET /v1/ospfv3/routes` |
 | `show ospf neigh` / `show ospf database` | `GET /v1/ospf/neighbors` / `GET /v1/ospf/database` |
 | `show ospf` / `show ospf instance` | `GET /v1/ospf/instance` |
 | `show ospfv3` / `show ospfv3 instance` | `GET /v1/ospfv3/instance` |

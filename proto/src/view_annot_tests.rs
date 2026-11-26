@@ -384,3 +384,51 @@ fn interface_summaries_keys_and_wire_index() {
         2
     );
 }
+
+#[test]
+fn route_summaries_keys_and_wire_index() {
+    use crate::ospf::{OspfEvent, OspfRequest, RoutePathClass, RouteSummary};
+    use crate::ospfv3::{Ospfv3Event, Ospfv3Request, Ospfv3RouteSummary};
+    let v2 = RouteSummary {
+        prefix: "10.0.0.0/24".into(),
+        class: RoutePathClass::External2,
+        cost: 2,
+        type2_cost: Some(20),
+        area: Ipv4Addr::UNSPECIFIED,
+        next_hops: vec!["10.0.0.2 dev eth0".into()],
+        advertising_router: Some(Ipv4Addr::new(1, 1, 1, 1)),
+    };
+    let j = serde_json::to_value(&v2).unwrap();
+    assert_eq!(j["class"], "external-2");
+    assert_keys_match(view_of::<RouteSummary>().unwrap(), &j);
+    let v3 = Ospfv3RouteSummary {
+        prefix: "2001:db8::/64".into(),
+        class: RoutePathClass::IntraArea,
+        cost: 1,
+        type2_cost: None,
+        area: v2.area,
+        next_hops: vec![],
+        advertising_router: None,
+    };
+    assert_keys_match(
+        view_of::<Ospfv3RouteSummary>().unwrap(),
+        &serde_json::to_value(&v3).unwrap(),
+    );
+    let first = |v: Vec<u8>| v[0];
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfRequest::GetRoutes).unwrap()),
+        5
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&OspfEvent::Routes(vec![])).unwrap()),
+        4
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Request::GetRoutes).unwrap()),
+        4
+    );
+    assert_eq!(
+        first(postcard::to_allocvec(&Ospfv3Event::Routes(vec![])).unwrap()),
+        3
+    );
+}

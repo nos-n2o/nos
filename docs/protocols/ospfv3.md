@@ -81,11 +81,12 @@ $C -X POST $B/v1/transactions/v3/commit
 
 ### Check neighbours, the LSDB and routes
 
-`show ospfv3 neigh`, `show ospfv3 interface` and `show ospfv3 database` work like their OSPF counterparts (`GET /v1/ospfv3/neighbors`, `GET /v1/ospfv3/interfaces` and `GET /v1/ospfv3/database` over REST). `show ospfv3 interface` shows the link-local address and the Interface ID (`if-id`) instead of the IPv4 address; the advertised prefixes are in the detail view:
+`show ospfv3 route` (`GET /v1/ospfv3/routes`, #1453) prints the computed routes like `show ospf route`, with IPv6 prefixes and link-local next hops. `show ospfv3 neigh`, `show ospfv3 interface` and `show ospfv3 database` work like their OSPF counterparts (`GET /v1/ospfv3/neighbors`, `GET /v1/ospfv3/interfaces` and `GET /v1/ospfv3/database` over REST). `show ospfv3 interface` shows the link-local address and the Interface ID (`if-id`) instead of the IPv4 address; the advertised prefixes are in the detail view:
 
 ```
 show ospfv3 neigh                    (also: neighbor, neighbors)
 show ospfv3 interface                (also: interfaces)
+show ospfv3 route
 show ospfv3 database
 show ospfv3 database link 1.1.1.1
 ```

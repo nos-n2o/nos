@@ -957,6 +957,11 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
                         mpls_labels: vec![],
                         vpn: vec![],
                         blackhole: false,
+                        metric: None,
+                        preference: 0,
+                        age_secs: 0,
+                        interfaces: vec![],
+                        installed: false,
                     }],
                 }],
                 next: Some("10.0.0.0/8".parse().unwrap()),
@@ -1336,6 +1341,18 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let (s, v) = send(app, Method::GET, "/v1/bgp/summary", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
+    let (s, v) = send(
+        app,
+        Method::GET,
+        "/v1/bgp/summary?instance=r1&peer=192.0.2.2",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = send(app, Method::GET, "/v1/bgp/summary?instance=nope", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = send(app, Method::GET, "/v1/bgp/summary?peer=nonsense", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, v) = send(app, Method::GET, "/v1/bgp/evpn", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
@@ -1349,6 +1366,13 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
         send(app, Method::GET, "/v1/ospf/neighbors", None).await.1,
         json!([])
     );
+    for uri in ["/v1/ospf/routes", "/v1/ospfv3/routes"] {
+        assert_eq!(
+            send(app, Method::GET, uri, None).await.1,
+            json!([]),
+            "{uri}"
+        );
+    }
 }
 
 /// Every error is an RFC 9457 problem document whose `status` repeats the
@@ -2918,15 +2942,17 @@ async fn show_routes_and_listener_never_fetch_the_config() {
         "/v1/ospf/neighbors",
         "/v1/ospf/database",
         "/v1/ospf/segment-routing",
+        "/v1/ospf/routes",
         "/v1/ospf/instance",
         "/v1/ospfv3/instance",
         "/v1/ospfv3/neighbors",
         "/v1/ospfv3/database",
+        "/v1/ospfv3/routes",
     ] {
         let (s, _) = send(&app, Method::GET, uri, None).await;
         assert_eq!(s, StatusCode::OK, "{uri}");
     }
-    assert_eq!(lists.load(Ordering::SeqCst), 11);
+    assert_eq!(lists.load(Ordering::SeqCst), 13);
     assert_eq!(daemons.rest_api("rt1").await.unwrap(), None);
     assert_eq!(apis.load(Ordering::SeqCst), 1);
     assert_eq!(gets.load(Ordering::SeqCst), 0, "no Request::Get");

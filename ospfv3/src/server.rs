@@ -34,6 +34,7 @@ fn allowed(role: Role, req: &Ospfv3Request) -> bool {
         Ospfv3Request::GetNeighbors
         | Ospfv3Request::GetDatabase
         | Ospfv3Request::GetInterfaces
+        | Ospfv3Request::GetRoutes
         | Ospfv3Request::GetInstance => {
             matches!(role, Role::User | Role::Restd)
         }
@@ -96,6 +97,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ospfv3Request::GetRoutes => {
+                let event = Ospfv3Event::Routes(links.route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             Ospfv3Request::GetDatabase => {
                 let event = Ospfv3Event::Database(links.database_summaries().await);
                 if writer.send(event).await.is_err() {
@@ -139,6 +146,7 @@ mod authz_tests {
             for q in [
                 Ospfv3Request::GetNeighbors,
                 Ospfv3Request::GetInterfaces,
+                Ospfv3Request::GetRoutes,
                 Ospfv3Request::GetInstance,
             ] {
                 assert_eq!(

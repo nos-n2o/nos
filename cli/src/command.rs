@@ -55,6 +55,10 @@ pub enum Command {
     ShowLldpStatistics,
     /// `show version` — local, valid in any mode.
     ShowVersion,
+    /// `clear acl [<name>] counters` (#1419).
+    ClearAclCounters {
+        name: Option<String>,
+    },
     /// `show acl` (every ACL) or `show acl <name>` (one): counters included.
     ShowAcl {
         name: Option<String>,
@@ -101,6 +105,12 @@ pub enum Command {
     ShowBgpSummary {
         instance: Option<String>,
     },
+    /// `show bgp neighbor [<ip>] [instance <name>]` — one detail block per
+    /// peer (#1443).
+    ShowBgpNeighbor {
+        peer: Option<IpAddr>,
+        instance: Option<String>,
+    },
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
@@ -129,6 +139,8 @@ pub enum Command {
     ShowOspfNeigh,
     /// `show ospf interface` (#1438): every running OSPF interface.
     ShowOspfInterface,
+    /// `show ospf route` (#1453): the computed routes of every OSPF instance.
+    ShowOspfRoute,
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase {
@@ -147,6 +159,8 @@ pub enum Command {
     ShowOspfv3Neigh,
     /// `show ospfv3 interface` (#1438).
     ShowOspfv3Interface,
+    /// `show ospfv3 route` (#1453).
+    ShowOspfv3Route,
     /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Database {
@@ -370,6 +384,20 @@ mod tests {
             Command::parse("clear spanning-tree detected-protocols interface eth1"),
             Command::ClearStpMcheck {
                 interface: Some("eth1".into())
+            }
+        );
+    }
+
+    #[test]
+    fn clear_acl_counters() {
+        assert_eq!(
+            Command::parse("clear acl counters"),
+            Command::ClearAclCounters { name: None }
+        );
+        assert_eq!(
+            Command::parse("clear acl EDGE counters"),
+            Command::ClearAclCounters {
+                name: Some("EDGE".into())
             }
         );
     }
@@ -870,6 +898,27 @@ mod tests {
     }
 
     #[test]
+    fn show_bgp_neighbor() {
+        let n = |peer: Option<&str>, instance: Option<&str>| Command::ShowBgpNeighbor {
+            peer: peer.map(|p| p.parse().unwrap()),
+            instance: instance.map(String::from),
+        };
+        assert_eq!(Command::parse("show bgp neighbor"), n(None, None));
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2"),
+            n(Some("10.0.0.2"), None)
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor instance r1"),
+            n(None, Some("r1"))
+        );
+        assert_eq!(
+            Command::parse("show bgp neighbor 10.0.0.2 instance r1"),
+            n(Some("10.0.0.2"), Some("r1"))
+        );
+    }
+
+    #[test]
     fn show_bgp_evpn() {
         assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
         assert_eq!(
@@ -909,6 +958,15 @@ mod tests {
                 family: nos_proto::AddressFamily::Vpnv4Unicast,
                 rd: Some("65001:1".into())
             }
+        );
+    }
+
+    #[test]
+    fn show_ospf_route() {
+        assert_eq!(Command::parse("show ospf route"), Command::ShowOspfRoute);
+        assert_eq!(
+            Command::parse("show ospfv3 route"),
+            Command::ShowOspfv3Route
         );
     }
 
