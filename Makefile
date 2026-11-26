@@ -91,7 +91,7 @@ miri: toolchain-check ## Run miri UB checks on the pure-logic crates on ci.yml's
 	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" $(RUN) cargo +$(MIRI_TOOLCHAIN) miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
 coverage: toolchain-check ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
-	$(RUN) cargo llvm-cov --workspace --features $(DEV_FEATURES) --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
+	$(RUN) cargo llvm-cov --workspace --features $(DEV_FEATURES) --ignore-filename-regex '/tools/e2e/|/tools/route-stub/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
 		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
 MUTANTS_JOBS ?= 2

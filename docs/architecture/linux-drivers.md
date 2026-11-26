@@ -31,6 +31,13 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 - Logs: the usual `added route` / `installed labelled route` line with a trailing `replaced=true`; no `removed ...` line for the old key. Check with `assert_quiet` on `removed route prefix=` in `nos-e2e`.
 - IPv4 and IPv6 are both replaced; the `vpn-v6`, `vpn-multipath`, `bgp-multipath` and `ospf-spf` phases are the kernel regression guard. IPv6 ECMP replace needs a kernel that replaces a multipath route whole (the behaviour of current kernels; very old ones could replace only the first hop).
 
+## Route ownership (`nos-ribd`, #1514)
+
+- `nos-ribd` stamps every route it installs with `rtm_protocol` 200 (`NOS_RTPROT`) and dumps, diffs and deletes only those. A route of any other protocol (an operator's `proto boot`, `kernel`, `static`) in a NOS table is left alone, also on a crash restart; only deleting the VRF itself (config removal) drops it.
+- A foreign route on a slot NOS config wants (same prefix and metric) is replaced once (`NLM_F_REPLACE`, `replaced foreign route` warning) and is then NOS's.
+- No migration: routes an older NOS installed as `static` are not recognised after an upgrade. Wanted ones are replaced as above, unwanted ones stay until the VRF or container is recreated.
+- In a hand-added route (tests, operators) never use protocol 200.
+
 ## MPLS (L3VPN, `nos-ribd`, #581)
 
 Segment routing (ILM entries, `RibDriver::sync_ilm`, #1165): [segment-routing.md](segment-routing.md).

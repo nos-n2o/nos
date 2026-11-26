@@ -729,7 +729,15 @@ impl LinuxRibDriver {
         let sent = if replace {
             self.route_channel.replace(route).await
         } else {
-            self.route_channel.add(route).await
+            match self.route_channel.add(route.clone()).await {
+                // A foreign route (another protocol) holds the slot NOS config
+                // wants: replace it once, then it is ours (#1514).
+                Err(e) if is_eexist(&e) => {
+                    warn!(%prefix, %gateway, table_id, backup, "replaced foreign route");
+                    self.route_channel.replace(route).await
+                }
+                other => other,
+            }
         };
         sent.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, replace, error = %e, "failed to add route");
@@ -1464,6 +1472,18 @@ impl LinuxRibDriver {
     }
 }
 
+/// The kernel refused an add because the slot is taken (`EEXIST`).
+fn is_eexist(e: &DriverError) -> bool {
+    matches!(e, DriverError::Netlink(rtnetlink::Error::NetlinkError(m))
+        if m.code.is_some_and(|c| c.get() == -17))
+}
+
+/// Private `rtm_protocol` stamped on every route NOS installs, and the only one
+/// it ever dumps or deletes: a route of any other protocol (an operator's
+/// `proto boot`, a kernel route) in a NOS table is left alone (#1514). 200 is
+/// free in iproute2's `rt_protos` and the kernel needs no registration.
+pub const NOS_RTPROT: RouteProtocol = RouteProtocol::Other(200);
+
 /// Extracts `((prefix, is_backup), key)` from a dumped `RouteMessage`: the
 /// sorted `(gateway, link-local ifindex, labels)` triples (`Key`), or `None` for a route we don't
 /// manage (no gateway — e.g. a kernel-internal entry a VRF device creates on
@@ -1474,17 +1494,17 @@ impl LinuxRibDriver {
 /// never deleted. A single-hop route's labels are the route-level encap. A
 /// missing `Destination` attribute means the default route (kernel omits it
 /// for 0/0), so it falls back to the family's unspecified address. A
-/// blackhole is a managed discard slot (empty key) only with `RTPROT_STATIC`,
-/// the protocol `build_route` gives every route: an operator's `ip route add
-/// blackhole` (`RTPROT_BOOT`) or a VRF recipe's `unreachable default metric
-/// …` is left alone.
+/// blackhole is a managed discard slot (empty key). Only a route with
+/// `NOS_RTPROT`, the protocol `build_route` gives every route, is ours: an
+/// operator's `ip route add …` (`RTPROT_BOOT`) or a VRF recipe's `unreachable
+/// default metric …` is left alone.
 // ponytail: kernels before 4.11 dump IPv6 ECMP siblings as separate routes,
 // not one `RTA_MULTIPATH`; merge siblings per slot here if one must be
 // supported.
 /// A `RTM_F_CLONED` entry is a kernel exception (e.g. the PMTU a tunnel
 /// learned), dumped beside the route it belongs to: never a route of ours.
 fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
-    if route.header.flags.contains(RouteFlags::Cloned) {
+    if route.header.protocol != NOS_RTPROT || route.header.flags.contains(RouteFlags::Cloned) {
         return None;
     }
     // `build_route` sends a VPNv6 route to an IPv4 PE through its IPv4-mapped
@@ -1524,8 +1544,7 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
             .into_iter()
             .collect(),
     };
-    let discard =
-        route.header.kind == RouteType::BlackHole && route.header.protocol == RouteProtocol::Static;
+    let discard = route.header.kind == RouteType::BlackHole;
     if key.is_empty() && !discard {
         return None;
     }
@@ -1623,7 +1642,8 @@ fn build_route(
     let mut builder = RouteMessageBuilder::<IpAddr>::new()
         .destination_prefix(prefix.addr(), prefix.prefix_len())
         .ok()?
-        .table_id(table_id);
+        .table_id(table_id)
+        .protocol(NOS_RTPROT);
     if hops.is_empty() {
         builder = builder.kind(RouteType::BlackHole);
     } else if let [hop] = hops {
@@ -2061,6 +2081,46 @@ mod tests {
         let mut foreign = route;
         foreign.header.protocol = RouteProtocol::Boot;
         assert_eq!(extract_route(&foreign), None);
+    }
+
+    #[test]
+    fn only_nos_protocol_routes_are_extracted() {
+        let p = net("10.9.0.0/16");
+        let hops = [plain("10.0.0.1"), plain("10.0.0.2")];
+        for built in [
+            build_route(p, &[plain("10.0.0.1")], 100, false, false).unwrap(),
+            build_route(p, &hops, 100, false, false).unwrap(),
+            build_route(p, &[], 100, false, false).unwrap(),
+            build_route(p, &[plain("10.0.0.1")], 100, true, false).unwrap(),
+        ] {
+            assert_eq!(built.header.protocol, NOS_RTPROT);
+            let mut route = wire(&built);
+            assert!(extract_route(&route).is_some());
+            for other in [
+                RouteProtocol::Boot,
+                RouteProtocol::Static,
+                RouteProtocol::Ospf,
+                RouteProtocol::Kernel,
+            ] {
+                route.header.protocol = other;
+                assert_eq!(extract_route(&route), None);
+            }
+        }
+    }
+
+    #[test]
+    fn eexist_is_recognised() {
+        use netlink_packet_core::ErrorMessage;
+        let mut m = ErrorMessage::default();
+        m.code = std::num::NonZeroI32::new(-17);
+        assert!(is_eexist(&DriverError::Netlink(
+            rtnetlink::Error::NetlinkError(m.clone())
+        )));
+        m.code = std::num::NonZeroI32::new(-1);
+        assert!(!is_eexist(&DriverError::Netlink(
+            rtnetlink::Error::NetlinkError(m)
+        )));
+        assert!(!is_eexist(&DriverError::Other(String::new())));
     }
 
     #[test]

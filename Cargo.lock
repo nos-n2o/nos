@@ -2339,6 +2339,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-route-stub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "netlink-packet-route",
+ "rtnetlink",
+ "tokio",
+]
+
+[[package]]
 name = "nos-rpl"
 version = "0.1.0"
 dependencies = [
