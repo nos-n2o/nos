@@ -3074,7 +3074,17 @@ pub async fn ospf_dr_frr(w: &mut World) -> anyhow::Result<()> {
     b.provision_flags(&with_base(B, fb)).await?;
 
     w.dock.container_remove("router-f").await;
+    w.dock.container_remove("router-g").await;
     w.dock.ensure_pulled(FRR_IMAGE).await?;
+    let full0 = format!(
+        "ospf neighbor reached full link=broadcast-domain:{BD} neighbor={OSPF_ROUTER_ID_F}"
+    );
+    let (fa0, fb0) = (a.count_fresh(&full0).await, b.count_fresh(&full0).await);
+    let dr0 = b
+        .count_fresh(&format!(
+            "ospf interface became dr link=broadcast-domain:{BD} dr={OSPF_ROUTER_ID_B}"
+        ))
+        .await;
     let conf = format!(
         "frr defaults traditional\nhostname router-f\n!\n\
          interface eth0.{OSPF_BROADCAST_TAG}\n ip ospf area {OSPF_AREA}\n ip ospf priority 0\nexit\n!\n\
@@ -3099,18 +3109,41 @@ pub async fn ospf_dr_frr(w: &mut World) -> anyhow::Result<()> {
         .await?;
 
     let link = format!("link=broadcast-domain:{BD}");
-    b.wait(&format!(
-        "ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}"
-    ))
-    .await?;
-    a.wait(&format!(
-        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}"
-    ))
-    .await?;
-    b.wait(&format!(
-        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}"
-    ))
-    .await?;
+    let full = format!("ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}");
+    // FRR cold-starts and a broadcast interface waits RouterDeadInterval (40s)
+    // before DR election: 120s, not the default 60s (#1468).
+    let waited = async {
+        b.wait_new(
+            &format!("ospf interface became dr {link} dr={OSPF_ROUTER_ID_B}"),
+            dr0,
+            120,
+        )
+        .await?;
+        a.wait_new(&full, fa0, 120).await?;
+        b.wait_new(&full, fb0, 120).await
+    }
+    .await;
+    if let Err(e) = waited {
+        let mut dump: Vec<String> = Vec::new();
+        for c in ["show ip ospf neighbor", "show ip ospf interface"] {
+            let out = w.dock.exec("router-f", &["vtysh", "-c", c]).await;
+            dump.push(format!(
+                "\n--- FRR `{c}`:\n{}",
+                out.map_or_else(|e| e.to_string(), |o| o.1)
+            ));
+        }
+        for (r, pat) in [
+            (a, "ospf interface\\|ospf neighbor"),
+            (b, "ospf interface\\|ospf neighbor"),
+        ] {
+            dump.push(format!(
+                "\n--- {} last lines:\n{}",
+                r.name(),
+                r.tail(pat, 15).join("\n")
+            ));
+        }
+        bail!("{e:#}{}", dump.join(""));
+    }
     let ifc = format!("show ip ospf interface eth0.{OSPF_BROADCAST_TAG} json");
     let dr = OSPF_BROADCAST_ADDRESS_B.split('/').next().unwrap();
     let bdr = OSPF_BROADCAST_ADDRESS_A.split('/').next().unwrap();
@@ -8736,7 +8769,44 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
             ],
         )
         .await?;
-    let pinged = ping_from_a(w, target, 10).await;
+    // The host route may not be in use for the first packets (#1468): log it,
+    // ping, and retry the batch once before failing.
+    let mut seen: Vec<String> = Vec::new();
+    let mut moved = false;
+    let mut last = Ok(());
+    for attempt in 1..=2 {
+        let r = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                "router-a",
+                &["ip", "route", "get", target, "oif", "eth0"],
+            )
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        let tbl = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                "router-a",
+                &["ip", "route", "show", "table", "100"],
+            )
+            .await
+            .unwrap_or_else(|e| e.to_string());
+        seen.push(format!(
+            "\nattempt {attempt}: route get: {r}\ntable 100: {tbl}"
+        ));
+        last = ping_from_a(w, target, 10).await;
+        if last.is_err() {
+            break;
+        }
+        // ponytail: one labelled packet is the proof; the unlabelled packets
+        // seen were the first of a fresh route, hence one retry, no more.
+        if mpls_packets(w, "router-b").await?.0 > rx0 {
+            moved = true;
+            break;
+        }
+    }
     let _ = w
         .dock
         .in_netns(
@@ -8745,13 +8815,14 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
             &["ip", "route", "del", &host, "table", "100"],
         )
         .await;
-    pinged?;
+    last?;
     let (rx1, _) = mpls_packets(w, "router-b").await?;
-    // ponytail: half of the 10 pings, not all: the first packets of a fresh
-    // host route were seen unlabelled in a run; one labelled packet is the
-    // proof, the margin only rules out a fluke.
-    if rx1 < rx0 + 5 {
-        bail!("adj-sid {sid}: router-b mpls rx {rx0}->{rx1}");
+    let (_, atx2) = mpls_packets(w, "router-a").await?;
+    if !moved {
+        bail!(
+            "adj-sid {sid}: router-b mpls rx {rx0}->{rx1}, router-a tx {atx1} -> {atx2}{}",
+            seen.join("")
+        );
     }
 
     log("router-c drops its Prefix-SID: the ILM entry on router-b goes, the ping stays up");

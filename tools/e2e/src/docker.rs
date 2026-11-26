@@ -421,6 +421,38 @@ impl Dock {
         seed: Option<(&str, &str, &[u8])>,
         caps: &[&str],
     ) -> anyhow::Result<()> {
+        // router-f (FRR) and router-g (ExaBGP) share one IP: a leftover of
+        // either clashes (403 "Address already in use", #1468). Clear both,
+        // and retry once if the daemon still reports the clash.
+        let clash = ["router-f", "router-g"].contains(&name);
+        if clash {
+            self.container_remove("router-f").await;
+            self.container_remove("router-g").await;
+        }
+        let run = || self.start_plain_once(name, image, network, ip, entrypoint, cmd, seed, caps);
+        match run().await {
+            Err(e) if clash && format!("{e:#}").contains("Address already in use") => {
+                self.container_remove("router-f").await;
+                self.container_remove("router-g").await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                run().await
+            }
+            r => r,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_plain_once(
+        &self,
+        name: &str,
+        image: &str,
+        network: &str,
+        ip: &str,
+        entrypoint: Option<&[&str]>,
+        cmd: &[&str],
+        seed: Option<(&str, &str, &[u8])>,
+        caps: &[&str],
+    ) -> anyhow::Result<()> {
         self.container_remove(name).await;
         let (full, network) = (self.n(name), self.n(network));
         let network = network.as_str();
