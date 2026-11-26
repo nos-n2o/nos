@@ -416,11 +416,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Command::Save
     ),
     cmd!(["show" "aaa" "users"],
-        Doc::Local {
-            summary: "Show the externally authenticated users that have an ssh account entry.",
-            detail: "Lists the names (RADIUS or TACACS+ users) nos-configd gave a persistent \
-                     uid after an accepted login, or an administrator allocated. Admin only.",
-        },
+        Doc::FromConfig(Topic::ShowAaaUsers),
         Always,
         Command::ShowAaaUsers),
     cmd!(["allocate" "aaa" "user" (name: Plain)],
