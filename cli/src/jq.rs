@@ -461,6 +461,22 @@ impl Program {
             _ => None,
         }
     }
+
+    /// How a streamed array walk can run this program without holding the
+    /// array (#1508): per element after `.[]`, or a bare `length` as a count.
+    pub fn stream_tail(&self) -> Option<Tail> {
+        match self.0.as_slice() {
+            [Term::Length] => Some(Tail::Count),
+            _ => self.split_iter().map(Tail::Each),
+        }
+    }
+}
+
+/// See [`Program::stream_tail`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tail {
+    Each(Program),
+    Count,
 }
 
 #[cfg(test)]
@@ -483,6 +499,18 @@ mod tests {
     fn doc() -> Value {
         json!({"a": {"b": [10, 20, 30]}, "s": "héllo", "n": null,
                "rows": [{"state": "up", "id": 1}, {"state": "down", "id": 2}, {"id": 3}]})
+    }
+
+    #[test]
+    fn stream_tail_classes() {
+        let t = |s: &str| parse(s).unwrap().stream_tail();
+        assert_eq!(t("length"), Some(Tail::Count));
+        for yes in [".[]", ".[] | .a", ".[] | select(.a == 1)", ".[] | length"] {
+            assert!(matches!(t(yes), Some(Tail::Each(_))), "{yes}");
+        }
+        for no in [".[0]", "select(.a == 1)", ".", ".a", "{a: .b}"] {
+            assert_eq!(t(no), None, "{no}");
+        }
     }
 
     #[test]

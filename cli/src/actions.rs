@@ -16,7 +16,7 @@ use nos_proto::{
 };
 
 use crate::command::RouteQuery;
-use crate::pipe::{self, JsonArray, Output};
+use crate::pipe::{self, JqStream, JsonArray, Output};
 use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
 use crate::{
@@ -245,13 +245,8 @@ pub async fn handle_action_out(
                 }
                 return Outcome::Continue(mode);
             }
-            Resolved::ShowRoute { .. } | Resolved::ShowBgpRoutes if out != Output::Json => {
-                // ponytail: streamed walks are not filtered yet (#1508)
-                eprintln!("error: jq is not supported on this command yet");
-                return Outcome::Continue(mode);
-            }
             Resolved::ShowRoute { table, query } => {
-                show_route_json(watchdog_socket, &table, query).await;
+                show_route_json(watchdog_socket, &table, query, &out).await;
                 return Outcome::Continue(mode);
             }
             Resolved::ShowRouteTables => {
@@ -263,7 +258,7 @@ pub async fn handle_action_out(
                 return Outcome::Continue(mode);
             }
             Resolved::ShowBgpRoutes => {
-                show_bgp_routes_json(socket, watchdog_socket).await;
+                show_bgp_routes_json(socket, watchdog_socket, &out).await;
                 return Outcome::Continue(mode);
             }
             Resolved::Error(_) => {}
@@ -1193,16 +1188,70 @@ fn print_jq(p: &crate::jq::Program, reply: &serde_json::Value) {
     }
 }
 
+/// What a streamed walk does with each page: `| json` prints the array,
+/// `| jq` runs its tail per row (#1508).
+enum Sink<'a, W: io::Write> {
+    Json(JsonArray<'a, W>),
+    Jq(JqStream<'a, W>),
+}
+
+impl<W: io::Write> Sink<'_, W> {
+    fn page<T: serde::Serialize>(&mut self, rows: &[T]) {
+        match self {
+            Sink::Json(a) => a.page(rows),
+            Sink::Jq(s) => s.page(rows),
+        }
+    }
+
+    fn end(self) {
+        if let Sink::Jq(s) = self {
+            if let Err(e) = s.end() {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+            }
+        } else if let Sink::Json(a) = self {
+            a.end();
+        }
+    }
+}
+
+/// The streaming tail of a `| jq` program, or the refusal (printed) when it
+/// needs the whole reply. `Ok(None)` for `| json`.
+fn stream_tail(out: &Output) -> Result<Option<crate::jq::Tail>, ()> {
+    let Output::Jq(p) = out else { return Ok(None) };
+    if let Some(t) = p.stream_tail() {
+        return Ok(Some(t));
+    }
+    eprintln!(
+        "error: this filter needs the whole reply; start with .[] (e.g. | jq '.[] | select(.protocol == \"bgp\")')"
+    );
+    Err(())
+}
+
+fn sink<W: io::Write>(w: &mut W, tail: Option<crate::jq::Tail>) -> Sink<'_, W> {
+    match tail {
+        Some(t) => Sink::Jq(JqStream::begin(w, t)),
+        None => Sink::Json(JsonArray::begin(w)),
+    }
+}
+
 /// `show route <table> [<addr>] | json`: one streamed array of prefixes, or
 /// the longest match (`null` when none). Errors go to stderr, nothing else.
-async fn show_route_json(watchdog_socket: &Path, table: &str, query: RouteQuery) {
+async fn show_route_json(watchdog_socket: &Path, table: &str, query: RouteQuery, out: &Output) {
+    let tail = if matches!(query, RouteQuery::Lookup(_)) {
+        None // a single value: the whole program runs on it
+    } else {
+        match stream_tail(out) {
+            Ok(t) => t,
+            Err(()) => return,
+        }
+    };
     let Some(rib_socket) = resolve_rib(watchdog_socket, table).await else {
         return;
     };
     match query {
         RouteQuery::Table | RouteQuery::Filter(_) => {
             let mut stdout = io::stdout();
-            let mut array = JsonArray::begin(&mut stdout);
+            let mut array = sink(&mut stdout, tail);
             let filter = route_filter(&query);
             match rib_client::for_each_routes_page(&rib_socket, filter, |page| array.page(page))
                 .await
@@ -1212,7 +1261,10 @@ async fn show_route_json(watchdog_socket: &Path, table: &str, query: RouteQuery)
             }
         }
         RouteQuery::Lookup(addr) => match rib_client::lookup(&rib_socket, addr).await {
-            Ok(m) => println!("{}", pipe::json_pretty(&m)),
+            Ok(m) => match out {
+                Output::Jq(p) => print_jq(p, &serde_json::to_value(&m).unwrap_or_default()),
+                _ => println!("{}", pipe::json_pretty(&m)),
+            },
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         },
     }
@@ -1220,7 +1272,10 @@ async fn show_route_json(watchdog_socket: &Path, table: &str, query: RouteQuery)
 
 /// `show bgp routes | json`: `{ "<instance>": [ ... ], ... }`, each value
 /// streamed. A failed walk leaves the document unterminated (stderr has why).
-async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path) {
+/// `| jq` sees the rows of every instance as one stream (#1508).
+async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path, out: &Output) {
+    let Ok(tail) = stream_tail(out) else { return };
+    let jq = tail.is_some();
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1229,8 +1284,12 @@ async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path) {
         }
     };
     let mut stdout = io::stdout();
-    print!("{{");
+    if !jq {
+        print!("{{");
+    }
     let mut first = true;
+    // ponytail: with jq, one sink spans all instances; count prints once at the end
+    let mut jq_sink = tail.map(|t| JqStream::begin(&mut stdout, t));
     for instance in &cfg.bgp_instances {
         let name = &instance.name;
         let bgp_socket = match watchdog_client::resolve(
@@ -1249,10 +1308,19 @@ async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path) {
                 return;
             }
         };
+        if let Some(s) = jq_sink.as_mut() {
+            if let Err(e) = bgp_client::for_each_routes_page(&bgp_socket, |page| s.page(page)).await
+            {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+            continue;
+        }
         let key = pipe::json_pretty(name);
         print!("{}\n{key}: ", if first { "" } else { "," });
         first = false;
-        let mut array = JsonArray::begin(&mut stdout);
+        let mut plain = io::stdout();
+        let mut array = JsonArray::begin(&mut plain);
         match bgp_client::for_each_routes_page(&bgp_socket, |page| array.page(page)).await {
             Ok(()) => array.end(),
             Err(e) => {
@@ -1261,7 +1329,13 @@ async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path) {
             }
         }
     }
-    println!("{}}}", if first { "" } else { "\n" });
+    if let Some(s) = jq_sink {
+        if let Err(e) = s.end() {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+        }
+    } else {
+        println!("{}}}", if first { "" } else { "\n" });
+    }
 }
 
 /// `emit` for a `detail` form: one block per element.

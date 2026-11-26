@@ -104,7 +104,7 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Each result prints as compact JSON on its own line; strings stay quoted (`"up"`), escaped like `| json`. Example: `show bfd sessions | jq '.[] | select(.state == "up") | .peer'`.
 - A missing key or out-of-range index is `null`; indexing a scalar, `.[]` on a scalar or `null`, and `length` of a number are errors on stderr. Comparing different kinds is false (`!=` true), unlike jq's total order.
 - Limits: 512 bytes, 16 pipe stages, 100000 results per run.
-- `show route <table>` and `show bgp routes` (streamed) print `error: jq is not supported on this command yet` until #1508.
+- `show route <table>` and `show bgp routes` stream (#1508): the program must start with `.[]` (the rest runs per row, one page in memory, results print at once) or be a bare `length` (counts rows without storing them); anything else is refused before any IPC with `error: this filter needs the whole reply; start with .[]`. The first per-row error goes to stderr and stops further output. `show bgp routes | jq` flattens every instance's rows into one stream (`| json` keeps the per-instance object). `show route <table> <addr>` is a single value: the full language applies.
 - Tab offers `jq` next to `json`; `?` explains it (`Topic::PipeJq`).
 
 ### Adding a view (#1422)

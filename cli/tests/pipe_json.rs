@@ -2,7 +2,7 @@
 //! streamed page walk against a fake daemon.
 
 use futures::{SinkExt, StreamExt};
-use nos_cli::pipe::{json_pretty, JsonArray};
+use nos_cli::pipe::{json_pretty, JqStream, JsonArray};
 use nos_pki::testing::shared;
 use nos_proto::{
     BgpEvent, BgpRequest, BgpRouteCursor, BgpRouteSummary, IpcCodec, RpkiValidationState,
@@ -62,6 +62,30 @@ async fn walk(fail: bool) -> (String, bool) {
         array.end();
     }
     (String::from_utf8(buf).unwrap(), ok)
+}
+
+/// `| jq` over the same three-page walk (#1508): per-row results equal the
+/// filter applied to the `| json` array; `length` counts.
+#[tokio::test]
+async fn a_jq_walk_equals_filtering_the_array() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("bgp.sock");
+    let l = shared().identity("bgpd", "r1").listen(&path).unwrap();
+    tokio::spawn(serve(l, false));
+    let mut buf = Vec::new();
+    let tail = nos_cli::jq::parse(".[] | select(.local_pref == 100) | .prefix")
+        .unwrap()
+        .stream_tail()
+        .unwrap();
+    let mut s = JqStream::begin(&mut buf, tail);
+    nos_cli::bgp_client::for_each_routes_page(&path, |p| s.page(p))
+        .await
+        .unwrap();
+    s.end().unwrap();
+    assert_eq!(
+        String::from_utf8(buf).unwrap(),
+        "\"10.0.1.0/24\"\n\"10.0.2.0/24\"\n\"10.0.3.0/24\"\n"
+    );
 }
 
 #[tokio::test]

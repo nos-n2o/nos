@@ -2,7 +2,7 @@
 //! the pipe grammar (#1420 adds the jq expression here), plus the escape-safe
 //! JSON printer. Pure: no I/O besides the `Write` handed in.
 
-use crate::jq::{self, Program};
+use crate::jq::{self, Program, Tail};
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::io::Write;
@@ -128,6 +128,60 @@ impl<'a, W: Write> JsonArray<'a, W> {
     }
 }
 
+/// A streamed array filtered by `| jq` (#1508): `Tail::Each` runs per row and
+/// prints each result at once; `Tail::Count` only counts. The first per-row
+/// error is kept (later rows are skipped) for the caller to report.
+pub struct JqStream<'a, W: Write> {
+    out: &'a mut W,
+    tail: Tail,
+    count: usize,
+    err: Option<jq::JqError>,
+}
+
+impl<'a, W: Write> JqStream<'a, W> {
+    pub fn begin(out: &'a mut W, tail: Tail) -> Self {
+        Self {
+            out,
+            tail,
+            count: 0,
+            err: None,
+        }
+    }
+
+    pub fn page<T: Serialize>(&mut self, rows: &[T]) {
+        for r in rows {
+            if self.err.is_some() {
+                return;
+            }
+            match &self.tail {
+                Tail::Count => self.count += 1,
+                Tail::Each(p) => {
+                    let v = serde_json::to_value(r).unwrap_or_default();
+                    match p.run(&v) {
+                        Ok(rs) => {
+                            for x in rs {
+                                let _ = writeln!(self.out, "{}", escape(&x.to_string()));
+                            }
+                        }
+                        Err(e) => self.err = Some(e),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Prints the count (if counting); the first error, if any.
+    pub fn end(self) -> Result<(), jq::JqError> {
+        if let Some(e) = self.err {
+            return Err(e);
+        }
+        if matches!(self.tail, Tail::Count) {
+            let _ = writeln!(self.out, "{}", self.count);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +277,31 @@ mod tests {
             serde_json::from_slice::<Vec<u8>>(&buf).unwrap(),
             Vec::<u8>::new()
         );
+    }
+
+    #[test]
+    fn jq_stream_matches_whole_array() {
+        let rows = [
+            serde_json::json!({"a": 1, "s": "x"}),
+            serde_json::json!({"a": 2, "s": "y"}),
+        ];
+        let pages: [&[serde_json::Value]; 3] = [&rows[..1], &[], &rows[1..]];
+        let run = |src: &str, pages: &[&[serde_json::Value]]| {
+            let mut buf = Vec::new();
+            let mut s = JqStream::begin(&mut buf, jq::parse(src).unwrap().stream_tail().unwrap());
+            for p in pages {
+                s.page(p);
+            }
+            let r = s.end();
+            (String::from_utf8(buf).unwrap(), r)
+        };
+        assert_eq!(run(".[] | select(.a == 2) | .s", &pages).0, "\"y\"\n");
+        assert_eq!(run(".[] | .a", &pages).0, "1\n2\n");
+        assert_eq!(run("length", &pages).0, "2\n");
+        assert_eq!(run("length", &[&[]]).0, "0\n");
+        // first error stops output, reported once
+        let (o, r) = run(".[] | .a | length", &pages);
+        assert_eq!(o, "");
+        assert!(r.is_err());
     }
 }
