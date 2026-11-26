@@ -20,6 +20,7 @@ fn prefix(s: &str) -> anyhow::Result<(Ipv4Addr, u8)> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    // nosemgrep: rust.lang.security.args.args -- test-only CLI, not a security decision
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (conn, handle, _) = rtnetlink::new_connection()?;
     tokio::spawn(conn);
