@@ -84,9 +84,48 @@ impl NosCompleter {
     }
 }
 
+impl NosCompleter {
+    /// Does `line` (a show line without its pipe) accept `| json`?
+    fn json_capable(&self, line: &str) -> bool {
+        crate::session::resolve(&self.mode, crate::command::Command::parse(line)).json_capable()
+    }
+
+    /// Completion inside a `| ...` tail (#1415): `json` after a capable
+    /// command, nothing otherwise. `None` when the line has no pipe.
+    fn complete_pipe(&mut self, line: &str) -> Option<CompletionResult> {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("show") || words.next() == Some("log") {
+            return None;
+        }
+        let (head, tail) = line.split_once('|')?;
+        let partial = tail.trim_start();
+        let mut out = Vec::new();
+        if self.json_capable(head)
+            && !partial.contains(char::is_whitespace)
+            && "json".starts_with(partial)
+        {
+            let span = Span::new(line.len() - partial.len(), line.len());
+            out.push(self.pipe_suggestion("json".into(), span));
+        }
+        Some(CompletionResult::fresh(out))
+    }
+
+    fn pipe_suggestion(&mut self, word: String, span: Span) -> Suggestion {
+        self.suggestion(
+            word,
+            Some(Doc::FromConfig(Topic::PipeJson)),
+            "show ... | json".into(),
+            span,
+        )
+    }
+}
+
 impl Completer for NosCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let line = &line[..pos];
+        if let Some(done) = self.complete_pipe(line) {
+            return done;
+        }
         let ends_with_whitespace = line.chars().next_back().is_none_or(char::is_whitespace);
         let tokens = spec::tokenize_with_offsets(line);
 
@@ -194,6 +233,11 @@ impl Completer for NosCompleter {
                     out.push(s);
                 }
             }
+        }
+        if ends_with_whitespace && line.trim_start().starts_with("show") && self.json_capable(line)
+        {
+            let s = self.pipe_suggestion("|".into(), span);
+            out.push(s);
         }
         CompletionResult::fresh(out)
     }
@@ -409,5 +453,21 @@ mod tests {
                 "detail for BgpInstanceAsn".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn pipe_json_is_offered_after_a_capable_show_only() {
+        let op = || Mode::Operational;
+        assert!(values(op(), "show bfd sessions ").contains(&"|".to_string()));
+        assert!(values(op(), "show route rt1 ").contains(&"|".to_string()));
+        assert!(!values(op(), "show bfd reflector ").contains(&"|".to_string()));
+        assert_eq!(values(op(), "show bfd sessions | "), ["json"]);
+        assert_eq!(values(op(), "show bfd sessions | js"), ["json"]);
+        assert_eq!(
+            values(op(), "show bfd sessions | json "),
+            Vec::<String>::new()
+        );
+        assert_eq!(values(op(), "show bfd sessions | x"), Vec::<String>::new());
+        assert_eq!(values(op(), "show bfd reflector | "), Vec::<String>::new());
     }
 }

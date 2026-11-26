@@ -52,6 +52,8 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::version))
         .routes(routes!(show::config))
         .routes(routes!(show::routes))
+        .routes(routes!(show::route_tables))
+        .routes(routes!(show::route_summary))
         .routes(routes!(show::route_lookup))
         .routes(routes!(show::fdb))
         .routes(routes!(show::interfaces))

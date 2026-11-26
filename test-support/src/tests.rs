@@ -197,7 +197,7 @@ async fn ribd_defaults_values_and_pushed() {
         RibEvent::EvpnIrb(None)
     ));
     assert!(matches!(
-        q(RibRequest::GetRoutesPage { after: None, limit: 0 }).await,
+        q(RibRequest::GetRoutesPage { after: None, limit: 0, filter: nos_proto::RouteFilter::default() }).await,
         RibEvent::RoutesPage { routes, next: None } if routes.is_empty()
     ));
     let lookup = RibRequest::Lookup {

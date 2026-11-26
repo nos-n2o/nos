@@ -87,6 +87,15 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Empty state is `no <what>`, or `<scope>: no <what>` (`bgp instance r1: no peers`, `ospf instance o1: no LSAs`), with no trailing verb. `no route matches <addr>` is a valid empty result (stdout).
 - Texts come from `format::not_running`, `not_found` and `none` (names are sanitized); daemons are resolved by `actions::resolve_service`. A source-scan test pins that `actions.rs` writes none of them inline.
 
+### `| json` on `show` commands (#1415)
+
+- `show <command> | json` prints the reply as pretty JSON instead of text; the line is split at its first `|` (`cli/src/pipe.rs`), and the word after it must be `json`. `show log` is never split (`match <text>` takes the rest of the line); a non-`show` line is untouched.
+- Supported: `show bfd sessions`, `show route <table> [<addr>]`, `show bgp routes`. Any other `show` line is refused with `error: this command has no JSON output` before any IPC; a view-driven command gains it when it prints through `emit` (set its arm in `Resolved::json_capable`).
+- Keys keep the declaration order of the REST body (the reply is serialized directly). An empty list is `[]`; `show route <table> <addr>` with no match is `null`.
+- `show route <table>` and `show bgp routes` stream one array, one element per line, a page at a time. `show bgp routes` prints one object keyed by instance name, each value such an array. If a walk fails midway the closing bracket is never written and the error goes to stderr, so a consumer gets invalid JSON, never silently truncated data.
+- DEL and U+0080-U+009F (a CSI on some terminals) are written as `\u00XX`: the JSON stays valid and lossless, and a daemon-supplied string cannot inject terminal escapes.
+- Tab offers `|` after a supported command, then `json`; `?` explains it (`Topic::PipeJson`).
+
 ### Adding a view (#1422)
 
 - A reply type that derives `nos_proto::view::View` (`#[view(...)]` on every field) prints through `cli/src/view.rs`, with no hand-written renderer: a list as a table of its `brief` fields, one object as a `header  value` block of every non-hidden field.

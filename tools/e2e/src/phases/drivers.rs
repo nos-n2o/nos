@@ -5589,6 +5589,18 @@ pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
     };
     let mut add = flags("--static-route");
     add.extend(strings(&["--static-gateway", REDISTRIBUTE_GATEWAY.s()]));
+    let get = |path: String| async move {
+        let body = a.rest_expect(Method::GET, &path, None, 200).await?;
+        anyhow::Ok(serde_json::from_str::<serde_json::Value>(&body)?)
+    };
+    let before = get("/v1/routes/rt1/summary".into()).await?;
+    let static_v4 = |s: &serde_json::Value| {
+        s["sources"]
+            .as_array()
+            .and_then(|v| v.iter().find(|c| c["source"] == "Static"))
+            .and_then(|c| c["ipv4"].as_u64())
+            .unwrap_or(0)
+    };
     a.provision(&add).await?;
 
     let ours = |items: &[serde_json::Value]| -> Vec<String> {
@@ -5659,6 +5671,73 @@ pub async fn routes_paging(w: &mut World) -> anyhow::Result<()> {
     }
     a.rest_expect(Method::GET, "/v1/routes/rt1?after=nope", None, 400)
         .await?;
+
+    log("the summary counts the 25 statics (#1445)");
+    let after = get("/v1/routes/rt1/summary".into()).await?;
+    if static_v4(&after) != static_v4(&before) + N as u64
+        || after["ipv4_prefixes"].as_u64() != before["ipv4_prefixes"].as_u64().map(|n| n + N as u64)
+    {
+        bail!("summary did not grow by {N}: {before} -> {after}");
+    }
+
+    log("filters: protocol, exact prefix, longer (#1445)");
+    // Walks `base` over `pagination.next`, returning every item.
+    let walk = |base: &'static str| async move {
+        let (mut items, mut next) = (Vec::new(), None::<String>);
+        loop {
+            let uri = match &next {
+                Some(n) => format!("{base}&after={n}"),
+                None => base.to_string(),
+            };
+            let page = get(uri).await?;
+            items.extend(page["items"].as_array().cloned().unwrap_or_default());
+            next = page["pagination"]["next"].as_str().map(String::from);
+            if next.is_none() {
+                return anyhow::Ok(items);
+            }
+        }
+    };
+    let statics = walk("/v1/routes/rt1?protocol=static&limit=10").await?;
+    if !statics.iter().all(|p| {
+        p["candidates"]
+            .as_array()
+            .is_some_and(|c| c.iter().all(|c| c["source"] == "Static"))
+    }) || ours(&statics) != prefixes
+    {
+        bail!("protocol=static walk is wrong: {statics:?}");
+    }
+    if !ours(&walk("/v1/routes/rt1?protocol=ospf").await?).is_empty() {
+        bail!("protocol=ospf must not list 10.88.x");
+    }
+    let covered = walk("/v1/routes/rt1?prefix=10.88.0.0/16&longer=true&limit=10").await?;
+    let got: Vec<_> = covered
+        .iter()
+        .filter_map(|p| p["prefix"].as_str().map(String::from))
+        .collect();
+    if got != prefixes {
+        bail!("prefix=10.88.0.0/16&longer=true returned {got:?}");
+    }
+    let exact = walk("/v1/routes/rt1?prefix=10.88.3.0/24").await?;
+    if exact.len() != 1 || exact[0]["prefix"] != "10.88.3.0/24" {
+        bail!("exact prefix returned {exact:?}");
+    }
+    for bad in ["protocol=nope", "prefix=nope", "longer=true"] {
+        a.rest_expect(Method::GET, &format!("/v1/routes/rt1?{bad}"), None, 400)
+            .await?;
+    }
+
+    log("the table list carries the VRF and kernel table (#1445)");
+    let tables = get("/v1/routes".into()).await?;
+    let rt1 = tables
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["table"] == "rt1"))
+        .ok_or_else(|| anyhow::anyhow!("rt1 missing from GET /v1/routes: {tables}"))?;
+    if rt1["running"] != true
+        || rt1["summary"]["kernel_table"] != RT1_KERNEL_TABLE
+        || !rt1["summary"]["vrf"].is_string()
+    {
+        bail!("rt1 entry is wrong: {rt1}");
+    }
 
     a.provision(&flags("--remove-static-route")).await?;
     Ok(())

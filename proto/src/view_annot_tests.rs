@@ -407,3 +407,24 @@ fn route_summaries_keys_and_wire_index() {
         3
     );
 }
+
+#[test]
+fn rib_summary() {
+    use crate::{RibSummary, RouteSourceKind, SourceCount};
+    let s = RibSummary {
+        table: "rt1".into(),
+        vrf: Some("vrf-rt1".into()),
+        kernel_table: Some(100),
+        ipv4_prefixes: 3,
+        ipv6_prefixes: 1,
+        sources: vec![SourceCount {
+            source: RouteSourceKind::Static,
+            ipv4: 3,
+            ipv6: 0,
+        }],
+    };
+    let node = view_of::<RibSummary>().unwrap();
+    assert_keys_match(node, &serde_json::to_value(&s).unwrap());
+    let back: RibSummary = postcard::from_bytes(&postcard::to_allocvec(&s).unwrap()).unwrap();
+    assert_eq!(back, s);
+}

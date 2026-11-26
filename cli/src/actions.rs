@@ -15,6 +15,7 @@ use nos_proto::{
     ServiceRef, Topic, DEFAULT_CONFIG_SOCKET,
 };
 
+use crate::pipe::{self, JsonArray, Output};
 use crate::session::{self, Mode, Resolved};
 use crate::spec::{self, Doc};
 use crate::{
@@ -173,8 +174,65 @@ pub enum LeaveChoice {
 /// `ask_leave` answers the commit/discard/leave-open question on `exit` with
 /// uncommitted changes — a stdin prompt in `main.rs`, a canned answer in
 /// tests.
-#[allow(clippy::too_many_lines, reason = "one arm per action")]
 pub async fn handle_action(
+    action: Resolved,
+    mode: Mode,
+    socket: &Path,
+    watchdog_socket: &Path,
+    doc_cache: &DocCache,
+    ask_leave: fn(&str) -> LeaveChoice,
+) -> Outcome {
+    handle_action_out(
+        action,
+        mode,
+        socket,
+        watchdog_socket,
+        doc_cache,
+        ask_leave,
+        Output::Text,
+    )
+    .await
+}
+
+/// `handle_action` with the output mode of a `| json` pipe (#1415): a command
+/// without JSON output is refused before any IPC.
+pub async fn handle_action_out(
+    action: Resolved,
+    mode: Mode,
+    socket: &Path,
+    watchdog_socket: &Path,
+    doc_cache: &DocCache,
+    ask_leave: fn(&str) -> LeaveChoice,
+    out: Output,
+) -> Outcome {
+    if out == Output::Json {
+        match action {
+            Resolved::ShowBfdSessions { peer, .. } => {
+                if let Some(r) = bfd_sessions_reply(watchdog_socket, peer).await {
+                    emit_out(&r, "", out);
+                }
+                return Outcome::Continue(mode);
+            }
+            Resolved::ShowRoute { table, address } => {
+                show_route_json(watchdog_socket, &table, address).await;
+                return Outcome::Continue(mode);
+            }
+            Resolved::ShowBgpRoutes => {
+                show_bgp_routes_json(socket, watchdog_socket).await;
+                return Outcome::Continue(mode);
+            }
+            Resolved::Error(_) => {}
+            _ => {
+                eprintln!("error: this command has no JSON output");
+                return Outcome::Continue(mode);
+            }
+        }
+    }
+    handle_text_action(action, mode, socket, watchdog_socket, doc_cache, ask_leave).await
+}
+
+#[allow(clippy::too_many_lines, reason = "one arm per action")]
+async fn handle_text_action(
     action: Resolved,
     mode: Mode,
     socket: &Path,
@@ -938,6 +996,98 @@ fn filter_lldp_interface(
 /// (#1415) and the jq filter (#1420) branch here, off `view::to_value`.
 fn emit<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str) {
     println!("{}", view::render(reply, empty));
+}
+
+/// `emit`, or the reply as JSON (an empty list is `[]`, never the text).
+fn emit_out<T: serde::Serialize + nos_proto::view::ViewValue>(reply: &T, empty: &str, out: Output) {
+    match out {
+        Output::Text => emit(reply, empty),
+        Output::Json => println!("{}", pipe::json_pretty(reply)),
+    }
+}
+
+/// `show route <table> [<addr>] | json`: one streamed array of prefixes, or
+/// the longest match (`null` when none). Errors go to stderr, nothing else.
+async fn show_route_json(watchdog_socket: &Path, table: &str, address: Option<IpAddr>) {
+    let rib_socket = match watchdog_client::resolve(
+        watchdog_socket,
+        nos_proto::ServiceRef::RibTable(table.to_string()),
+    )
+    .await
+    {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!(
+                "{}",
+                format::not_running(&format!("routing table '{table}'"))
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    match address {
+        None => {
+            let mut stdout = io::stdout();
+            let mut array = JsonArray::begin(&mut stdout);
+            match rib_client::for_each_routes_page(&rib_socket, |page| array.page(page)).await {
+                Ok(()) => array.end(),
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            }
+        }
+        Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
+            Ok(m) => println!("{}", pipe::json_pretty(&m)),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        },
+    }
+}
+
+/// `show bgp routes | json`: `{ "<instance>": [ ... ], ... }`, each value
+/// streamed. A failed walk leaves the document unterminated (stderr has why).
+async fn show_bgp_routes_json(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    let mut stdout = io::stdout();
+    print!("{{");
+    let mut first = true;
+    for instance in &cfg.bgp_instances {
+        let name = &instance.name;
+        let bgp_socket = match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(name.clone()),
+        )
+        .await
+        {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("{}", format::not_running(&format!("bgp instance '{name}'")));
+                continue;
+            }
+            Err(e) => {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+        };
+        let key = pipe::json_pretty(name);
+        print!("{}\n{key}: ", if first { "" } else { "," });
+        first = false;
+        let mut array = JsonArray::begin(&mut stdout);
+        match bgp_client::for_each_routes_page(&bgp_socket, |page| array.page(page)).await {
+            Ok(()) => array.end(),
+            Err(e) => {
+                eprintln!("error: {}", format::sanitize(&e.to_string()));
+                return;
+            }
+        }
+    }
+    println!("{}}}", if first { "" } else { "\n" });
 }
 
 /// `emit` for a `detail` form: one block per element.

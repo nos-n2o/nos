@@ -290,6 +290,7 @@ impl FakeRibd {
                     next: None,
                 }),
                 RibRequest::Lookup { .. } => Reply::One(RibEvent::NoMatch),
+                RibRequest::GetSummary => Reply::One(RibEvent::Error("no summary".into())),
                 RibRequest::GetVpnLabel => Reply::One(RibEvent::VpnLabel(None)),
                 RibRequest::ResolveNextHop { addrs } => {
                     Reply::One(RibEvent::NextHops(vec![None; addrs.len()]))

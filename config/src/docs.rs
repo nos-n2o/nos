@@ -2320,6 +2320,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              included). `--follow` streams new lines after the backlog; the filters apply \
              to them too.",
         ),
+        Topic::PipeJson => (
+            "Print a show command's output as JSON.",
+            "`show <command> | json` prints the same data `nos-restd` serves, as JSON, \
+             instead of text. Only commands that list `| json` support it; any other \
+             command is refused and nothing runs. `show route <table>` and `show bgp \
+             routes` stream one JSON array (`show bgp routes` over several instances: one \
+             object keyed by instance name); if the walk fails midway the array is left \
+             unterminated and the error goes to stderr, so a consumer never mistakes \
+             truncated data for a complete result.",
+        ),
     };
     CommandDoc {
         topic,

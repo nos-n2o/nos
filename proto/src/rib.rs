@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 
 use ipnet::IpNet;
+use nos_proto_derive::View;
 use serde::{Deserialize, Serialize};
 
 /// Wire twin of `nos-rib`'s internal `RouteSource` — kept separate so
@@ -25,6 +26,108 @@ pub enum RouteSourceKind {
     /// underlay `nos-bgpd`'s VPN Adj-RIB-In. Appended (postcard indexes
     /// variants by position).
     Vpn,
+}
+
+impl RouteSourceKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::Static,
+        Self::Bgp,
+        Self::Ospf,
+        Self::Connected,
+        Self::Evpn,
+        Self::Vpn,
+    ];
+
+    /// The lowercase name the CLI and REST filters use.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Bgp => "bgp",
+            Self::Ospf => "ospf",
+            Self::Connected => "connected",
+            Self::Evpn => "evpn",
+            Self::Vpn => "vpn",
+        }
+    }
+}
+
+impl std::fmt::Display for RouteSourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for RouteSourceKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.name() == s)
+            .ok_or_else(|| {
+                format!("unknown route source `{s}` (static, bgp, ospf, connected, evpn, vpn)")
+            })
+    }
+}
+
+/// Selection for `GetRoutesPage` (#1445). Empty (the default): every prefix.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteFilter {
+    /// Only prefixes with a candidate of this source, and only those
+    /// candidates.
+    pub source: Option<RouteSourceKind>,
+    /// Only this prefix (exact), or with `longer` it and everything under it.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub prefix: Option<IpNet>,
+    /// With `prefix`: match the prefix and every longer prefix it covers.
+    /// Ignored without `prefix`.
+    pub longer: bool,
+}
+
+/// Candidates of one source in a table, per address family.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct SourceCount {
+    /// The source.
+    #[view(brief, text)]
+    pub source: RouteSourceKind,
+    /// IPv4 candidates.
+    #[view(brief, header = "ipv4", unit = count)]
+    pub ipv4: u32,
+    /// IPv6 candidates.
+    #[view(brief, header = "ipv6", unit = count)]
+    pub ipv6: u32,
+}
+
+/// One routing table's summary, for `show route summary` and the table list.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
+pub struct RibSummary {
+    /// The routing table's name.
+    #[view(brief, sort)]
+    pub table: String,
+    /// The VRF device backing it; `None` until created (or with the noop
+    /// driver).
+    #[view(brief)]
+    pub vrf: Option<String>,
+    /// The kernel routing table id; `None` as for `vrf`.
+    #[view(brief, header = "kernel-table", unit = count)]
+    pub kernel_table: Option<u32>,
+    /// Distinct IPv4 prefixes.
+    #[view(brief, header = "ipv4", unit = count)]
+    pub ipv4_prefixes: u32,
+    /// Distinct IPv6 prefixes.
+    #[view(brief, header = "ipv6", unit = count)]
+    pub ipv6_prefixes: u32,
+    /// Candidates per source (only sources with one), declaration order.
+    #[view(nested)]
+    pub sources: Vec<SourceCount>,
 }
 
 /// Where a `Vpn`-sourced candidate came from: the remote PE (the BGP next
@@ -632,6 +735,9 @@ pub enum RibRequest {
         after: Option<IpNet>,
         /// Most prefixes wanted.
         limit: u32,
+        /// Which prefixes (and candidates) to return (#1445); the cursor
+        /// walks the filtered set.
+        filter: RouteFilter,
     },
     /// Fire-and-forget, `nos-ospfd`/`nos-ospfv3d` only (#1165): the complete
     /// ILM set of one OSPF instance (segment routing), replacing its previous
@@ -644,6 +750,9 @@ pub enum RibRequest {
         /// The whole ILM set.
         routes: Vec<IlmRoute>,
     },
+    /// One-shot: this table's [`RibSummary`], answered by
+    /// `RibEvent::Summary` (#1445). Appended (postcard indexes by position).
+    GetSummary,
 }
 
 /// Most prefixes `nos-ribd` returns in one `RoutesPage`, and the default
@@ -703,6 +812,8 @@ pub enum RibEvent {
         /// Cursor for the next page; `None` on the last.
         next: Option<IpNet>,
     },
+    /// Reply to `GetSummary`.
+    Summary(RibSummary),
 }
 
 #[cfg(test)]
@@ -1100,6 +1211,7 @@ mod tests {
         let last = postcard::to_allocvec(&RibRequest::GetRoutesPage {
             after: None,
             limit: 0,
+            filter: RouteFilter::default(),
         })
         .unwrap()[0];
         assert_eq!(bytes[0], last + 1);
@@ -1115,5 +1227,38 @@ mod tests {
         assert_eq!(r.weight(), plain + 2);
         let back: OspfRoute = postcard::from_bytes(&postcard::to_allocvec(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+    }
+
+    /// `GetSummary`/`Summary` are appended after the previous last variants
+    /// (#1445), and `RouteSourceKind` parses what it prints.
+    #[test]
+    fn summary_variants_are_last_and_sources_parse() {
+        let idx = |v: &RibRequest| postcard::to_allocvec(v).unwrap()[0];
+        let mpls = RibRequest::PushMplsRoutes {
+            instance: String::new(),
+            routes: vec![],
+        };
+        assert_eq!(idx(&RibRequest::GetSummary), idx(&mpls) + 1);
+        let sum = RibSummary {
+            table: "rt1".into(),
+            vrf: None,
+            kernel_table: Some(100),
+            ipv4_prefixes: 1,
+            ipv6_prefixes: 0,
+            sources: vec![],
+        };
+        let page = RibEvent::RoutesPage {
+            routes: vec![],
+            next: None,
+        };
+        let i = |e: &RibEvent| postcard::to_allocvec(e).unwrap()[0];
+        assert_eq!(i(&RibEvent::Summary(sum)), i(&page) + 1);
+        for k in RouteSourceKind::ALL {
+            assert_eq!(k.to_string().parse::<RouteSourceKind>(), Ok(k));
+        }
+        assert!("nope"
+            .parse::<RouteSourceKind>()
+            .unwrap_err()
+            .contains("bgp"));
     }
 }

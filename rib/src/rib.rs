@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 
-use nos_proto::{Config, IpNet, NextHop};
+use nos_proto::{Config, IpNet, NextHop, RouteFilter, RouteSourceKind, SourceCount};
 use tokio::time::Instant;
 use tracing::warn;
 
@@ -451,17 +451,31 @@ impl Rib {
     /// bounded heap plus a sort of just the page, never a full sort.
     // ponytail: O(n) per page (~100 pages at 1M prefixes under the read
     // lock); a `BTreeMap` makes it a range scan if that is measured too slow.
+    ///
+    /// `filter` (#1445) selects prefixes (`prefix` exact, or covered-by with
+    /// `longer`; `source`: has a candidate of it) and drops the other
+    /// sources' candidates; `more` is over the filtered prefixes.
     pub fn routes_page(
         &self,
         after: Option<IpNet>,
         limit: usize,
+        filter: &RouteFilter,
     ) -> (Vec<(IpNet, Vec<RibEntry>)>, bool) {
+        let kind = |e: &RibEntry| crate::server::to_source_kind(e.source);
         let mut heap = std::collections::BinaryHeap::with_capacity(limit + 1);
-        for prefix in self
-            .entries
-            .keys()
-            .filter(|p| after.is_none_or(|a| **p > a))
-        {
+        for prefix in self.entries.keys().filter(|p| {
+            after.is_none_or(|a| **p > a)
+                && filter.prefix.is_none_or(|f| {
+                    if filter.longer {
+                        f.contains(*p)
+                    } else {
+                        **p == f
+                    }
+                })
+                && filter
+                    .source
+                    .is_none_or(|s| self.entries[*p].iter().any(|e| kind(e) == s))
+        }) {
             heap.push(*prefix);
             if heap.len() > limit + 1 {
                 heap.pop();
@@ -472,9 +486,42 @@ impl Rib {
         prefixes.truncate(limit);
         let page = prefixes
             .into_iter()
-            .map(|p| (p, sorted_by_preference(&self.entries[&p])))
+            .map(|p| {
+                let mut c = sorted_by_preference(&self.entries[&p]);
+                if let Some(s) = filter.source {
+                    c.retain(|e| kind(e) == s);
+                }
+                (p, c)
+            })
             .collect();
         (page, more)
+    }
+
+    /// Distinct prefixes per family (v4, v6) and the candidates per source
+    /// (only sources with one), in `RouteSourceKind` declaration order.
+    pub fn summary_counts(&self) -> (u32, u32, Vec<SourceCount>) {
+        let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
+        let v4 = self
+            .entries
+            .keys()
+            .filter(|p| matches!(p, IpNet::V4(_)))
+            .count();
+        let sources = RouteSourceKind::ALL
+            .into_iter()
+            .filter_map(|source| {
+                let count = |v4: bool| {
+                    self.entries
+                        .iter()
+                        .filter(|(p, _)| matches!(p, IpNet::V4(_)) == v4)
+                        .flat_map(|(_, c)| c)
+                        .filter(|e| crate::server::to_source_kind(e.source) == source)
+                        .count()
+                };
+                let (ipv4, ipv6) = (n(count(true)), n(count(false)));
+                (ipv4 + ipv6 > 0).then_some(SourceCount { source, ipv4, ipv6 })
+            })
+            .collect();
+        (n(v4), n(self.entries.len() - v4), sources)
     }
 
     /// Longest-prefix-match lookup: the most specific configured prefix that
@@ -1213,7 +1260,7 @@ mod tests {
         for limit in 1..=6 {
             let (mut got, mut after) = (Vec::new(), None);
             loop {
-                let (page, more) = rib.routes_page(after, limit);
+                let (page, more) = rib.routes_page(after, limit, &RouteFilter::default());
                 assert!(page.len() <= limit);
                 after = page.last().map(|(p, _)| *p);
                 got.extend(page);
@@ -1224,12 +1271,80 @@ mod tests {
             assert_eq!(got, all, "limit {limit}");
         }
         // Empty table, a cursor past the end, a cursor on a removed prefix.
-        assert_eq!(Rib::new().routes_page(None, 3), (vec![], false));
+        let nf = RouteFilter::default();
+        assert_eq!(Rib::new().routes_page(None, 3, &nf), (vec![], false));
         let last = all.last().unwrap().0;
-        assert_eq!(rib.routes_page(Some(last), 3), (vec![], false));
+        assert_eq!(rib.routes_page(Some(last), 3, &nf), (vec![], false));
         let gone: IpNet = "10.0.0.128/25".parse().unwrap();
         let want = all.iter().map(|a| a.0).find(|p| *p > gone).unwrap();
-        assert_eq!(rib.routes_page(Some(gone), 1).0[0].0, want);
+        assert_eq!(rib.routes_page(Some(gone), 1, &nf).0[0].0, want);
+    }
+
+    #[test]
+    fn routes_page_filters_and_summary_counts() {
+        let mut rib = Rib::new();
+        for p in ["10.0.0.0/8", "10.1.0.0/16", "10.1.1.0/24", "11.0.0.0/8"] {
+            rib.insert(entry(p, "10.0.0.1", RouteSource::Static));
+        }
+        rib.insert(entry("10.1.0.0/16", "10.0.0.2", RouteSource::Bgp));
+        rib.insert(entry("2001:db8::/32", "fe80::1", RouteSource::Bgp));
+        let f = |source, prefix: Option<&str>, longer| RouteFilter {
+            source,
+            prefix: prefix.map(|p| p.parse().unwrap()),
+            longer,
+        };
+        let names = |flt: &RouteFilter, limit| {
+            let (p, more) = rib.routes_page(None, limit, flt);
+            (
+                p.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>(),
+                more,
+                p,
+            )
+        };
+        // Source: only that source's prefixes and candidates.
+        let (p, _, full) = names(&f(Some(RouteSourceKind::Bgp), None, false), 10);
+        assert_eq!(p, ["10.1.0.0/16", "2001:db8::/32"]);
+        assert!(full
+            .iter()
+            .all(|(_, c)| c.len() == 1 && c[0].source == RouteSource::Bgp));
+        // Exact prefix, covered-by, longer without a match.
+        assert_eq!(
+            names(&f(None, Some("10.1.0.0/16"), false), 10).0,
+            ["10.1.0.0/16"]
+        );
+        assert_eq!(
+            names(&f(None, Some("10.0.0.0/8"), true), 10).0,
+            ["10.0.0.0/8", "10.1.0.0/16", "10.1.1.0/24"]
+        );
+        // Filtered paging never repeats and ends with no `more`.
+        let flt = f(None, Some("10.0.0.0/8"), true);
+        let (mut got, mut after) = (vec![], None);
+        loop {
+            let (page, more) = rib.routes_page(after, 2, &flt);
+            after = page.last().map(|(p, _)| *p);
+            got.extend(page.into_iter().map(|(p, _)| p.to_string()));
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(got, ["10.0.0.0/8", "10.1.0.0/16", "10.1.1.0/24"]);
+        let (v4, v6, sources) = rib.summary_counts();
+        assert_eq!((v4, v6), (4, 1));
+        assert_eq!(
+            sources,
+            [
+                SourceCount {
+                    source: RouteSourceKind::Static,
+                    ipv4: 4,
+                    ipv6: 0
+                },
+                SourceCount {
+                    source: RouteSourceKind::Bgp,
+                    ipv4: 1,
+                    ipv6: 1
+                },
+            ]
+        );
     }
 
     #[test]
