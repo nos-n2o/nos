@@ -7877,6 +7877,8 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
 }
 
 /// GoBGP's spelling of `ESI` (`arbitrary` + the nine value bytes).
+/// The ES-Import RT of `consts::ESI` (its first six value bytes), as GoBGP prints it.
+const ES_IMPORT_RT: &str = "11:22:33:44:55:66";
 const GOBGP_ESI: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:99"];
 /// How GoBGP prints that ESI in its RIB.
 const GOBGP_ESI_TEXT: &str = "ESI_ARBITRARY | 11:22:33:44:55:66:77:88:99";
@@ -8087,24 +8089,6 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         bail!("show fdb does not list the segment up with router-a as DF: {body}");
     }
 
-    let peer_es = |verb: &'static str| {
-        let mut v = strings(&[
-            "global",
-            "rib",
-            verb,
-            "-a",
-            "evpn",
-            "esi",
-            ESI_PEER_ORIGIN.s(),
-        ]);
-        v.push("esi".to_string());
-        v.extend(strings(&GOBGP_ESI));
-        v.extend(strings(&["rd", "65010:1"]));
-        if verb == "add" {
-            v.extend(strings(&["rt", "65010:1", "encap", "vxlan"]));
-        }
-        v
-    };
     bridge_port_flood(w, "router-a", &bond, true).await?;
 
     // RFC 8584 §2.2.3, strictly: GoBGP's Type-4 carries no DF Election
@@ -8131,24 +8115,27 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         }
         v
     };
-    let fallback = |r: &str| {
-        format!(
-            "{} algorithm=modulo ac_df=false pes={ESI_PEER_NO_EVI_ORIGIN},{IP_A}",
-            role(r)
-        )
-    };
-    let base = a.count(&fallback("non-df"));
+    let fallback =
+        |r: &str, o: &str| format!("{} algorithm=modulo ac_df=false pes={o},{IP_A}", role(r));
+    // RFC 7432 §7.6: GoBGP's CLI can't set the ES-Import RT, so its Type-4 is
+    // not imported: it is no candidate and router-a stays the DF (#1521).
+    let warn = format!(
+        "evpn type-4 ignored, es-import rt mismatch domain={EVPN_DOMAIN} esi={ESI} origin={ESI_PEER_NO_EVI_ORIGIN}"
+    );
+    let warn_base = a.count(&warn);
+    let base = a.count(&fallback("non-df", ESI_PEER_NO_EVI_ORIGIN));
     gobgp_owned(w, peer_es_no_evi("add")).await?;
-    a.wait_new(&fallback("non-df"), base, 30).await?;
-    bridge_port_flood(w, "router-a", &bond, false).await?;
-    let base = a.count(&role("df"));
-    gobgp_owned(w, peer_es_no_evi("del")).await?;
-    a.wait_new(&role("df"), base, 30).await?;
+    a.wait_new(&warn, warn_base, 30).await?;
+    a.assert_quiet(&fallback("non-df", ESI_PEER_NO_EVI_ORIGIN), base, 10)
+        .await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
+    gobgp_owned(w, peer_es_no_evi("del")).await?;
+    a.assert_quiet(&fallback("non-df", ESI_PEER_NO_EVI_ORIGIN), base, 5)
+        .await?;
 
-    log("a second PE on the segment, also attached to this EVI (per-EVI A-D), with a lower address wins the election");
+    log("a second PE on the segment (FRR, with the ES-Import RT), also attached to this EVI (per-EVI A-D), with a lower address wins the election");
     let base = a.count(&role("non-df"));
-    gobgp_owned(w, peer_es("add")).await?;
+    start_frr_segment(w, ESI_PEER_FRR.s(), ESI_PEER_ORIGIN.s(), ESI, ES_IMPORT_RT).await?;
     gobgp_owned(
         w,
         gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
@@ -8162,7 +8149,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 
     log("its Type-4 and per-EVI A-D withdrawn: router-a is the DF again and the bond floods");
     let base = a.count(&role("df"));
-    gobgp_owned(w, peer_es("del")).await?;
+    stop_frr_segment(w, ESI_PEER_FRR.s()).await?;
     gobgp_owned(
         w,
         gobgp_ad("del", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
@@ -8356,13 +8343,13 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 
     log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
     let base = a.count(&role("non-df"));
-    gobgp_owned(w, peer_es("add")).await?;
+    start_frr_segment(w, ESI_PEER_FRR.s(), ESI_PEER_ORIGIN.s(), ESI, ES_IMPORT_RT).await?;
     gobgp_owned(
         w,
         gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN.s(), "65010:1")),
     )
     .await?;
-    a.wait_new(&role("non-df"), base, 30).await?;
+    a.wait_new(&role("non-df"), base, 60).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
     let mut clear = flags.clone();
     let at = clear
@@ -8379,6 +8366,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     }
     a.provision_flags(&clear).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
+    stop_frr_segment(w, ESI_PEER_FRR.s()).await?;
     gobgp_evpn_rib(
         w,
         "dropped router-a's Type-4, Type-1s and the Type-2's ESI",
@@ -8435,7 +8423,14 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
     in_kernel(p1.0).await?;
 
     log("its PE loses its per-ES A-D: the backup is the PE whose Type-4 (with the ES-Import RT) is held (.24)");
-    start_frr_segment(w).await?;
+    start_frr_segment(
+        w,
+        p4.0,
+        p4.0,
+        &format!("00:{}", ESI4[1]),
+        "11:22:33:44:55:66",
+    )
+    .await?;
     let base = a.count(&at(p4.0));
     gobgp_owned(w, gobgp_ad("del", &ESI4, true, p1)).await?;
     a.wait_new(&at(p4.0), base, 30).await?;
@@ -8443,8 +8438,7 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
 
     log("its Type-4 withdrawn: the lowest address (.22)");
     let base = a.count(&at(p2.0));
-    w.dock.container_remove("router-f").await;
-    gobgp_owned(w, strings(&["neighbor", "del", p4.0])).await?;
+    stop_frr_segment(w, p4.0).await?;
     a.wait_new(&at(p2.0), base, 30).await?;
     in_kernel(p2.0).await?;
 
@@ -8462,10 +8456,15 @@ async fn single_active_backup(w: &World) -> anyhow::Result<()> {
 /// segment: a bond with `evpn mh es-id` makes it originate the Type-4 with the
 /// ES-Import RT. It peers GoBGP, which relays the route to router-a; a
 /// route-map strips FRR's DF Election community, which GoBGP can't decode and
-/// would treat the whole UPDATE as a withdraw. Returns once GoBGP holds it.
-async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
-    let (vtep, _) = esi4_pes()[3];
-    let esi = format!("00:{}", ESI4[1]);
+/// would treat the whole UPDATE as a withdraw. `vtep` is the Type-4's origin;
+/// the container sits at `addr` and holds `vtep` on `lo` when they differ. Returns once GoBGP holds it.
+async fn start_frr_segment(
+    w: &World,
+    addr: &'static str,
+    vtep: &'static str,
+    esi: &str,
+    es_import: &str,
+) -> anyhow::Result<()> {
     let conf = format!(
         "frr defaults traditional\nhostname router-f\n!\n\
          bgp extcommunity-list expanded NODF permit DF\n\
@@ -8478,8 +8477,14 @@ async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
     );
     // A bond with an up member is the segment's port; the VXLAN device on its
     // bridge makes zebra's EVPN run.
+    let lo_add = if vtep == addr {
+        String::new()
+    } else {
+        format!("ip addr add {vtep}/32 dev lo && ")
+    };
     let setup = format!(
         "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && \
+         {lo_add}\
          ip link add br0 type bridge && \
          ip link add vx{EVPN_VNI} type vxlan id {EVPN_VNI} local {vtep} dstport 4789 nolearning && \
          ip link set vx{EVPN_VNI} master br0 && ip link add d1 type dummy && \
@@ -8494,7 +8499,7 @@ async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
             "router-f",
             FRR_IMAGE,
             NET,
-            vtep,
+            addr,
             &["sh", "-c", &setup],
             ("/etc/frr", "frr.conf", conf.as_bytes()),
             &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
@@ -8505,7 +8510,7 @@ async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
         strings(&[
             "neighbor",
             "add",
-            vtep,
+            addr,
             "as",
             &ESI4_FRR_ASN.to_string(),
             "family",
@@ -8514,9 +8519,16 @@ async fn start_frr_segment(w: &World) -> anyhow::Result<()> {
     )
     .await?;
     gobgp_evpn_rib(w, "learned FRR's Type-4", |rib| {
-        rib.contains("es-import rt: 11:22:33:44:55:66")
+        rib.contains(&format!("es-import rt: {es_import}"))
     })
     .await
+}
+
+/// Removes the FRR PE `start_frr_segment` started and GoBGP's session to it.
+async fn stop_frr_segment(w: &World, addr: &str) -> anyhow::Result<()> {
+    w.dock.container_remove("router-f").await;
+    gobgp_owned(w, strings(&["neighbor", "del", addr])).await?;
+    Ok(())
 }
 
 /// GoBGP arguments to add/delete one PE's A-D route for `esi`: per-ES (MAX-ET,

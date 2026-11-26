@@ -227,6 +227,10 @@ pub const LACP_SYSTEM_PRIORITY_A_CHANGED: u16 = 150;
 /// the even `EVPN_VNI`), and a MAC pinned behind the bond.
 pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
 pub const ESI_PEER_ORIGIN: Addr = Addr("10.50.0.1");
+/// Where `evpn-esi`'s FRR PE sits on the docker net: `ESI_PEER_ORIGIN` (.1) is
+/// the network gateway, so FRR originates its Type-4 from that VTEP address on
+/// `lo` and peers GoBGP from here.
+pub const ESI_PEER_FRR: Addr = Addr("10.50.0.31");
 /// `evpn-esi`: a PE that advertises only a bare Type-4 for `ESI` — no per-EVI
 /// A-D for `EVPN_VNI` — and, being GoBGP, no DF Election community, so no
 /// AC-DF. RFC 8584 §2.2.3 (strictly): the per-EVI filter only applies when
@@ -382,7 +386,8 @@ pub fn esi4_pes() -> [(&'static str, &'static str); 4] {
     ]
 }
 /// The AS of the FRR PE (`router-f`) that originates ESI4's Type-4 with its
-/// ES-Import RT, which GoBGP's CLI can't set.
+/// ES-Import RT, which GoBGP's CLI can't set (`evpn-esi` uses FRR for every
+/// Type-4 router-a must import: it ignores one without the RT, #1521).
 pub const ESI4_FRR_ASN: u32 = 65024;
 pub const ESI4_MAC: (&str, &str) = ("aa:bb:cc:00:00:06", "192.0.2.36");
 pub const ASN_B: u32 = 65002;
