@@ -38,6 +38,18 @@ pub enum LoginBackend {
     Tacacs,
 }
 
+/// How a user's password is checked against a TACACS+ server.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum TacacsAuthentication {
+    /// One START carrying the password (RFC 8907 section 5.4.2.2).
+    #[default]
+    Pap,
+    /// START, then the server's prompts answered by CONTINUE packets.
+    Ascii,
+}
+
 /// The Access-Accept attribute whose text names the user's role
 /// (`admin`, `operator` or `read-only`; anything else is read-only).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -197,6 +209,20 @@ pub struct TacacsServer {
     #[garde(custom(|t: &Option<u8>, _ctx: &Config| in_range(*t, 30, "timeout")))]
     #[cli(topic = TacacsTimeout)]
     pub timeout_secs: Option<u8>,
+
+    /// How the password is checked. Default `pap`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = TacacsAuthentication)]
+    pub authentication: TacacsAuthentication,
+
+    /// Keep one TCP connection to the server and run every login and
+    /// accounting exchange over it (RFC 8907 section 4.5), when the server
+    /// agrees. Default off.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = TacacsSingleConnect)]
+    pub single_connect: bool,
 }
 
 impl Default for TacacsServer {
@@ -208,6 +234,8 @@ impl Default for TacacsServer {
             routing_table: None,
             key_ref: String::new(),
             timeout_secs: None,
+            authentication: TacacsAuthentication::default(),
+            single_connect: false,
         }
     }
 }
