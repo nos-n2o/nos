@@ -90,6 +90,11 @@ impl NosCompleter {
         crate::session::resolve(&self.mode, crate::command::Command::parse(line)).json_capable()
     }
 
+    fn display_set_capable(&self, line: &str) -> bool {
+        crate::session::resolve(&self.mode, crate::command::Command::parse(line))
+            .display_set_capable()
+    }
+
     /// Completion inside a `| ...` tail (#1415): `json` after a capable
     /// command, nothing otherwise. `None` when the line has no pipe.
     fn complete_pipe(&mut self, line: &str) -> Option<CompletionResult> {
@@ -100,6 +105,30 @@ impl NosCompleter {
         let (head, tail) = line.split_once('|')?;
         let partial = tail.trim_start();
         let mut out = Vec::new();
+        if self.display_set_capable(head) {
+            let done: Vec<&str> = partial.split_whitespace().collect();
+            let cur = if partial.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                done.last().copied().unwrap_or("")
+            };
+            let before = &done[..done.len() - usize::from(!cur.is_empty())];
+            let word = match before {
+                [] => "display",
+                ["display"] => "set",
+                _ => "",
+            };
+            if !word.is_empty() && word.starts_with(cur) {
+                let span = Span::new(line.len() - cur.len(), line.len());
+                let s = self.suggestion(
+                    word.into(),
+                    Some(Doc::FromConfig(Topic::DisplaySet)),
+                    "show ... | display set".into(),
+                    span,
+                );
+                out.push(s);
+            }
+        }
         if self.json_capable(head)
             && !partial.contains(char::is_whitespace)
             && "json".starts_with(partial)
@@ -234,7 +263,9 @@ impl Completer for NosCompleter {
                 }
             }
         }
-        if ends_with_whitespace && line.trim_start().starts_with("show") && self.json_capable(line)
+        if ends_with_whitespace
+            && line.trim_start().starts_with("show")
+            && (self.json_capable(line) || self.display_set_capable(line))
         {
             let s = self.pipe_suggestion("|".into(), span);
             out.push(s);
@@ -453,6 +484,21 @@ mod tests {
                 "detail for BgpInstanceAsn".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn display_set_is_offered_after_show_config_only() {
+        let op = || Mode::Operational;
+        assert!(values(op(), "show config ").contains(&"|".to_string()));
+        assert_eq!(values(op(), "show config | "), ["display"]);
+        assert_eq!(values(op(), "show config | di"), ["display"]);
+        assert_eq!(values(op(), "show config | display "), ["set"]);
+        assert_eq!(values(op(), "show config | display s"), ["set"]);
+        assert_eq!(
+            values(op(), "show config | display set "),
+            Vec::<String>::new()
+        );
+        assert_eq!(values(op(), "show config admin | "), Vec::<String>::new());
     }
 
     #[test]

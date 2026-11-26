@@ -1127,6 +1127,7 @@ mod tests {
                 used.insert(t);
             }
         }
+        used.insert(Topic::DisplaySet);
         used.insert(Topic::PipeJson); // the completer's `| json`, not a spec row
         let unused: Vec<_> = Topic::ALL.iter().filter(|t| !used.contains(t)).collect();
         assert!(unused.is_empty(), "unused topics: {unused:?}");

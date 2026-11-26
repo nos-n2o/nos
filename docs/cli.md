@@ -88,6 +88,7 @@ If the router's login service cannot be reached, the shell refuses to start: not
 - Keys keep the declaration order of the REST body (the reply is serialized directly). An empty list is `[]`; `show route <table> <addr>` with no match is `null`.
 - `show route <table>` and `show bgp routes` stream one array, one element per line, a page at a time. `show bgp routes` prints one object keyed by instance name, each value such an array. If a walk fails midway the closing bracket is never written and the error goes to stderr, so a consumer gets invalid JSON, never silently truncated data.
 - DEL and U+0080-U+009F (a CSI on some terminals) are written as `\u00XX`: the JSON stays valid and lossless, and a daemon-supplied string cannot inject terminal escapes.
+- `show config [<path>] | display set` and `show this | display set` (#1462) print flat, absolute `set` lines instead of the indented tree: paste them from the top of the config. A secret is a `# ... <hidden>` comment; a policy's source is an `edit` block of `set source line <n> <text>` closed by `top`. Any other command (incl. `show config admin`) is refused with `error: this command has no display set output`. CLI-only: REST returns the JSON `Config`.
 - Tab offers `|` after a supported command, then `json`; `?` explains it (`Topic::PipeJson`).
 
 ### Adding a view (#1422)

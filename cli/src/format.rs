@@ -2179,6 +2179,35 @@ pub fn render_config_path(config: &Config, words: &[&str]) -> Result<String, Str
     Ok(sanitize(&text).into_owned())
 }
 
+/// `show config [<path>] | display set` / `show this | display set` (#1462):
+/// flat absolute `set` lines (`words` empty: the whole config). Each line is
+/// sanitized on its own, so a forged value cannot add a `set` line. `Err`: the
+/// words name no object, or the `admin` keystore.
+pub fn render_display_set(config: &Config, words: &[&str]) -> Result<String, String> {
+    let doc = serde_json::to_value(config).unwrap_or_default();
+    let segs = crate::config_grammar::resolve_path(words, &doc)
+        .filter(|s| s.first().map(String::as_str) != Some("admin"))
+        .ok_or_else(|| format!("no such object: {}", sanitize(&words.join(" "))))?;
+    Ok(set_lines(&doc, &segs))
+}
+
+/// `render_display_set` at an already-resolved path (`show this`).
+pub fn set_lines(doc: &serde_json::Value, segs: &[String]) -> String {
+    let mut doc = doc.clone();
+    if let Some(o) = doc.as_object_mut() {
+        o.remove("admin");
+    }
+    let lines = render::render_set(&doc, segs);
+    if lines.is_empty() {
+        return "nothing configured".into();
+    }
+    lines
+        .iter()
+        .map(|l| sanitize_line(l).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `show config admin`: the keystore, secrets as `<hidden>`.
 pub fn render_admin_config(config: &Config) -> String {
     sanitize(&render_admin_config_raw(config)).into_owned()
@@ -3930,6 +3959,47 @@ mod tests {
         }));
         let out = render_config_path(&empty, &["routing-table", "rt1"]).unwrap();
         assert_eq!(out, "routing-table rt1");
+    }
+
+    #[test]
+    fn display_set_lines() {
+        let cfg = ospf_config();
+        let all = render_display_set(&cfg, &[]).unwrap();
+        assert!(
+            all.lines()
+                .all(|l| l.starts_with("set ") || l.starts_with('#')),
+            "{all}"
+        );
+        assert!(
+            all.contains("set ospf instance o1 router-id 1.1.1.1"),
+            "{all}"
+        );
+        assert!(!all.contains("argon2id"), "{all}");
+        let scoped = render_display_set(&cfg, &["ospf", "instance", "o1"]).unwrap();
+        assert!(scoped.contains("router-id 1.1.1.1"), "{scoped}");
+        assert!(render_display_set(&cfg, &["nope"])
+            .unwrap_err()
+            .contains("no such object"));
+        assert!(render_display_set(&cfg, &["admin"]).is_err());
+        let empty = config_from(&serde_json::json!({}));
+        assert_eq!(
+            render_display_set(&empty, &[]).unwrap(),
+            "nothing configured"
+        );
+        // A forged value cannot add a line or an escape.
+        let forged = config_from(&serde_json::json!({
+            "hostname": "a\nset x\u{1b}[31m\u{9b}"
+        }));
+        let out = render_display_set(&forged, &[]).unwrap();
+        assert!(
+            out.lines()
+                .all(|l| l.starts_with("set ") || l.starts_with("edit") || l == "top"),
+            "{out:?}"
+        );
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{9b}'),
+            "{out:?}"
+        );
     }
 
     #[test]
