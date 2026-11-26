@@ -117,7 +117,10 @@ async fn run(
         let (mut reader, write_half) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(write_half, IpcCodec::<RibRequest>::default());
         let mut eof_buf = [0u8; 1];
+        let started = std::time::Instant::now();
         let (routes, ilm) = compute_routes(&links).await;
+        // The initial snapshot is an SPF run (counted, `note_spf`).
+        links.note_spf(started.elapsed());
         if !push(
             &mut writer,
             &instance,
@@ -144,8 +147,9 @@ async fn run(
         let changed = links.route_changed();
         let mut throttle = SpfThrottle::new(Timers::default());
         loop {
+            let mut by_change = false;
             tokio::select! {
-                stop = wait_for_change(&changed, &mut shutdown, &mut throttle, links.spf_timers()) => if stop { return },
+                stop = wait_for_change(&changed, &mut shutdown, &mut throttle, links.spf_timers(), &mut by_change) => if stop { return },
                 _ = reader.read(&mut eof_buf) => {
                     warn!(table = %table, "nos-ribd closed the ospf push connection, reconnecting");
                     break;
@@ -166,7 +170,12 @@ async fn run(
                 push_ilm(&mut writer, &instance, &[]).await;
                 break;
             }
+            let started = std::time::Instant::now();
             let (new_routes, new_ilm) = compute_routes(&links).await;
+            // Only a change-triggered run is an SPF run; the 2 s poll tick is not.
+            if by_change {
+                links.note_spf(started.elapsed());
+            }
             let updates = diff_routes(&last_sent, &new_routes);
             if !push(&mut writer, &instance, updates, chunk).await {
                 warn!(table = %table, "write failure sending ospf route update, reconnecting");
@@ -231,15 +240,18 @@ where
 /// Waits for the next reason to recompute routes: an LSDB change (then a
 /// RFC 8405 throttle pause, so an LSU burst costs one SPF, not one per LSA),
 /// the `POLL_INTERVAL` fallback (not a change: it bypasses the throttle so a
-/// 2 s tick can't keep it in `long_wait`), or shutdown. Returns `true` to stop.
+/// 2 s tick can't keep it in `long_wait`), or shutdown. Returns `true` to stop;
+/// `by_change` is set when it woke on an LSDB change (an SPF run, `note_spf`).
 async fn wait_for_change(
     changed: &tokio::sync::Notify,
     shutdown: &mut watch::Receiver<bool>,
     throttle: &mut SpfThrottle,
     timers: Timers,
+    by_change: &mut bool,
 ) -> bool {
     tokio::select! {
         () = changed.notified() => {
+            *by_change = true;
             throttle.set_timers(timers);
             let (delay, state) = throttle.on_change(std::time::Instant::now());
             let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
@@ -505,11 +517,15 @@ mod tests {
         for _ in 0..5 {
             n.notify_one();
         }
-        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default()).await);
+        let mut by = false;
+        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default(), &mut by).await);
+        assert!(by);
         assert_eq!(start.elapsed(), hold_down);
         // The burst is spent: the next wait falls back to the poll tick,
         // which is not a change and leaves the throttle alone.
-        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default()).await);
+        by = false;
+        assert!(!wait_for_change(&n, &mut rx, &mut th, Timers::default(), &mut by).await);
+        assert!(!by, "a poll tick is not an SPF run");
         assert_eq!(start.elapsed(), hold_down + POLL_INTERVAL);
     }
 

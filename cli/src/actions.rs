@@ -432,6 +432,8 @@ async fn handle_text_action(
         | Resolved::ShowOspfRoute
         | Resolved::ShowOspfDatabase { .. }
         | Resolved::ShowOspfSegmentRouting
+        | Resolved::ShowOspfInstance
+        | Resolved::ShowOspfv3Instance
         | Resolved::ShowOspfv3Neigh
         | Resolved::ShowOspfv3Interface
         | Resolved::ShowOspfv3Route
@@ -615,6 +617,14 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
         }
         Resolved::ShowOspfv3Interface => {
             show_ospfv3_interface(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfInstance => {
+            show_ospf_instance(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Instance => {
+            show_ospfv3_instance(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowOspfSegmentRouting => {
@@ -2163,6 +2173,72 @@ async fn show_ospf_database(
                 Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
             },
             Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospf [instance]` (#1439): one summary block per instance.
+async fn show_ospf_instance(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(sock)) => match ospf_client::get_instance(&sock).await {
+                Ok(summary) => {
+                    println!("ospf instance {}:", instance.name);
+                    emit(&summary, "");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+        }
+    }
+}
+
+/// `show ospfv3 [instance]` (#1439): one summary block per instance.
+async fn show_ospfv3_instance(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", format::sanitize(&e.to_string()));
+            return;
+        }
+    };
+    if cfg.ospfv3_instances.is_empty() {
+        println!("no ospfv3 instances configured");
+        return;
+    }
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(sock)) => match ospfv3_client::get_instance(&sock).await {
+                Ok(summary) => {
+                    println!("ospfv3 instance {}:", instance.name);
+                    emit(&summary, "");
+                }
+                Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
+            },
+            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {}", format::sanitize(&e.to_string())),
         }
     }

@@ -34,7 +34,8 @@ fn allowed(role: Role, req: &Ospfv3Request) -> bool {
         Ospfv3Request::GetNeighbors
         | Ospfv3Request::GetDatabase
         | Ospfv3Request::GetInterfaces
-        | Ospfv3Request::GetRoutes => {
+        | Ospfv3Request::GetRoutes
+        | Ospfv3Request::GetInstance => {
             matches!(role, Role::User | Role::Restd)
         }
         Ospfv3Request::RedistributeRoutes(_) => role == Role::Ribd,
@@ -108,6 +109,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ospfv3Request::GetInstance => {
+                let event = Ospfv3Event::Instance(links.instance_summary().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             Ospfv3Request::RedistributeRoutes(update) => {
                 // Only the closing `Full` is applied: it replaces the raw
                 // set, so half a snapshot would withdraw the rest.
@@ -140,6 +147,7 @@ mod authz_tests {
                 Ospfv3Request::GetNeighbors,
                 Ospfv3Request::GetInterfaces,
                 Ospfv3Request::GetRoutes,
+                Ospfv3Request::GetInstance,
             ] {
                 assert_eq!(
                     allowed(role, &q),

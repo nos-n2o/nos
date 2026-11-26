@@ -1,0 +1,7 @@
+Router-Id                 -
+Abr                       no
+Asbr                      no
+Spf-Runs                  0
+Last-Spf-Age-Secs         -
+Last-Spf-Duration-Micros  -
+Areas

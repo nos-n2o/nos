@@ -104,6 +104,10 @@ show route rt1
 - `Info` holds an external LSA's `metric <n> E1` or `E2`, and a router LSA's `B`/`E`/`V` flags and `vlink <router-id>` virtual links; `-` otherwise.
 - `show ospf database <type> [<adv-router>]` keeps one type (name or number) and, optionally, one advertising router.
 - Both cover every OSPF instance on the router.
+- `show ospf` (also `show ospf instance`) prints, per instance, the router ID, whether it is an ABR (RFC 3509: two or more areas and an active backbone) or an ASBR (it redistributes external routes), the SPF counters and one row per area (type, LSAs in its database, interfaces, `Full` neighbors).
+  - `spf_runs` counts the initial computation and every change-triggered one; the periodic 2 s recheck does not count. `last_spf_age_secs` and `last_spf_duration_micros` are `-` before the first.
+  - An area's `lsa_count` leaves out AS-scope Type-5 LSAs, which sit in no area database. A loopback counts as an interface.
+  - REST: `GET /v1/ospf/instance`.
 
 Over REST, `GET /v1/ospf/neighbors`, `GET /v1/ospf/interfaces` and `GET /v1/ospf/database` return the same data as JSON, one entry per instance:
 

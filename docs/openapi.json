@@ -344,6 +344,54 @@
         ],
         "type": "object"
       },
+      "AreaSummary": {
+        "description": "One area of an `InstanceSummary`.",
+        "properties": {
+          "area_id": {
+            "description": "The area id.",
+            "type": "string"
+          },
+          "area_type": {
+            "$ref": "#/components/schemas/AreaType",
+            "description": "The area's type."
+          },
+          "full_neighbor_count": {
+            "description": "Neighbors in `Full` state across the area's interfaces.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interface_count": {
+            "description": "Interfaces attached to the area, loopbacks included.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lsa_count": {
+            "description": "LSAs in the area's database (AS-scope Type-5 LSAs live in no area\ndatabase and are not counted).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "area_id",
+          "area_type",
+          "lsa_count",
+          "interface_count",
+          "full_neighbor_count"
+        ],
+        "type": "object"
+      },
+      "AreaType": {
+        "description": "An area's type (no-summary variants stay `Stub`/`Nssa`).",
+        "enum": [
+          "normal",
+          "stub",
+          "nssa"
+        ],
+        "type": "string"
+      },
       "AsPathList": {
         "description": "A named set of AS-path regexes, referenced by bare name from an RPL\nscript's `this.bgp.as_path in NAME`. Each pattern is matched against the\npath rendered as space-separated ASNs, with `_` as the Cisco-style\nboundary (see `nos_rpl::AsPathRegexes`); the list matches if ANY pattern\ndoes.",
         "properties": {
@@ -3028,6 +3076,64 @@
           "time",
           "actor",
           "kind"
+        ],
+        "type": "object"
+      },
+      "InstanceSummary": {
+        "description": "`show ospf` / `show ospfv3` (#1439): one instance's own state. The\n`OSPFv3` daemon replies with this same type (nothing in it is address\nfamily specific).",
+        "properties": {
+          "abr": {
+            "description": "Area border router: attached to 2+ areas with an active backbone\n(RFC 3509), derived.",
+            "type": "boolean"
+          },
+          "areas": {
+            "description": "Every attached area, by area id.",
+            "items": {
+              "$ref": "#/components/schemas/AreaSummary"
+            },
+            "type": "array"
+          },
+          "asbr": {
+            "description": "Autonomous system boundary router: redistributing external routes.",
+            "type": "boolean"
+          },
+          "last_spf_age_secs": {
+            "description": "Seconds since the last SPF computation; `None` before the first.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_spf_duration_micros": {
+            "description": "Duration of the last SPF computation in microseconds; `None` before\nthe first.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "router_id": {
+            "description": "The instance's router id; `None` before its first reconcile.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spf_runs": {
+            "description": "SPF computations run since start (change-triggered and initial ones;\nthe periodic poll does not count).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "abr",
+          "asbr",
+          "spf_runs",
+          "areas"
         ],
         "type": "object"
       },
@@ -8167,7 +8273,7 @@
             "result": {
               "oneOf": [
                 {
-                  "$ref": "#/components/schemas/Vec"
+                  "$ref": "#/components/schemas/InstanceSummary"
                 },
                 {
                   "type": "null"
@@ -10096,6 +10202,37 @@
         ]
       }
     },
+    "/v1/ospf/instance": {
+      "get": {
+        "operationId": "ospf_instance",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPF instance summary (router id, ABR/ASBR, SPF, areas), per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
     "/v1/ospf/interfaces": {
       "get": {
         "operationId": "ospf_interfaces",
@@ -10246,6 +10383,37 @@
           }
         },
         "summary": "OSPFv3 LSDB summary, per instance",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/ospfv3/instance": {
+      "get": {
+        "operationId": "ospfv3_instance",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Vec"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "OSPFv3 instance summary (router id, ABR/ASBR, SPF, areas), per instance",
         "tags": [
           "show"
         ]

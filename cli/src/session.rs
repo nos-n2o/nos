@@ -216,6 +216,8 @@ pub enum Resolved {
     },
     /// `show ospf segment-routing` — mirrors `ShowOspfDatabase`.
     ShowOspfSegmentRouting,
+    ShowOspfInstance,
+    ShowOspfv3Instance,
     /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
     /// configured `Ospfv3Instance`.
     ShowOspfv3Neigh,
@@ -499,6 +501,8 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
             adv_router,
         },
         Command::ShowOspfSegmentRouting => Resolved::ShowOspfSegmentRouting,
+        Command::ShowOspfInstance => Resolved::ShowOspfInstance,
+        Command::ShowOspfv3Instance => Resolved::ShowOspfv3Instance,
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
         Command::ShowOspfv3Interface => Resolved::ShowOspfv3Interface,
         Command::ShowOspfv3Route => Resolved::ShowOspfv3Route,
@@ -639,6 +643,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowOspfRoute
         | Command::ShowOspfDatabase { .. }
         | Command::ShowOspfSegmentRouting
+        | Command::ShowOspfInstance
+        | Command::ShowOspfv3Instance
         | Command::ShowOspfv3Neigh
         | Command::ShowOspfv3Interface
         | Command::ShowOspfv3Route

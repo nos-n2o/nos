@@ -240,6 +240,8 @@ pub enum Ospfv3Request {
     GetInterfaces,
     /// One-shot: the computed routes (#1453).
     GetRoutes,
+    /// One-shot: this instance's own summary (#1439).
+    GetInstance,
 }
 
 /// Messages sent from `nos-ospfv3d` to a query client.
@@ -253,4 +255,6 @@ pub enum Ospfv3Event {
     Interfaces(Vec<Ospfv3InterfaceSummary>),
     /// Reply with the routes.
     Routes(Vec<Ospfv3RouteSummary>),
+    /// Reply with the instance summary (the same type as `OSPFv2`'s).
+    Instance(crate::InstanceSummary),
 }

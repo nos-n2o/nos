@@ -91,6 +91,8 @@ show ospfv3 database
 show ospfv3 database link 1.1.1.1
 ```
 
+`show ospfv3` (also `show ospfv3 instance`, `GET /v1/ospfv3/instance`) prints the same instance summary as `show ospf` (router ID, ABR/ASBR, SPF counters, one row per area); an area's `lsa_count` counts its area database only (no link-local or AS-scope LSAs).
+
 The `Type` column shows the LS type's name (an unknown code shows as `0x....`). `show ospfv3 database <type> [<adv-router>]` filters by name, number or `0x` hex code, and by advertising router. The codes are OSPFv3's LS type codes (RFC 5340 and RFC 8362): `0x2001` router, `0x2002` network, `0x2003` inter-area prefix, `0x2004` inter-area router, `0x4005` AS-external, `0x0008` link, `0x2009` intra-area prefix, and, in extended mode, `0xa021` E-Router, `0xa022` E-Network, `0xa023` E-Inter-Area-Prefix, `0xa024` E-Inter-Area-Router, `0xc025` E-AS-External, `0x8028` E-Link and `0xa029` E-Intra-Area-Prefix. Link LSAs are only valid on their own link, so the `Link` column shows which link each one belongs to. `Info` shows a router LSA's `B`/`E`/`V` flags and virtual links. AS-external LSAs belong to no area; they are listed under area `0.0.0.0`.
 
 ### Advertise a LAN without speaking OSPFv3

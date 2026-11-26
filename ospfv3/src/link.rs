@@ -12,9 +12,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ipnet::{IpNet, Ipv6Net};
 use nos_proto::schema::BfdProfile;
@@ -2251,6 +2251,9 @@ pub struct LinkManager {
     /// RFC 6987 stub router (`Ospfv3Instance.max_metric_*`), see
     /// `max_metric_active`.
     max_metric: std::sync::Mutex<MaxMetric>,
+    /// SPF runs counted by `note_spf`, and the last one's start and duration.
+    spf_runs: AtomicU64,
+    last_spf: std::sync::Mutex<Option<(Instant, Duration)>>,
     opener: Opener,
     /// RFC 7166 §4.1 boot count, taken per authenticated link (re)start.
     boots: nos_ospf_common::boot::BootCounter,
@@ -2675,6 +2678,8 @@ impl LinkManager {
             restart: std::sync::Mutex::new(None),
             restart_on: AtomicBool::new(false),
             bfd: std::sync::Mutex::new(HashMap::new()),
+            spf_runs: AtomicU64::new(0),
+            last_spf: std::sync::Mutex::new(None),
             opener,
             boots,
         });
@@ -3880,6 +3885,85 @@ impl LinkManager {
         }
     }
 
+    /// Records one SPF run (#1439) for `show ospfv3`. `compute_routes` stays
+    /// pure: `rib_push_client` calls this after the initial snapshot and
+    /// after every change-triggered recomputation, never after the poll tick.
+    pub fn note_spf(&self, duration: Duration) {
+        self.spf_runs.fetch_add(1, Ordering::Relaxed);
+        *self.last_spf.lock().unwrap() = Some((Instant::now(), duration));
+    }
+
+    /// `show ospfv3` (#1439): router id, ABR/ASBR role, SPF counters and one
+    /// row per attached area. `lsa_count` is the area store only (no
+    /// link-local or AS-scope LSAs).
+    pub async fn instance_summary(&self) -> nos_proto::InstanceSummary {
+        use nos_proto::{AreaSummary, AreaType};
+        let router_id = *self.router_id.lock().await;
+        let border = self.is_backbone_abr().await;
+        let boundary = !self.redistribute_filtered.lock().await.is_empty();
+        let mut ids: Vec<Ipv4Addr> = self.attached_areas().await.into_iter().collect();
+        ids.sort();
+        let snapshot: Vec<(Ipv4Addr, usize)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| {
+                let full = e
+                    .status
+                    .borrow()
+                    .neighbors
+                    .values()
+                    .filter(|n| n.state == NeighborState::Full)
+                    .count();
+                (e.config.area_id, full)
+            })
+            .collect();
+        let loopbacks: HashMap<Ipv4Addr, usize> = self
+            .loopback_prefixes
+            .lock()
+            .await
+            .iter()
+            .map(|(a, v)| (*a, v.len()))
+            .collect();
+        let mut areas = Vec::new();
+        for id in ids {
+            let store = self.lsdbs.lock().await.get(&id).cloned();
+            let lsa_count = match store {
+                Some(s) => s.lock().await.all().len(),
+                None => 0,
+            };
+            let here = snapshot.iter().filter(|(a, _)| *a == id);
+            let links = here.clone().count() + loopbacks.get(&id).copied().unwrap_or(0);
+            let full: usize = here.map(|(_, f)| *f).sum();
+            let area_type = if self.nssa_areas.lock().unwrap().contains_key(&id) {
+                AreaType::Nssa
+            } else if self.stub_areas.lock().unwrap().contains_key(&id) {
+                AreaType::Stub
+            } else {
+                AreaType::Normal
+            };
+            areas.push(AreaSummary {
+                area_id: id,
+                area_type,
+                lsa_count: u32::try_from(lsa_count).unwrap_or(u32::MAX),
+                interface_count: u32::try_from(links).unwrap_or(u32::MAX),
+                full_neighbor_count: u32::try_from(full).unwrap_or(u32::MAX),
+            });
+        }
+        let last = *self.last_spf.lock().unwrap();
+        nos_proto::InstanceSummary {
+            router_id,
+            abr: border,
+            asbr: boundary,
+            spf_runs: self.spf_runs.load(Ordering::Relaxed),
+            last_spf_age_secs: last.map(|(at, _)| at.elapsed().as_secs()),
+            last_spf_duration_micros: last
+                .map(|(_, d)| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
+            areas,
+        }
+    }
+
     pub async fn neighbor_summaries(&self) -> Vec<Ospfv3NeighborSummary> {
         self.links
             .lock()
@@ -5015,6 +5099,66 @@ pub(crate) mod tests {
         assert_eq!(a.running_config(&cfg.attach_point).await, Some(cfg.clone()));
         a.reconcile(vec![], HashMap::new(), id(1)).await;
         assert!(a.running_config(&cfg.attach_point).await.is_none());
+    }
+
+    /// #1439: `instance_summary` of a fresh manager, then with two areas (one
+    /// an NSSA), an ASBR role and one counted SPF run.
+    #[tokio::test(start_paused = true)]
+    async fn instance_summary_reports_role_areas_and_spf() {
+        let wire = Arc::new(wire::Wire::default());
+        let m = router(&wire);
+        let fresh = m.instance_summary().await;
+        assert_eq!(
+            (fresh.router_id, fresh.abr, fresh.asbr, fresh.spf_runs),
+            (None, false, false, 0)
+        );
+        assert_eq!(fresh.last_spf_age_secs, None);
+        assert_eq!(fresh.areas.len(), 0);
+
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        m.set_stub_areas(HashMap::from([(area1, (true, 1))]));
+        m.set_nssa_areas(HashMap::from([(area1, NssaSettings::default())]));
+        let prefix = |s: &str| (s.parse::<Ipv6Net>().unwrap(), 1);
+        m.reconcile(
+            vec![],
+            HashMap::from([
+                (Ipv4Addr::UNSPECIFIED, vec![prefix("2001:db8:9::/64")]),
+                (area1, vec![prefix("2001:db8:a::/64")]),
+            ]),
+            id(1),
+        )
+        .await;
+        m.originate_all(id(1)).await;
+        m.apply_redistribute_update(RedistributeUpdate::Full(vec![
+            nos_proto::RedistributedRoute {
+                prefix: "2001:db8:ffff::/48".parse::<Ipv6Net>().unwrap().into(),
+                gateway: "fe80::9".parse().unwrap(),
+            },
+        ]))
+        .await;
+        m.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+            .await;
+        m.note_spf(Duration::from_micros(250));
+        tokio::time::advance(Duration::from_secs(7)).await;
+
+        let s = m.instance_summary().await;
+        assert_eq!(s.router_id, Some(id(1)));
+        assert!(s.abr, "two areas incl. the backbone");
+        assert!(s.asbr);
+        assert_eq!((s.spf_runs, s.last_spf_age_secs), (1, Some(7)));
+        assert_eq!(s.last_spf_duration_micros, Some(250));
+        let rows: Vec<_> = s
+            .areas
+            .iter()
+            .map(|a| (a.area_id, a.area_type, a.interface_count, a.lsa_count >= 1))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Ipv4Addr::UNSPECIFIED, nos_proto::AreaType::Normal, 1, true),
+                (area1, nos_proto::AreaType::Nssa, 1, true),
+            ]
+        );
     }
 
     #[test]
@@ -7365,6 +7509,17 @@ pub(crate) mod tests {
         let (a, b) = pair(&wire, None, None).await;
         let n = a.neighbor_summaries().await;
         assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
+        // `show ospfv3` (#1439): one area, one interface, one Full neighbor.
+        let inst = a.instance_summary().await;
+        assert_eq!(inst.areas.len(), 1, "{inst:?}");
+        assert_eq!(
+            (
+                inst.areas[0].interface_count,
+                inst.areas[0].full_neighbor_count
+            ),
+            (1, 1)
+        );
+        assert!(inst.areas[0].lsa_count >= 2, "own and B's Router-LSA");
         let routes = a.compute_routes().await;
         let r = routes
             .iter()
