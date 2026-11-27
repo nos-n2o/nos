@@ -1120,6 +1120,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              into equally sized groups: the group holding the lowest (port priority, port number) \
              is kept. `delete` goes back to 32768. Changing it restarts LACP on this member only.",
         ),
+        Topic::InterfaceLacpFallback => (
+            "Let an interface carry traffic alone while no LACP partner answers.",
+            "Default off. For PXE boot and other hosts that speak no LACP until the OS is up: \
+             while no partner is heard, one port of the aggregate becomes active on its own. \
+             `min-links` is not applied to it. Fallback starts after `lacp fallback-timeout` \
+             seconds without a LACPDU (measured from the last one heard, never shorter than the \
+             Receive Machine's Defaulted time) and ends at once when a partner is heard. Only \
+             meaningful on a `lacp`-mode aggregate member. Changing it restarts nothing. `delete` \
+             goes back to off.",
+        ),
+        Topic::InterfaceLacpFallbackTimeout => (
+            "Set the seconds before LACP fallback activates.",
+            "1-3600, default 30. Measured from the last LACPDU heard on the port. Ignored \
+             without `lacp fallback`. `delete` goes back to 30.",
+        ),
         Topic::InterfaceLacpLinkNumber => (
             "Set an interface's LACP Link_Number.",
             "Sets the 802.1AX-2014 Link_Number that names this interface in its `lacp`-mode \

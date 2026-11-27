@@ -305,6 +305,8 @@ mod tests {
             port_aggregate: None,
             lacp_port_priority: None,
             lacp_link_number: None,
+            lacp_fallback: false,
+            lacp_fallback_timeout: None,
             lacp_mode: nos_proto::LacpMode::default(),
             mtu: None,
             lldp_transmit: tx,

@@ -364,6 +364,21 @@ pub struct Interface {
     #[cli(topic = InterfaceLacpMode, words = "lacp mode")]
     pub lacp_mode: crate::schema::LacpMode,
 
+    /// LACP fallback (PXE / no-partner use): while no partner is heard on
+    /// this port, `nos-lacpd` may let it carry traffic alone. Only
+    /// meaningful on a `Lacp`-mode aggregate member; ignored otherwise.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceLacpFallback, words = "lacp fallback")]
+    pub lacp_fallback: bool,
+
+    /// Seconds without a LACPDU before fallback activates; `None` = 30,
+    /// valid 1..=3600. Ignored without `lacp_fallback`.
+    #[serde(default)]
+    #[garde(custom(|t: &Option<u16>, _ctx: &Config| valid_lacp_fallback_timeout(*t)))]
+    #[cli(topic = InterfaceLacpFallbackTimeout, words = "lacp fallback-timeout")]
+    pub lacp_fallback_timeout: Option<u16>,
+
     /// The link's MTU, in bytes. A link-layer property of the physical (or
     /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
     /// not part of the loopback/physical addressing split (see
@@ -415,6 +430,15 @@ pub struct Interface {
     )]
     /// L3 attachment points of a physical interface, one per VLAN tag.
     pub subinterfaces: Vec<Subinterface>,
+}
+
+pub(crate) fn valid_lacp_fallback_timeout(t: Option<u16>) -> garde::Result {
+    match t {
+        Some(s) if !(1..=3600).contains(&s) => Err(garde::Error::new(
+            "lacp-fallback-timeout must be between 1 and 3600",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// RFC 791's IPv4 minimum through Linux's practical link-layer ceiling.
@@ -625,6 +649,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn lacp_fallback_timeout_range() {
+        for ok in [None, Some(1), Some(30), Some(3600)] {
+            assert!(valid_lacp_fallback_timeout(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [0, 3601] {
+            assert!(valid_lacp_fallback_timeout(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
             acl_in: None,
@@ -646,6 +680,8 @@ mod tests {
             stp_port_profile: None,
             lacp_port_priority: None,
             lacp_link_number: None,
+            lacp_fallback: false,
+            lacp_fallback_timeout: None,
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
