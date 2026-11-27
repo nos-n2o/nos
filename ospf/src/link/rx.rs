@@ -908,7 +908,7 @@ pub(super) async fn handle_lsu(
         return None;
     }
 
-    let ack = exchange::AckMode::Rfc(super::flood::ack_ctx(cfg, status, lsu.router_id));
+    let ack = super::flood::ack_ctx(cfg, status, lsu.router_id);
     let origin = nos_ospf_common::lsdb::Origin {
         link: link_id,
         neighbor: lsu.router_id,

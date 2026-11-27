@@ -727,17 +727,7 @@ pub fn on_lsr_received<L: Lsa>(
     vec![Action::SendLsu(found)]
 }
 
-/// How `on_lsu_received` acknowledges (#1516).
-#[derive(Debug, Clone, Copy)]
-pub enum AckMode {
-    /// Every acked LSA is queued on `pending_acks`, never `SendLsAck`.
-    /// ponytail: deleted by whichever of #1517/#1518 lands second.
-    LegacyDelayed,
-    /// RFC 2328 §13.5 Table 19 through `ack_action`.
-    Rfc(AckCtx),
-}
-
-/// The link facts `AckMode::Rfc` needs. `rx.from_dr_or_bdr` doubles as
+/// The link facts `on_lsu_received` needs for RFC 2328 §13.5 Table 19. `rx.from_dr_or_bdr` doubles as
 /// "from the DR" when we are the BDR (the only case `ack_action` reads it).
 #[derive(Debug, Clone, Copy)]
 pub struct AckCtx {
@@ -751,7 +741,7 @@ pub struct AckCtx {
 pub struct LsuResult<L: Lsa> {
     pub actions: Vec<Action<L>>,
     /// Headers actually installed/superseded, so the daemon logs nothing for
-    /// the duplicates its own periodic resend produces.
+    /// the duplicates a flood echoes back.
     pub installed: Vec<L::Header>,
     /// The §13.5 row of every acknowledged-or-not LSA.
     pub verdicts: Vec<(L::Header, RxVerdict)>,
@@ -766,9 +756,9 @@ pub struct LsuResult<L: Lsa> {
 /// - `exempt_max_age`: skips §13 step 4 (v3 Grace-LSA: never held, and its
 ///   `MaxAge` copy is what ends a grace).
 /// - `origin`: who sent the LSU, handed to the store's flood sink.
-/// - `ack`: `LegacyDelayed` queues every ack on `adj.pending_acks` for the
-///   daemon's `RXMT_INTERVAL` sweep; `Rfc` applies `ack_action`: `Direct` is an
-///   `Action::SendLsAck` for the daemon to unicast at once.
+/// - `ack`: Table 19 through `ack_action`: `Direct` is an `Action::SendLsAck`
+///   for the daemon to unicast at once, `Delayed` queues on `adj.pending_acks`
+///   (flushed by the daemon's `ACK_INTERVAL` tick).
 ///
 /// A `Rejected` instance equal to one on the sender's retransmission list is
 /// an implied ack (§13 step 7a): the entry is removed.
@@ -782,7 +772,7 @@ pub fn on_lsu_received<L, FS, FD, FE>(
     discard: FD,
     exempt_max_age: FE,
     origin: Option<Origin>,
-    ack: AckMode,
+    ack: AckCtx,
 ) -> LsuResult<L>
 where
     L: Lsa,
@@ -853,11 +843,10 @@ where
             }
             InstallOutcome::Installed | InstallOutcome::Superseded => {
                 res.installed.push(h);
-                match ack {
-                    AckMode::Rfc(c) if floods_back(c.rx, c.link, c.other_adjacent) => {
-                        RxVerdict::NewerFloodedBack
-                    }
-                    _ => RxVerdict::Newer,
+                if floods_back(ack.rx, ack.link, ack.other_adjacent) {
+                    RxVerdict::NewerFloodedBack
+                } else {
+                    RxVerdict::Newer
                 }
             }
         };
@@ -877,19 +866,12 @@ where
 fn ack_lsa<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     res: &mut LsuResult<L>,
-    ack: &AckMode,
+    ack: &AckCtx,
     h: L::Header,
     verdict: RxVerdict,
 ) {
     res.verdicts.push((h, verdict));
-    let what = match ack {
-        AckMode::LegacyDelayed => {
-            // Today's behaviour: every acked LSA, delayed. `DbNewer` was
-            // queued too before the RFC table existed.
-            AckAction::Delayed
-        }
-        AckMode::Rfc(c) => ack_action(verdict, c.link.we_are_bdr, c.rx.from_dr_or_bdr),
-    };
+    let what = ack_action(verdict, ack.link.we_are_bdr, ack.rx.from_dr_or_bdr);
     match what {
         AckAction::None => {}
         AckAction::Delayed => adj.pending_acks.push(h),

@@ -17,13 +17,16 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ipnet::{IpNet, Ipv6Net};
+use nos_ospf_common::flood::{flood_on_link, merge_floods, LinkFlood, Peer, Receipt};
+use nos_ospf_common::lsdb::{FloodEvent, InstallOutcome};
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
     BfdDiag, LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3InterfaceSummary,
     Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3RouteSummary, RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -122,6 +125,17 @@ use crate::spf;
 /// RFC 2328 Appendix C.3's `RxmtInterval` — same fixed value/ponytail
 /// rationale as `ospf::link::RXMT_INTERVAL`.
 const RXMT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// RFC 2328 §13.5: delayed acknowledgments are flushed this often (as
+/// `ospf::link::ACK_INTERVAL`).
+const ACK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Flood events one link task holds per scope before its receiver lags
+/// (`RecvError::Lagged`: that store is re-flooded once on the link).
+const FLOOD_CHANNEL_CAPACITY: usize = 1024;
+
+/// Flood events handled per `select!` pass (one LSU batch).
+const FLOOD_BATCH: usize = 256;
 
 /// Same cadence/rationale as `ospf::link::ORIGINATION_INTERVAL`.
 const ORIGINATION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -507,6 +521,80 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     (adj, dbd)
 }
 
+/// What a link task needs to flood by event (#1518): its `Origin.link` id and
+/// one receiver per store it reads (RFC 5340 §4.5.1): its area's, its own
+/// link-local one and the AS-wide one (none for a stub area's link).
+pub struct FloodFeed {
+    id: u32,
+    area: Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+    link: Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+    as_scope: Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+}
+
+/// Next event of `rx`, pending forever once it is gone.
+async fn recv_flood(
+    rx: &mut Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+) -> Result<FloodEvent<Lsa>, RecvError> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Floods what `rx` yielded (a batch if more is queued). A lagged receiver
+/// re-floods its whole store once: the only full dump left.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the link task's own state, passed through"
+)]
+async fn on_flood_event(
+    first: Result<FloodEvent<Lsa>, RecvError>,
+    rx: &mut Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+    store: &Mutex<Lsdb>,
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    link_id: u32,
+    status: &StatusHandle,
+    last_dest: &mut Option<Dest>,
+) {
+    let mut lagged = false;
+    let mut events = Vec::new();
+    match first {
+        Ok(e) => events.push(e),
+        Err(RecvError::Lagged(_)) => lagged = true,
+        Err(RecvError::Closed) => {
+            *rx = None;
+            return;
+        }
+    }
+    if let Some(r) = rx.as_mut() {
+        while events.len() < FLOOD_BATCH {
+            match r.try_recv() {
+                Ok(e) => events.push(e),
+                Err(TryRecvError::Lagged(_)) => {
+                    lagged = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if lagged {
+        warn!(link = %cfg.attach_point, "ospfv3 flood channel lagged, reflooding the store");
+        events.extend(as_events(store.lock().await.all()));
+    }
+    flood_events(
+        socket,
+        cfg,
+        local_router_id,
+        link_id,
+        status,
+        &events,
+        last_dest,
+    );
+}
+
 /// Runs until aborted. Owns the raw socket, the Hello send ticker, and
 /// every timer this link's network type needs — mirrors `ospf::link::run`'s
 /// shape, minus all crypto-sequence/auth bookkeeping. `lsdb` is the area's
@@ -531,6 +619,7 @@ pub async fn run(
     startup_grace: Option<(u32, u8)>,
     mut topology_rx: mpsc::UnboundedReceiver<Vec<Ipv4Addr>>,
     mut bfd_rx: mpsc::UnboundedReceiver<Ipv6Addr>,
+    mut feed: FloodFeed,
 ) {
     let stores = Stores {
         area: &lsdb,
@@ -564,6 +653,8 @@ pub async fn run(
     let mut last_flood_dest: Option<Dest> = None;
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ack_tick = tokio::time::interval(ACK_INTERVAL);
+    ack_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, authenticated = cfg.auth.is_some(), "ospfv3 link driver started");
     if is_broadcast {
@@ -663,7 +754,7 @@ pub async fn run(
                                             );
                                         }
                                         if let Some(actions) =
-                                            handle_lsu(&cfg, local_router_id, &status, &stores, &lsu).await
+                                            handle_lsu(&cfg, local_router_id, &status, &stores, &lsu, feed.id).await
                                         {
                                             execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
                                         }
@@ -681,6 +772,15 @@ pub async fn run(
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospfv3 recv error"),
                 }
             }
+            first = recv_flood(&mut feed.area) => {
+                on_flood_event(first, &mut feed.area, &lsdb, &socket, &cfg, local_router_id, feed.id, &status, &mut last_flood_dest).await;
+            }
+            first = recv_flood(&mut feed.link) => {
+                on_flood_event(first, &mut feed.link, &link_local_lsdb, &socket, &cfg, local_router_id, feed.id, &status, &mut last_flood_dest).await;
+            }
+            first = recv_flood(&mut feed.as_scope) => {
+                on_flood_event(first, &mut feed.as_scope, &as_lsdb, &socket, &cfg, local_router_id, feed.id, &status, &mut last_flood_dest).await;
+            }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
                 sweep_dead_neighbors(&cfg, &status);
@@ -695,10 +795,6 @@ pub async fn run(
                 advance_adjacencies(&socket, &cfg, local_router_id, &status);
             }
             Some(cmd) = grace_rx.recv() => match cmd {
-                // `LinkManager::flood_now`, RFC 6987 on-shutdown.
-                GraceCmd::Resend => {
-                    flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status, &mut last_flood_dest).await;
-                }
                 GraceCmd::Announce(grace_period) => {
                     send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, lsa::RESTART_REASON_SOFTWARE, 0);
                 }
@@ -709,10 +805,12 @@ pub async fn run(
             },
             Some(address) = bfd_rx.recv() => kill_bfd_neighbor(&cfg, &status, address),
             Some(origins) = topology_rx.recv() => exit_grace_on_topology_change(&cfg, &status, &origins),
+            _ = ack_tick.tick() => {
+                note_flood_dest(&cfg, &status, &mut last_flood_dest);
+                flush_pending_acks(&socket, &cfg, local_router_id, &status);
+            }
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
-                flush_pending_acks(&socket, &cfg, local_router_id, &status);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status, &mut last_flood_dest).await;
             }
         }
     }
@@ -729,16 +827,6 @@ struct Stores<'a> {
 }
 
 impl Stores<'_> {
-    /// Every LSA this link may summarize/flood.
-    async fn all(&self) -> Vec<Arc<Lsa>> {
-        let mut lsas = self.area.lock().await.all();
-        lsas.extend(self.link.lock().await.all());
-        if !self.stub {
-            lsas.extend(self.as_scope.lock().await.all());
-        }
-        lsas
-    }
-
     async fn headers(&self) -> Vec<LsaHeader> {
         let mut headers = self.area.lock().await.headers();
         headers.extend(self.link.lock().await.headers());
@@ -1149,6 +1237,7 @@ async fn handle_lsu(
     status: &StatusHandle,
     stores: &Stores<'_>,
     lsu: &LsuPacket,
+    link_id: u32,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
         let snapshot = status.borrow();
@@ -1160,6 +1249,11 @@ async fn handle_lsu(
         return None;
     }
 
+    let ack = ack_ctx(cfg, status, lsu.router_id);
+    let origin = nos_ospf_common::lsdb::Origin {
+        link: link_id,
+        neighbor: lsu.router_id,
+    };
     let (actions, newly_installed) = {
         let mut lsdb = stores.area.lock().await;
         let mut link_local_lsdb = stores.link.lock().await;
@@ -1174,6 +1268,8 @@ async fn handle_lsu(
             tokio::time::Instant::now().into_std(),
             cfg.stub,
             cfg.nssa,
+            Some(origin),
+            ack,
         );
         // A Grace-LSA is acted on at once and never held: a copy left in the
         // LSDB would be offered back to the restarted router and flooded to
@@ -1507,7 +1603,7 @@ fn execute_actions(
 
 /// RFC 2328 §13.5 delayed acknowledgment (as `ospf::link::flood`'s): sends
 /// each neighbor's queued acks (`AdjacencyData::pending_acks`) as one
-/// `LSAck` on the `RXMT_INTERVAL` sweep.
+/// `LSAck` on the 1 s `ACK_INTERVAL` tick.
 fn flush_pending_acks(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -1610,12 +1706,35 @@ fn flush_pending_acks_group(
     }
 }
 
+/// Resends every neighbor's last-sent DBD (if any, see `AdjacencyData::
+/// last_dbd_sent`), its request list and the retransmission-list entries
+/// older than `RXMT_INTERVAL` (RFC 2328 §13.6, `due_retransmissions`, unicast).
 fn retransmit_pending(
     socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
 ) {
+    let now = tokio::time::Instant::now().into_std();
+    let mut due: HashMap<Ipv4Addr, Vec<Arc<Lsa>>> = HashMap::new();
+    status.send_if_modified(|s| {
+        for (id, info) in &mut s.neighbors {
+            if !matches!(
+                info.state,
+                NeighborState::Exchange | NeighborState::Loading | NeighborState::Full
+            ) {
+                continue;
+            }
+            if let Some(adj) = &mut info.adjacency {
+                let lsas = exchange::due_retransmissions(adj, now, RXMT_INTERVAL);
+                if !lsas.is_empty() {
+                    due.insert(*id, lsas);
+                }
+            }
+        }
+        // Nothing here changes what origination snapshots.
+        false
+    });
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
@@ -1643,73 +1762,140 @@ fn retransmit_pending(
                 }
             }
         }
-        if !adj.retransmission_list.is_empty() {
-            let lsas: Vec<_> = adj
-                .retransmission_list
-                .values()
-                .map(|r| r.lsa.clone())
-                .collect();
-            for payload in lsu_packets(cfg, local_router_id, &lsas) {
-                if let Err(e) = socket.send_unicast(info.address, cfg.interface_id, &payload) {
-                    warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
-                }
+        let retransmit = due.remove(neighbor_id).unwrap_or_default();
+        for payload in lsu_packets(cfg, local_router_id, &retransmit) {
+            if let Err(e) = socket.send_unicast(info.address, cfg.interface_id, &payload) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
             }
         }
     }
 }
 
-/// Mirrors `ospf::link::flood::flood_full_neighbors`'s `ponytail:` periodic-resend
-/// design exactly, same rationale.
-async fn flood_full_neighbors(
-    socket: &LinkSocket,
-    cfg: &LinkConfig,
-    local_router_id: Ipv4Addr,
-    stores: &Stores<'_>,
-    status: &StatusHandle,
-    last_dest: &mut Option<Dest>,
-) {
+/// Logs the flood destination once per change (`ospfv3 lsu flood destination
+/// changed`, asserted by `nos-e2e ospfv3-dr`); also run on the ack tick so a
+/// role change is reported without waiting for the next flood.
+fn note_flood_dest(cfg: &LinkConfig, status: &StatusHandle, last_dest: &mut Option<Dest>) -> Dest {
     let dest = current_dest(cfg, status);
     if *last_dest != Some(dest) {
         *last_dest = Some(dest);
         info!(link = %cfg.attach_point, dest = %dest.as_str(), "ospfv3 lsu flood destination changed");
     }
-    let full_neighbors: Vec<(Ipv4Addr, Ipv6Addr)> = status
-        .borrow()
-        .neighbors
-        .iter()
-        .filter(|(_, info)| info.state == NeighborState::Full)
-        .map(|(id, info)| (*id, info.address))
-        .collect();
-    if full_neighbors.is_empty() {
-        return;
+    dest
+}
+
+fn link_flood(cfg: &LinkConfig, s: &LinkStatus) -> LinkFlood {
+    LinkFlood {
+        broadcast: elects_dr(cfg.network_type),
+        we_are_dr: s.interface_state == InterfaceState::Dr,
+        we_are_bdr: s.interface_state == InterfaceState::Backup,
     }
-    let lsas = stores.all().await;
-    if lsas.is_empty() {
-        return;
+}
+
+/// RFC 2328 §13.5 context for an LSU received from `from` on this link.
+fn ack_ctx(cfg: &LinkConfig, status: &StatusHandle, from: Ipv4Addr) -> exchange::AckCtx {
+    let s = status.borrow();
+    exchange::AckCtx {
+        link: link_flood(cfg, &s),
+        rx: Receipt {
+            from,
+            from_dr_or_bdr: s.dr == Some(from) || s.bdr == Some(from),
+        },
+        other_adjacent: s
+            .neighbors
+            .iter()
+            .any(|(id, n)| *id != from && neighbor::exchange_or_later(n.state)),
     }
-    let payloads = lsu_packets(cfg, local_router_id, &lsas);
-    // Multicast (RFC 2328 §13.3 step 5): each chunk once to the group; a
-    // send error falls back to the unicast loop for this pass. One signed
-    // packet is valid for all receivers (the trailer binds only the source).
-    if dest != Dest::Unicast {
-        let sent = payloads.iter().all(|payload| {
-            socket
-                .send_flood(dest, Ipv6Addr::UNSPECIFIED, cfg.interface_id, payload)
-                .map_err(|e| {
-                    warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospfv3 lsu, falling back to unicast");
+}
+
+/// Every LSA of a store as a synthetic flood event (lag recovery only).
+fn as_events(lsas: Vec<Arc<Lsa>>) -> Vec<FloodEvent<Lsa>> {
+    lsas.into_iter()
+        .map(|lsa| FloodEvent {
+            lsa,
+            origin: None,
+            outcome: InstallOutcome::Installed,
+        })
+        .collect()
+}
+
+/// RFC 2328 §13.3 (RFC 5340 §4.5 keeps it): floods each event's LSA out this
+/// link. Adds it to the retransmission list of every neighbor `>= Exchange`
+/// (but the sender) and sends at once, MTU-split: to the group on broadcast
+/// links (unicast fallback if the group send fails), unicast otherwise.
+/// `link_id` is this link's `Origin.link`. A Grace-LSA is never flooded on
+/// (it is acted on at once and never held, RFC 5187).
+fn flood_events(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    link_id: u32,
+    status: &StatusHandle,
+    events: &[FloodEvent<Lsa>],
+    last_dest: &mut Option<Dest>,
+) {
+    note_flood_dest(cfg, status, last_dest);
+    let now = tokio::time::Instant::now().into_std();
+    let mut outs = Vec::new();
+    let mut addrs: HashMap<Ipv4Addr, Ipv6Addr> = HashMap::new();
+    status.send_if_modified(|s| {
+        let link = link_flood(cfg, s);
+        let (dr, bdr) = (s.dr, s.bdr);
+        addrs.extend(s.neighbors.iter().map(|(id, n)| (*id, n.address)));
+        for ev in events {
+            let ty = ev.lsa.header.lsa_type;
+            if ty == lsa::LSA_TYPE_GRACE || !lsa::in_area_scope(ty, cfg.stub, cfg.nssa) {
+                continue;
+            }
+            let rx = ev.origin.filter(|o| o.link == link_id).map(|o| Receipt {
+                from: o.neighbor,
+                from_dr_or_bdr: dr == Some(o.neighbor) || bdr == Some(o.neighbor),
+            });
+            let mut peers: Vec<Peer<'_, Lsa>> = s
+                .neighbors
+                .iter_mut()
+                .filter_map(|(id, n)| {
+                    let state = n.state;
+                    let adj = n.adjacency.as_mut()?;
+                    Some(Peer {
+                        id: *id,
+                        state,
+                        adj,
+                    })
                 })
-                .is_ok()
-        });
-        if sent {
-            return;
-        }
-    }
-    for (neighbor_id, neighbor_addr) in full_neighbors {
-        for payload in &payloads {
-            if let Err(e) = socket.send_unicast(neighbor_addr, cfg.interface_id, payload) {
-                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
+                .collect();
+            if let Some(out) = flood_on_link(&ev.lsa, rx, link, &mut peers, now) {
+                outs.push(out);
             }
         }
+        // Nothing here changes what origination snapshots.
+        false
+    });
+    for (dest, to, lsas) in merge_floods(outs) {
+        let mut sent_group = dest != Dest::Unicast;
+        if sent_group {
+            for payload in lsu_packets(cfg, local_router_id, &lsas) {
+                if let Err(e) =
+                    socket.send_flood(dest, Ipv6Addr::UNSPECIFIED, cfg.interface_id, &payload)
+                {
+                    warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospfv3 lsu, falling back to unicast");
+                    sent_group = false;
+                    break;
+                }
+            }
+        }
+        if !sent_group {
+            for payload in lsu_packets(cfg, local_router_id, &lsas) {
+                for addr in to.iter().filter_map(|id| addrs.get(id)) {
+                    if let Err(e) = socket.send_unicast(*addr, cfg.interface_id, &payload) {
+                        warn!(link = %cfg.attach_point, error = %e, "failed to send ospfv3 lsu");
+                    }
+                }
+            }
+        }
+        info!(
+            link = %cfg.attach_point, dest = %dest.as_str(), neighbors = to.len(), lsas = lsas.len(),
+            "ospfv3 lsu flooded"
+        );
     }
 }
 
@@ -2134,8 +2320,6 @@ fn run_election(
 pub enum GraceCmd {
     /// Announce this grace period (seconds) to the `Full` neighbors.
     Announce(u32),
-    /// Resend the LSDB to the `Full` neighbors now.
-    Resend,
     /// Flush the Grace-LSA (restart mode ended, RFC 5187 §2.3).
     Flush,
 }
@@ -2144,7 +2328,7 @@ struct LinkEntry {
     config: LinkConfig,
     task: JoinHandle<()>,
     status: watch::Receiver<LinkStatus>,
-    /// Asks the link task to send or flush Grace-LSAs, or to resend its LSDB.
+    /// Asks the link task to send or flush Grace-LSAs.
     grace_tx: mpsc::UnboundedSender<GraceCmd>,
     /// BFD found the path to this neighbor link-local address down.
     bfd_tx: mpsc::UnboundedSender<Ipv6Addr>,
@@ -2179,6 +2363,13 @@ pub struct LinkManager {
     /// offer another link's Link-LSAs (RFC 5340 §4.5.1). SPF still merges
     /// every same-area link's store back in (`compute_routes`).
     link_local_lsdbs: Mutex<HashMap<String, Arc<Mutex<Lsdb>>>>,
+    /// Each store's flood-event sender (#1518; the store's sink): per area,
+    /// per link (Link-LSAs, by attach point) and the one AS-scope channel.
+    area_flood_txs: Mutex<HashMap<Ipv4Addr, broadcast::Sender<FloodEvent<Lsa>>>>,
+    link_flood_txs: Mutex<HashMap<String, broadcast::Sender<FloodEvent<Lsa>>>>,
+    as_flood_tx: broadcast::Sender<FloodEvent<Lsa>>,
+    /// Source of `Origin.link` ids.
+    next_link_id: AtomicU32,
     /// AS-scoped LSAs (AS-External-LSA/E-AS-External-LSA, `lsa::is_as_scope`)
     /// — one store for the whole router, read by every link whatever its
     /// area, so an ASBR's LSA learned in one area floods on into the others
@@ -2506,7 +2697,7 @@ impl LinkManager {
     }
 
     /// RFC 6987 on-shutdown: re-originates the Router-LSAs with max-metric
-    /// links, kicks them out and holds `on_shutdown` seconds so neighbors
+    /// links (flooded by event) and holds `on_shutdown` seconds so neighbors
     /// move traffic away before this process exits. Skipped when off, when
     /// max-metric is already active, and when no LSA actually changed.
     pub async fn max_metric_on_shutdown(&self) {
@@ -2524,25 +2715,10 @@ impl LinkManager {
         }
         self.max_metric_state().shutting_down = true;
         self.origination_pass().await;
-        self.flood_now().await;
         tokio::time::sleep(
             std::time::Duration::from_secs(u64::from(hold)).min(MAX_METRIC_SHUTDOWN_HOLD_MAX),
         )
         .await;
-    }
-
-    /// Has every link resend its LSDB to its `Full` neighbors now.
-    async fn flood_now(&self) {
-        let senders: Vec<mpsc::UnboundedSender<GraceCmd>> = self
-            .links
-            .lock()
-            .await
-            .values()
-            .map(|e| e.grace_tx.clone())
-            .collect();
-        for tx in senders {
-            let _ = tx.send(GraceCmd::Resend);
-        }
     }
 
     /// What the last resync handed to the setters (`reconcile` tests).
@@ -2644,6 +2820,7 @@ impl LinkManager {
     ) -> Arc<Self> {
         let route_changed = Arc::new(tokio::sync::Notify::new());
         let reoriginate = Arc::new(tokio::sync::Notify::new());
+        let (as_flood_tx, _) = broadcast::channel(FLOOD_CHANNEL_CAPACITY);
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             physical: Mutex::new(Vec::new()),
@@ -2651,10 +2828,16 @@ impl LinkManager {
             resolved_virtual: Mutex::new(Vec::new()),
             lsdbs: Mutex::new(HashMap::new()),
             link_local_lsdbs: Mutex::new(HashMap::new()),
-            as_lsdb: Arc::new(Mutex::new(
-                Lsdb::with_notify(Arc::clone(&route_changed))
-                    .with_reflect_notify(Arc::clone(&reoriginate)),
-            )),
+            area_flood_txs: Mutex::new(HashMap::new()),
+            link_flood_txs: Mutex::new(HashMap::new()),
+            as_flood_tx: as_flood_tx.clone(),
+            next_link_id: AtomicU32::new(0),
+            as_lsdb: Arc::new(Mutex::new({
+                let mut db = Lsdb::with_notify(Arc::clone(&route_changed))
+                    .with_reflect_notify(Arc::clone(&reoriginate));
+                db.set_flood_sink(as_flood_tx);
+                db
+            })),
             route_changed,
             reoriginate,
             redistribute_raw: Mutex::new(HashSet::new()),
@@ -2712,12 +2895,30 @@ impl LinkManager {
         if let Some(l) = stores.get(&area_id) {
             return Arc::clone(l);
         }
-        let db = self.new_store().await;
+        let mut db = self.new_store().await;
+        let (tx, _) = broadcast::channel(FLOOD_CHANNEL_CAPACITY);
+        db.set_flood_sink(tx.clone());
+        self.area_flood_txs.lock().await.insert(area_id, tx);
         Arc::clone(
             stores
                 .entry(area_id)
                 .or_insert_with(|| Arc::new(Mutex::new(db))),
         )
+    }
+
+    /// The receivers a link task floods from (the stores are created if
+    /// missing, so their senders exist). A stub area's link has no AS one.
+    async fn flood_feed(&self, cfg: &LinkConfig) -> FloodFeed {
+        self.lsdb_for(cfg.area_id).await;
+        self.link_local_lsdb_for(&cfg.attach_point).await;
+        let area = self.area_flood_txs.lock().await[&cfg.area_id].subscribe();
+        let link = self.link_flood_txs.lock().await[&cfg.attach_point].subscribe();
+        FloodFeed {
+            id: self.next_link_id.fetch_add(1, Ordering::Relaxed),
+            area: Some(area),
+            link: Some(link),
+            as_scope: (!cfg.stub).then(|| self.as_flood_tx.subscribe()),
+        }
     }
 
     /// An empty store wired to this manager's notifiers and, once the router
@@ -2745,7 +2946,13 @@ impl LinkManager {
         if let Some(l) = stores.get(attach_point) {
             return Arc::clone(l);
         }
-        let db = self.new_store().await;
+        let mut db = self.new_store().await;
+        let (tx, _) = broadcast::channel(FLOOD_CHANNEL_CAPACITY);
+        db.set_flood_sink(tx.clone());
+        self.link_flood_txs
+            .lock()
+            .await
+            .insert(attach_point.to_string(), tx);
         Arc::clone(
             stores
                 .entry(attach_point.to_string())
@@ -3861,6 +4068,7 @@ impl LinkManager {
             } else {
                 0
             };
+            let feed = self.flood_feed(&cfg).await;
             let task = tokio::spawn(run(
                 (self.opener)(&cfg, boot_count),
                 cfg.clone(),
@@ -3874,6 +4082,7 @@ impl LinkManager {
                 self.startup_grace(),
                 topology_rx,
                 bfd_rx,
+                feed,
             ));
             links.insert(
                 key,
@@ -5907,6 +6116,7 @@ pub(crate) mod tests {
             &status,
             &stores,
             &lsu(vec![from(2, seq), from(3, seq)]),
+            0,
         )
         .await;
         {
@@ -5922,6 +6132,7 @@ pub(crate) mod tests {
             &status,
             &stores,
             &lsu(vec![from(2, seq + 1)]),
+            0,
         )
         .await;
         let held = area.lock().await.get(&key(2)).unwrap();
@@ -5964,12 +6175,12 @@ pub(crate) mod tests {
         let mut foreign = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 1);
         foreign.header.link_state_id = neighbor_id;
         foreign.header.advertising_router = neighbor_id;
-        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![foreign])).await;
+        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![foreign]), 0).await;
         assert_eq!(area.lock().await.reflected_keys(), Vec::<LsaKey>::new());
         assert!(n.notified().now_or_never().is_none());
 
         let newer = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 5);
-        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![newer.clone()])).await;
+        handle_lsu(&cfg, me, &status, &stores, &lsu(vec![newer.clone()]), 0).await;
         assert_eq!(area.lock().await.reflected_keys(), vec![newer.header.key()]);
         assert!(n.notified().now_or_never().is_some());
     }
@@ -7426,7 +7637,18 @@ pub(crate) mod tests {
 
         let a_addr: Ipv6Addr = "fe80::1".parse().unwrap();
         wire.drop_hellos.lock().unwrap().insert(a_addr);
-        settle(3 * 40).await;
+        // A's only traffic is an LSU per new LSA (there is no periodic resend).
+        for i in 0..6u8 {
+            let mut l = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER);
+            l.header.advertising_router = id(99);
+            l.header.link_state_id = Ipv4Addr::new(198, 51, 100, i);
+            a.lsdb_for(Ipv4Addr::UNSPECIFIED)
+                .await
+                .lock()
+                .await
+                .install(l);
+            settle(20).await;
+        }
         let n = b.neighbor_summaries().await;
         assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
 
@@ -8803,7 +9025,7 @@ pub(crate) mod tests {
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![],
             };
-            let got = handle_lsu(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsu).await;
+            let got = handle_lsu(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsu, 0).await;
             assert_eq!(got.is_some(), handled, "lsu {state:?}");
             handle_lsack(
                 &status,
@@ -8866,11 +9088,12 @@ pub(crate) mod tests {
         let m = trio(&wire, None).await;
         settle(90).await;
         let c = sent(&wire, 3, 4);
-        assert!(c.last() == Some(&wire::To::AllD), "{c:?}");
+        assert!(c.contains(&wire::To::AllD), "{c:?}");
         assert!(sent(&wire, 3, 5).iter().all(|t| *t == wire::To::AllD));
         for n in [1, 2] {
             let s = sent(&wire, n, 4);
-            assert!(s.last() == Some(&wire::To::AllSpf), "{n}: {s:?}");
+            // The BDR may have had nothing to flood once elected.
+            assert!(n != 1 || s.contains(&wire::To::AllSpf), "{n}: {s:?}");
         }
         assert!(heard(&m[0], id(3)).await && heard(&m[1], id(3)).await);
     }
@@ -8881,7 +9104,7 @@ pub(crate) mod tests {
         let m = trio(&wire, Some(trailer(b"k"))).await;
         settle(90).await;
         let c = sent(&wire, 3, 4);
-        assert!(c.last() == Some(&wire::To::AllD), "{c:?}");
+        assert!(c.contains(&wire::To::AllD), "{c:?}");
         assert!(heard(&m[0], id(3)).await && heard(&m[1], id(3)).await);
         assert!(heard(&m[2], id(1)).await);
     }
@@ -8984,25 +9207,169 @@ pub(crate) mod tests {
     async fn destination_is_reported_only_on_change() {
         let wire = Arc::new(wire::Wire::default());
         let cfg = wired_link(1, NetworkType::Broadcast);
-        let socket = wire.opener()(&cfg, 0).unwrap();
+        let _socket = wire.opener()(&cfg, 0).unwrap();
         let status = dr_status(InterfaceState::Dr, &[]);
-        let (a, l, s) = (
-            Mutex::new(Lsdb::new()),
-            Mutex::new(Lsdb::new()),
-            Mutex::new(Lsdb::new()),
-        );
-        let stores = Stores {
-            area: &a,
-            link: &l,
-            as_scope: &s,
-            stub: false,
-        };
         let mut last = None;
-        flood_full_neighbors(&socket, &cfg, id(1), &stores, &status, &mut last).await;
+        note_flood_dest(&cfg, &status, &mut last);
         assert_eq!(last, Some(Dest::AllSpfRouters));
         status.send_modify(|s| s.interface_state = InterfaceState::DrOther);
-        flood_full_neighbors(&socket, &cfg, id(1), &stores, &status, &mut last).await;
+        note_flood_dest(&cfg, &status, &mut last);
         assert_eq!(last, Some(Dest::AllDRouters));
+    }
+
+    fn router_lsa(adv: u8, ty: u16) -> Arc<crate::lsa::Lsa> {
+        let mut h = header();
+        h.lsa_type = ty;
+        h.advertising_router = id(adv);
+        Arc::new(crate::lsa::Lsa {
+            header: h,
+            body: crate::lsa::LsaBody::Opaque(vec![1, 2, 3, 4]),
+        })
+    }
+
+    fn event(lsa: &Arc<crate::lsa::Lsa>, from: Option<(u32, u8)>) -> FloodEvent<crate::lsa::Lsa> {
+        FloodEvent {
+            lsa: Arc::clone(lsa),
+            origin: from.map(|(link, n)| nos_ospf_common::lsdb::Origin {
+                link,
+                neighbor: id(n),
+            }),
+            outcome: InstallOutcome::Installed,
+        }
+    }
+
+    fn rxmt_len(status: &StatusHandle, n: u8) -> usize {
+        status.borrow().neighbors[&id(n)]
+            .adjacency
+            .as_ref()
+            .unwrap()
+            .retransmission_list
+            .len()
+    }
+
+    /// RFC 2328 §13.3: every neighbor but the sender gets the LSA on its
+    /// retransmission list and one LSU goes out at once, to the group.
+    #[tokio::test]
+    async fn flood_events_reach_every_neighbor_but_the_sender() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::Broadcast);
+        let socket = wire.opener()(&cfg, 0).unwrap();
+        let status = dr_status(InterfaceState::Dr, &[2, 3]);
+        let l = router_lsa(7, crate::lsa::LSA_TYPE_ROUTER);
+        let mut last = None;
+        // Received on link 5 from neighbor 2, flooded by link 5's own task.
+        flood_events(
+            &socket,
+            &cfg,
+            id(1),
+            5,
+            &status,
+            &[event(&l, Some((5, 2)))],
+            &mut last,
+        );
+        assert_eq!((rxmt_len(&status, 2), rxmt_len(&status, 3)), (0, 1));
+        assert_eq!(sent(&wire, 1, 4), vec![wire::To::AllSpf]);
+        // Received on ANOTHER link: nobody on this one is the sender.
+        flood_events(
+            &socket,
+            &cfg,
+            id(1),
+            6,
+            &status,
+            &[event(&l, Some((5, 2)))],
+            &mut last,
+        );
+        assert_eq!(rxmt_len(&status, 2), 1);
+    }
+
+    /// An AS-scope LSA never enters a stub area's link; a Grace-LSA is never
+    /// flooded on.
+    #[tokio::test]
+    async fn flood_events_honour_stub_scope_and_skip_grace() {
+        let wire = Arc::new(wire::Wire::default());
+        let mut cfg = wired_link(1, NetworkType::PointToPoint);
+        cfg.stub = true;
+        let socket = wire.opener()(&cfg, 0).unwrap();
+        let status = dr_status(InterfaceState::PointToPoint, &[2]);
+        let mut last = None;
+        let evs = [
+            event(&router_lsa(7, crate::lsa::LSA_TYPE_AS_EXTERNAL), None),
+            event(&router_lsa(7, crate::lsa::LSA_TYPE_GRACE), None),
+        ];
+        flood_events(&socket, &cfg, id(1), 5, &status, &evs, &mut last);
+        assert_eq!(rxmt_len(&status, 2), 0);
+        assert_eq!(sent(&wire, 1, 4), vec![]);
+        cfg.stub = false;
+        flood_events(&socket, &cfg, id(1), 5, &status, &evs[..1], &mut last);
+        assert_eq!(rxmt_len(&status, 2), 1);
+    }
+
+    /// The sweep resends only entries older than `RXMT_INTERVAL`.
+    #[tokio::test(start_paused = true)]
+    async fn retransmission_waits_for_rxmt_interval() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::PointToPoint);
+        let socket = wire.opener()(&cfg, 0).unwrap();
+        let status = dr_status(InterfaceState::PointToPoint, &[2]);
+        let mut last = None;
+        let l = router_lsa(7, crate::lsa::LSA_TYPE_ROUTER);
+        flood_events(
+            &socket,
+            &cfg,
+            id(1),
+            5,
+            &status,
+            &[event(&l, None)],
+            &mut last,
+        );
+        let flooded = sent(&wire, 1, 4).len();
+        assert_eq!(flooded, 1);
+        tokio::time::advance(RXMT_INTERVAL / 2).await;
+        retransmit_pending(&socket, &cfg, id(1), &status);
+        assert_eq!(sent(&wire, 1, 4).len(), flooded);
+        tokio::time::advance(RXMT_INTERVAL).await;
+        retransmit_pending(&socket, &cfg, id(1), &status);
+        assert_eq!(sent(&wire, 1, 4).len(), flooded + 1);
+        assert_eq!(rxmt_len(&status, 2), 1);
+    }
+
+    /// Three routers in a line (A - M - C, two nets): M relays what each
+    /// end originates by flood event, and a Link-LSA never leaves its link.
+    #[tokio::test(start_paused = true)]
+    async fn relay_across_links_and_link_lsas_stay_on_their_link() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, m, c) = (router(&wire), router(&wire), router(&wire));
+        let on_b = |n: u8| LinkConfig {
+            attach_point: format!("link-{n}"),
+            link_local_address: format!("fe80::{n}").parse().unwrap(),
+            prefixes: vec![format!("2001:db8:b::{n}/64").parse().unwrap()],
+            interface_id: u32::from(n),
+            network_type: NetworkType::PointToPoint,
+            ..link("unused", 10)
+        };
+        a.reconcile(
+            vec![wired_link(1, NetworkType::PointToPoint)],
+            loopback(1),
+            id(1),
+        )
+        .await;
+        m.reconcile(
+            vec![wired_link(2, NetworkType::PointToPoint), on_b(12)],
+            loopback(2),
+            id(2),
+        )
+        .await;
+        c.reconcile(vec![on_b(13)], loopback(3), id(3)).await;
+        settle(60).await;
+        assert!(heard(&a, id(3)).await && heard(&c, id(1)).await);
+        for (who, other) in [(&a, id(3)), (&c, id(1))] {
+            assert!(
+                who.database_summaries().await.iter().all(|l| {
+                    l.lsa_type != crate::lsa::LSA_TYPE_LINK || l.advertising_router != other
+                }),
+                "a Link-LSA crossed a router"
+            );
+        }
     }
 
     #[tokio::test]
@@ -9028,7 +9395,9 @@ pub(crate) mod tests {
                 l.header.key(),
                 nos_ospf_common::exchange::Rxmt {
                     lsa: Arc::new(l),
-                    last_sent: std::time::Instant::now(),
+                    last_sent: std::time::Instant::now()
+                        .checked_sub(RXMT_INTERVAL * 2)
+                        .unwrap(),
                 },
             );
         });

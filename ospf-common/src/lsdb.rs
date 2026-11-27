@@ -25,10 +25,10 @@ pub const MIN_LS_ARRIVAL: Duration = Duration::from_secs(1);
 
 /// How many `age_and_evict` ticks an entry sits at `MAX_AGE` before it's
 /// evicted. RFC 2328 §14 removes a `MaxAge` LSA once it's off every neighbor's
-/// retransmission list; the daemons have no such signal (flooding is a
-/// periodic full resend, `link::RXMT_INTERVAL` = 5s), so a bounded hold —
-/// long enough for one resend tick plus margin — is what lets a flushed LSA
-/// actually reach the neighbors before it disappears locally.
+/// retransmission list; the daemons don't tie eviction to that, so a bounded
+/// hold — the flood sink sends the flushed copy at once and one
+/// `RXMT_INTERVAL` (5s) retransmission of an unacked one still fits — keeps
+/// it, and the stale-echo guard in `on_lsu_received`, in place.
 pub const MAX_AGE_HOLD_TICKS: u16 = 7;
 
 pub struct Lsdb<L: Lsa> {
@@ -363,8 +363,8 @@ impl<L: Lsa> Lsdb<L> {
         self.entries.values().map(|l| *l.header()).collect()
     }
 
-    /// Every installed LSA — used by the daemons' periodic full-LSDB resend
-    /// to `Full` neighbors.
+    /// Every installed LSA — used to re-flood a store after a lagged flood
+    /// channel.
     pub fn all(&self) -> Vec<Arc<L>> {
         self.entries.values().cloned().collect()
     }
@@ -373,8 +373,8 @@ impl<L: Lsa> Lsdb<L> {
     /// `MAX_AGE`) and evicts any entry that has sat at `MAX_AGE` for
     /// `MAX_AGE_HOLD_TICKS` ticks — whether it aged out naturally or was
     /// prematurely aged (§14.1) — returning the evicted keys so the caller
-    /// can log them. The hold is what gives the periodic resend a chance to
-    /// carry the `MaxAge` copy to every neighbor first.
+    /// can log them. The hold keeps the `MaxAge` copy available to
+    /// retransmission and the stale-echo guard until it is evicted.
     ///
     /// An LSA whose advertising router is in `hold` (a neighbor in its grace
     /// period, RFC 3623 / RFC 5187) is aged no further than just below

@@ -5143,9 +5143,8 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&v2_removed, v2_removed0, 30).await?;
 
     // RFC 2328 §13.5 delayed acknowledgment, as `asbr` checks for OSPFv2:
-    // some batch is held a second or more before router-b's sweep sends it.
-    b.wait_new("ospfv3 lsack sent.*delayed_ms=[1-9][0-9][0-9][0-9]", 0, 30)
-        .await
+    // router-b acks through the 1 s delayed-ack tick.
+    b.wait_new("ospfv3 lsack sent.*delayed_ms=", 0, 30).await
 }
 
 /// RFC 5340 ABR (requires `ospfv3`): router-b's IPv6 loopback joins a second
@@ -5645,6 +5644,46 @@ pub async fn ospfv3_lsinfinity_asbr(w: &mut World) -> anyhow::Result<()> {
 /// router-c on into area 2 (its own Inter-Area-Router-LSA), and flush it when
 /// router-c stops being an ASBR.
 pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
+    abr_transit_up(w).await?;
+    let (a, c) = (w.a()?, w.c()?);
+    log("router-a re-summarizes router-b's backbone Inter-Area-Router-LSA into area 2");
+    let originated = either_form(
+        LSA_TYPE_INTER_AREA_ROUTER,
+        LSA_TYPE_E_INTER_AREA_ROUTER,
+        |t| {
+            format!(
+                "ospfv3 lsa originated lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
+            )
+        },
+    );
+    a.wait_new(&originated, 0, 90).await?;
+
+    log("router-c stops redistributing: the Inter-Area-Router-LSAs are flushed");
+    c.provision(&["--clear-redistribute-to-ospfv3"]).await?;
+    let aged = either_form(
+        LSA_TYPE_INTER_AREA_ROUTER,
+        LSA_TYPE_E_INTER_AREA_ROUTER,
+        |t| {
+            format!(
+                "ospfv3 lsa prematurely aged lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
+            )
+        },
+    );
+    let flushed = a.wait_new(&aged, 0, 60).await;
+    abr_transit_down(w).await;
+    flushed
+}
+
+/// Tears the `abr_transit_up` topology down again.
+async fn abr_transit_down(w: &mut World) {
+    w.remove(C).await;
+    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
+    w.dock.network_remove(NET_OSPFV3_A1).await;
+}
+
+/// Brings the three-router `ospfv3-abr-transit` topology up to Full on both
+/// links (shared by `ospfv3-flood`).
+async fn abr_transit_up(w: &mut World) -> anyhow::Result<()> {
     w.require_ipv6().await?;
     if !w.dock.network_exists(NET_OSPFV3_A1).await {
         w.dock
@@ -5748,34 +5787,51 @@ pub async fn ospfv3_abr_transit(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
-    log("router-a re-summarizes router-b's backbone Inter-Area-Router-LSA into area 2");
-    let originated = either_form(
-        LSA_TYPE_INTER_AREA_ROUTER,
-        LSA_TYPE_E_INTER_AREA_ROUTER,
-        |t| {
-            format!(
-                "ospfv3 lsa originated lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
-            )
-        },
-    );
-    a.wait_new(&originated, 0, 90).await?;
+    Ok(())
+}
 
-    log("router-c stops redistributing: the Inter-Area-Router-LSAs are flushed");
-    c.provision(&["--clear-redistribute-to-ospfv3"]).await?;
-    let aged = either_form(
-        LSA_TYPE_INTER_AREA_ROUTER,
-        LSA_TYPE_E_INTER_AREA_ROUTER,
-        |t| {
-            format!(
-                "ospfv3 lsa prematurely aged lsa_type={t} link_state_id={OSPFV3_ROUTER_ID_C} advertising_router={OSPFV3_ROUTER_ID}"
-            )
-        },
-    );
-    let flushed = a.wait_new(&aged, 0, 60).await;
-    w.remove(C).await;
-    w.dock.network_disconnect(NET_OSPFV3_A1, "router-b").await;
-    w.dock.network_remove(NET_OSPFV3_A1).await;
-    flushed
+/// #1518, RFC 5340 §4.5 / RFC 2328 §13.3: a new LSA is flooded the moment it
+/// is installed and relayed across an ABR without a sweep, and a settled LSDB
+/// floods nothing. The `ospfv3-abr-transit` topology; router-c, in area 1,
+/// gets a loopback: router-b (neighbor) must install its LSA within seconds of
+/// router-c originating it, router-a (across the ABR, via router-b's
+/// Inter-Area-Prefix-LSA) shortly after, and then no router floods for 15 s.
+pub async fn ospfv3_flood(w: &mut World) -> anyhow::Result<()> {
+    abr_transit_up(w).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let from_c = format!("ospfv3 lsa installed.*advertising_router={OSPFV3_ROUTER_ID_C}");
+    let from_b = format!("ospfv3 lsa installed.*advertising_router={OSPFV3_ROUTER_ID_B}");
+    let originated = format!("ospfv3 lsa originated.*advertising_router={OSPFV3_ROUTER_ID_C}");
+    let (originated0, c_at_b0, b_at_a0) =
+        (c.count(&originated), b.count(&from_c), a.count(&from_b));
+    c.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_C,
+        "--ospfv3-area",
+        OSPFV3_AREA_1,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE_AREA1,
+        "--ospfv3-loopback-address",
+        OSPFV3_FLOOD_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
+    ])
+    .await?;
+    c.wait_new(&originated, originated0, 30).await?;
+    // Origination ticks every 2 s; the flood itself adds well under a second
+    // (the old 5 s sweep made each hop 0-5 s).
+    b.wait_new(&from_c, c_at_b0, 4).await?;
+    a.wait_new(&from_b, b_at_a0, 8).await?;
+    // Let the relays and acks of this change land, then nothing may flood.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    for r in [a, b, c] {
+        let fresh = r.count_fresh("ospfv3 lsu flooded").await;
+        r.assert_quiet("ospfv3 lsu flooded", fresh, 15).await?;
+    }
+    abr_transit_down(w).await;
+    Ok(())
 }
 
 /// Polls `r`'s `GET /v1/ospfv3/database` until one LSA satisfies `pred` (60s).
