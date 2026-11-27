@@ -117,3 +117,10 @@ Several daemons put filters on the same device's `clsact` qdisc, all through the
 ```
 
 - Production pushes come from `nos-bgpd` as `AclRequest::PushFlowspec` (`Role::Bgpd` only, #562) with `devices` empty: `nos-acld` adds, per (instance, table), the devices of its own plan (`plan::flowspec_devices`: every `flowspec` interface, subinterface or port aggregate whose routing table that instance owns for `table: None`, or the VRF `t` whose `vpn.bgp-instance` is that instance for `Some(t)`; an aggregate resolved through its bond like an ACL). `nos-bgpd` sends the own-table set plus one set per VRF, holding the VPN flowspec rules valid in it (one copy per flow, the lowest RD's, #1086); a VRF that loses its `vpn` is pushed empty once. A config change re-attaches; a rule no device holds shows `unsupported: not attached`.
+
+## Nexthop objects (`nos-nexthop`)
+
+- `nos-fdbd` builds its FDB nexthops and groups through the `nos-nexthop` crate (hand-encoded `RTM_NEWNEXTHOP`/`RTM_DELNEXTHOP`, `RTM_GETNEXTHOP` dump); `nos-ribd` will share it (#1582).
+- Gateway nexthops take an optional `oif`, `onlink` and MPLS label stack; groups take per-member weights and re-sending a group id replaces its members in place.
+- Ids are netns-global: `nos-fdbd` keeps its low per-VNI range, `nos-ribd` will take `table_id << 20 | seq`.
+- Linux 7.2: an IPv6 route cannot use an IPv4-gateway nexthop, alone or through a group (`ip -6 route add ... nhid N` fails with "IPv6 routes can not use an IPv4 nexthop").

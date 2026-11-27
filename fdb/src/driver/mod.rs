@@ -6,7 +6,6 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 pub mod linux;
-mod nexthop;
 pub mod noop;
 
 pub use linux::LinuxFdbDriver;
