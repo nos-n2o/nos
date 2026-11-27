@@ -26,6 +26,14 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 - `interface` is a kernel link name: `LinuxRibDriver::resolve_pinned` turns it into the hops' ifindex before install; a missing link defers the route and fails the apply, so it is retried on the next tick.
 - `next-hops` (#1556): `build_from_config` makes one `Static` entry per prefix with the primary gateway and every extra one as hops, sorted by gateway so config order never changes the entry; a hop with `bfd` is dropped while its session is not Up, and a route with no hop left is not inserted (never an empty list, which would read as a discard). `bfd_target` lists every hop. `ponytail:` one pinned interface per entry, so a hop naming another interface than the route's is installed on the route's (logged).
 
+## Recursive static next hops (#1527)
+
+- A static hop with no pinned `interface` and no `Connected` prefix covering its gateway is recursive. `Rib` keeps the configured entries (`static_cfg`) and `Rib::reresolve` derives the installed `Static` entry from them: the hop becomes the next hops of the longest covering route (`Rib::cover`: not `Bgp`/`Evpn`/`Vpn`, not a discard, not an unresolved static), ECMP kept, backup not inherited.
+- Depth is 4: round n resolves only through entries resolved in earlier rounds, so a longer chain or a cycle (A via B via A, or a gateway inside the route's own prefix) stays unresolved.
+- A static with no resolvable hop is in `Rib.unresolved`: still a `Static` candidate in `show route` (`installed` false, listed last), never a winner, never a cover for BGP next hops (`resolve`, `igp_costs`). Partly resolvable hop lists install what resolves. A static that used to install through an unreachable gateway is now withheld.
+- `reresolve` runs after every `Static`/`Connected` replace, `replace_ospf` and `retain_ospf_owners`; the incremental OSPF push (`apply_ospf_route_update`) merges its returned deltas, so the kernel follows an OSPF path change by one `NLM_F_REPLACE`.
+- Logs: `static next hop resolved prefix gateway via`, `static next hop unresolved prefix gateway` (on change only). `ponytail:` the cover scan is linear per recursive hop.
+
 ## L3VPN VRF export (#580)
 
 - Config (`vpn::resolve`, from `reconcile::vpn_export` each resync): RD, export RTs and `vpn.bgp_instance` (never `table.bgp_instance`); idle without RD and instance.

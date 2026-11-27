@@ -717,6 +717,9 @@ async fn apply_ospf_route_update(ctx: &Context, owner: &OspfOwner, updates: Vec<
         }
     }
 
+    // A static recursing through an OSPF route follows its path (#1527).
+    deltas.extend(guard.reresolve());
+
     if full_replace {
         let routes = guard.best_routes_for_kernel();
         drop(guard);
@@ -840,7 +843,10 @@ fn to_prefix_routes(
                     .collect(),
                 // Candidates arrive best first: the first is the kernel winner
                 // (`best_routes_for_kernel`), except a `Connected` one.
-                installed: render.kernel_ok && i == 0 && e.source != RouteSource::Connected,
+                installed: render.kernel_ok
+                    && i == 0
+                    && e.source != RouteSource::Connected
+                    && !rib.is_unresolved(&prefix, e),
                 gateways: e.next_hops.iter().map(|h| h.gateway).collect(),
                 source: to_source_kind(e.source),
                 backup: e.backup,

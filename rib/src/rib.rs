@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use nos_proto::{Config, IpNet, NextHop, RouteFilter, RouteSourceKind, SourceCount};
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Where a route came from. New sources are appended as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,7 +203,18 @@ pub struct Rib {
     ilm: BTreeMap<OspfOwner, Vec<nos_proto::IlmRoute>>,
     /// ILM entries given on the command line (`--test-ilm`, e2e only).
     pub ilm_fixed: Vec<nos_proto::IlmRoute>,
+    /// Every configured `Static` entry as `build_from_config` made it (#1527):
+    /// the source `reresolve` derives the installed entry from.
+    static_cfg: HashMap<IpNet, RibEntry>,
+    /// Recursive statics no covering route resolves: still a `Static`
+    /// candidate (`show route`), never a winner, never a cover.
+    unresolved: HashSet<IpNet>,
+    /// The hops each resolved recursive static was last derived with.
+    resolved_hops: HashMap<IpNet, Vec<NextHop>>,
 }
+
+/// Recursion depth of a static next hop (#1527): rounds of `Rib::reresolve`.
+const MAX_RECURSION: usize = 4;
 
 impl Rib {
     /// Replaces `owner`'s ILM set (empty removes it).
@@ -336,9 +347,15 @@ impl Rib {
             candidates.retain(|e| e.source != source);
         }
         let mut added = Vec::new();
+        if source == RouteSource::Static {
+            self.static_cfg.clear();
+        }
         for entry in entries {
             debug_assert_eq!(entry.source, source);
             added.push(entry.prefix);
+            if source == RouteSource::Static {
+                self.static_cfg.insert(entry.prefix, entry.clone());
+            }
             self.entries.entry(entry.prefix).or_default().push(entry);
         }
         self.entries.retain(|_, c| !c.is_empty());
@@ -352,6 +369,169 @@ impl Rib {
                     .get(p)
                     .is_some_and(|c| c.iter().any(|e| e.source == *s))
         });
+        if matches!(source, RouteSource::Static | RouteSource::Connected) {
+            // The caller applies the whole table next.
+            let _ = self.reresolve();
+        }
+    }
+
+    /// Whether `e` is a recursive static with no resolution (#1527).
+    pub(crate) fn is_unresolved(&self, prefix: &IpNet, e: &RibEntry) -> bool {
+        e.source == RouteSource::Static && self.unresolved.contains(prefix)
+    }
+
+    /// `candidates` best (lowest preference value) first, an unresolved
+    /// static after every other.
+    fn sorted(&self, prefix: &IpNet, candidates: &[RibEntry]) -> Vec<RibEntry> {
+        let mut sorted = candidates.to_vec();
+        sorted.sort_by_key(|e| (self.is_unresolved(prefix, e), e.rank()));
+        sorted
+    }
+
+    /// The best candidate a next hop may resolve through: no overlay source
+    /// (`Bgp`/`Evpn`/`Vpn`), no discard route (RFC 4271 section 9.1.2) and no
+    /// unresolved static.
+    fn resolving_best<'a>(
+        &self,
+        prefix: &IpNet,
+        candidates: &'a [RibEntry],
+    ) -> Option<&'a RibEntry> {
+        candidates
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e.source,
+                    RouteSource::Bgp | RouteSource::Evpn | RouteSource::Vpn
+                ) && !e.is_discard()
+                    && !self.is_unresolved(prefix, e)
+            })
+            .min_by_key(|e| e.rank())
+    }
+
+    /// The longest prefix covering `addr` and its best resolving candidate.
+    fn cover(&self, addr: IpAddr) -> Option<(&IpNet, &RibEntry)> {
+        self.entries
+            .iter()
+            .filter(|(net, _)| net.contains(&addr))
+            .filter_map(|(net, c)| Some((net, self.resolving_best(net, c)?)))
+            .max_by_key(|(net, _)| net.prefix_len())
+    }
+
+    /// Replaces a prefix's `Static` candidate by `entry`.
+    fn put_static(&mut self, entry: RibEntry) {
+        let prefix = entry.prefix;
+        let c = self.entries.entry(prefix).or_default();
+        match c.iter_mut().find(|e| e.source == RouteSource::Static) {
+            Some(old) if *old == entry => return,
+            Some(old) => *old = entry,
+            None => c.push(entry),
+        }
+        self.touch(&prefix);
+    }
+
+    /// Recursive static next hops (#1527): a static hop that is not on-link
+    /// (no pinned interface, no `Connected` prefix covering the gateway)
+    /// takes the next hops of the longest route covering it. Rounds: round n
+    /// resolves only through entries resolved in earlier rounds, so depth is
+    /// at most `MAX_RECURSION` and a cycle never resolves. A static no hop of
+    /// which resolves stays an `unresolved` candidate. Returns the delta
+    /// (`None` = no winner left) of every prefix whose winner changed.
+    // ponytail: linear cover scan per recursive hop per round; a prefix trie
+    // if a table ever holds thousands of recursive statics.
+    pub fn reresolve(&mut self) -> HashMap<IpNet, Option<RibEntry>> {
+        if self.static_cfg.is_empty() && self.unresolved.is_empty() && self.resolved_hops.is_empty()
+        {
+            return HashMap::new();
+        }
+        let connected: Vec<IpNet> = self
+            .entries
+            .values()
+            .flatten()
+            .filter(|e| e.source == RouteSource::Connected)
+            .map(|e| e.prefix)
+            .collect();
+        let on_link = |e: &RibEntry, gw: IpAddr| {
+            e.interface.is_some() || connected.iter().any(|n| n.contains(&gw))
+        };
+        let recursive: Vec<RibEntry> = self
+            .static_cfg
+            .values()
+            .filter(|e| e.next_hops.iter().any(|h| !on_link(e, h.gateway)))
+            .cloned()
+            .collect();
+        let old_unresolved = std::mem::take(&mut self.unresolved);
+        let old_resolved = std::mem::take(&mut self.resolved_hops);
+        let mut before: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
+        for p in old_unresolved
+            .iter()
+            .chain(old_resolved.keys())
+            .chain(recursive.iter().map(|e| &e.prefix))
+        {
+            before.insert(*p, self.best_route_in(p, &old_unresolved).cloned());
+        }
+        // Back to the configured entries; the recursive ones are pending.
+        for p in old_resolved.keys() {
+            if let Some(orig) = self.static_cfg.get(p).cloned() {
+                self.put_static(orig);
+            }
+        }
+        for e in &recursive {
+            self.put_static(e.clone());
+            self.unresolved.insert(e.prefix);
+        }
+        let mut resolved: HashMap<IpNet, Vec<NextHop>> = HashMap::new();
+        for _ in 0..MAX_RECURSION {
+            let mut round = Vec::new();
+            for e in recursive
+                .iter()
+                .filter(|e| self.unresolved.contains(&e.prefix))
+            {
+                let mut hops = Vec::new();
+                for h in &e.next_hops {
+                    if on_link(e, h.gateway) {
+                        hops.push(h.clone());
+                    } else if let Some((_, c)) = self.cover(h.gateway) {
+                        hops.extend(c.next_hops.iter().cloned());
+                    }
+                }
+                hops.sort();
+                hops.dedup();
+                if !hops.is_empty() {
+                    round.push((e, hops));
+                }
+            }
+            if round.is_empty() {
+                break;
+            }
+            for (e, hops) in round {
+                self.unresolved.remove(&e.prefix);
+                let mut derived = e.clone();
+                derived.next_hops.clone_from(&hops);
+                self.put_static(derived);
+                resolved.insert(e.prefix, hops);
+            }
+        }
+        for e in &recursive {
+            let p = e.prefix;
+            let gateway = e.next_hops[0].gateway;
+            if let Some(hops) = resolved.get(&p) {
+                if old_resolved.get(&p) != Some(hops) {
+                    let via = hops[0].gateway;
+                    info!(prefix = %p, %gateway, %via, "static next hop resolved");
+                }
+            } else if !old_unresolved.contains(&p) {
+                warn!(prefix = %p, %gateway, "static next hop unresolved");
+            }
+        }
+        self.resolved_hops = resolved;
+        let mut deltas = HashMap::new();
+        for (p, b) in before {
+            let after = self.best_route(&p).cloned();
+            if b != after {
+                deltas.insert(p, after);
+            }
+        }
+        deltas
     }
 
     /// How many `source`-sourced candidates the table holds
@@ -414,20 +594,24 @@ impl Rib {
 
     /// The winning candidate for one prefix, if any exist.
     pub fn best_route(&self, prefix: &IpNet) -> Option<&RibEntry> {
-        self.entries.get(prefix)?.iter().min_by_key(|e| e.rank())
+        self.best_route_in(prefix, &self.unresolved)
+    }
+
+    /// `best_route` with `unresolved` as the set of dormant statics.
+    fn best_route_in(&self, prefix: &IpNet, unresolved: &HashSet<IpNet>) -> Option<&RibEntry> {
+        let dormant = unresolved.contains(prefix);
+        self.entries
+            .get(prefix)?
+            .iter()
+            .filter(|e| !(dormant && e.source == RouteSource::Static))
+            .min_by_key(|e| e.rank())
     }
 
     /// The winning route for every known prefix.
     pub fn best_routes(&self) -> HashMap<IpNet, RibEntry> {
         self.entries
-            .iter()
-            .filter_map(|(prefix, candidates)| {
-                candidates
-                    .iter()
-                    .min_by_key(|e| e.rank())
-                    .cloned()
-                    .map(|e| (*prefix, e))
-            })
+            .keys()
+            .filter_map(|prefix| self.best_route(prefix).cloned().map(|e| (*prefix, e)))
             .collect()
     }
 
@@ -455,7 +639,7 @@ impl Rib {
         let mut out: Vec<(IpNet, Vec<RibEntry>)> = self
             .entries
             .iter()
-            .map(|(prefix, candidates)| (*prefix, sorted_by_preference(candidates)))
+            .map(|(prefix, candidates)| (*prefix, self.sorted(prefix, candidates)))
             .collect();
         out.sort_by_key(|(prefix, _)| *prefix);
         out
@@ -503,7 +687,7 @@ impl Rib {
         let page = prefixes
             .into_iter()
             .map(|p| {
-                let mut c = sorted_by_preference(&self.entries[&p]);
+                let mut c = self.sorted(&p, &self.entries[&p]);
                 if let Some(s) = filter.source {
                     c.retain(|e| kind(e) == s);
                 }
@@ -549,7 +733,7 @@ impl Rib {
             .iter()
             .filter(|(net, _)| net.contains(&addr))
             .max_by_key(|(net, _)| net.prefix_len())?;
-        Some((*prefix, sorted_by_preference(candidates)))
+        Some((*prefix, self.sorted(prefix, candidates)))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -607,6 +791,8 @@ impl Rib {
         for prefix in touched {
             self.refresh_ospf(&prefix);
         }
+        // The caller applies the whole table next.
+        let _ = self.reresolve();
     }
 
     /// One owner's incremental `Add`; reports the prefix's winner change.
@@ -653,6 +839,9 @@ impl Rib {
                 }
             }
         }
+        if !gone.is_empty() {
+            let _ = self.reresolve();
+        }
         gone
     }
 
@@ -683,22 +872,17 @@ impl Rib {
     /// one which may resolve a next hop (same filter as `igp_costs`):
     /// its gateway and ifindex, or `addr` itself on a `Connected` prefix.
     pub fn resolve(&self, addr: IpAddr) -> Option<nos_proto::ResolvedNextHop> {
-        self.entries
-            .iter()
-            .filter(|(net, _)| net.contains(&addr))
-            .filter_map(|(net, candidates)| Some((net, resolving_best(candidates)?)))
-            .max_by_key(|(net, _)| net.prefix_len())
-            .map(|(_, e)| {
-                let (gateway, interface_id) = match e.source {
-                    RouteSource::Connected => (addr, None),
-                    _ => (e.next_hops[0].gateway, e.next_hops[0].interface_id),
-                };
-                nos_proto::ResolvedNextHop {
-                    gateway,
-                    interface_id,
-                    source: crate::server::to_source_kind(e.source),
-                }
-            })
+        self.cover(addr).map(|(_, e)| {
+            let (gateway, interface_id) = match e.source {
+                RouteSource::Connected => (addr, None),
+                _ => (e.next_hops[0].gateway, e.next_hops[0].interface_id),
+            };
+            nos_proto::ResolvedNextHop {
+                gateway,
+                interface_id,
+                source: crate::server::to_source_kind(e.source),
+            }
+        })
     }
 
     /// IGP cost per prefix: its best non-BGP candidate's cost (`Connected`/
@@ -710,7 +894,7 @@ impl Rib {
         self.entries
             .iter()
             .filter_map(|(prefix, candidates)| {
-                let best = resolving_best(candidates)?;
+                let best = self.resolving_best(prefix, candidates)?;
                 let cost = match best.source {
                     RouteSource::Ospf => self.ospf_metrics.get(prefix).copied().unwrap_or(0),
                     _ => 0,
@@ -729,29 +913,6 @@ const ALL_SOURCES: [RouteSource; 6] = [
     RouteSource::Evpn,
     RouteSource::Vpn,
 ];
-
-/// The best candidate a next hop may resolve through: no overlay source
-/// (`Bgp`/`Evpn`/`Vpn`, so nothing resolves recursively) and no discard
-/// route (RFC 4271 section 9.1.2: unresolvable, not selectable-then-dropped).
-fn resolving_best(candidates: &[RibEntry]) -> Option<&RibEntry> {
-    candidates
-        .iter()
-        .filter(|e| {
-            !matches!(
-                e.source,
-                RouteSource::Bgp | RouteSource::Evpn | RouteSource::Vpn
-            ) && !e.is_discard()
-        })
-        .min_by_key(|e| e.rank())
-}
-
-/// Clones and sorts a prefix's candidates best (lowest preference value)
-/// first.
-fn sorted_by_preference(candidates: &[RibEntry]) -> Vec<RibEntry> {
-    let mut sorted = candidates.to_vec();
-    sorted.sort_by_key(RibEntry::rank);
-    sorted
-}
 
 /// Builds a fresh `Rib` for `table_name` from a freshly fetched `Config`.
 /// Returns `None` if no `RoutingTable` named `table_name` exists in `cfg` —
@@ -2229,5 +2390,127 @@ mod tests {
         assert_eq!(gone, vec![b]);
         assert_eq!(rib.count_source(RouteSource::Ospf), 1);
         assert_eq!(rib.igp_costs().len(), 1);
+    }
+
+    // ------------------------------------------ recursive statics (#1527)
+
+    /// A table with `10.0.0.0/24` connected, `statics` configured.
+    fn recursive_rib(statics: &[(&str, &str)]) -> Rib {
+        let mut rib = Rib::new();
+        rib.replace_source(
+            RouteSource::Connected,
+            [entry("10.0.0.0/24", "10.0.0.1", RouteSource::Connected)],
+        );
+        rib.replace_source(
+            RouteSource::Static,
+            statics
+                .iter()
+                .map(|(p, g)| entry(p, g, RouteSource::Static)),
+        );
+        rib
+    }
+
+    fn hops(rib: &Rib, prefix: &str) -> Option<Vec<IpAddr>> {
+        let e = rib.best_route(&prefix.parse().unwrap())?;
+        Some(e.next_hops.iter().map(|h| h.gateway).collect())
+    }
+
+    fn gw(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn static_resolves_through_ospf_and_follows_it() {
+        let mut rib = recursive_rib(&[("10.9.0.0/16", "172.16.0.1")]);
+        let p9: IpNet = "10.9.0.0/16".parse().unwrap();
+        assert_eq!(hops(&rib, "10.9.0.0/16"), None);
+        // Still a candidate, not installed.
+        let (_, cands) = rib.lookup(gw("10.9.1.1")).unwrap();
+        assert!(rib.is_unresolved(&p9, &cands[0]));
+        assert!(!rib.best_routes_for_kernel().contains_key(&p9));
+
+        let o = owner(false, "o");
+        let change = rib.upsert_ospf_and_diff(&o, ospf("172.16.0.0/24", "10.0.0.2"), 10);
+        assert!(matches!(change, BestPathChange::Installed(_)));
+        let d = rib.reresolve();
+        assert!(matches!(&d[&p9], Some(e) if e.next_hops[0].gateway == gw("10.0.0.2")));
+        assert_eq!(hops(&rib, "10.9.0.0/16"), Some(vec![gw("10.0.0.2")]));
+
+        // The OSPF path moves: the static follows.
+        rib.upsert_ospf_and_diff(&o, ospf("172.16.0.0/24", "10.0.0.3"), 10);
+        assert_eq!(rib.reresolve().len(), 1);
+        assert_eq!(hops(&rib, "10.9.0.0/16"), Some(vec![gw("10.0.0.3")]));
+
+        // And withdraws with it.
+        rib.remove_ospf_and_diff(&o, &"172.16.0.0/24".parse().unwrap());
+        assert_eq!(rib.reresolve()[&p9], None);
+        assert_eq!(hops(&rib, "10.9.0.0/16"), None);
+    }
+
+    #[test]
+    fn on_link_static_is_untouched_and_ecmp_is_inherited() {
+        let mut rib = recursive_rib(&[("10.9.0.0/16", "10.0.0.5"), ("10.8.0.0/16", "172.16.0.1")]);
+        assert_eq!(hops(&rib, "10.9.0.0/16"), Some(vec![gw("10.0.0.5")]));
+        let mut ecmp = ospf("172.16.0.0/24", "10.0.0.2");
+        ecmp.next_hops.push((gw("10.0.0.3"), None).into());
+        rib.replace_ospf(&owner(false, "o"), [(ecmp, 5)]);
+        assert_eq!(
+            hops(&rib, "10.8.0.0/16"),
+            Some(vec![gw("10.0.0.2"), gw("10.0.0.3")])
+        );
+    }
+
+    #[test]
+    fn recursion_depth_is_four() {
+        for (n, resolved) in [(4, true), (5, false)] {
+            let c: Vec<(String, String)> = (0..n)
+                .map(|i| {
+                    (
+                        format!("10.{}.0.0/16", 20 + i),
+                        format!("10.{}.0.1", 21 + i),
+                    )
+                })
+                .collect();
+            let statics: Vec<(&str, &str)> =
+                c.iter().map(|(p, g)| (p.as_str(), g.as_str())).collect();
+            let mut rib = recursive_rib(&statics);
+            // The last link's gateway is reached through OSPF.
+            let last = format!("10.{}.0.0/16", 20 + n);
+            rib.replace_ospf(&owner(false, "o"), [(ospf(&last, "10.0.0.2"), 1)]);
+            assert_eq!(
+                hops(&rib, "10.20.0.0/16").is_some(),
+                resolved,
+                "chain of {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn cycle_stays_unresolved_and_does_not_shadow() {
+        let mut rib =
+            recursive_rib(&[("10.20.0.0/16", "10.21.0.1"), ("10.21.0.0/16", "10.20.0.1")]);
+        assert_eq!(hops(&rib, "10.20.0.0/16"), None);
+        assert_eq!(hops(&rib, "10.21.0.0/16"), None);
+        // A self-cover (gateway inside the route's own prefix) never resolves.
+        rib.replace_source(
+            RouteSource::Static,
+            [entry("10.30.0.0/16", "10.30.0.1", RouteSource::Static)],
+        );
+        assert_eq!(hops(&rib, "10.30.0.0/16"), None);
+    }
+
+    #[test]
+    fn unresolved_static_does_not_beat_a_lower_priority_route() {
+        let mut rib = recursive_rib(&[("10.9.0.0/16", "172.16.0.1")]);
+        rib.upsert(entry("10.9.0.0/16", "10.0.0.7", RouteSource::Bgp));
+        assert_eq!(hops(&rib, "10.9.0.0/16"), Some(vec![gw("10.0.0.7")]));
+    }
+
+    #[test]
+    fn bgp_only_cover_does_not_resolve() {
+        let mut rib = recursive_rib(&[("10.9.0.0/16", "172.16.0.1")]);
+        rib.upsert(entry("172.16.0.0/24", "10.0.0.7", RouteSource::Bgp));
+        rib.reresolve();
+        assert_eq!(hops(&rib, "10.9.0.0/16"), None);
     }
 }

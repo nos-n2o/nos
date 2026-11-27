@@ -414,6 +414,11 @@ pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
 /// for the nexthop), beside `REDISTRIBUTE_GATEWAY` (10.50.0.99).
 pub const ECMP_STATIC: &str = "198.18.79.0/24";
 pub const ECMP_EXTRA_GATEWAY: Addr = Addr("10.50.0.98");
+/// `static-variants` recursion (#1527): a static through `REDISTRIBUTE_GATEWAY`
+/// and a static whose gateway lies inside it.
+pub const RECURSIVE_COVER: &str = "198.18.80.0/24";
+pub const RECURSIVE_STATIC: &str = "198.18.81.0/24";
+pub const RECURSIVE_GATEWAY: &str = "198.18.80.5";
 pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is
