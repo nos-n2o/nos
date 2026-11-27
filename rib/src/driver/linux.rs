@@ -1170,6 +1170,10 @@ impl LinuxRibDriver {
     /// Diffs `best_routes` against what's actually installed in
     /// `table_id`'s kernel table and adds/removes to converge, reusing the
     /// exact dumped `RouteMessage` for any removal.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one dump-diff-converge pass: remove, add, shadow rebuild"
+    )]
     async fn reconcile_routes(
         &self,
         table_id: u32,
@@ -1206,9 +1210,14 @@ impl LinuxRibDriver {
             .map(|(slot, hops)| (*slot, (key(hops), self.form_for(hops, slot.1))))
             .collect();
 
+        // The kernel refuses a delete naming both `RTA_NH_ID` and a gateway
+        // (what a dump of a group route carries): delete those by id alone.
         let observed_by_slot: HashMap<Slot, RouteMessage> = observed
             .iter()
-            .map(|(slot, _, _, message)| (*slot, message.clone()))
+            .map(|(slot, _, gid, message)| {
+                let by_id = gid.and_then(|g| group_route(slot.0, table_id, g));
+                (*slot, by_id.unwrap_or_else(|| message.clone()))
+            })
             .collect();
 
         let (to_add, mut to_remove) = diff_routes(&observed_map, &desired);
@@ -1753,7 +1762,7 @@ fn group_keys(records: &[NexthopRecord]) -> HashMap<u32, Key> {
 fn unmap(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(a) => a.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
+        IpAddr::V4(_) => ip,
     }
 }
 
@@ -2118,10 +2127,10 @@ fn log_removed(prefix: IpNet, key: &Key, table_id: u32, backup: bool) {
     }
 }
 
-/// A VPNv6 route (RFC 4659) leaves toward IPv4 PEs: the kernel refuses an
-/// IPv6 route with `RTA_VIA` ("IPv6 does not support RTA_VIA"), but takes
-/// the IPv4-mapped gateway (`via ::ffff:a.b.c.d`) and sends the labelled
-/// packet to the PE's IPv4 neighbour. `extract_route` maps it back.
+// A VPNv6 route (RFC 4659) leaves toward IPv4 PEs: the kernel refuses an
+// IPv6 route with `RTA_VIA` ("IPv6 does not support RTA_VIA"), but takes
+// the IPv4-mapped gateway (`via ::ffff:a.b.c.d`) and sends the labelled
+// packet to the PE's IPv4 neighbour. `extract_route` maps it back.
 fn map_hops(v4: bool, hops: &[NextHop]) -> Hops {
     if v4 || hops.is_empty() || !hops.iter().all(|h| h.gateway.is_ipv4()) {
         return hops.to_vec();

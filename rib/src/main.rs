@@ -105,6 +105,20 @@ struct Args {
     dev: DevArgs,
 }
 
+/// Test-only: each SIGUSR1 turns the nexthop groups on.
+#[cfg(feature = "dev-args")]
+fn usr1_enables_groups(driver: Arc<LinuxRibDriver>) {
+    tokio::spawn(async move {
+        let Ok(mut usr1) = signal(SignalKind::user_defined1()) else {
+            return;
+        };
+        while usr1.recv().await.is_some() {
+            driver.enable_nexthop_groups();
+            info!("nexthop groups on (SIGUSR1)");
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -149,17 +163,7 @@ async fn main() -> anyhow::Result<()> {
             let driver = Arc::new(driver);
             // e2e `ecmp-nexthop-groups`: SIGUSR1 turns groups on again.
             #[cfg(feature = "dev-args")]
-            {
-                let driver = driver.clone();
-                tokio::spawn(async move {
-                    if let Ok(mut usr1) = signal(SignalKind::user_defined1()) {
-                        while usr1.recv().await.is_some() {
-                            driver.enable_nexthop_groups();
-                            info!("nexthop groups on (SIGUSR1)");
-                        }
-                    }
-                });
-            }
+            usr1_enables_groups(driver.clone());
             driver
         }
     };

@@ -102,34 +102,29 @@ impl NexthopTable {
     pub fn ensure(&mut self, key: &GroupKey) -> Option<Plan> {
         let mut plan = Plan::default();
         for hop in key {
-            let id = match self.hops.get(hop) {
-                Some(id) => *id,
-                None => match self.alloc() {
-                    Some(id) => {
-                        self.hops.insert(hop.clone(), id);
-                        plan.new_hops.push((id, hop.clone()));
-                        id
-                    }
-                    None => {
-                        self.forget(&plan);
-                        return None;
-                    }
-                },
+            let id = if let Some(id) = self.hops.get(hop) {
+                *id
+            } else if let Some(id) = self.alloc() {
+                self.hops.insert(hop.clone(), id);
+                plan.new_hops.push((id, hop.clone()));
+                id
+            } else {
+                self.forget(&plan);
+                return None;
             };
             plan.members.push(id);
         }
-        match self.groups.get(key) {
-            Some(id) => plan.group = *id,
-            None => {
-                let Some(id) = self.alloc() else {
-                    self.forget(&plan);
-                    return None;
-                };
-                self.groups.insert(key.clone(), id);
-                self.members.insert(id, plan.members.clone());
-                plan.group = id;
-                plan.new_group = true;
-            }
+        if let Some(id) = self.groups.get(key) {
+            plan.group = *id;
+        } else {
+            let Some(id) = self.alloc() else {
+                self.forget(&plan);
+                return None;
+            };
+            self.groups.insert(key.clone(), id);
+            self.members.insert(id, plan.members.clone());
+            plan.group = id;
+            plan.new_group = true;
         }
         Some(plan)
     }
@@ -395,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names, reason = "a, b: two hops")]
     fn seed_adopts_the_kernels_objects() {
         let mut t = table();
         let a = hop("10.0.0.1", 2);
