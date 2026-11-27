@@ -44,6 +44,12 @@ const ATTACHED_6: &str = "acl attached interface=eth0 direction=in acl=EDGE6";
 /// `d-nd` (deny icmpv6 type 135) shadows implicit 135: 1 + 1 + 2 + 3
 /// implicit + 2 defaults = 9 again, still two levels.
 const COMPILED_6B: &str = "compiled acl acl=EDGE6 rules=3 filters=9 levels=2 shadowed=0";
+/// Step 5c (#1539), `EDGE7`: default permit, `d-port` (deny udp from
+/// router-b port 9) and `d-frag` (deny fragments from router-b), both IPv4
+/// and denies, neither trailing; they overlap in the optimiser's
+/// over-approximation: 2 levels, 2 filters + 2 defaults.
+const COMPILED_7: &str = "compiled acl acl=EDGE7 rules=2 filters=4 levels=2 shadowed=0";
+const ATTACHED_7: &str = "acl attached interface=eth0 direction=in acl=EDGE7";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 /// Step 2b (#544): router-b's TCP from its address, denied and sampled on
@@ -349,6 +355,76 @@ async fn nd_permit(w: &World) -> anyhow::Result<()> {
         .await
 }
 
+/// Step 5c (#1539): router-b sends 20 UDP datagrams of 4000 bytes to port 9
+/// (3 fragments each at MTU 1500). `d-port` counts the 20 first fragments
+/// (they carry the UDP header), `d-frag` the 40 later ones, which no L4 key
+/// can match. The BGP session (TCP) matches neither.
+async fn fragments(w: &World) -> anyhow::Result<()> {
+    log("step 5c (#1539): EDGE7, d-port catches first fragments, d-frag the later ones");
+    let a = w.a()?;
+    let (compiled, attached, ended) = (a.count(COMPILED_7), a.count(ATTACHED_7), a.count(ENDED));
+    a.provision(&[
+        "--acl-default",
+        "EDGE7=permit",
+        "--acl-rule",
+        &format!("EDGE7,d-port,deny,udp,{IP_B}/32,any,9"),
+        "--acl-in",
+        "eth0=EDGE7",
+    ])
+    .await?;
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let _ = a.rest(Method::DELETE, &tx, None).await;
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    let rule = serde_json::json!({
+        "name": "d-frag", "action": "Deny", "fragments": true,
+        "source": format!("{IP_B}/32"),
+    });
+    a.rest_expect(
+        Method::PUT,
+        &format!("{tx}/acl/EDGE7/rule/d-frag?after=d-port"),
+        Some(&rule.to_string()),
+        200,
+    )
+    .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    a.wait_new(COMPILED_7, compiled, 30).await?;
+    a.wait_new(ATTACHED_7, attached, 30).await?;
+    let script = format!(
+        "use Socket; socket(my $s, AF_INET, SOCK_DGRAM, 0); \
+         setsockopt($s, SOL_SOCKET, 25, \"{RLFA_VRF}\") or die \"bind: $!\"; \
+         my $d = sockaddr_in(9, inet_aton(\"{IP_A}\")); \
+         send($s, \"x\" x 4000, 0, $d) or die \"send: $!\" for 1..20; sleep 1"
+    );
+    let (code, out) = w
+        .dock
+        .exec_root("router-b", &["perl", "-e", &script])
+        .await?;
+    anyhow::ensure!(code == 0, "router-b UDP burst failed ({code}): {out}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = a
+            .rest_expect(Method::GET, "/v1/acl/EDGE7", None, 200)
+            .await?;
+        let acl: serde_json::Value = serde_json::from_str(&body)?;
+        let n = |name| rule_of(&acl, name).and_then(|r| r["packets"].as_u64());
+        if n("d-frag") >= Some(40) {
+            anyhow::ensure!(
+                n("d-port") == Some(20) && n("d-frag") == Some(40),
+                "fragment counters: {body}"
+            );
+            break;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "d-frag never reached 40: {body}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    a.assert_quiet(ENDED, ended, 12).await?;
+    let detached = a.count(DETACHED);
+    a.provision(&["--acl-in", "eth0="]).await?;
+    a.wait_new(DETACHED, detached, 30).await
+}
+
 pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     // A hold-time change restarts the session (`diff_peers`).
@@ -473,6 +549,8 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let detached = a.count(DETACHED);
     a.provision(&["--acl-in", "eth0="]).await?;
     a.wait_new(DETACHED, detached, 30).await?;
+
+    fragments(w).await?;
 
     nd_permit(w).await?;
 

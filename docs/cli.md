@@ -216,7 +216,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
 - **Build one:**
   - `set acl EDGE default-action permit` (the default is `deny`)
   - `set acl EDGE rule p-bgp action permit`, then `set acl EDGE rule p-bgp protocol tcp` and `set acl EDGE rule p-bgp destination-port 179`
-- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `log`. An unset field matches anything.
+- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `fragments`, `log`. An unset field matches anything.
 - **Order:** a new rule is appended. `set acl EDGE rule d-bgp before p-bgp` inserts it, `move acl EDGE rule d-bgp after p-bgp` reorders it (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)). Rule names are required and unique within the ACL.
 - **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate), on a switching-profile port, and when an interface and its untagged subinterface (one kernel device) both set one for the same direction.
 - **Directions:** `acl in` filters what the link receives, `acl out` what it sends, the router's own packets included.
@@ -237,7 +237,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
   - The hop limit of 255 is not checked (flower cannot match it).
   - Only IPv4 and IPv6 are filtered; ARP, LACP, LLDP and STP always pass.
   - A physical interface's ACL sees untagged frames only; attach to the subinterface for tagged traffic.
-  - A rule with a port, `established` or ICMP match never matches non-first IP fragments.
+  - A rule with a port, `established` or ICMP match never matches non-first IP fragments (their L4 header is absent). `fragments` matches exactly those (IPv4 and IPv6, offset > 0; never first fragments or unfragmented packets); `source`, `destination` and `protocol` still apply, ports, `established` and `icmp-type`/`icmp-code` are refused with it. To block a port fully, pair the rules: `set acl EDGE rule d-ssh action deny protocol tcp destination-port 22` then `set acl EDGE rule d-frag action deny fragments`.
   - `established` is stateless: it means TCP ACK or RST is set.
 - **Log what a rule matches:** `set acl EDGE rule d-bgp log`.
   - Each matching packet gives `acl log acl=EDGE rule=d-bgp interface=eth0 direction=in src=.. dst=.. proto=6 sport=.. dport=.. suppressed=0` in `show log` (ICMP: `sport` is the type, `dport` the code; `-` when unknown).

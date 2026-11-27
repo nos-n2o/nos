@@ -2217,6 +2217,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Log the packets the rule matches.",
             "Not logged yet: the rule filters as usual and `nos-acld` warns `acl log not supported yet`. `delete log` turns it off.",
         ),
+        Topic::AclRuleFragments => (
+            "Match non-first IP fragments only.",
+            "Matches IPv4 and IPv6 fragments with a non-zero offset: first fragments and unfragmented packets never match. `source`, `destination` and `protocol` still apply; ports, `established` and `icmp-type`/`icmp-code` are refused, since only the first fragment carries the L4 header. Pair it with a port rule to also catch the later fragments of the same packet. `delete fragments` turns it off.",
+        ),
         Topic::InterfaceAclIn => (
             "Filter the IP packets received on this link.",
             "The name of an `acl`. The commit is refused when it does not exist, on a loopback, a port aggregate member (attach it to the aggregate) or a switching-profile port, and when the interface and its untagged subinterface (one device) both set one. The ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first, and `icmpv6` on IPv6 (the default deny drops Neighbor Discovery). A physical interface sees untagged frames only; attach to the subinterface for tagged traffic.",

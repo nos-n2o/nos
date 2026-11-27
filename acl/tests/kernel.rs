@@ -106,7 +106,13 @@ fn attach_replace_detach_leave_foreign_filters() {
     );
     assert_eq!(d.live_chain(i, Direction::In).unwrap(), Some(ACL_CHAIN_A));
 
-    let two = compile(&acl(vec![established, deny_bgp.clone()])).unwrap();
+    let frags = AclRule {
+        name: "frags".into(),
+        action: AclAction::Deny,
+        fragments: true,
+        ..Default::default()
+    };
+    let two = compile(&acl(vec![established, deny_bgp.clone(), frags])).unwrap();
     d.install(i, Direction::In, ACL_CHAIN_B, &two).unwrap();
     d.switch(i, Direction::In, ACL_CHAIN_B, Some(ACL_CHAIN_A))
         .unwrap();
@@ -119,6 +125,7 @@ fn attach_replace_detach_leave_foreign_filters() {
         "{chain}"
     );
     assert!(chain.contains("src_port 1000-2000"), "{chain}");
+    assert!(chain.contains("ip_flags frag/nofirstfrag"), "{chain}");
     assert_eq!(d.live_chain(i, Direction::In).unwrap(), Some(ACL_CHAIN_B));
     // Flushing an empty chain again is fine.
     d.flush(i, Direction::In, ACL_CHAIN_A).unwrap();

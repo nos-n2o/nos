@@ -46,6 +46,7 @@ fn rule_matches(r: &AclRule, p: &Packet) -> bool {
             .is_none_or(|x| l4 && tcp_udp && (x.start..=x.end).contains(&p.sport))
         && r.destination_port
             .is_none_or(|x| l4 && tcp_udp && (x.start..=x.end).contains(&p.dport))
+        && (!r.fragments || p.non_first_fragment)
         && (!r.established || (l4 && p.proto == 6 && p.flags & (ACK | RST) != 0))
         && r.icmp_type
             .is_none_or(|t| l4 && matches!(p.proto, 1 | 58) && p.icmp.0 == t)
@@ -78,6 +79,9 @@ fn flower_matches(protocol: Protocol, k: &FlowerKeys, p: &Packet) -> bool {
             .is_none_or(|(lo, hi)| l4 && matches!(p.proto, 6 | 17) && (lo..=hi).contains(&p.sport))
         && k.dst_port
             .is_none_or(|(lo, hi)| l4 && matches!(p.proto, 6 | 17) && (lo..=hi).contains(&p.dport))
+        // A non-first fragment has is_fragment=1, first_frag=0; any other packet 0, 0.
+        && k.flags
+            .is_none_or(|(v, m)| (u32::from(p.non_first_fragment) ^ v) & m == 0)
         && k.tcp_flags
             .is_none_or(|(v, m)| l4 && p.proto == 6 && p.flags & m == v & m)
         && k.icmp_type
@@ -165,56 +169,66 @@ fn rule() -> impl Strategy<Value = AclRule> {
         prop::option::of(0u8..5),
         prop::option::of(0u8..2),
     );
-    (proto, nets, ports, extra, any::<bool>(), any::<bool>()).prop_map(
-        |(proto, (v6, s, d), (sp, dp), (est, ity, ico), deny, log)| {
-            let protocol = proto.map(|i| match i {
-                0 => AclProtocol::Tcp,
-                1 => AclProtocol::Udp,
-                2 => AclProtocol::Icmp,
-                3 => AclProtocol::Icmpv6,
-                _ => AclProtocol::Number(89),
-            });
-            // The commit's rules: prefixes agree with each other and with
-            // the ICMP flavour; L4 fields need the matching protocol.
-            let v6 = match protocol {
-                Some(AclProtocol::Icmp) => false,
-                Some(AclProtocol::Icmpv6) => true,
-                _ => v6,
-            };
-            let net = |i: Option<usize>| {
-                i.map(|i| {
-                    let pool: &[&str] = if v6 { &V6_NETS } else { &V4_NETS };
-                    pool[i % pool.len()].parse::<IpNet>().unwrap()
-                })
-            };
-            let tcp_udp = matches!(protocol, Some(AclProtocol::Tcp | AclProtocol::Udp));
-            let icmp = matches!(protocol, Some(AclProtocol::Icmp | AclProtocol::Icmpv6));
-            let range = |r: Option<(u16, u16)>| {
-                r.filter(|_| tcp_udp)
-                    .map(|(start, end)| PortRange { start, end })
-            };
-            let icmp_type = ity
-                .filter(|_| icmp)
-                .map(|t| [8, 0, 135, 136, 134][usize::from(t)]);
-            AclRule {
-                action: if deny {
-                    AclAction::Deny
-                } else {
-                    AclAction::Permit
-                },
-                protocol,
-                source: net(s),
-                destination: net(d),
-                source_port: range(sp),
-                destination_port: range(dp),
-                established: est && protocol == Some(AclProtocol::Tcp),
-                icmp_code: ico.filter(|_| icmp_type.is_some()),
-                icmp_type,
-                log,
-                ..Default::default()
-            }
-        },
+    (
+        proto,
+        nets,
+        ports,
+        extra,
+        (any::<bool>(), any::<bool>()),
+        any::<bool>(),
     )
+        .prop_map(
+            |(proto, (v6, s, d), (sp, dp), (est, ity, ico), (deny, log), frag)| {
+                let protocol = proto.map(|i| match i {
+                    0 => AclProtocol::Tcp,
+                    1 => AclProtocol::Udp,
+                    2 => AclProtocol::Icmp,
+                    3 => AclProtocol::Icmpv6,
+                    _ => AclProtocol::Number(89),
+                });
+                // The commit's rules: prefixes agree with each other and with
+                // the ICMP flavour; L4 fields need the matching protocol.
+                let v6 = match protocol {
+                    Some(AclProtocol::Icmp) => false,
+                    Some(AclProtocol::Icmpv6) => true,
+                    _ => v6,
+                };
+                let net = |i: Option<usize>| {
+                    i.map(|i| {
+                        let pool: &[&str] = if v6 { &V6_NETS } else { &V4_NETS };
+                        pool[i % pool.len()].parse::<IpNet>().unwrap()
+                    })
+                };
+                let tcp_udp = matches!(protocol, Some(AclProtocol::Tcp | AclProtocol::Udp));
+                let icmp = matches!(protocol, Some(AclProtocol::Icmp | AclProtocol::Icmpv6));
+                let range = |r: Option<(u16, u16)>| {
+                    r.filter(|_| tcp_udp)
+                        .map(|(start, end)| PortRange { start, end })
+                };
+                let icmp_type = ity
+                    .filter(|_| icmp)
+                    .map(|t| [8, 0, 135, 136, 134][usize::from(t)]);
+                AclRule {
+                    action: if deny {
+                        AclAction::Deny
+                    } else {
+                        AclAction::Permit
+                    },
+                    protocol,
+                    source: net(s),
+                    destination: net(d),
+                    source_port: range(sp),
+                    destination_port: range(dp),
+                    established: est && protocol == Some(AclProtocol::Tcp),
+                    icmp_code: ico.filter(|_| icmp_type.is_some()),
+                    icmp_type,
+                    log,
+                    // The validator refuses `fragments` next to an L4 key.
+                    fragments: frag && sp.is_none() && dp.is_none() && !est && icmp_type.is_none(),
+                    ..Default::default()
+                }
+            },
+        )
 }
 
 fn packet() -> impl Strategy<Value = Packet> {

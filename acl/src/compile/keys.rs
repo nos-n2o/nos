@@ -1,7 +1,9 @@
 //! Overlap and containment of two filters' matches (pure). Exact on the
 //! fields `rule::filters` sets: family, IP protocol, prefixes, port ranges,
-//! TCP flags, ICMP type/code. Anything else a `FlowerKeys` can hold (MAC,
-//! fragment flags, tunnel) is never set by a rule and is ignored here.
+//! TCP flags, fragment flags, ICMP type/code. Anything else a `FlowerKeys`
+//! can hold (MAC, tunnel) is never set by a rule and is ignored here. An
+//! L4-keyed filter and a `fragments` one never share a packet, yet overlap is
+//! reported (over-approximation only costs a level).
 
 use std::net::IpAddr;
 
@@ -67,6 +69,10 @@ pub(super) fn overlap(a: &Filter, b: &Filter) -> bool {
             (Some((av, am)), Some((bv, bm))) => (av ^ bv) & am & bm == 0,
             _ => true,
         }
+        && match (a.keys.flags, b.keys.flags) {
+            (Some((av, am)), Some((bv, bm))) => (av ^ bv) & am & bm == 0,
+            _ => true,
+        }
 }
 
 /// Every packet `b` matches, `a` matches too. Under-approximating is safe
@@ -75,6 +81,11 @@ pub(super) fn contains(a: &Filter, b: &Filter) -> bool {
     a.protocol == b.protocol
         && dims(a, b).iter().all(|&(x, y)| holds(x, y))
         && match (a.keys.tcp_flags, b.keys.tcp_flags) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some((av, am)), Some((bv, bm))) => am & !bm == 0 && (av ^ bv) & am == 0,
+        }
+        && match (a.keys.flags, b.keys.flags) {
             (None, _) => true,
             (Some(_), None) => false,
             (Some((av, am)), Some((bv, bm))) => am & !bm == 0 && (av ^ bv) & am == 0,
@@ -182,6 +193,17 @@ mod tests {
         assert_eq!(rel(&ack, &not_ack), (false, false, false));
         assert_eq!(rel(&ack, &both), (true, true, false));
         assert_eq!(rel(&v4(|_| {}), &ack), (true, true, false));
+    }
+
+    #[test]
+    fn fragment_flags_are_ternary() {
+        let later = v4(|k| k.flags = Some((1, 3)));
+        let any_frag = v4(|k| k.flags = Some((1, 1)));
+        let first = v4(|k| k.flags = Some((3, 3)));
+        assert_eq!(rel(&later, &later), (true, true, true));
+        assert_eq!(rel(&any_frag, &later), (true, true, false));
+        assert_eq!(rel(&later, &first), (false, false, false));
+        assert_eq!(rel(&v4(|_| {}), &later), (true, true, false));
     }
 
     #[test]

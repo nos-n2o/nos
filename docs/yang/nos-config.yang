@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-08 {
+  revision 2026-12-09 {
     description "Generated.";
   }
 
@@ -2350,6 +2350,10 @@ module nos-config {
       leaf log {
         type boolean;
         description "Log the packets the rule matches.";
+      }
+      leaf fragments {
+        type boolean;
+        description "Match non-first IP fragments only.";
       }
     }
   }

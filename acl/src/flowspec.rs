@@ -6,6 +6,7 @@
 //! that priority with the same actions. What flower cannot express exactly
 //! is refused, never approximated (owner decision D3 of #16).
 
+use crate::compile::LATER_FRAGMENT;
 use crate::driver::sample_kind;
 use nos_proto::{FlowBitOp, FlowComponent, FlowNumOp, FlowRule, FlowRuleAction};
 use nos_tc::{
@@ -166,7 +167,7 @@ const FIRST_FRAGMENT: (u32, u32) = (
     FLAG_IS_FRAGMENT | FLAG_FRAG_IS_FIRST,
     FLAG_IS_FRAGMENT | FLAG_FRAG_IS_FIRST,
 );
-const LATER_FRAGMENT: (u32, u32) = (FLAG_IS_FRAGMENT, FLAG_IS_FRAGMENT | FLAG_FRAG_IS_FIRST);
+
 /// RFC 8955 type 12 bits.
 const IS_F: u64 = 0x02;
 const FF: u64 = 0x04;

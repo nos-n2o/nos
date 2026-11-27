@@ -7,6 +7,8 @@ mod keys;
 mod optimize;
 mod rule;
 
+pub(crate) use rule::LATER_FRAGMENT;
+
 use nos_proto::schema::{Acl, AclAction};
 use nos_tc::{FlowerKeys, Protocol};
 

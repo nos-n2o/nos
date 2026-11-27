@@ -1,7 +1,7 @@
 //! One user rule to its flower filters.
 
 use nos_proto::schema::{AclProtocol, AclRule};
-use nos_tc::{FlowerKeys, Protocol};
+use nos_tc::{FlowerKeys, Protocol, FLAG_FRAG_IS_FIRST, FLAG_IS_FRAGMENT};
 
 use super::{Filter, IMPLICIT_ND_COOKIE};
 use nos_proto::schema::AclAction;
@@ -9,6 +9,10 @@ use nos_proto::schema::AclAction;
 /// TCP header flag bits (RFC 9293 §3.1).
 const TCP_RST: u16 = 0x04;
 const TCP_ACK: u16 = 0x10;
+
+/// Flower `ip_flags` of a non-first fragment: fragment set, first-fragment clear.
+pub(crate) const LATER_FRAGMENT: (u32, u32) =
+    (FLAG_IS_FRAGMENT, FLAG_IS_FRAGMENT | FLAG_FRAG_IS_FIRST);
 
 /// The families a rule applies to: its prefixes' (validated to agree), else
 /// its ICMP flavour's, else both.
@@ -25,9 +29,9 @@ fn families(r: &AclRule) -> Vec<Protocol> {
 /// `r`'s filters, every one carrying `index` as its cookie. `established` is
 /// two filters (ACK set, RST set): flower matches one flag mask per filter.
 ///
-/// ponytail: an L4 key (ports, TCP flags, ICMP type/code) never matches a
-/// non-first fragment, whose L4 header the flow dissector leaves zero (D12);
-/// a rule wanting those needs a `FLAG_IS_FRAGMENT` twin filter.
+/// An L4 key (ports, TCP flags, ICMP type/code) never matches a non-first
+/// fragment, whose L4 header the flow dissector leaves zero (D12); `fragments`
+/// adds the `LATER_FRAGMENT` flag key so a twin rule can catch those.
 pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
     let base = FlowerKeys {
         ip_proto: r.protocol.map(AclProtocol::number),
@@ -37,6 +41,7 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
         dst_port: r.destination_port.map(|p| (p.start, p.end)),
         icmp_type: r.icmp_type,
         icmp_code: r.icmp_code,
+        flags: r.fragments.then_some(LATER_FRAGMENT),
         ..Default::default()
     };
     let flags: Vec<Option<(u16, u16)>> = if r.established {
@@ -164,6 +169,17 @@ mod tests {
             (f[0].keys.ip_proto, f[0].keys.icmp_type, f[0].keys.icmp_code),
             (Some(58), Some(135), Some(0))
         );
+    }
+
+    #[test]
+    fn fragments_adds_the_later_fragment_flags_per_family() {
+        let r = rule(|r| r.fragments = true);
+        let f = filters(&r, 0);
+        assert_eq!(f.len(), 2);
+        assert!(f.iter().all(|f| f.keys.flags == Some((1, 3))));
+        assert!(filters(&rule(|_| {}), 0)
+            .iter()
+            .all(|f| f.keys.flags.is_none()));
     }
 
     #[test]
