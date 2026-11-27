@@ -2244,10 +2244,15 @@ pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_a, 90).await?;
     b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_b, 90).await?;
 
-    // Stop router-a's nos-ospfd so it stops refreshing: router-b's held copy
-    // must then age out purely on its own local clock.
-    log("killing router-a's nos-ospfd to stop further refreshes");
-    w.dock.kill_process("router-a", "nos-ospfd").await?;
+    // Freeze router-a's nos-ospfd so it stops refreshing: router-b's held copy
+    // must then age out purely on its own local clock. SIGSTOP, not a kill:
+    // the watchdog respawns a killed daemon, whose fresh LSA is refuted with
+    // router-b's database copy (RFC 2328 §13 step 8, #1626) and re-originated
+    // above it, which legitimately refreshes router-b's copy.
+    log("freezing router-a's nos-ospfd to stop further refreshes");
+    w.dock
+        .signal_process("router-a", "nos-ospfd", "-STOP")
+        .await?;
     b.wait_new(
         &format!("ospf lsa maxage flushed.*advertising_router={OSPF_ROUTER_ID}"),
         0,
