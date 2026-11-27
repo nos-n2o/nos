@@ -26,8 +26,8 @@ use tracing::{debug, info};
 
 use nos_tc::{Action, ActionKind, Filter, FlowerKeys, Hook, Kind, Protocol, Request, Verdict};
 
-use super::nexthop::{self, Nexthop};
 use super::{is_local_mac, is_local_neigh, vxlan_name, DriverError, FdbDriver, Mac, VXLAN_PORT};
+use nos_nexthop::{Gateway, Group, Nexthop};
 
 /// Local bias (RFC 8365 §8.3.1, `docs/protocols/evpn-vxlan.md`): the bridge
 /// only sees the inner frame, so the *outer* source of a core-origin BUM
@@ -391,7 +391,7 @@ impl LinuxFdbDriver {
 
     /// Runs one nexthop request on a blocking thread (see `nexthop`).
     async fn nexthop(&self, nh: Nexthop, tolerate: i32) -> Result<(), DriverError> {
-        tokio::task::spawn_blocking(move || nexthop::send(&nh, tolerate))
+        tokio::task::spawn_blocking(move || nos_nexthop::send(&nh, tolerate))
             .await
             .map_err(|e| DriverError::Other(e.to_string()))?
             .map_err(|e| DriverError::Other(format!("nexthop request failed: {e}")))
@@ -450,7 +450,7 @@ impl LinuxFdbDriver {
                 id
             } else {
                 let id = self.next_nexthop_id(vni)?;
-                self.nexthop(Nexthop::Gateway { id, gateway: *vtep }, 0)
+                self.nexthop(Nexthop::Gateway(Gateway::fdb(id, *vtep)), 0)
                     .await?;
                 self.commit_nexthop(vni, |s| {
                     s.gateways.insert(*vtep, id);
@@ -460,7 +460,16 @@ impl LinuxFdbDriver {
             members.push(id);
         }
         let id = self.next_nexthop_id(vni)?;
-        self.nexthop(Nexthop::Group { id, members }, 0).await?;
+        let members = members.into_iter().map(|m| (m, 1)).collect();
+        self.nexthop(
+            Nexthop::Group(Group {
+                id,
+                members,
+                fdb: true,
+            }),
+            0,
+        )
+        .await?;
         self.commit_nexthop(vni, |s| {
             s.groups.insert(key, id);
         });

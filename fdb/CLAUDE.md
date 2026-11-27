@@ -22,7 +22,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 - Segment pin: `NUD_NOARP` + nested (`NLA_F_NESTED`) `NDA_FDB_EXT_ATTRS { NFEA_ACTIVITY_NOTIFY }`, not `extern_learn`.
 - Single-active block: STP state **disabled** via `RTM_SETLINK` + `IFLA_PROTINFO`. *Blocking* and the `RTM_NEWLINK` slave-data path silently do nothing.
 - A forward-facing FDB entry must be **deleted before it changes form** (nexthop group vs plain): the kernel keeps the old form on `replace`.
-- Nexthops (`nexthop.rs`) are hand-encoded netlink, unit tests pin the bytes; tc goes through `nos-tc` (`tc/CLAUDE.md`: priorities 1 and 2 are ours).
+- Nexthops are hand-encoded netlink in the `nos-nexthop` crate (`Gateway::fdb`, `Group`), unit tests there pin the bytes; tc goes through `nos-tc` (`tc/CLAUDE.md`: priorities 1 and 2 are ours).
 - With the underlay in a VRF, receiving VXLAN needs `net.ipv4.udp_l3mdev_accept=1`; nothing in nos sets it (unprivileged daemons), the e2e helper does.
 - `local_mac_ages` (`NDA_CACHEINFO` `used`, USER_HZ ticks) is read per `GetMacs`, never stored: `refresh_local` must not see a ticking age (#1463).
 - Loop guards: `local_macs` skips `extern_learn` entries (fdbd's own writes), the VXLAN port and inactive segment pins.
@@ -57,7 +57,7 @@ Config is a `BroadcastDomain` (`vni`, `rd`, route targets, `vtep_source`, `redis
 | `fdb.rs` | `Fdb`: the MAC table (`received`, `installed`, `local` with each MAC's port, `ads`, `es_down`), `desired`/`local_routes`/`plan_df`/`plan_local_bias`/`ad_index` (pure), `set_ready`/`apply_push`/`sync_df`/`refresh_local`/`run_local`/`table` |
 | `df.rs` | pure DF election (`candidates`/`elect` modulo, `elect_hrw`/`hrw_weight`, `effective`) |
 | `reconcile.rs` | config diff + tick → `Ready` → `Fdb::set_ready` |
-| `driver/` | `FdbDriver`, `linux.rs`, `noop.rs`, `nexthop.rs`, `is_local_mac` (pure) |
+| `driver/` | `FdbDriver`, `linux.rs`, `noop.rs`, `is_local_mac` (pure) |
 | `bgp_client.rs`, `interface_client.rs`, `server.rs` | push to `nos-bgpd`; bridge/VTEP/bond lookups (over `nos_daemon::ipc::one_shot`); `GetMacs`/`PushEvpnRoutes` |
 
 Config/watchdog clients and the `main()` bootstrap come from `nos-daemon` (`daemon/CLAUDE.md`).

@@ -1962,6 +1962,7 @@ dependencies = [
  "netlink-sys",
  "nos-daemon",
  "nos-log-client",
+ "nos-nexthop",
  "nos-pki",
  "nos-proto",
  "nos-tc",
@@ -2088,6 +2089,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nos-nexthop"
+version = "0.1.0"
+dependencies = [
+ "netlink-sys",
 ]
 
 [[package]]
