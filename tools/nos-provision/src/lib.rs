@@ -1325,6 +1325,17 @@ pub struct Args {
     #[arg(long)]
     pub lacp_port_priority: Option<u16>,
 
+    /// If set (requires `--port-aggregate`), enables LACP fallback on every
+    /// `--enslave-interface-into-port-aggregate` member
+    /// (`InterfaceOp::SetLacpFallback`).
+    #[arg(long)]
+    pub lacp_fallback: bool,
+
+    /// If set (requires `--port-aggregate`), the LACP fallback timeout in
+    /// seconds of every member (`InterfaceOp::SetLacpFallbackTimeout`).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=3600))]
+    pub lacp_fallback_timeout: Option<u16>,
+
     /// The LACP v2 flags (#892), flattened to keep `Args`' derive frame small.
     #[command(flatten)]
     pub lacp_v2: LacpV2Args,
@@ -4215,6 +4226,18 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     priority,
                 }));
             }
+            if args.lacp_fallback {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallback {
+                    name: member.clone(),
+                    enabled: true,
+                }));
+            }
+            if let Some(seconds) = args.lacp_fallback_timeout {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallbackTimeout {
+                    name: member.clone(),
+                    seconds,
+                }));
+            }
             if let Some(base) = args.lacp_v2.lacp_link_number {
                 let index = if args.lacp_v2.lacp_link_number_descending {
                     args.port_aggregate_members.len() - 1 - index
@@ -4243,6 +4266,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_bfd.is_some()
         || args.port_aggregate_bfd_peer.is_some()
         || args.lacp_port_priority.is_some()
+        || args.lacp_fallback
+        || args.lacp_fallback_timeout.is_some()
         || args.lacp_v2.lacp_version.is_some()
         || args.lacp_v2.lacp_port_algorithm.is_some()
         || args.lacp_v2.lacp_conversation_map.is_some()
@@ -6178,6 +6203,9 @@ mod tests {
             "10.0.0.2",
             "--lacp-port-priority",
             "200",
+            "--lacp-fallback",
+            "--lacp-fallback-timeout",
+            "45",
             "--lacp-mode",
             "passive",
             "--port-aggregate-untagged-domain",
@@ -6281,6 +6309,20 @@ mod tests {
             &ConfigOp::Interface(InterfaceOp::SetLacpPortPriority {
                 name: "eth1".into(),
                 priority: 200,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLacpFallback {
+                name: "eth1".into(),
+                enabled: true,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLacpFallbackTimeout {
+                name: "eth1".into(),
+                seconds: 45,
             }),
         );
         has(
@@ -6972,6 +7014,11 @@ mod tests {
             (&["--lacp-system-priority", "1"], "require --port-aggregate"),
             (&["--min-links", "2"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
+            (&["--lacp-fallback"], "require --port-aggregate"),
+            (
+                &["--lacp-fallback-timeout", "5"],
+                "require --port-aggregate",
+            ),
             (&["--lacp-version", "1"], "require --port-aggregate"),
             (
                 &["--lacp-port-algorithm", "c-vlan"],

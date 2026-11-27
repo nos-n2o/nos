@@ -8,6 +8,7 @@ lacp bond1
     port-number               4
     port-priority             50
     mode                      passive
+    fallback                  -
     receive                   current
     mux                       distributing
     selected                  yes
@@ -27,6 +28,7 @@ lacp bond1
     port-number               4
     port-priority             50
     mode                      active
+    fallback                  -
     receive                   defaulted
     mux                       detached
     selected                  no
@@ -56,6 +58,7 @@ lacp bond22
     port-number               4
     port-priority             50
     mode                      passive
+    fallback                  -
     receive                   current
     mux                       distributing
     selected                  yes

@@ -796,14 +796,12 @@ mod tests {
             .apply(&mut cfg)
             .unwrap();
         assert_eq!(cfg.interfaces[0].lacp_fallback_timeout, None);
-        assert!(
-            InterfaceOp::SetLacpFallback {
-                name: "nope".into(),
-                enabled: true
-            }
-            .apply(&mut cfg)
-            .is_err()
-        );
+        assert!(InterfaceOp::SetLacpFallback {
+            name: "nope".into(),
+            enabled: true
+        }
+        .apply(&mut cfg)
+        .is_err());
     }
 
     #[test]

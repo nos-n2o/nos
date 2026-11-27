@@ -42,6 +42,7 @@ fn sample() -> PortAggregateLacpSummary {
             marker_pdus_rx: 0,
             marker_responses_tx: 0,
             marker_responses_rx: 0,
+            fallback: nos_proto::LacpFallback::Disabled,
         }],
         version: nos_proto::LacpVersion::V1,
         port_algorithm: nos_proto::LacpPortAlgorithm::Unspecified,
