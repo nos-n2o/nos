@@ -360,3 +360,63 @@ fn a_flood_through_a_log_rule_is_sampled_sparsely_and_still_counted() {
         .sum();
     assert_eq!(decided, SENT, "{rows:?}");
 }
+
+/// Sends one hand-built IPv4 UDP frame (dst port 9) on `dev` with the given
+/// IP flags/offset field (`0x2000` = first fragment, `0` = unfragmented).
+const SEND: &str = r#"
+import socket, struct, sys
+dev, frag = sys.argv[1], int(sys.argv[2], 0)
+udp = struct.pack("!HHHH", 1234, 9, 16, 0) + b"x" * 8
+ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 1, frag, 64, 17, 0,
+                 bytes([10, 0, 0, 1]), bytes([10, 0, 0, 2]))
+s = sum(struct.unpack("!10H", ip)); s = (s & 0xffff) + (s >> 16); s = (s & 0xffff) + (s >> 16)
+ip = ip[:10] + struct.pack("!H", ~s & 0xffff) + ip[12:]
+eth = bytes.fromhex("0200000000020200000000010800") + ip + udp
+r = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+r.bind((dev, 0)); r.send(eth)
+"#;
+
+/// Measured on Linux 7.2 (#1539): flower never parses the L4 header of a
+/// first fragment, whatever `ip_flags` the filter carries, so an L4 key
+/// (`dst_port`) misses first fragments as well as later ones. If a kernel
+/// ever changes that, this test fails and the ACL can drop its workaround.
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn flower_never_parses_l4_of_a_first_fragment() {
+    run(&[
+        "ip", "link", "add", "va", "type", "veth", "peer", "name", "vb",
+    ]);
+    for d in ["va", "vb"] {
+        run(&["ip", "link", "set", d, "up"]);
+    }
+    run(&["tc", "qdisc", "add", "dev", "vb", "clsact"]);
+    // `tc -s` prints `Sent N bytes M pkt` per action.
+    let packets = || -> u32 {
+        let out = run(&["tc", "-s", "filter", "show", "dev", "vb", "ingress"]);
+        let tail = out.split("Sent ").nth(1).unwrap_or("0 bytes 0 pkt");
+        tail.split_whitespace().nth(2).unwrap().parse().unwrap()
+    };
+    let probe = |flags: &[&str], frag: &str| -> u32 {
+        run(&["tc", "filter", "del", "dev", "vb", "ingress"]);
+        let mut cmd = vec![
+            "tc", "filter", "add", "dev", "vb", "ingress", "protocol", "ip", "flower", "ip_proto",
+            "udp", "dst_port", "9",
+        ];
+        cmd.extend_from_slice(flags);
+        cmd.extend(["action", "drop"]);
+        run(&cmd);
+        run(&["python3", "-I", "-c", SEND, "va", frag]);
+        packets()
+    };
+    for flags in [
+        &[][..],
+        &["ip_flags", "frag/firstfrag"],
+        &["ip_flags", "firstfrag"],
+        &["ip_flags", "frag"],
+    ] {
+        assert_eq!(probe(flags, "0x2000"), 0, "first fragment, {flags:?}");
+    }
+    // An unfragmented packet matches, with or without a `nofrag` flag.
+    assert_eq!(probe(&[], "0"), 1);
+    assert_eq!(probe(&["ip_flags", "nofrag"], "0"), 1);
+}
