@@ -2057,6 +2057,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Only answer probes from these sources.",
             "RFC 7881 section 7 source filtering: a prefix per entry. With none, any non-martian source is answered; martian sources (unspecified, multicast, loopback, broadcast) never are.",
         ),
+        Topic::SbfdReflectorAuth => (
+            "Authenticate S-BFD probes with a key.",
+            "RFC 7880 section 11: a key per Auth Key ID, its secret an admin key label. A probe with the A bit set is verified with the key of its type and key id and the reply is signed with that key and the probe's sequence number; a probe that does not verify is dropped. Probes without the A bit are still answered, so unauthenticated initiators keep working. Simple password is allowed but discouraged.",
+        ),
         Topic::BfdReference => (
             "Run BFD with a BFD profile.",
             "The name of a `bfd-profile` whose parameters apply to the sessions of this peer-group, OSPF or OSPFv3 profile, or static route. The commit is refused when the profile does not exist. Unset runs no BFD.",

@@ -114,10 +114,10 @@ pub struct BfdProfile {
     pub padded_pdu_size: Option<u16>,
 
     /// `sbfd`: Seamless BFD initiator (RFC 7880/7881): probes a reflector
-    /// that keeps no per-session state. Excludes `echo-mode`, `padded-pdu-size`
-    /// and `auth` (not built for S-BFD yet).
+    /// that keeps no per-session state. Excludes `echo-mode` and
+    /// `padded-pdu-size`; `auth` is allowed (RFC 7880 §11).
     #[serde(default)]
-    #[garde(custom(sbfd_compatible(self.echo_mode, self.padded_pdu_size.is_some(), self.auth.is_some())))]
+    #[garde(custom(sbfd_compatible(self.echo_mode, self.padded_pdu_size.is_some())))]
     #[cli(topic = BfdProfileMode)]
     pub mode: BfdMode,
 
@@ -157,12 +157,11 @@ fn nonzero_discriminator(d: &Ipv4Addr, _ctx: &Config) -> garde::Result {
 fn sbfd_compatible(
     echo: EchoMode,
     padded: bool,
-    auth: bool,
 ) -> impl FnOnce(&BfdMode, &Config) -> garde::Result {
     move |mode, _ctx| {
-        if *mode == BfdMode::Sbfd && (echo != EchoMode::Disabled || padded || auth) {
+        if *mode == BfdMode::Sbfd && (echo != EchoMode::Disabled || padded) {
             return Err(garde::Error::new(
-                "mode sbfd does not support echo-mode, padded-pdu-size or auth",
+                "mode sbfd does not support echo-mode or padded-pdu-size",
             ));
         }
         Ok(())
@@ -261,7 +260,7 @@ pub enum BfdAuthMethod {
     MeticulousSha1,
 }
 
-fn valid_auth(auth: Option<&BfdAuth>, cfg: &Config) -> garde::Result {
+pub(super) fn valid_auth(auth: Option<&BfdAuth>, cfg: &Config) -> garde::Result {
     let Some(a) = auth else { return Ok(()) };
     // RFC 5880 §4.2 (password 1..16 bytes), §4.3 (MD5 key 1..16, SHA1 1..20).
     let max = match a.method {
@@ -386,7 +385,7 @@ mod tests {
         ));
         assert!(!with(&|p| p.echo_mode = EchoMode::Affiliated));
         assert!(!with(&|p| p.padded_pdu_size = Some(100)));
-        assert!(!with(&|p| {
+        assert!(with(&|p| {
             p.auth = Some(BfdAuth {
                 key: "k".into(),
                 ..Default::default()

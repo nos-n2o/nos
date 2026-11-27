@@ -598,6 +598,7 @@ fn render_bfd_reflector_raw(v: &nos_proto::ReflectorView) -> String {
         ("not-in-allow-from", d.filtered),
         ("rate-limited", d.rate_limited),
         ("authenticated", d.authenticated),
+        ("auth-failed", d.auth_failed),
         ("demand-bit-clear", d.demand_clear),
         ("unknown-discriminator", d.unknown_discriminator),
     ]

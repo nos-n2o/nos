@@ -166,7 +166,12 @@ S-BFD probes a target that keeps no per-session state: the far end only has to a
   - The transmit interval is `min-tx-interval`, raised to the Required Min RX the reflector answers with. Probing starts at that rate at once; the one-second wait of classical BFD while not Up does not apply.
   - A reflector that answers AdminDown (out of service) takes the session `down` without a failure diagnostic and slows probing to one packet a second until it answers Up again.
   - Single-hop sessions require TTL 255 on the reflection.
-- Not available yet: `mode sbfd` is refused together with `echo-mode`, `padded-pdu-size` and `auth` (a follow-up adds S-BFD authentication after RFC 5880 authentication, #289; until then the reflector drops any packet with the A bit set and counts it).
+- Authentication (RFC 7880 section 11):
+  - Initiator: `auth` on the `mode sbfd` profile works as on any profile (admin-key label, key id, method). Probes are signed; a reflection is accepted only if it verifies and echoes one of the last `2 x detect-multiplier` sequence numbers sent, otherwise `auth_failures` counts it. While the key is missing nothing is sent and the session stays `down`.
+  - Reflector: `set sbfd reflector auth <key-id> method <method>` and `set sbfd reflector auth <key-id> key <admin-key-label>` (one element per key id). A probe with the A bit is verified by type and key id and the reply is signed with the same key and the probe's sequence number; no key match counts `authenticated`, a bad digest or password `auth_failed` in `show bfd reflector`.
+  - A probe without the A bit is still answered unsigned, so initiators without a key keep working; the reflector keeps no state, so it never checks sequence numbers.
+  - Simple password is accepted but the RFC discourages it: it exposes the secret on the wire.
+- `mode sbfd` is still refused together with `echo-mode` and `padded-pdu-size`.
 - Interoperability: FRR's `bfdd` implements RFC 5880, 5881, 5882 and 5883 only (its documentation lists no S-BFD, checked against FRR 10.4), so it can be neither initiator nor reflector. The e2e phase `bfd-sbfd` therefore runs `nos` against `nos`, with an FRR classical session alongside to prove the two kinds do not disturb each other.
 - Check the reflector with `show bfd reflector` (`GET /v1/bfd/reflector`): the discriminators and counters of packets received, replied and dropped per reason (`malformed`, `source_port`, `martian`, `filtered`, `rate_limited`, `authenticated`, `demand_clear`, `unknown_discriminator`).
 - An initiator is listed by `show bfd sessions` with `Kind` `SbfdInitiator`; REST has `kind` (`Classical`, `SbfdInitiator` or `Unsolicited`), and `remote_discriminator` is the S-BFD discriminator probed.
