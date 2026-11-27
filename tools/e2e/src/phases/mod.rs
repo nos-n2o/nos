@@ -4,6 +4,7 @@ mod acl;
 mod bfd;
 mod bfd_auth;
 mod bfd_echo;
+mod bfd_link;
 mod bgp;
 mod bmp;
 mod drivers;
@@ -178,6 +179,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospfv3-p2p-rid-change" => ospf::ospfv3_p2p_rid_change(w).await,
         "ospfv3-p2mp" => ospf::ospfv3_p2mp(w).await,
         "ospfv3-bfd" => ospf::ospfv3_bfd(w).await,
+        "ospfv3-bfd-two-link" => bfd_link::ospfv3_bfd_two_link(w).await,
         "ospfv3-dr" => ospf::ospfv3_dr(w).await,
         "ospfv3-hybrid" => ospf::ospfv3_hybrid(w).await,
         "ospfv3-lfa" => ospf::ospfv3_lfa(w).await,
@@ -335,6 +337,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3-p2p-rid-change",
             "ospfv3-p2mp",
             "ospfv3-bfd",
+            "ospfv3-bfd-two-link",
             "ospfv3-dr",
             "ospfv3-hybrid",
             "ospfv3-lfa",
@@ -571,6 +574,7 @@ pub const ALL: &[&str] = &[
     "ospfv3-p2p-rid-change",
     "ospfv3-p2mp",
     "ospfv3-bfd",
+    "ospfv3-bfd-two-link",
     "ospfv3-dr",
     "ospfv3-hybrid",
     "ospfv3-lfa",

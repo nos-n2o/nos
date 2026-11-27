@@ -97,7 +97,7 @@ fn ospfv3_instance_only(router_id: &str) -> Vec<String> {
     ])
 }
 
-fn ospfv3(address: &str, router_id: &str) -> Vec<String> {
+pub(super) fn ospfv3(address: &str, router_id: &str) -> Vec<String> {
     let mut f = strings(&["--address6", address]);
     f.extend(ospfv3_instance_only(router_id));
     f.extend(strings(&["--ospfv3-interface-profile", OSPFV3_PROFILE]));
@@ -431,7 +431,7 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
 
 /// `Router::provision_flags` wants the *complete* flag list; this prepends the
 /// router's own base flags to a scenario's extras.
-fn with_base(id: crate::router::Id, extra: Vec<String>) -> Vec<String> {
+pub(super) fn with_base(id: crate::router::Id, extra: Vec<String>) -> Vec<String> {
     let mut f = id.base_flags();
     f.extend(extra);
     f
@@ -7825,21 +7825,21 @@ struct BfdScenario {
     base_b: Vec<String>,
 }
 
-/// Drops (or lifts) UDP 3784 on router-a's ingress; `tc` knows only IPv4 or
+/// Drops (or lifts) UDP 3784 on router-a's `dev` ingress; `tc` knows only IPv4 or
 /// IPv6 per filter.
-async fn bfd_filter(w: &World, v6: bool, drop: bool) -> anyhow::Result<()> {
+pub(super) async fn bfd_filter(w: &World, dev: &str, v6: bool, drop: bool) -> anyhow::Result<()> {
     use super::bfd::tc;
     if !drop {
-        return tc(&w.dock, &["qdisc", "del", "dev", "eth0", "clsact"])
+        return tc(&w.dock, &["qdisc", "del", "dev", dev, "clsact"])
             .await
             .map(|_| ());
     }
-    tc(&w.dock, &["qdisc", "add", "dev", "eth0", "clsact"]).await?;
+    tc(&w.dock, &["qdisc", "add", "dev", dev, "clsact"]).await?;
     let (proto, sel) = if v6 { ("ipv6", "ip6") } else { ("ip", "ip") };
     tc(
         &w.dock,
         &[
-            "filter", "add", "dev", "eth0", "ingress", "protocol", proto, "u32", "match", sel,
+            "filter", "add", "dev", dev, "ingress", "protocol", proto, "u32", "match", sel,
             "protocol", "17", "0xff", "match", sel, "dport", "3784", "0xffff", "action", "drop",
         ],
     )
@@ -7900,7 +7900,7 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
     let (n_down, n_kill, n_removed) = (a.count(&down), a.count(&killing), a.count(&removed));
     let full_base = a.count(&s.full_a);
     let n_add = a.count(&add);
-    bfd_filter(w, s.v6, true).await?;
+    bfd_filter(w, "eth0", s.v6, true).await?;
     let result = async {
         a.wait_new(&down, n_down, 10).await?;
         a.wait_new(&killing, n_kill, 5).await?;
@@ -7908,7 +7908,7 @@ async fn bfd_scenario(w: &mut World, s: BfdScenario) -> anyhow::Result<()> {
         a.wait_new(&removed, n_removed, 15).await
     }
     .await;
-    let lifted = bfd_filter(w, s.v6, false).await;
+    let lifted = bfd_filter(w, "eth0", s.v6, false).await;
     result?;
     lifted?;
 

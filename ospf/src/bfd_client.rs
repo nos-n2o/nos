@@ -41,16 +41,27 @@ pub struct Want {
     pub interface: Option<String>,
 }
 
-/// The neighbors that want a session, by address.
-pub type Target = HashMap<IpAddr, Want>;
+/// A session's identity on the daemon side: the neighbor address and the
+/// interface (`None` for `OSPFv2`, which has no link-local peers). Two links can
+/// each hold a neighbor at the same link-local address (#1603), so the address
+/// alone is not a key.
+pub type Peer = (IpAddr, Option<String>);
+
+/// The neighbors that want a session.
+pub type Target = HashMap<Peer, Want>;
 
 /// What the daemon provides to the client.
 pub trait Host: Send + Sync + 'static {
     /// The sessions wanted right now (neighbors at 2-Way or later whose link
     /// has a `bfd` profile).
     fn target(&self) -> impl Future<Output = Target> + Send;
-    /// BFD reports the path to `peer` down: kill that neighbor.
-    fn down(&self, peer: IpAddr, diag: BfdDiag) -> impl Future<Output = ()> + Send;
+    /// BFD reports the path to `peer` on `interface` down: kill that neighbor.
+    fn down(
+        &self,
+        peer: IpAddr,
+        interface: Option<String>,
+        diag: BfdDiag,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Pure bookkeeping of what is registered and what has been `Up`.
@@ -59,15 +70,15 @@ pub struct Book {
     table: String,
     registered: Target,
     /// Peers whose session has been `Up` since they were registered.
-    was_up: HashSet<IpAddr>,
+    was_up: HashSet<Peer>,
 }
 
 impl Book {
-    fn key(&self, peer: IpAddr, want: &Want) -> SessionKey {
+    fn key(&self, peer: &Peer, want: &Want) -> SessionKey {
         SessionKey {
             aggregate: None,
             table: self.table.clone(),
-            peer,
+            peer: peer.0,
             local: want.local,
             interface: want.interface.clone(),
             multihop: false,
@@ -81,7 +92,7 @@ impl Book {
         if self.table != table {
             for (peer, want) in &self.registered {
                 reqs.push(BfdRequest::Deregister {
-                    key: self.key(*peer, want),
+                    key: self.key(peer, want),
                 });
             }
             self.registered.clear();
@@ -93,36 +104,34 @@ impl Book {
             if old == Some(want) {
                 continue;
             }
-            // A different path is a different session: the old one goes.
-            if let Some(old) =
-                old.filter(|o| (&o.local, &o.interface) != (&want.local, &want.interface))
-            {
+            // A different local address is a different session: the old one goes.
+            if let Some(old) = old.filter(|o| o.local != want.local) {
                 reqs.push(BfdRequest::Deregister {
-                    key: self.key(*peer, old),
+                    key: self.key(peer, old),
                 });
                 self.was_up.remove(peer);
             }
             reqs.push(BfdRequest::Register {
                 table: self.table.clone(),
-                peer: *peer,
+                peer: peer.0,
                 local: want.local,
                 interface: want.interface.clone(),
                 profile: want.profile.clone(),
                 multihop: false,
             });
-            self.registered.insert(*peer, want.clone());
+            self.registered.insert(peer.clone(), want.clone());
         }
-        let gone: Vec<IpAddr> = self
+        let gone: Vec<Peer> = self
             .registered
             .keys()
             .filter(|p| !target.contains_key(p))
-            .copied()
+            .cloned()
             .collect();
         for peer in gone {
             let want = self.registered.remove(&peer).expect("just listed");
             self.was_up.remove(&peer);
             reqs.push(BfdRequest::Deregister {
-                key: self.key(peer, &want),
+                key: self.key(&peer, &want),
             });
         }
         reqs
@@ -131,19 +140,18 @@ impl Book {
     /// A state event: whether it is a failure to act on, i.e. the session
     /// was `Up` and is now `Down` (not `AdminDown`, RFC 5882 §3.2).
     pub fn on_state(&mut self, key: &SessionKey, state: BfdState, diag: BfdDiag) -> bool {
-        if key.table != self.table || !self.registered.contains_key(&key.peer) {
+        let peer = (key.peer, key.interface.clone());
+        if key.table != self.table || !self.registered.contains_key(&peer) {
             return false;
         }
         match state {
             BfdState::Up => {
-                self.was_up.insert(key.peer);
+                self.was_up.insert(peer);
                 false
             }
-            BfdState::Down => {
-                self.was_up.remove(&key.peer) && diag != BfdDiag::AdministrativelyDown
-            }
+            BfdState::Down => self.was_up.remove(&peer) && diag != BfdDiag::AdministrativelyDown,
             BfdState::Init | BfdState::AdminDown => {
-                self.was_up.remove(&key.peer);
+                self.was_up.remove(&peer);
                 false
             }
         }
@@ -232,7 +240,7 @@ async fn run<H: Host>(
                 ev = reader.next() => match ev {
                     Some(Ok(BfdEvent::State { key, state, diag, .. })) => {
                         if book.on_state(&key, state, diag) {
-                            host.down(key.peer, diag).await;
+                            host.down(key.peer, key.interface, diag).await;
                         }
                     }
                     Some(Ok(BfdEvent::Sessions(_) | BfdEvent::Reflector(_))) => {}
@@ -268,7 +276,7 @@ mod tests {
     fn target(peers: &[&str]) -> Target {
         peers
             .iter()
-            .map(|p| (ip(p), want(Some("192.0.2.254"), None)))
+            .map(|p| ((ip(p), None), want(Some("192.0.2.254"), None)))
             .collect()
     }
 
@@ -312,15 +320,60 @@ mod tests {
     fn link_local_peer_carries_its_interface_and_a_moved_path_replaces_the_session() {
         let mut b = Book::default();
         let mut t = Target::new();
-        t.insert(ip("fe80::2"), want(Some("fe80::1"), Some("eth1")));
+        t.insert(
+            (ip("fe80::2"), Some("eth1".into())),
+            want(Some("fe80::1"), Some("eth1")),
+        );
         assert!(matches!(
             b.sync("rt1", &t).as_slice(),
             [BfdRequest::Register { interface: Some(i), local: Some(_), .. }] if i == "eth1"
         ));
-        t.insert(ip("fe80::2"), want(Some("fe80::1"), Some("eth2")));
+        t.insert(
+            (ip("fe80::2"), Some("eth1".into())),
+            want(Some("fe80::9"), Some("eth1")),
+        );
         assert!(matches!(
             b.sync("rt1", &t).as_slice(),
             [BfdRequest::Deregister { .. }, BfdRequest::Register { .. }]
+        ));
+    }
+
+    fn ll_key(interface: &str) -> SessionKey {
+        SessionKey {
+            interface: Some(interface.into()),
+            local: Some(ip("fe80::1")),
+            ..key("rt1", "fe80::2")
+        }
+    }
+
+    #[test]
+    fn one_link_local_peer_on_two_interfaces_is_two_sessions_and_downs_are_per_interface() {
+        let mut b = Book::default();
+        let mut t = Target::new();
+        for i in ["eth0", "eth1"] {
+            t.insert(
+                (ip("fe80::2"), Some(i.into())),
+                want(Some("fe80::1"), Some(i)),
+            );
+        }
+        let reqs = b.sync("rt1", &t);
+        assert_eq!(reqs.len(), 2, "{reqs:?}");
+        assert!(reqs
+            .iter()
+            .all(|r| matches!(r, BfdRequest::Register { .. })));
+        let d = BfdDiag::ControlDetectionTimeExpired;
+        for i in ["eth0", "eth1"] {
+            assert!(!b.on_state(&ll_key(i), BfdState::Up, d));
+        }
+        // eth1 drops: only eth1's neighbor is killed, eth0's stays guarded.
+        assert!(b.on_state(&ll_key("eth1"), BfdState::Down, d));
+        assert!(!b.on_state(&ll_key("eth1"), BfdState::Down, d));
+        assert!(b.on_state(&ll_key("eth0"), BfdState::Down, d));
+        // Withdrawing one neighbor deregisters only its session.
+        t.remove(&(ip("fe80::2"), Some("eth0".into())));
+        assert!(matches!(
+            b.sync("rt1", &t).as_slice(),
+            [BfdRequest::Deregister { key }] if key.interface.as_deref() == Some("eth0")
         ));
     }
 

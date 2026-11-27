@@ -222,12 +222,14 @@ async fn bfd_down_kills_a_full_neighbor_at_once() {
     let want = a.target().await;
     assert_eq!(want.len(), 1);
     let peer = IpAddr::from([10, 0, 0, 2]);
-    assert_eq!(want[&peer].local, Some(IpAddr::from([10, 0, 0, 1])));
+    assert_eq!(want[&(peer, None)].local, Some(IpAddr::from([10, 0, 0, 1])));
 
-    a.down(IpAddr::from([10, 0, 0, 9]), BfdDiag::PathDown).await;
+    a.down(IpAddr::from([10, 0, 0, 9]), None, BfdDiag::PathDown)
+        .await;
     settle(1).await;
     assert_eq!(state(&a).await, OspfNeighborState::Full, "stranger");
-    a.down(peer, BfdDiag::ControlDetectionTimeExpired).await;
+    a.down(peer, None, BfdDiag::ControlDetectionTimeExpired)
+        .await;
     settle(1).await;
     assert_eq!(state(&a).await, OspfNeighborState::Down);
     assert!(a.target().await.is_empty(), "deregistered below 2-Way");

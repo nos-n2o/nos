@@ -4759,7 +4759,10 @@ impl Host for LinkManager {
             for n in entry.status.borrow().neighbors.values() {
                 if bfd::bfd_wanted(n.state) {
                     target.insert(
-                        IpAddr::V6(n.address),
+                        (
+                            IpAddr::V6(n.address),
+                            Some(entry.config.kernel_interface.clone()),
+                        ),
                         Want {
                             profile: profile.clone(),
                             local: Some(IpAddr::V6(entry.config.link_local_address)),
@@ -4772,11 +4775,17 @@ impl Host for LinkManager {
         target
     }
 
-    async fn down(&self, peer: IpAddr, diag: BfdDiag) {
+    async fn down(&self, peer: IpAddr, interface: Option<String>, diag: BfdDiag) {
         let IpAddr::V6(peer) = peer else { return };
-        info!(peer = %peer, diag = %diag, "ospfv3: bfd session down");
+        info!(peer = %peer, interface = ?interface, diag = %diag, "ospfv3: bfd session down");
+        // The session is scoped by interface: the same fe80:: on another link is another neighbor.
         for entry in self.links.lock().await.values() {
-            let _ = entry.bfd_tx.send(peer);
+            if interface
+                .as_deref()
+                .is_none_or(|i| i == entry.config.kernel_interface)
+            {
+                let _ = entry.bfd_tx.send(peer);
+            }
         }
     }
 }
@@ -7494,13 +7503,22 @@ pub(crate) mod tests {
         let want = a.target().await;
         let peer: IpAddr = "fe80::2".parse().unwrap();
         assert_eq!(want.len(), 1);
-        assert_eq!(want[&peer].local, Some("fe80::1".parse().unwrap()));
-        assert!(want[&peer].interface.is_some());
+        let (key, w) = want.iter().next().unwrap();
+        assert_eq!(key.0, peer);
+        assert_eq!(w.local, Some("fe80::1".parse().unwrap()));
+        assert_eq!(key.1, w.interface);
+        let iface = w.interface.clone();
+        assert!(iface.is_some());
 
-        a.down("fe80::9".parse().unwrap(), BfdDiag::PathDown).await;
+        a.down("fe80::9".parse().unwrap(), iface.clone(), BfdDiag::PathDown)
+            .await;
         settle(1).await;
         assert_eq!(state().await, OspfNeighborState::Full, "stranger");
-        a.down(peer, BfdDiag::ControlDetectionTimeExpired).await;
+        a.down(peer, Some("other0".into()), BfdDiag::PathDown).await;
+        settle(1).await;
+        assert_eq!(state().await, OspfNeighborState::Full, "stranger");
+        a.down(peer, iface, BfdDiag::ControlDetectionTimeExpired)
+            .await;
         settle(1).await;
         assert_eq!(state().await, OspfNeighborState::Down);
         assert!(a.target().await.is_empty(), "deregistered below 2-Way");
