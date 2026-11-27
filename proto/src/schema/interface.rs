@@ -649,6 +649,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn lacp_fallback_timeout_range() {
+        for ok in [None, Some(1), Some(30), Some(3600)] {
+            assert!(valid_lacp_fallback_timeout(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [0, 3601] {
+            assert!(valid_lacp_fallback_timeout(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
             acl_in: None,
