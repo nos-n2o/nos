@@ -145,7 +145,7 @@ pub(crate) fn entry_for(prefix: IpNet, vtep: IpAddr) -> RibEntry {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: BTreeMap::new(),
     }
 }
 
@@ -422,7 +422,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

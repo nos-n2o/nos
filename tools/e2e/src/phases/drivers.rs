@@ -6328,6 +6328,84 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
         a.provision(&["--remove-static-route", ECMP_STATIC]).await?;
         a.wait_new(&ecmp_gone, ecmp_gone_base, 30).await?;
 
+        log("per-hop interface (#1616): two fe80 gateways on two links, one oif each");
+        w.link_veths().await?;
+        let eth1 = |id: crate::router::Id, v4: &str, v6: &str| {
+            strings(&[
+                "--interface",
+                "eth1",
+                "--address",
+                v4,
+                "--address6",
+                v6,
+                "--asn",
+                &id.asn.to_string(),
+                "--router-id",
+                id.rid,
+                "--remote-as",
+                &id.remote_as.to_string(),
+                "--peer",
+                id.peer_ip.s(),
+            ])
+        };
+        a.provision_flags(&eth1(crate::router::A, IFACE_ETH1_V4_A, IFACE_ETH1_V6_A))
+            .await?;
+        b.provision_flags(&eth1(crate::router::B, IFACE_ETH1_V4_B, IFACE_ETH1_V6_B))
+            .await?;
+        let mut lls = Vec::new();
+        for dev in ["eth0", "eth1"] {
+            // The link-local address appears once the kernel has the link up.
+            let mut found = None;
+            for _ in 0..30 {
+                // 404 until `nos-interfaced` has applied the new interface.
+                let Ok(body) = b
+                    .rest_expect(Method::GET, &format!("/v1/interfaces/{dev}"), None, 200)
+                    .await
+                else {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                };
+                let st: serde_json::Value = serde_json::from_str(&body)?;
+                found = std::iter::once(&st)
+                    .chain(st["subinterfaces"].as_array().into_iter().flatten())
+                    .find_map(|x| x["link_local_address"].as_str())
+                    .map(str::to_string);
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            lls.push(found.with_context(|| format!("router-b: {dev} has no link_local_address"))?);
+        }
+        let hop_added = format!("added route prefix={IFACE_STATIC} .*next_hops=2");
+        let hop_base = a.count(&hop_added);
+        a.provision(&[
+            "--static-route",
+            IFACE_STATIC,
+            "--static-gateway",
+            &lls[0],
+            "--static-interface",
+            "eth0",
+            "--static-extra-gateway",
+            &format!("{IFACE_STATIC}={}", lls[1]),
+            "--static-extra-interface",
+            &format!("{}=eth1", lls[1]),
+        ])
+        .await?;
+        a.wait_new(&hop_added, hop_base, 30).await?;
+        let hop_one = format!("added route prefix={IFACE_STATIC} .*next_hops=1.*replaced=true");
+        let hop_one_base = a.count(&hop_one);
+        a.provision(&[
+            "--remove-static-extra-gateway",
+            &format!("{IFACE_STATIC}={}", lls[1]),
+        ])
+        .await?;
+        a.wait_new(&hop_one, hop_one_base, 30).await?;
+        let hop_gone = removed(IFACE_STATIC);
+        let hop_gone_base = a.count(&hop_gone);
+        a.provision(&["--remove-static-route", IFACE_STATIC]).await?;
+        a.wait_new(&hop_gone, hop_gone_base, 30).await?;
+
         log("recursive (#1527): a static whose gateway is covered by another static");
         let cover_added = added(RECURSIVE_COVER, gw);
         let cover_base = a.count(&cover_added);
@@ -6379,11 +6457,16 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             "--remove-static-route",
             ECMP_STATIC,
             "--remove-static-route",
+            IFACE_STATIC,
+            "--remove-static-route",
             RECURSIVE_COVER,
             "--remove-static-route",
             RECURSIVE_STATIC,
         ])
         .await;
+    let _ = a.provision(&["--delete-interfaces", "eth1"]).await;
+    let _ = b.provision(&["--delete-interfaces", "eth1"]).await;
+    w.unlink_veths().await;
     let _ = b.provision(&["--remove-static-route", FLOAT_PREFIX]).await;
     res?;
     a.established().await

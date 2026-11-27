@@ -171,7 +171,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         };
         let best: HashMap<IpNet, RibEntry> = [
             entry("10.1.0.0/24", RouteSource::Connected),

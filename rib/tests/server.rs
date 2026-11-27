@@ -22,7 +22,7 @@ fn sample_rib() -> Rib {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
@@ -34,7 +34,7 @@ fn sample_rib() -> Rib {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     });
     rib.insert(RibEntry {
         prefix: narrow,
@@ -45,7 +45,7 @@ fn sample_rib() -> Rib {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     });
     rib
 }

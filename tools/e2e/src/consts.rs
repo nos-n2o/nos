@@ -414,6 +414,15 @@ pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
 /// for the nexthop), beside `REDISTRIBUTE_GATEWAY` (10.50.0.99).
 pub const ECMP_STATIC: &str = "198.18.79.0/24";
 pub const ECMP_EXTRA_GATEWAY: Addr = Addr("10.50.0.98");
+/// `static-variants` per-hop interface (#1616): an IPv6 prefix through router-b's
+/// fe80 address on `eth0` and its fe80 address on `eth1` (a direct veth pair,
+/// `link_veths`); eth1 gets an address on each router so `nos-interfaced`
+/// brings it up and it joins `rt1`. Phase-only, removed afterwards.
+pub const IFACE_STATIC: &str = "2001:db8:1616::/48";
+pub const IFACE_ETH1_V4_A: &str = "10.80.16.1/24";
+pub const IFACE_ETH1_V4_B: &str = "10.80.16.2/24";
+pub const IFACE_ETH1_V6_A: &str = "fd16:16::1/64";
+pub const IFACE_ETH1_V6_B: &str = "fd16:16::2/64";
 /// `static-variants` recursion (#1527): a static through `REDISTRIBUTE_GATEWAY`
 /// and a static whose gateway lies inside it.
 pub const RECURSIVE_COVER: &str = "198.18.80.0/24";
