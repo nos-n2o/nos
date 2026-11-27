@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use crate::flood::{ack_action, floods_back, AckAction, LinkFlood, Receipt, RxVerdict};
 use crate::lsa::{Lsa, LsaHeader, MAX_AGE};
-use crate::lsdb::{InstallOutcome, Key, Lsdb, Origin};
+use crate::lsdb::{InstallOutcome, Key, Lsdb, Origin, MIN_LS_ARRIVAL};
 use crate::neighbor::{Event, NeighborState};
 
 /// The LSA header's wire length, identical in RFC 2328 and RFC 5340.
@@ -172,6 +172,11 @@ pub struct AdjacencyData<L: Lsa> {
     /// the first reply, or the slave — which answered the bare packet —
     /// never sees the M=0 poll that ends its exchange.
     pub unpolled: bool,
+    /// RFC 2328 §13 step 8: when the database copy of an LSA was last sent
+    /// back to this neighbor for an older instance it flooded; one per
+    /// `MIN_LS_ARRIVAL` per LSA. Pruned on each use, so bounded by the LSAs
+    /// refuted within that window.
+    pub db_resent: HashMap<Key<L>, Instant>,
 }
 
 // By hand: a derive would demand `L: Default`.
@@ -191,6 +196,7 @@ impl<L: Lsa> Default for AdjacencyData<L> {
             stub: false,
             nssa: false,
             unpolled: false,
+            db_resent: HashMap::new(),
         }
     }
 }
@@ -788,6 +794,8 @@ where
     // Hash view of the request list: O(list + LSAs) per LSU, not O(LSAs x list).
     // Keys leave it as they're satisfied; one `retain` at the end keeps the Vec's order.
     let mut pending: std::collections::HashSet<Key<L>> = adj.request_list.iter().copied().collect();
+    // §13 step 8: database copies answering older instances, one LSU.
+    let mut db_copies: Vec<Arc<L>> = Vec::new();
     for l in lsas {
         let h = *l.header();
         if discard(&h) {
@@ -852,6 +860,14 @@ where
         };
         ack_lsa(adj, &mut res, &ack, h, verdict);
         pending.remove(&key);
+        if verdict == RxVerdict::DbNewer
+            && let Some(held) = store.get(&key)
+        {
+            resend_db_copy(adj, &mut db_copies, held, &h, now);
+        }
+    }
+    if !db_copies.is_empty() {
+        res.actions.push(Action::SendLsu(db_copies));
     }
     if pending.len() != adj.request_list.len() {
         adj.request_list.retain(|k| pending.contains(k));
@@ -860,6 +876,36 @@ where
         res.actions.push(Action::NeighborEvent(Event::LoadingDone));
     }
     res
+}
+
+/// §13 step 8: queues the database copy `held` for the sender of the older
+/// `received` header, unless it is `MaxAge` with `MaxSequenceNumber` (nothing
+/// newer can exist) or one went out within `MIN_LS_ARRIVAL`. Never goes on the
+/// retransmission list and the older instance is not acked.
+fn resend_db_copy<L: Lsa>(
+    adj: &mut AdjacencyData<L>,
+    out: &mut Vec<Arc<L>>,
+    held: Arc<L>,
+    received: &L::Header,
+    now: Instant,
+) {
+    let hh = held.header();
+    if hh.age() >= MAX_AGE && hh.seq() == i32::MAX {
+        return;
+    }
+    adj.db_resent
+        .retain(|_, t| now.saturating_duration_since(*t) < MIN_LS_ARRIVAL);
+    let key = hh.key();
+    if adj.db_resent.contains_key(&key) {
+        return;
+    }
+    adj.db_resent.insert(key, now);
+    tracing::debug!(
+        lsa = ?received,
+        held_seq = hh.seq(),
+        "ospf lsa older than database, sent database copy"
+    );
+    out.push(held);
 }
 
 /// Records `verdict` for `h` and acknowledges it per `ack`.

@@ -82,6 +82,7 @@ Pure building blocks for event-driven flooding (RFC 2328 §13.3, §13.5), shared
 - **Request lists** hold keys only, so step 1b's "new LSA is less recent" cannot be decided: the request is dropped and the peer served from the retransmission list.
 - **Retransmission**: entries are `Rxmt { lsa, last_sent }`; `due_retransmissions(adj, now, rxmt)` returns those at least `rxmt` old and stamps them. `on_lsack_received` clears only the same instance (§13.7).
 - **Acks**: `on_lsu_received(.., origin, ack)` returns `LsuResult { actions, installed, verdicts }`. `AckCtx` applies Table 19 (`ack_action`): `Direct` is an `Action::SendLsAck` for the daemon to unicast to the sender at once, `Delayed` goes on `pending_acks`. `floods_back` predicts steps 2 to 4 before the event is consumed (it ignores step 1b, which at worst drops one ack that the sender's retransmission re-asks).
+- **Older instance** (§13 step 8): a `DbNewer` verdict pushes one `Action::SendLsu` with the held copies (unicast, not on the retransmission list, older instance not acked). Skipped for a MaxAge + `i32::MAX` copy; once per `MIN_LS_ARRIVAL` per neighbor and LSA (`AdjacencyData.db_resent`). Logs `ospf lsa older than database, sent database copy` (debug, common crate). v2 and v3 both get it; proof `nos-e2e ospf-forged-lsa`.
 - **`SendLsr`**: on `ExchangeDone` with a non-empty request list the first LSR is emitted at once, before the event, instead of waiting for the 5 s sweep.
 
 ### SPF and route installation

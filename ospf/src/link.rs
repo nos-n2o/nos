@@ -619,6 +619,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         stub: cfg.stub,
         nssa: cfg.nssa,
         unpolled: true,
+        db_resent: HashMap::new(),
     };
     (adj, dbd)
 }

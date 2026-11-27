@@ -459,3 +459,38 @@ fn destination_is_reported_only_on_change() {
     note_flood_dest(&cfg, &status, &mut last);
     assert_eq!(last, Some(Dest::AllDRouters));
 }
+
+/// RFC 2328 §13 step 8: an older instance is answered with the database copy
+/// (a unicast LSU action), never acked.
+#[tokio::test]
+async fn older_lsa_is_answered_with_the_database_copy() {
+    let cfg = link("eth0", 10);
+    let mut held = foreign_type5(0);
+    held.header.sequence_number += 1;
+    lsa::fill_checksum(&mut held);
+    let mut db = Lsdb::new();
+    db.install(held);
+    let (lsdb, link_local) = (Mutex::new(db), Mutex::new(Lsdb::new()));
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(AdjacencyData::default());
+        s.neighbors.insert(id(2), info);
+    });
+    let lsu = LsuPacket {
+        discarded: 0,
+        last_error: None,
+        router_id: id(2),
+        area_id: Ipv4Addr::UNSPECIFIED,
+        lsas: vec![foreign_type5(0)],
+    };
+    let acts = rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu, 7)
+        .await
+        .unwrap();
+    assert!(acts
+        .iter()
+        .any(|a| matches!(a, exchange::Action::SendLsu(v) if v.len() == 1)));
+    assert!(!acts
+        .iter()
+        .any(|a| matches!(a, exchange::Action::SendLsAck(_))));
+}

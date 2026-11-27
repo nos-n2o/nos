@@ -1775,3 +1775,73 @@ fn exchange_done_with_an_empty_request_list_has_no_lsr() {
         })]
     );
 }
+
+fn older_at(adj: &mut AdjacencyData, area: &mut Lsdb<L>, ls: &[L], now: Instant) -> LsuResult<L> {
+    lsu_full(
+        adj,
+        area,
+        &mut Lsdb::new(),
+        None,
+        ls,
+        now,
+        None,
+        rfc(BCAST, false, true),
+    )
+}
+
+fn db_copies(r: &LsuResult<L>) -> Vec<usize> {
+    r.actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendLsu(v) => Some(v.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn older_lsa_is_answered_with_the_database_copy_once_per_second() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    area.install(lsa_id(2, SEQ1));
+    let mut adj = AdjacencyData::default();
+    let t0 = Instant::now();
+    // Two refuted LSAs in one LSU: one SendLsu, no ack, nothing on the rxmt list.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1), lsa_id(2, SEQ1 - 1)],
+        t0,
+    );
+    assert_eq!(db_copies(&r), vec![2]);
+    assert!(!r.actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+    assert!(adj.retransmission_list.is_empty() && adj.pending_acks.is_empty());
+    // Within MinLSArrival: nothing.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1)],
+        t0 + Duration::from_millis(500),
+    );
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+    // After it: again.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1)],
+        t0 + Duration::from_millis(1500),
+    );
+    assert_eq!(db_copies(&r), vec![1]);
+}
+
+#[test]
+fn max_age_max_sequence_database_copy_is_not_resent() {
+    let mut area = Lsdb::new();
+    let mut held = lsa_id(1, i32::MAX);
+    held.0.age = MAX_AGE;
+    area.install(held);
+    let mut adj = AdjacencyData::default();
+    let r = older_at(&mut adj, &mut area, &[lsa_id(1, SEQ1)], Instant::now());
+    assert_eq!(r.verdicts[0].1, RxVerdict::DbNewer);
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+}
