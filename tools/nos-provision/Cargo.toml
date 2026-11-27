@@ -21,6 +21,7 @@ futures    = { workspace = true }
 clap       = { workspace = true }
 anyhow     = { workspace = true }
 ipnet      = { workspace = true }
+serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

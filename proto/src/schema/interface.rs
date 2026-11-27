@@ -3,12 +3,12 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_point_to_point_valid,
-    routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
-    unique_key_in,
+    bfd_reference_valid, lldp_med_profile_reference_valid, ospf_profile_reference_valid,
+    ospfv3_profiles_point_to_point_valid, routing_table_reference_valid,
+    stp_port_profile_reference_valid, unique_addresses, unique_key_in,
 };
 
-use super::{Config, LldpDestination, VlanTag};
+use super::{Config, LldpDestination, LldpLocation, VlanTag};
 use nos_proto_derive::Cli;
 
 use super::sugar;
@@ -415,6 +415,21 @@ pub struct Interface {
     )]
     /// L3 attachment points of a physical interface, one per VLAN tag.
     pub subinterfaces: Vec<Subinterface>,
+
+    /// Names an `LldpMedProfile` whose LLDP-MED settings this link advertises
+    /// (TIA-1057). Physical interfaces only. Inert until `nos-lldpd` reads it.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| lldp_med_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceLldpMedProfile, words = "lldp-med-profile")]
+    pub lldp_med_profile: Option<String>,
+
+    /// Where this port is (LLDP-MED location identification): per port, not
+    /// per profile, since a profile is shared by many jacks. Needs an
+    /// `lldp_med_profile` on the same interface. Empty means none.
+    #[serde(default)]
+    #[garde(custom(|l: &LldpLocation, _ctx: &Config| l.check().map_err(garde::Error::new)))]
+    #[cli(topic = InterfaceLldpLocation, words = "lldp-location")]
+    pub lldp_location: LldpLocation,
 }
 
 /// RFC 791's IPv4 minimum through Linux's practical link-layer ceiling.
@@ -596,12 +611,27 @@ fn valid_lldp_physical_only(interfaces: &[Interface]) -> garde::Result {
     for iface in interfaces {
         let configured = iface.lldp_transmit
             || iface.lldp_receive
-            || iface.lldp_destination != LldpDestination::default();
+            || iface.lldp_destination != LldpDestination::default()
+            || iface.lldp_med_profile.is_some()
+            || !iface.lldp_location.is_empty();
         if configured && loopback_table_name(&iface.name).is_some() {
             return Err(garde::Error::new(
                 "lldp can only be configured on a physical interface, not a loopback",
             ));
         }
+    }
+    Ok(())
+}
+
+/// A location is advertised by the MED machinery, which the profile switches on.
+fn valid_lldp_location_needs_profile(interfaces: &[Interface]) -> garde::Result {
+    if interfaces
+        .iter()
+        .any(|i| !i.lldp_location.is_empty() && i.lldp_med_profile.is_none())
+    {
+        return Err(garde::Error::new(
+            "lldp-location requires an lldp-med-profile on the same interface",
+        ));
     }
     Ok(())
 }
@@ -616,6 +646,7 @@ pub(crate) fn valid_interfaces(interfaces: &[Interface], ctx: &Config) -> garde:
     valid_subinterface_and_switching_profile_tags(interfaces, ctx)?;
     valid_port_aggregate_membership(interfaces)?;
     valid_lldp_physical_only(interfaces)?;
+    valid_lldp_location_needs_profile(interfaces)?;
     Ok(())
 }
 
@@ -653,6 +684,8 @@ mod tests {
             lldp_receive: false,
             lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
+            lldp_med_profile: None,
+            lldp_location: crate::schema::LldpLocation::default(),
         }
     }
 
@@ -1287,6 +1320,73 @@ mod tests {
         cfg.stp_port_profiles.clear();
         let err = cfg.validate_with(&cfg).unwrap_err().to_string();
         assert!(err.contains("interfaces[0].stp_port_profile"), "{err}");
+    }
+
+    fn med_profile(name: &str) -> crate::schema::LldpMedProfile {
+        crate::schema::LldpMedProfile {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn elin(n: &str) -> crate::schema::LldpLocation {
+        crate::schema::LldpLocation {
+            elin: Some(n.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lldp_med_profile_reference_must_exist() {
+        let mut iface = interface("eth0", &[], None);
+        iface.lldp_med_profile = Some("voice".into());
+        let mut cfg = config_with(vec![iface], vec![]);
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("interfaces[0].lldp_med_profile"), "{err}");
+        cfg.lldp_med_profiles = vec![med_profile("voice")];
+        cfg.validate_with(&cfg).unwrap();
+        // deleting it again fails the interface under its own path
+        cfg.lldp_med_profiles.clear();
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn lldp_location_needs_a_profile_and_is_per_interface() {
+        let mut a = interface("eth0", &[], None);
+        a.lldp_location = elin("1234567890");
+        let mut cfg = config_with(vec![a.clone()], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        a.lldp_med_profile = Some("empty".into());
+        let mut b = interface("eth1", &[], None);
+        b.lldp_med_profile = Some("empty".into());
+        b.lldp_location = elin("0987654321");
+        cfg.interfaces = vec![a, b];
+        cfg.lldp_med_profiles = vec![med_profile("empty")];
+        cfg.validate_with(&cfg).unwrap();
+        assert_ne!(
+            cfg.interfaces[0].lldp_location,
+            cfg.interfaces[1].lldp_location
+        );
+        cfg.interfaces[1].lldp_location = elin("12");
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn lldp_med_on_loopback_fails() {
+        let mut iface = interface("loopback-rt1", &[], None);
+        iface.lldp_med_profile = Some("p".into());
+        let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+        cfg.lldp_med_profiles = vec![med_profile("p")];
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn pre_change_interface_json_loads() {
+        let mut v = serde_json::to_value(interface("eth0", &[], None)).unwrap();
+        v.as_object_mut().unwrap().remove("lldp_med_profile");
+        v.as_object_mut().unwrap().remove("lldp_location");
+        let i: Interface = serde_json::from_value(v).unwrap();
+        assert!(i.lldp_med_profile.is_none() && i.lldp_location.is_empty());
     }
 
     #[test]

@@ -366,6 +366,8 @@ mod tests {
 
     fn interface(name: &str) -> Interface {
         Interface {
+            lldp_med_profile: None,
+            lldp_location: crate::schema::LldpLocation::default(),
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -417,6 +419,8 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             interfaces: vec![Interface {
+                lldp_med_profile: None,
+                lldp_location: crate::schema::LldpLocation::default(),
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,

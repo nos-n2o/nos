@@ -210,6 +210,38 @@ $ $C $B/v1/lldp/statistics | jq .
 ]
 ```
 
+### Configure LLDP-MED (configuration only for now)
+
+LLDP-MED (ANSI/TIA-1057) lets a switch port tell an IP phone which VLAN to use, how much power to expect and where it is. NOS stores and validates this configuration. `nos-lldpd` does not send it yet, so nothing changes on the wire until the transmit step lands (#1572).
+
+- A profile groups the settings and an interface attaches it with `lldp-med-profile <name>`. One profile can serve many ports.
+- `network-policy <application>` sets `vlan`, `tagged`, `priority` and `dscp` for one application type. At most 8 per profile, one per type: `voice`, `voice-signaling`, `guest-voice`, `guest-voice-signaling`, `softphone-voice`, `video-conferencing`, `streaming-video`, `video-signaling`.
+- `poe` sets the power source, priority and power in units of 0.1 W (154 is 15.4 W, at most 1023). The values are advertised as configured and never measured: NOS has no PoE hardware.
+- `advertise-always` exists for NOS-to-NOS links, where neither side would speak first. What it gates is described with the transmit step.
+- The location is per interface, so each jack has its own. It needs an `lldp-med-profile` on the same interface (an empty one is enough). Set any of `elin`, `civic` and `coordinate`.
+
+```
+nos(config)# set lldp-med-profile phones network-policy voice vlan 100
+nos(config)# set lldp-med-profile phones network-policy voice tagged
+nos(config)# set lldp-med-profile phones network-policy voice priority 5
+nos(config)# set lldp-med-profile phones network-policy voice dscp 46
+nos(config)# set lldp-med-profile phones poe power 154
+nos(config)# set interface eth1 lldp-med-profile phones
+nos(config)# set interface eth1 lldp-location elin 3125550123
+nos(config)# set interface eth1 lldp-location civic country FR
+nos(config)# set interface eth1 lldp-location civic element 3 value Paris
+nos(config)# set interface eth1 lldp-location coordinate latitude 48.8566
+nos(config)# set interface eth1 lldp-location coordinate longitude 2.3522
+```
+
+Check with `show config`. The commit is refused when:
+
+- an interface names a profile that does not exist, or a profile is deleted while one still uses it;
+- `lldp-location` is set without an `lldp-med-profile` on the same interface;
+- LLDP-MED is set on a loopback;
+- a policy has `tagged` without a `vlan`, a VLAN above 4094, a priority above 7, a DSCP above 63, or twice the same application type;
+- the ELIN is not 10 to 25 digits, the civic country is not two uppercase letters, the civic address is over 250 bytes encoded, or a coordinate is out of range.
+
 ## How LLDP behaves
 
 **Physical interfaces only.** LLDP describes a physical link, so it can be enabled on a physical interface, including a port-aggregate member, but not on a loopback (refused at commit) and not on a subinterface or on the aggregate itself.
@@ -253,6 +285,9 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI forms are
 | tx-hold | `set lldp tx-hold <n>`; `delete lldp tx-hold` | `lldp/tx-hold` | 1-100, default 4 | range; as above | advertised time to live = `tx-interval × tx-hold` | the neighbour's `show lldp neighbors` (`ttl`) |
 | management-address | `set lldp management-address <ip>` adds one; `delete lldp management-address <ip>` removes one | `lldp/management-address`, a list | up to 4 IPv4 or IPv6 addresses, default none | unicast (not unspecified, not multicast), no duplicates, at most 4 | each advertised on every interface, with its interface's ifIndex when one carries it | the neighbour's `show lldp neighbors` (`management`) |
 
+| lldp-med-profile (interface) | `set interface <if> lldp-med-profile <name>`; `delete interface <if> lldp-med-profile` | `interface/<if>/lldp-med-profile` | profile name, default none | the profile exists; physical interface only | none yet (#1572) | `show config` |
+| lldp-location | `set interface <if> lldp-location elin <digits>`, `civic …`, `coordinate …`; `delete interface <if> lldp-location elin` | `interface/<if>/lldp-location` | ELIN, civic address and/or coordinates, default none | needs an `lldp-med-profile` on the interface; ELIN 10-25 digits; civic at most 250 bytes; latitude -90 to 90, longitude -180 to 180 | none yet (#1572) | `show config` |
+| lldp-med-profile | `edit lldp-med-profile <name>`; `delete lldp-med-profile <name>` | `lldp-med-profile/<name>` | `network-policy` (at most 8), `poe`, `advertise-always` | name 1-64 characters, unique; policy and PoE ranges as above | none yet (#1572) | `show config` |
 | system-description | `set lldp system-description <text>`; `delete lldp system-description` | `lldp/system-description` | text, 1-255 bytes, default `nos` | not empty, at most 255 bytes, no control characters | the System Description field of every frame | the neighbour's `show lldp neighbors detail` (`system-description`) |
 
 `tx-interval`, `tx-hold`, `management-address` and `system-description` are system-wide: they are typed the same way from anywhere in configuration mode.

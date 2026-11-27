@@ -2257,6 +2257,7 @@ dependencies = [
  "ipnet",
  "nos-pki",
  "nos-proto",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

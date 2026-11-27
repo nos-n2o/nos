@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-10 {
+  revision 2026-12-12 {
     description "Generated.";
   }
 
@@ -1474,6 +1474,81 @@ module nos-config {
         description "Enforce BGP flowspec rules on the IP packets received on this link.";
       }
     }
+    leaf lldp_med_profile {
+      type string;
+      description "Attach an LLDP-MED profile.";
+    }
+    container lldp_location {
+      description "Set this port's location.";
+      leaf elin {
+        type string;
+        description "Set the Emergency Location Identification Number.";
+      }
+      container civic {
+        description "Set the civic address.";
+        leaf what {
+          type uint8;
+          description "Set which location the address describes.";
+        }
+        leaf country {
+          type string;
+          description "Set the country code.";
+        }
+        list elements {
+          key "ca_type";
+          description "Add or remove a civic element.";
+          leaf ca_type {
+            type uint8;
+          }
+          leaf value {
+            type string;
+            description "Set the element's text.";
+          }
+        }
+      }
+      container coordinate {
+        description "Set the coordinates.";
+        leaf latitude {
+          type string;
+          description "Set the latitude.";
+        }
+        leaf latitude_resolution {
+          type uint8;
+          description "Set the latitude resolution.";
+        }
+        leaf longitude {
+          type string;
+          description "Set the longitude.";
+        }
+        leaf longitude_resolution {
+          type uint8;
+          description "Set the longitude resolution.";
+        }
+        leaf altitude {
+          type string;
+          description "Set the altitude.";
+        }
+        leaf altitude_unit {
+          type enumeration {
+            enum "Meters";
+            enum "Floors";
+          }
+          description "Set the altitude unit.";
+        }
+        leaf altitude_resolution {
+          type uint8;
+          description "Set the altitude resolution.";
+        }
+        leaf datum {
+          type enumeration {
+            enum "Wgs84";
+            enum "Nad83Navd88";
+            enum "Nad83Mllw";
+          }
+          description "Set the geodetic datum.";
+        }
+      }
+    }
   }
   list policy_definitions {
     key "name";
@@ -2390,6 +2465,75 @@ module nos-config {
         type string;
         description "Set a key's secret.";
       }
+    }
+  }
+  list lldp_med_profiles {
+    key "name";
+    description "Create or delete an LLDP-MED profile.";
+    leaf name {
+      type string;
+    }
+    list network_policies {
+      key "app_type";
+      description "Add or remove a network policy.";
+      leaf app_type {
+        type enumeration {
+          enum "Voice";
+          enum "VoiceSignaling";
+          enum "GuestVoice";
+          enum "GuestVoiceSignaling";
+          enum "SoftphoneVoice";
+          enum "VideoConferencing";
+          enum "StreamingVideo";
+          enum "VideoSignaling";
+        }
+      }
+      leaf vlan {
+        type uint16;
+        description "Set the policy's VLAN id.";
+      }
+      leaf tagged {
+        type boolean;
+        description "Mark the policy's frames as 802.1Q tagged.";
+      }
+      leaf priority {
+        type uint8;
+        description "Set the 802.1p priority.";
+      }
+      leaf dscp {
+        type uint8;
+        description "Set the DSCP value.";
+      }
+      leaf unknown {
+        type boolean;
+        description "Flag the policy as required but unknown.";
+      }
+    }
+    container poe {
+      description "Set the power-via-MDI values to advertise.";
+      leaf source {
+        type enumeration {
+          enum "Primary";
+          enum "Backup";
+        }
+        description "Set the power source.";
+      }
+      leaf priority {
+        type enumeration {
+          enum "Critical";
+          enum "High";
+          enum "Low";
+        }
+        description "Set the power priority.";
+      }
+      leaf power {
+        type uint16;
+        description "Set the advertised power.";
+      }
+    }
+    leaf advertise_always {
+      type boolean;
+      description "Send the LLDP-MED TLVs without waiting for a neighbor.";
     }
   }
 }

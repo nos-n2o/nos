@@ -45,6 +45,8 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "id",
     "label",
     "first",
+    "app_type",
+    "ca_type",
 ];
 
 /// Why a config path could not be resolved.

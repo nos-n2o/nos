@@ -20,6 +20,8 @@ pub mod community_group;
 pub mod interface;
 /// Edits to global LLDP settings (`LldpOp`).
 pub mod lldp;
+/// Edits to LLDP-MED profiles (`LldpMedProfileOp`).
+pub mod lldp_med_profile;
 /// Edits to syslog servers (`LoggingOp`).
 pub mod logging;
 /// Edits to OSPF areas (`OspfAreaOp`).
@@ -70,6 +72,7 @@ pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
 pub use lldp::LldpOp;
+pub use lldp_med_profile::LldpMedProfileOp;
 pub use logging::LoggingOp;
 pub use ospf_area::OspfAreaOp;
 pub use ospf_instance::OspfInstanceOp;
@@ -170,6 +173,8 @@ pub enum ConfigOp {
     Admin(AdminOp),
     /// Delegates to a `PortAggregateConversationOp` edit.
     PortAggregateConversation(PortAggregateConversationOp),
+    /// Delegates to a `LldpMedProfileOp` edit.
+    LldpMedProfile(LldpMedProfileOp),
 }
 
 impl ConfigOp {
@@ -208,6 +213,7 @@ impl ConfigOp {
             ConfigOp::StpPortProfile(..) => "StpPortProfile",
             ConfigOp::Admin(..) => "Admin",
             ConfigOp::PortAggregateConversation(..) => "PortAggregateConversation",
+            ConfigOp::LldpMedProfile(..) => "LldpMedProfile",
         }
     }
 
@@ -250,6 +256,7 @@ impl ConfigOp {
             ConfigOp::StpPortProfile(op) => op.apply(config),
             ConfigOp::Admin(op) => op.apply(config),
             ConfigOp::PortAggregateConversation(op) => op.apply(config),
+            ConfigOp::LldpMedProfile(op) => op.apply(config),
         }
     }
 }
@@ -329,6 +336,9 @@ pub enum OpError {
     /// No STP port profile matches the given name.
     #[error("stp port profile '{0}' not found")]
     StpPortProfileNotFound(String),
+    /// No LLDP-MED profile matches the given name.
+    #[error("lldp-med profile '{0}' not found")]
+    LldpMedProfileNotFound(String),
     /// No LACP conversation range starts at `first` in the port aggregate.
     #[error("lacp conversation range starting at {first} not found in port aggregate '{name}'")]
     LacpConversationNotFound {

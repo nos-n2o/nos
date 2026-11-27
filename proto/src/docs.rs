@@ -743,6 +743,64 @@ topics! {
     TacacsSingleConnect,
     /// the `| jq <expression>` output pipe of `show` commands
     PipeJq,
+    /// `Config.lldp_med_profiles`
+    LldpMedProfile,
+    /// `LldpMedProfile.network_policies`
+    LldpMedProfileNetworkPolicy,
+    /// `LldpMedNetworkPolicy.vlan`
+    LldpMedPolicyVlan,
+    /// `LldpMedNetworkPolicy.tagged`
+    LldpMedPolicyTagged,
+    /// `LldpMedNetworkPolicy.priority`
+    LldpMedPolicyPriority,
+    /// `LldpMedNetworkPolicy.dscp`
+    LldpMedPolicyDscp,
+    /// `LldpMedNetworkPolicy.unknown`
+    LldpMedPolicyUnknown,
+    /// `LldpMedProfile.poe`
+    LldpMedProfilePoe,
+    /// `LldpMedPoe.source`
+    LldpMedPoeSource,
+    /// `LldpMedPoe.priority`
+    LldpMedPoePriority,
+    /// `LldpMedPoe.power`
+    LldpMedPoePower,
+    /// `LldpMedProfile.advertise_always`
+    LldpMedProfileAdvertiseAlways,
+    /// `Interface.lldp_med_profile`
+    InterfaceLldpMedProfile,
+    /// `Interface.lldp_location`
+    InterfaceLldpLocation,
+    /// `LldpLocation.elin`
+    LldpLocationElin,
+    /// `LldpLocation.civic`
+    LldpLocationCivic,
+    /// `LldpLocation.coordinate`
+    LldpLocationCoordinate,
+    /// `LldpCivicAddress.what`
+    LldpCivicWhat,
+    /// `LldpCivicAddress.country`
+    LldpCivicCountry,
+    /// `LldpCivicAddress.elements`
+    LldpCivicElementList,
+    /// `LldpCivicElement.value`
+    LldpCivicElementValue,
+    /// `LldpCoordinate.latitude`
+    LldpCoordinateLatitude,
+    /// `LldpCoordinate.latitude_resolution`
+    LldpCoordinateLatitudeResolution,
+    /// `LldpCoordinate.longitude`
+    LldpCoordinateLongitude,
+    /// `LldpCoordinate.longitude_resolution`
+    LldpCoordinateLongitudeResolution,
+    /// `LldpCoordinate.altitude`
+    LldpCoordinateAltitude,
+    /// `LldpCoordinate.altitude_unit`
+    LldpCoordinateAltitudeUnit,
+    /// `LldpCoordinate.altitude_resolution`
+    LldpCoordinateAltitudeResolution,
+    /// `LldpCoordinate.datum`
+    LldpCoordinateDatum,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
