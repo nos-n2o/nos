@@ -2395,7 +2395,7 @@ impl Host for LinkManager {
             for n in entry.status.borrow().neighbors.values() {
                 if bfd::bfd_wanted(n.state) {
                     target.insert(
-                        IpAddr::V4(n.address),
+                        (IpAddr::V4(n.address), None),
                         Want {
                             profile: profile.clone(),
                             local: Some(IpAddr::V4(entry.config.local_addr)),
@@ -2408,7 +2408,7 @@ impl Host for LinkManager {
         target
     }
 
-    async fn down(&self, peer: IpAddr, diag: BfdDiag) {
+    async fn down(&self, peer: IpAddr, _interface: Option<String>, diag: BfdDiag) {
         let IpAddr::V4(peer) = peer else { return };
         info!(peer = %peer, diag = %diag, "ospf: bfd session down");
         for entry in self.links.lock().await.values() {
