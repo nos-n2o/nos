@@ -10,6 +10,7 @@ use futures::{stream, StreamExt as _, TryStreamExt as _};
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
 };
+use nos_nexthop::{Gateway, Group, Nexthop, NexthopRecord};
 use nos_proto::evpn_id::{format_mac, vxlan_name};
 use nos_proto::{IlmRoute, IpNet, NextHop};
 use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo, LinkMessage};
@@ -18,7 +19,7 @@ use rtnetlink::packet_route::neighbour::{
 };
 use rtnetlink::packet_route::route::{
     MplsLabel, RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteNextHopFlags,
-    RouteProtocol, RouteType,
+    RouteProtocol, RouteScope, RouteType,
 };
 use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{
@@ -28,6 +29,7 @@ use rtnetlink::{
 use tracing::{debug, info, trace, warn};
 
 use super::mpls::{self, Mpls, Sysctl};
+use super::nexthop_groups::{GroupKey, NexthopTable};
 use super::route_channel::RouteChannel;
 use super::{table_registry, DriverError, RibDriver};
 use crate::evpn::{L3Vni, Mac};
@@ -195,13 +197,6 @@ fn shadow_after_install(sent: bool, new: &Hops) -> Option<Hops> {
     sent.then(|| new.clone())
 }
 
-/// Drops slots whose add was deferred or skipped from a seeded shadow map.
-fn unset_deferred(installed: &mut HashMap<Slot, Hops>, deferred: &[Slot]) {
-    for slot in deferred {
-        installed.remove(slot);
-    }
-}
-
 /// One kernel route of a prefix: `false` is the primary, `true` its backup.
 type Slot = (IpNet, bool);
 
@@ -280,7 +275,63 @@ enum SlotOp {
     Replace,
 }
 
-fn slot_op(old: Option<&Key>, new: Option<&Key>) -> SlotOp {
+/// How a slot's kernel route is expressed: its own gateways (`Inline`, one or
+/// `RTA_MULTIPATH`) or `RTA_NH_ID` of a nexthop group (`Group`, #1587). Part of
+/// what a slot is compared by, so a route an older version left inline is
+/// migrated by one atomic replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    Inline,
+    Group,
+}
+
+/// What `slot_op` and `diff_routes` compare: the hops and how they are installed.
+type Shape = (Key, Form);
+
+fn form_of(gid: Option<u32>) -> Form {
+    if gid.is_some() {
+        Form::Group
+    } else {
+        Form::Inline
+    }
+}
+
+/// What `add_route` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    /// Deferred or skipped: nothing is in the kernel.
+    Skipped,
+    Inline,
+    /// Installed as `RTA_NH_ID` of this group.
+    Group(u32),
+}
+
+impl Placed {
+    fn sent(self) -> bool {
+        self != Self::Skipped
+    }
+    fn gid(self) -> Option<u32> {
+        match self {
+            Self::Group(g) => Some(g),
+            _ => None,
+        }
+    }
+}
+
+/// `LinuxRibDriver::form_for` without the driver.
+fn form(disabled: bool, rejected: &HashSet<Key>, hops: &[NextHop], backup: bool) -> Form {
+    if backup || disabled || hops.len() < 2 {
+        return Form::Inline;
+    }
+    let k = key(hops);
+    // A repeated hop would be one nexthop twice in a group.
+    if k.windows(2).any(|w| w[0] == w[1]) || rejected.contains(&k) {
+        return Form::Inline;
+    }
+    Form::Group
+}
+
+fn slot_op<T: PartialEq>(old: Option<&T>, new: Option<&T>) -> SlotOp {
     match (old, new) {
         (None, None) => SlotOp::Keep,
         (Some(_), None) => SlotOp::Remove,
@@ -334,6 +385,17 @@ pub struct LinuxRibDriver {
     /// Startup hold (#654): `apply` leaves kernel routes it has no desired
     /// slot for alone (see `RibDriver::keep_stale`).
     keep_stale: AtomicBool,
+    /// Per table id: the nexthop objects (#1587) and which slot uses which.
+    nexthops: Mutex<HashMap<u32, NexthopTable>>,
+    /// Held while a group is reserved and created, so two routes sharing a
+    /// hop set create it once.
+    create_lock: tokio::sync::Mutex<()>,
+    /// The kernel has no nexthop objects (`EOPNOTSUPP`/`ENOSYS`), or the test
+    /// flag `--inline-multipath`: every route installs inline. Lives for the
+    /// process.
+    groups_disabled: AtomicBool,
+    /// Hop sets the kernel refused as a group (`EINVAL`): inline for those.
+    rejected: Mutex<HashSet<Key>>,
 }
 
 impl LinuxRibDriver {
@@ -352,7 +414,24 @@ impl LinuxRibDriver {
             ilm: Mutex::new(HashMap::new()),
             sysctl: Sysctl::default(),
             keep_stale: AtomicBool::new(false),
+            nexthops: Mutex::new(HashMap::new()),
+            create_lock: tokio::sync::Mutex::new(()),
+            groups_disabled: AtomicBool::new(false),
+            rejected: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Installs every multipath route inline, as before nexthop groups
+    /// (test-only, e2e `ecmp-nexthop-groups` creates inline routes to migrate).
+    pub fn disable_nexthop_groups(&self) {
+        self.groups_disabled.store(true, Ordering::SeqCst);
+    }
+
+    /// How `hops` at a slot want to be installed: a group for a primary
+    /// multipath route unless groups are off or this hop set was refused.
+    fn form_for(&self, hops: &[NextHop], backup: bool) -> Form {
+        let disabled = self.groups_disabled.load(Ordering::SeqCst);
+        form(disabled, &self.rejected.lock().unwrap(), hops, backup)
     }
 
     /// `.match_name()` performs a targeted (non-dump) `RTM_GETLINK`
@@ -640,7 +719,8 @@ impl LinuxRibDriver {
     async fn dump_routes(
         &self,
         table_id: u32,
-    ) -> Result<Vec<(Slot, Key, RouteMessage)>, DriverError> {
+        groups: &HashMap<u32, Key>,
+    ) -> Result<Vec<(Slot, Key, Option<u32>, RouteMessage)>, DriverError> {
         let mut out = Vec::new();
         let table_id_u8 =
             u8::try_from(table_id).expect("table ids are always <= MAX_TABLE_ID (252)");
@@ -651,9 +731,9 @@ impl LinuxRibDriver {
         let mut v4 = self.handle.route().get(v4_filter).execute();
         while let Some(route) = v4.try_next().await? {
             if route.header.table == table_id_u8
-                && let Some((slot, key)) = extract_route(&route)
+                && let Some((slot, key, gid)) = extract(&route, groups)
             {
-                out.push((slot, key, route));
+                out.push((slot, key, gid, route));
             }
         }
 
@@ -663,9 +743,9 @@ impl LinuxRibDriver {
         let mut v6 = self.handle.route().get(v6_filter).execute();
         while let Some(route) = v6.try_next().await? {
             if route.header.table == table_id_u8
-                && let Some((slot, key)) = extract_route(&route)
+                && let Some((slot, key, gid)) = extract(&route, groups)
             {
-                out.push((slot, key, route));
+                out.push((slot, key, gid, route));
             }
         }
 
@@ -700,7 +780,8 @@ impl LinuxRibDriver {
         backup: bool,
         tunnel: bool,
         replace: bool,
-    ) -> Result<bool, DriverError> {
+    ) -> Result<Placed, DriverError> {
+        let want_group = self.form_for(hops, backup) == Form::Group;
         let gateway = show_gateways(hops.iter().map(|h| &h.gateway));
         // An `Evpn` route leaves `onlink` through the L3 VNI's bridge: its
         // gateway is the remote VTEP, resolved by `sync_l3vni`'s neighbour.
@@ -716,13 +797,13 @@ impl LinuxRibDriver {
         let shared_dev = if evpn {
             let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
                 debug!(%prefix, table_id, "l3 vni bridge not built yet, evpn route deferred");
-                return Ok(false);
+                return Ok(Placed::Skipped);
             };
             Some(bridge)
         } else if tunnel {
             let Some(dev) = self.tunnels.lock().unwrap().get(&table_id).copied() else {
                 debug!(%prefix, table_id, "remote lfa tunnel device not built yet, backup deferred");
-                return Ok(false);
+                return Ok(Placed::Skipped);
             };
             Some(dev)
         } else {
@@ -755,7 +836,7 @@ impl LinuxRibDriver {
             if first {
                 warn!(%prefix, %gateway, table_id, "ipv6 route over an ipv4 next hop not installed: the kernel cannot forward it over ethernet");
             }
-            return Ok(false);
+            return Ok(Placed::Skipped);
         }
         if labelled {
             let mut devs = Vec::with_capacity(hops.len());
@@ -768,7 +849,7 @@ impl LinuxRibDriver {
             let (kept, unresolved) = mpls::onlink_hops(hops, &devs);
             if kept.is_empty() {
                 warn!(%prefix, %gateway, table_id, "labelled route skipped: next hop unresolved");
-                return Ok(false);
+                return Ok(Placed::Skipped);
             }
             for gw in unresolved {
                 warn!(%prefix, gateway = %gw, table_id, "labelled next hop skipped: unresolved");
@@ -776,23 +857,37 @@ impl LinuxRibDriver {
             hops = kept;
         }
         let onlink = labelled || shared_dev.is_some();
-        let Some(route) = build_route(prefix, &hops, table_id, backup, onlink) else {
+        let mut gid = None;
+        if want_group && hops.len() >= 2 {
+            gid = self.ensure_group(table_id, prefix, &hops, onlink).await?;
+        }
+        let route = match gid {
+            Some(g) => group_route(prefix, table_id, g),
+            None => build_route(prefix, &hops, table_id, backup, onlink),
+        };
+        let Some(route) = route else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
-            return Ok(false);
+            return Ok(Placed::Skipped);
         };
-        let sent = if replace {
-            self.route_channel.replace(route).await
-        } else {
-            match self.route_channel.add(route.clone()).await {
-                // A foreign route (another protocol) holds the slot NOS config
-                // wants: replace it once, then it is ours (#1514).
-                Err(e) if is_eexist(&e) => {
-                    warn!(%prefix, %gateway, table_id, backup, "replaced foreign route");
-                    self.route_channel.replace(route).await
+        let mut sent = self
+            .put_route(route.clone(), replace, (prefix, &gateway, table_id, backup))
+            .await;
+        if gid.is_some()
+            && let Err(DriverError::Netlink(rtnetlink::Error::NetlinkError(m))) = &sent
+            && m.code.is_some_and(|c| c.get() == -EINVAL)
+        {
+            // The kernel took the group but not a route over it (e.g. an IPv6
+            // route over an IPv4-mapped gateway): this hop set goes inline.
+            self.reject(&hops, &std::io::Error::from_raw_os_error(EINVAL));
+            gid = None;
+            sent = match build_route(prefix, &hops, table_id, backup, onlink) {
+                Some(r) => {
+                    self.put_route(r, replace, (prefix, &gateway, table_id, backup))
+                        .await
                 }
-                other => other,
-            }
-        };
+                None => Ok(()),
+            };
+        }
         sent.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, replace, error = %e, "failed to add route");
         })?;
@@ -800,13 +895,47 @@ impl LinuxRibDriver {
             let labels: Vec<_> = hops.iter().map(|h| &h.labels).collect();
             let gateway = show_gateways(hops.iter().map(|h| &h.gateway));
             let interfaces: Vec<_> = hops.iter().filter_map(|h| h.interface_id).collect();
-            info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, replaced = replace, "installed labelled route");
+            match gid {
+                Some(g) => {
+                    info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, replaced = replace, nexthop_group = g, "installed labelled route");
+                }
+                None => {
+                    info!(%prefix, labels = ?labels, %gateway, interfaces = ?interfaces, table_id, replaced = replace, "installed labelled route");
+                }
+            }
         } else {
             let discard = hops.is_empty();
             let interfaces: Vec<_> = hops.iter().filter_map(|h| h.interface_id).collect();
-            info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, interfaces = ?interfaces, "added route");
+            match gid {
+                Some(g) => {
+                    info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, interfaces = ?interfaces, nexthop_group = g, "added route");
+                }
+                None => {
+                    info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, tunnel, replaced = replace, interfaces = ?interfaces, "added route");
+                }
+            }
         }
-        Ok(true)
+        Ok(gid.map_or(Placed::Inline, Placed::Group))
+    }
+
+    /// Sends one route: a replace, or an add that replaces a foreign route
+    /// (another protocol) holding the slot once (#1514).
+    async fn put_route(
+        &self,
+        route: RouteMessage,
+        replace: bool,
+        (prefix, gateway, table_id, backup): (IpNet, &str, u32, bool),
+    ) -> Result<(), DriverError> {
+        if replace {
+            return self.route_channel.replace(route).await;
+        }
+        match self.route_channel.add(route.clone()).await {
+            Err(e) if is_eexist(&e) => {
+                warn!(%prefix, %gateway, table_id, backup, "replaced foreign route");
+                self.route_channel.replace(route).await
+            }
+            other => other,
+        }
     }
 
     /// The ifindex `gateway` leaves over in this table's underlay (`ip route
@@ -883,6 +1012,7 @@ impl LinuxRibDriver {
         prefix: IpNet,
         hops: &[NextHop],
         backup: bool,
+        gid: Option<u32>,
     ) -> Result<(), DriverError> {
         let key = key(hops);
         let gateway = show_gateways(key.iter().map(|(gw, _, _)| gw));
@@ -892,7 +1022,11 @@ impl LinuxRibDriver {
             .iter()
             .map(|h| (h.gateway, h.interface_id).into())
             .collect();
-        let Some(route) = build_route(prefix, &bare, table_id, backup, false) else {
+        let route = match gid {
+            Some(g) => group_route(prefix, table_id, g),
+            None => build_route(prefix, &bare, table_id, backup, false),
+        };
+        let Some(route) = route else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
@@ -912,10 +1046,10 @@ impl LinuxRibDriver {
         table_id: u32,
         prefix: IpNet,
         hops: &[NextHop],
-        old: Option<&Hops>,
+        old: Option<(&Hops, Option<u32>)>,
         (source, backup, tunnel): (Option<RouteSource>, bool, bool),
-    ) -> Result<bool, DriverError> {
-        let sent = self
+    ) -> Result<Placed, DriverError> {
+        let placed = self
             .add_route(
                 table_id,
                 prefix,
@@ -926,10 +1060,11 @@ impl LinuxRibDriver {
                 old.is_some(),
             )
             .await?;
-        if let (false, Some(old)) = (sent, old) {
-            self.remove_route(table_id, prefix, old, backup).await?;
+        if let (false, Some((old, gid))) = (placed.sent(), old) {
+            self.remove_route(table_id, prefix, old, backup, gid)
+                .await?;
         }
-        Ok(sent)
+        Ok(placed)
     }
 
     /// Applies only `changes` directly against the kernel, using
@@ -942,19 +1077,24 @@ impl LinuxRibDriver {
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
         type Slots = HashMap<Slot, Hops>;
-        let items: Vec<(IpNet, Slots, Slots, Option<RouteSource>, bool)> = {
+        type Olds = HashMap<Slot, (Hops, Option<u32>)>;
+        self.ensure_nh_table(table_id).await;
+        let items: Vec<(IpNet, Olds, Slots, Option<RouteSource>, bool)> = {
             let installed = self.installed.lock().unwrap();
+            let nexthops = self.nexthops.lock().unwrap();
             let table_installed = installed.get(&table_id);
+            let table_groups = nexthops.get(&table_id);
             changes
                 .iter()
                 .map(|(prefix, new)| {
-                    let old: Slots = [false, true]
+                    let old: Olds = [false, true]
                         .into_iter()
                         .filter_map(|b| {
                             let slot = (*prefix, b);
+                            let gid = table_groups.and_then(|t| t.slot_gid(&slot));
                             table_installed
                                 .and_then(|m| m.get(&slot))
-                                .map(|hops| (slot, hops.clone()))
+                                .map(|hops| (slot, (hops.clone(), gid)))
                         })
                         .collect();
                     let source = new.as_ref().map(|e| e.source);
@@ -969,13 +1109,16 @@ impl LinuxRibDriver {
 
         // The shadow state follows each op as it succeeds, so a failed one
         // leaves its slot as the kernel still has it.
-        let set = |slot: Slot, hops: Option<Hops>| {
+        let set = |slot: Slot, hops: Option<Hops>, gid: Option<u32>| {
             let mut installed = self.installed.lock().unwrap();
             let table_installed = installed.entry(table_id).or_default();
             match hops {
                 Some(hops) => table_installed.insert(slot, hops),
                 None => table_installed.remove(&slot),
             };
+            if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+                t.set_slot(slot, gid);
+            }
         };
         let errors = drain(items.into_iter().map(
             |(prefix, old, new, source, tunnel)| async move {
@@ -985,20 +1128,28 @@ impl LinuxRibDriver {
                 let all: BTreeSet<Slot> = old.keys().chain(new.keys()).copied().collect();
                 for slot in all {
                     let (o, n) = (old.get(&slot), new.get(&slot));
-                    let op = slot_op(o.map(|h| key(h)).as_ref(), n.map(|h| key(h)).as_ref());
+                    let old_shape = o.map(|(h, g)| (key(h), form_of(*g)));
+                    let new_shape = n.map(|h| (key(h), self.form_for(h, slot.1)));
+                    let op = slot_op(old_shape.as_ref(), new_shape.as_ref());
                     let step = match (op, o, n) {
-                        (SlotOp::Remove, Some(o), _) => self
-                            .remove_route(table_id, prefix, o, slot.1)
+                        (SlotOp::Remove, Some((o, g)), _) => self
+                            .remove_route(table_id, prefix, o, slot.1, *g)
                             .await
-                            .map(|()| None),
+                            .map(|()| (None, None)),
                         (SlotOp::Add | SlotOp::Replace, o, Some(n)) => self
-                            .install(table_id, prefix, n, o, (source, slot.1, tunnel))
+                            .install(
+                                table_id,
+                                prefix,
+                                n,
+                                o.map(|(h, g)| (h, *g)),
+                                (source, slot.1, tunnel),
+                            )
                             .await
-                            .map(|sent| shadow_after_install(sent, n)),
-                        (_, _, n) => Ok(n.cloned()),
+                            .map(|placed| (shadow_after_install(placed.sent(), n), placed.gid())),
+                        (_, o, n) => Ok((n.cloned(), o.and_then(|(_, g)| *g))),
                     };
                     match step {
-                        Ok(hops) => set(slot, hops),
+                        Ok((hops, gid)) => set(slot, hops, gid),
                         Err(e) => result = result.and(Err(e)),
                     }
                 }
@@ -1006,6 +1157,7 @@ impl LinuxRibDriver {
             },
         ))
         .await;
+        self.collect_garbage(table_id).await;
         errors.into_iter().next().map_or(Ok(()), Err)
     }
 
@@ -1018,28 +1170,52 @@ impl LinuxRibDriver {
         best_routes: &HashMap<IpNet, RibEntry>,
         keep_stale: bool,
     ) -> Result<(), DriverError> {
-        let observed = self.dump_routes(table_id).await?;
-        let observed_map: HashMap<Slot, Key> = observed
+        // What the kernel has of ours, nexthops first: a route over a group
+        // reads as that group's key, and the table adopts the objects (a
+        // restarted `nos-ribd` finds its own groups instead of recreating them).
+        let records = self.nh_dump(table_id).await;
+        let group_keys = group_keys(&records);
+        {
+            let mut tables = self.nexthops.lock().unwrap();
+            let t = tables
+                .entry(table_id)
+                .or_insert_with(|| NexthopTable::new(table_id));
+            t.seed(&records);
+        }
+        let observed = self.dump_routes(table_id, &group_keys).await?;
+        let observed_map: HashMap<Slot, Shape> = observed
             .iter()
-            .map(|(slot, key, _)| (*slot, key.clone()))
+            .map(|(slot, key, gid, _)| (*slot, (key.clone(), form_of(*gid))))
+            .collect();
+        let observed_gid: HashMap<Slot, u32> = observed
+            .iter()
+            .filter_map(|(slot, _, gid, _)| Some((*slot, (*gid)?)))
             .collect();
         let desired_full: HashMap<Slot, Hops> = best_routes
             .iter()
             .flat_map(|(prefix, entry)| slots(*prefix, entry))
             .collect();
-        let desired: HashMap<Slot, Key> = desired_full
+        let desired: HashMap<Slot, Shape> = desired_full
             .iter()
-            .map(|(slot, hops)| (*slot, key(hops)))
+            .map(|(slot, hops)| (*slot, (key(hops), self.form_for(hops, slot.1))))
             .collect();
 
         let observed_by_slot: HashMap<Slot, RouteMessage> = observed
             .iter()
-            .map(|(slot, _, message)| (*slot, message.clone()))
+            .map(|(slot, _, _, message)| (*slot, message.clone()))
             .collect();
 
         let (to_add, mut to_remove) = diff_routes(&observed_map, &desired);
+        // Routes the startup hold leaves in the kernel: their groups stay.
+        let mut stale_groups = Vec::new();
         if keep_stale {
             // Only a slot we re-add (changed hops) goes: EEXIST otherwise.
+            stale_groups.extend(
+                to_remove
+                    .iter()
+                    .filter(|(slot, _)| !desired.contains_key(slot))
+                    .filter_map(|(slot, _)| observed_gid.get(slot).copied()),
+            );
             to_remove.retain(|(slot, _)| desired.contains_key(slot));
         }
         debug!(
@@ -1061,7 +1237,7 @@ impl LinuxRibDriver {
         // regardless of client-side concurrency, so it isn't used here.
         // Both phases run every op even if some fail (#139): one bad route
         // must not hold back every other one, nor the add phase.
-        // A slot in both lists changed key: replaced in one request, so its
+        // A slot in both lists changed shape: replaced in one request, so its
         // delete is skipped (#598).
         let replaced: HashSet<Slot> = to_add
             .iter()
@@ -1072,7 +1248,7 @@ impl LinuxRibDriver {
             .into_iter()
             .filter(|(slot, _)| !replaced.contains(slot))
             .collect();
-        let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), key)| {
+        let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), (key, _))| {
             let message = observed_by_slot.get(&(prefix, backup)).cloned();
             let gateway = show_gateways(key.iter().map(|(gw, _, _)| gw));
             async move {
@@ -1093,8 +1269,8 @@ impl LinuxRibDriver {
         }))
         .await;
 
-        let deferred = std::sync::Mutex::new(Vec::new());
-        let deferred_ref = &deferred;
+        let placed = std::sync::Mutex::new(Vec::new());
+        let placed_ref = &placed;
         let add_failed = drain(to_add.into_iter().map(|(slot, _)| {
             let source = best_routes.get(&slot.0).map(|e| e.source);
             let tunnel = best_routes.get(&slot.0).is_some_and(|e| e.backup_tunnel);
@@ -1102,21 +1278,19 @@ impl LinuxRibDriver {
             let gone = replaced.contains(&slot).then(|| {
                 (
                     observed_by_slot.get(&slot).cloned(),
-                    observed_map[&slot].clone(),
+                    observed_map[&slot].0.clone(),
                 )
             });
             async move {
                 let replace = gone.is_some();
-                let sent = self
+                let put = self
                     .add_route(table_id, slot.0, &want, source, slot.1, tunnel, replace)
                     .await
                     .map_err(|e| (slot, e))?;
-                if !sent {
-                    deferred_ref.lock().unwrap().push(slot);
-                }
+                placed_ref.lock().unwrap().push((slot, put));
                 // Deferred or skipped: the old route is still there, drop it.
                 match gone {
-                    Some((Some(mut message), key)) if !sent => {
+                    Some((Some(mut message), key)) if !put.sent() => {
                         message.header.flags.remove(RouteFlags::Onlink);
                         self.route_channel
                             .del(message)
@@ -1135,23 +1309,54 @@ impl LinuxRibDriver {
         // (an empty `desired` on `teardown` correctly clears it): `desired`,
         // except where an op failed and the kernel keeps what it had.
         let mut installed = desired_full;
-        // A deferred or skipped add is not in the kernel (#686).
-        unset_deferred(&mut installed, &deferred.into_inner().unwrap());
+        // The group each installed route uses: what was added, or what a kept
+        // route already had.
+        let mut gids: HashMap<Slot, u32> = observed_gid
+            .iter()
+            .filter(|(slot, _)| desired.get(slot) == observed_map.get(slot))
+            .map(|(slot, gid)| (*slot, *gid))
+            .collect();
+        for (slot, put) in placed.into_inner().unwrap() {
+            gids.remove(&slot);
+            match put {
+                // A deferred or skipped add is not in the kernel (#686).
+                Placed::Skipped => {
+                    installed.remove(&slot);
+                }
+                Placed::Inline => {}
+                Placed::Group(g) => {
+                    gids.insert(slot, g);
+                }
+            }
+        }
         let mut first_error = None;
         for (slot, e) in add_failed {
             // A failed replace leaves what the kernel had (like a failed
             // delete below); a failed add leaves nothing.
+            gids.remove(&slot);
             match replaced.contains(&slot).then(|| &observed_map[&slot]) {
-                Some(key) => installed.insert(slot, hops_of(key)),
+                Some((key, _)) => {
+                    if let Some(g) = observed_gid.get(&slot) {
+                        gids.insert(slot, *g);
+                    }
+                    installed.insert(slot, hops_of(key))
+                }
                 None => installed.remove(&slot),
             };
             first_error.get_or_insert(e);
         }
         for (slot, key, e) in remove_failed {
+            if let Some(g) = observed_gid.get(&slot) {
+                gids.insert(slot, *g);
+            }
             installed.insert(slot, hops_of(&key));
             first_error.get_or_insert(e);
         }
         self.installed.lock().unwrap().insert(table_id, installed);
+        if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+            t.reset_slots(gids, stale_groups);
+        }
+        self.collect_garbage(table_id).await;
         first_error.map_or(Ok(()), Err)
     }
 }
@@ -1496,6 +1701,229 @@ impl RibDriver for LinuxRibDriver {
     }
 }
 
+/// errno(3) `EINVAL`: the kernel refuses this nexthop combination.
+const EINVAL: i32 = 22;
+/// errno(3) `ENOSYS`.
+const ENOSYS: i32 = 38;
+/// errno(3) `EOPNOTSUPP`.
+const EOPNOTSUPP: i32 = 95;
+
+/// Runs one blocking `nos-nexthop` request on the blocking pool.
+async fn nh_send(nh: Nexthop, tolerate: i32) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || nos_nexthop::send(&nh, tolerate))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// The route key each group of a nexthop dump stands for (members' gateway,
+/// link-local oif and labels, as `key()` makes them): what `extract_route`
+/// reads an `RTA_NH_ID` route as.
+fn group_keys(records: &[NexthopRecord]) -> HashMap<u32, Key> {
+    let hops: HashMap<u32, &NexthopRecord> = records
+        .iter()
+        .filter(|r| r.gateway.is_some() && !r.fdb)
+        .map(|r| (r.id, r))
+        .collect();
+    records
+        .iter()
+        .filter_map(|r| {
+            let mut k: Key = r
+                .group
+                .as_ref()?
+                .iter()
+                .map(|(id, _)| {
+                    let h = hops.get(id)?;
+                    let gw = unmap(h.gateway?);
+                    Some((gw, key_ifindex(gw, h.oif), h.labels.clone()))
+                })
+                .collect::<Option<_>>()?;
+            k.sort_unstable();
+            Some((r.id, k))
+        })
+        .collect()
+}
+
+/// An IPv4-mapped IPv6 gateway as the IPv4 one it stands for.
+fn unmap(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(a) => a.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+/// `prefix via nexthop <gid>`: no gateway, oif, multipath or encap of its own.
+/// Also what a delete of such a route needs (the kernel refuses a delete that
+/// names a gateway for a route using a nexthop object).
+fn group_route(prefix: IpNet, table_id: u32, gid: u32) -> Option<RouteMessage> {
+    let mut route = RouteMessageBuilder::<IpAddr>::new()
+        .destination_prefix(prefix.addr(), prefix.prefix_len())
+        .ok()?
+        .table_id(table_id)
+        .protocol(NOS_RTPROT)
+        .build();
+    route.header.scope = RouteScope::Universe;
+    route.attributes.push(RouteAttribute::NhId(gid));
+    Some(route)
+}
+
+impl LinuxRibDriver {
+    /// The nexthop objects of `table_id`'s id range, as the kernel has them. A
+    /// kernel that cannot list them has no nexthop objects: groups are off.
+    async fn nh_dump(&self, table_id: u32) -> Vec<NexthopRecord> {
+        let range = NexthopTable::new(table_id).range();
+        match tokio::task::spawn_blocking(move || nos_nexthop::dump(range)).await {
+            Ok(Ok(records)) => records,
+            other => {
+                let e = match other {
+                    Ok(r) => r.err().map(|e| e.to_string()),
+                    Err(e) => Some(e.to_string()),
+                };
+                warn!(table_id, error = ?e, "cannot list nexthops, installing multipath routes inline");
+                self.disable_nexthop_groups();
+                Vec::new()
+            }
+        }
+    }
+
+    /// Makes sure `table_id` has a `NexthopTable`: seeded from the kernel, so
+    /// ids of objects an earlier `nos-ribd` left are not handed out again.
+    async fn ensure_nh_table(&self, table_id: u32) {
+        if self.nexthops.lock().unwrap().contains_key(&table_id) {
+            return;
+        }
+        let records = self.nh_dump(table_id).await;
+        let mut tables = self.nexthops.lock().unwrap();
+        tables.entry(table_id).or_insert_with(|| {
+            let mut t = NexthopTable::new(table_id);
+            t.seed(&records);
+            t
+        });
+    }
+
+    /// The group of `hops` for a route to `prefix`, created with its hop
+    /// nexthops when missing. `None` means install inline: no resolvable
+    /// egress, out of ids, or a kernel answer that refuses groups (recorded).
+    async fn ensure_group(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+        hops: &[NextHop],
+        onlink: bool,
+    ) -> Result<Option<u32>, DriverError> {
+        let mapped = map_hops(prefix.addr().is_ipv4(), hops);
+        let mut members: GroupKey = Vec::with_capacity(hops.len());
+        for (h, m) in hops.iter().zip(&mapped) {
+            // A nexthop object has no table to resolve its gateway in: the
+            // egress is looked up in this table's VRF now.
+            let oif = match h.interface_id {
+                Some(o) => Some(o),
+                None => self.egress_of(table_id, h.gateway).await,
+            };
+            let Some(oif) = oif else {
+                self.reject(hops, &std::io::Error::other("no egress for a member"));
+                return Ok(None);
+            };
+            members.push((m.gateway, Some(oif), onlink, m.labels.clone()));
+        }
+        members.sort();
+        let _create = self.create_lock.lock().await;
+        self.ensure_nh_table(table_id).await;
+        let plan = {
+            let mut tables = self.nexthops.lock().unwrap();
+            tables.get_mut(&table_id).and_then(|t| t.ensure(&members))
+        };
+        let Some(plan) = plan else {
+            self.reject(hops, &std::io::Error::other("nexthop ids exhausted"));
+            return Ok(None);
+        };
+        let mut created = Vec::new();
+        let mut result = Ok(());
+        for (id, (gateway, oif, onlink, labels)) in &plan.new_hops {
+            let nh = Nexthop::Gateway(Gateway {
+                id: *id,
+                gateway: *gateway,
+                oif: *oif,
+                onlink: *onlink,
+                labels: labels.clone(),
+                fdb: false,
+                replace: true,
+            });
+            result = nh_send(nh, 0).await;
+            if result.is_err() {
+                break;
+            }
+            created.push(*id);
+        }
+        if result.is_ok() && plan.new_group {
+            let nh = Nexthop::Group(Group {
+                id: plan.group,
+                members: plan.members.iter().map(|m| (*m, 1)).collect(),
+                fdb: false,
+            });
+            result = nh_send(nh, 0).await;
+            if result.is_ok() {
+                info!(
+                    id = plan.group,
+                    members = plan.members.len(),
+                    table_id,
+                    "installed nexthop group"
+                );
+            }
+        }
+        let Err(e) = result else {
+            return Ok(Some(plan.group));
+        };
+        if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+            t.forget(&plan);
+        }
+        for id in created {
+            let _ = nh_send(Nexthop::Delete { id }, ENOENT).await;
+        }
+        if e.raw_os_error()
+            .is_some_and(|c| matches!(c, EOPNOTSUPP | ENOSYS))
+        {
+            warn!(table_id, error = %e, "kernel has no nexthop groups, installing multipath routes inline");
+            self.disable_nexthop_groups();
+            Ok(None)
+        } else if e.raw_os_error() == Some(EINVAL) || e.kind() == std::io::ErrorKind::InvalidInput {
+            self.reject(hops, &e);
+            Ok(None)
+        } else {
+            Err(DriverError::Registry(e))
+        }
+    }
+
+    /// Remembers that `hops` cannot be a group (refused, no egress, no ids): they
+    /// install inline, and a later pass does not try again (no replace loop).
+    fn reject(&self, hops: &[NextHop], e: &std::io::Error) {
+        let k = key(hops);
+        if self.rejected.lock().unwrap().insert(k.clone()) {
+            let gateway = show_gateways(k.iter().map(|(gw, _, _)| gw));
+            warn!(%gateway, error = %e, "no nexthop group for these hops, installing them inline");
+        }
+    }
+
+    /// Deletes the groups, then the hop nexthops, nothing of ours uses
+    /// (deleting a nexthop deletes the routes using it, so this runs after a
+    /// pass has removed or replaced its routes).
+    async fn collect_garbage(&self, table_id: u32) {
+        let (groups, hops) = {
+            let mut tables = self.nexthops.lock().unwrap();
+            match tables.get_mut(&table_id) {
+                Some(t) => t.take_unreferenced(),
+                None => return,
+            }
+        };
+        for id in groups.iter().chain(&hops) {
+            if let Err(e) = nh_send(Nexthop::Delete { id: *id }, ENOENT).await {
+                warn!(id, table_id, error = %e, "failed to remove nexthop");
+            } else if groups.contains(id) {
+                info!(id, table_id, "removed nexthop group");
+            }
+        }
+    }
+}
+
 impl LinuxRibDriver {
     /// The ifindex of `underlay`'s VRF device, `None` before its `nos-ribd`
     /// created it (the next `sync_mpls` tries again).
@@ -1569,10 +1997,27 @@ pub const NOS_RTPROT: RouteProtocol = RouteProtocol::Other(200);
 // supported.
 /// A `RTM_F_CLONED` entry is a kernel exception (e.g. the PMTU a tunnel
 /// learned), dumped beside the route it belongs to: never a route of ours.
+#[cfg(test)]
 fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
+    extract(route, &HashMap::new()).map(|(slot, key, _)| (slot, key))
+}
+
+/// `extract_route`, and the nexthop group of a route installed as `RTA_NH_ID`
+/// (#1587): its key is the group's (`groups`, from `group_keys`); a route over
+/// a group not in `groups` (another daemon's, or a vanished one) is not ours.
+/// The kernel's compat mode also dumps such a route's gateways: the id wins.
+fn extract(route: &RouteMessage, groups: &HashMap<u32, Key>) -> Option<(Slot, Key, Option<u32>)> {
     if route.header.protocol != NOS_RTPROT || route.header.flags.contains(RouteFlags::Cloned) {
         return None;
     }
+    let nh_id = route.attributes.iter().find_map(|a| match a {
+        RouteAttribute::NhId(id) => Some(*id),
+        _ => None,
+    });
+    let from_group = match nh_id {
+        Some(id) => Some(groups.get(&id)?.clone()),
+        None => None,
+    };
     // `build_route` sends a VPNv6 route to an IPv4 PE through its IPv4-mapped
     // address; the desired state says IPv4.
     let gateway_of = |attrs: &[RouteAttribute]| {
@@ -1588,6 +2033,7 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
         RouteAttribute::MultiPath(hops) => Some(hops),
         _ => None,
     }) {
+        _ if from_group.is_some() => from_group.unwrap_or_default(),
         Some(hops) => hops
             .iter()
             .filter_map(|hop| {
@@ -1638,7 +2084,7 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Key)> {
 
     IpNet::new(destination, route.header.destination_prefix_length)
         .ok()
-        .map(|prefix| ((prefix, backup), key))
+        .map(|prefix| ((prefix, backup), key, nh_id))
 }
 
 /// The hops a dumped `key` stands for (an interface only for a link-local
@@ -1666,6 +2112,25 @@ fn log_removed(prefix: IpNet, key: &Key, table_id: u32, backup: bool) {
     }
 }
 
+/// A VPNv6 route (RFC 4659) leaves toward IPv4 PEs: the kernel refuses an
+/// IPv6 route with `RTA_VIA` ("IPv6 does not support RTA_VIA"), but takes
+/// the IPv4-mapped gateway (`via ::ffff:a.b.c.d`) and sends the labelled
+/// packet to the PE's IPv4 neighbour. `extract_route` maps it back.
+fn map_hops(v4: bool, hops: &[NextHop]) -> Hops {
+    if v4 || hops.is_empty() || !hops.iter().all(|h| h.gateway.is_ipv4()) {
+        return hops.to_vec();
+    }
+    hops.iter()
+        .map(|h| match h.gateway {
+            IpAddr::V4(a) => NextHop {
+                gateway: IpAddr::V6(a.to_ipv6_mapped()),
+                ..h.clone()
+            },
+            IpAddr::V6(_) => h.clone(),
+        })
+        .collect()
+}
+
 /// Builds the `RouteMessage` for one kernel route, `None` on a
 /// prefix/gateway address-family mismatch (or a backup with no hop). No hop
 /// is a discard (`RTN_BLACKHOLE`) route, one is `RTA_GATEWAY` (+ `RTA_OIF`),
@@ -1682,26 +2147,8 @@ fn build_route(
     onlink: bool,
 ) -> Option<RouteMessage> {
     let v4 = prefix.addr().is_ipv4();
-    // A VPNv6 route (RFC 4659) leaves toward IPv4 PEs: the kernel refuses an
-    // IPv6 route with `RTA_VIA` ("IPv6 does not support RTA_VIA"), but takes
-    // the IPv4-mapped gateway (`via ::ffff:a.b.c.d`) and sends the labelled
-    // packet to the PE's IPv4 neighbour. `extract_route` maps it back.
-    let mapped;
-    let hops = if !v4 && !hops.is_empty() && hops.iter().all(|h| h.gateway.is_ipv4()) {
-        mapped = hops
-            .iter()
-            .map(|h| match h.gateway {
-                IpAddr::V4(a) => NextHop {
-                    gateway: IpAddr::V6(a.to_ipv6_mapped()),
-                    ..h.clone()
-                },
-                IpAddr::V6(_) => h.clone(),
-            })
-            .collect::<Hops>();
-        &mapped[..]
-    } else {
-        hops
-    };
+    let mapped = map_hops(v4, hops);
+    let hops = &mapped[..];
     if (backup && hops.is_empty()) || hops.iter().any(|h| h.gateway.is_ipv4() != v4) {
         return None;
     }
@@ -1799,11 +2246,6 @@ mod tests {
         let hops: super::Hops = super::Hops::default();
         assert_eq!(super::shadow_after_install(false, &hops), None);
         assert_eq!(super::shadow_after_install(true, &hops), Some(hops.clone()));
-        let slot = ("10.0.0.0/8".parse().unwrap(), false);
-        let other = ("10.1.0.0/16".parse().unwrap(), false);
-        let mut m = std::collections::HashMap::from([(slot, hops.clone()), (other, hops)]);
-        super::unset_deferred(&mut m, &[slot]);
-        assert!(!m.contains_key(&slot) && m.contains_key(&other));
     }
 
     use super::*;
@@ -1881,7 +2323,7 @@ mod tests {
         let labelled = k(&[("10.0.0.1", &[16])]);
         let other = k(&[("10.0.0.9", &[])]);
         let discard: Key = Vec::new();
-        assert_eq!(slot_op(None, None), SlotOp::Keep);
+        assert_eq!(slot_op::<Key>(None, None), SlotOp::Keep);
         assert_eq!(slot_op(Some(&one), None), SlotOp::Remove);
         assert_eq!(slot_op(None, Some(&one)), SlotOp::Add);
         assert_eq!(slot_op(Some(&one), Some(&one)), SlotOp::Keep);
@@ -2345,5 +2787,166 @@ mod tests {
         let two = |a: &[u32], b: &[u32]| [hop("10.0.0.2", None, a), hop("10.0.0.2", Some(4), b)];
         assert_eq!(key(&two(&[1], &[2])), key(&two(&[2], &[1])));
         assert_ne!(key(&two(&[1], &[2])), key(&two(&[1], &[3])));
+    }
+
+    // ---- nexthop groups (#1587) ----
+
+    fn hop2(gw: &str, oif: Option<u32>, labels: &[u32]) -> NextHop {
+        NextHop {
+            gateway: addr(gw),
+            interface_id: oif,
+            labels: labels.to_vec(),
+        }
+    }
+
+    fn rec(id: u32, gw: &str, oif: u32, labels: &[u32]) -> NexthopRecord {
+        NexthopRecord {
+            id,
+            gateway: Some(addr(gw)),
+            oif: Some(oif),
+            labels: labels.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn grp(id: u32, members: &[u32]) -> NexthopRecord {
+        NexthopRecord {
+            id,
+            group: Some(members.iter().map(|m| (*m, 1)).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dumped_group_reads_as_the_key_of_its_hops() {
+        let hops = [
+            hop2("10.0.0.2", Some(3), &[200]),
+            hop2("10.0.0.1", Some(2), &[100, 101]),
+        ];
+        let records = [
+            rec(11, "10.0.0.2", 3, &[200]),
+            rec(10, "10.0.0.1", 2, &[100, 101]),
+            grp(12, &[11, 10]),
+            // a group with a member that is not listed is skipped
+            grp(13, &[10, 99]),
+        ];
+        let keys = group_keys(&records);
+        assert_eq!(keys.get(&12), Some(&key(&hops)));
+        assert!(!keys.contains_key(&13) && !keys.contains_key(&10));
+    }
+
+    #[test]
+    fn a_group_key_drops_the_oif_but_keeps_a_link_local_one() {
+        let records = [
+            rec(1, "fe80::1", 7, &[]),
+            rec(2, "2001:db8::1", 8, &[]),
+            grp(3, &[1, 2]),
+        ];
+        let want = key(&[
+            hop2("fe80::1", Some(7), &[]),
+            hop2("2001:db8::1", None, &[]),
+        ]);
+        assert_eq!(group_keys(&records).get(&3), Some(&want));
+    }
+
+    #[test]
+    fn a_vpnv6_group_reads_back_as_the_ipv4_pe() {
+        let records = [
+            rec(1, "::ffff:10.0.0.1", 2, &[100]),
+            rec(2, "::ffff:10.0.0.2", 2, &[100]),
+            grp(3, &[1, 2]),
+        ];
+        let want = key(&[
+            hop2("10.0.0.1", None, &[100]),
+            hop2("10.0.0.2", None, &[100]),
+        ]);
+        assert_eq!(group_keys(&records).get(&3), Some(&want));
+    }
+
+    #[test]
+    fn a_group_route_is_the_prefix_and_an_id() {
+        let p = net("10.9.0.0/16");
+        let route = group_route(p, 100, 0x6400_0001).unwrap();
+        let groups = HashMap::from([(
+            0x6400_0001,
+            key(&[hop2("10.0.0.1", None, &[]), hop2("10.0.0.2", None, &[])]),
+        )]);
+        let (slot, k, gid) = extract(&wire(&route), &groups).unwrap();
+        assert_eq!((slot, gid), ((p, false), Some(0x6400_0001)));
+        assert_eq!(k.len(), 2);
+        assert!(!route
+            .attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::Gateway(_) | RouteAttribute::MultiPath(_))));
+        // A route over a group that is not ours (or gone) is not ours.
+        assert_eq!(extract(&wire(&route), &HashMap::new()), None);
+    }
+
+    #[test]
+    fn the_nh_id_wins_over_the_gateways_the_kernel_dumps_beside_it() {
+        let p = net("10.9.0.0/16");
+        let mut route = group_route(p, 100, 5).unwrap();
+        route
+            .attributes
+            .push(RouteAttribute::Gateway(RouteAddress::from(Ipv4Addr::new(
+                10, 0, 0, 9,
+            ))));
+        let want = key(&[hop2("10.0.0.1", None, &[]), hop2("10.0.0.2", None, &[])]);
+        let (_, k, gid) = extract(&route, &HashMap::from([(5, want.clone())])).unwrap();
+        assert_eq!((k, gid), (want, Some(5)));
+    }
+
+    #[test]
+    fn the_same_hops_in_another_form_are_a_replace() {
+        let k = key(&[hop2("10.0.0.1", None, &[]), hop2("10.0.0.2", None, &[])]);
+        let inline: Shape = (k.clone(), Form::Inline);
+        let group: Shape = (k, Form::Group);
+        assert_eq!(slot_op(Some(&inline), Some(&group)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&group), Some(&inline)), SlotOp::Replace);
+        assert_eq!(slot_op(Some(&group), Some(&group)), SlotOp::Keep);
+        // the dump diff reports it on both sides, `reconcile_routes` replaces
+        let slot: Slot = (net("10.9.0.0/16"), false);
+        let (add, remove) = diff_routes(
+            &HashMap::from([(slot, inline)]),
+            &HashMap::from([(slot, group)]),
+        );
+        assert_eq!((add.len(), remove.len()), (1, 1));
+    }
+
+    #[test]
+    fn only_a_primary_multipath_route_is_a_group() {
+        let two = [hop2("10.0.0.1", None, &[]), hop2("10.0.0.2", None, &[])];
+        let none = HashSet::new();
+        assert_eq!(form(false, &none, &two, false), Form::Group);
+        assert_eq!(form(false, &none, &two, true), Form::Inline);
+        assert_eq!(form(false, &none, &two[..1], false), Form::Inline);
+        assert_eq!(form(false, &none, &[], false), Form::Inline);
+        assert_eq!(form(true, &none, &two, false), Form::Inline);
+        // the same gateway twice cannot be a group
+        let dup = [two[0].clone(), two[0].clone()];
+        assert_eq!(form(false, &none, &dup, false), Form::Inline);
+        // a refused hop set goes inline, another set does not
+        let refused = HashSet::from([key(&two)]);
+        assert_eq!(form(false, &refused, &two, false), Form::Inline);
+        let other = [hop2("10.0.0.1", None, &[]), hop2("10.0.0.3", None, &[])];
+        assert_eq!(form(false, &refused, &other, false), Form::Group);
+        // labels make another hop set
+        let labelled = [hop2("10.0.0.1", None, &[1]), hop2("10.0.0.2", None, &[])];
+        assert_eq!(form(false, &refused, &labelled, false), Form::Group);
+    }
+
+    #[test]
+    fn a_v6_route_over_v4_hops_maps_the_gateways() {
+        let hops = [
+            hop2("10.0.0.1", None, &[100]),
+            hop2("10.0.0.2", None, &[100]),
+        ];
+        let mapped = map_hops(false, &hops);
+        assert_eq!(mapped[0].gateway, addr("::ffff:10.0.0.1"));
+        assert_eq!(map_hops(true, &hops), hops.to_vec());
+        assert_eq!(
+            map_hops(false, &[hop2("2001:db8::1", None, &[])])[0].gateway,
+            addr("2001:db8::1")
+        );
     }
 }

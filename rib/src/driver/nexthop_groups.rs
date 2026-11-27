@@ -51,6 +51,10 @@ pub struct NexthopTable {
     /// The group each slot's installed route uses.
     slots: HashMap<Slot, u32>,
     refs: HashMap<u32, usize>,
+    /// `reset_slots` ran: the slots are the kernel's truth, so unreferenced
+    /// objects really are garbage. Before that (a delta before the first
+    /// full `apply`) nothing is collected.
+    reconciled: bool,
 }
 
 impl NexthopTable {
@@ -64,7 +68,13 @@ impl NexthopTable {
             free: BTreeSet::new(),
             slots: HashMap::new(),
             refs: HashMap::new(),
+            reconciled: false,
         }
+    }
+
+    /// The group slot `slot`'s installed route uses.
+    pub fn slot_gid(&self, slot: &Slot) -> Option<u32> {
+        self.slots.get(slot).copied()
     }
 
     /// The ids this table may list or delete.
@@ -169,11 +179,15 @@ impl NexthopTable {
             *self.refs.entry(g).or_default() += 1;
         }
         self.slots = slots;
+        self.reconciled = true;
     }
 
     /// Takes the objects nothing uses: groups first, then the hops no
     /// remaining group has. The caller deletes them in that order.
     pub fn take_unreferenced(&mut self) -> (Vec<u32>, Vec<u32>) {
+        if !self.reconciled {
+            return (vec![], vec![]);
+        }
         let mut groups: Vec<u32> = self
             .groups
             .values()
@@ -250,6 +264,20 @@ impl NexthopTable {
 mod tests {
     use super::*;
 
+    fn table() -> NexthopTable {
+        NexthopTable {
+            reconciled: true,
+            ..NexthopTable::new(100)
+        }
+    }
+
+    #[test]
+    fn nothing_is_collected_before_the_first_reconcile() {
+        let mut t = NexthopTable::new(100);
+        t.ensure(&key(&[hop("10.0.0.1", 2)])).unwrap();
+        assert_eq!(t.take_unreferenced(), (vec![], vec![]));
+    }
+
     fn hop(gw: &str, oif: u32) -> HopKey {
         (gw.parse().unwrap(), Some(oif), false, vec![])
     }
@@ -264,7 +292,7 @@ mod tests {
 
     #[test]
     fn ids_live_in_the_tables_range() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let p = t
             .ensure(&key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]))
             .unwrap();
@@ -280,7 +308,7 @@ mod tests {
 
     #[test]
     fn the_same_hop_set_shares_one_group_and_hops_are_shared() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let a = hop("10.0.0.1", 2);
         let b = hop("10.0.0.2", 3);
         let c = hop("10.0.0.3", 4);
@@ -296,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_label_stack_makes_another_hop() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let plain = hop("10.0.0.1", 2);
         let mut labelled = plain.clone();
         labelled.3 = vec![100];
@@ -309,7 +337,7 @@ mod tests {
 
     #[test]
     fn refcounts_hold_a_group_until_its_last_slot_goes() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let p = t
             .ensure(&key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]))
             .unwrap();
@@ -331,7 +359,7 @@ mod tests {
 
     #[test]
     fn collection_lists_groups_before_hops_and_reuses_ids() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let p = t
             .ensure(&key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]))
             .unwrap();
@@ -345,7 +373,7 @@ mod tests {
 
     #[test]
     fn forget_gives_a_failed_creation_back() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let k = key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]);
         let p = t.ensure(&k).unwrap();
         t.forget(&p);
@@ -356,7 +384,7 @@ mod tests {
 
     #[test]
     fn running_out_of_ids_is_none_and_leaves_nothing_behind() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         t.next_seq = SEQ_MAX; // one id left
         assert!(t
             .ensure(&key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]))
@@ -368,7 +396,7 @@ mod tests {
 
     #[test]
     fn seed_adopts_the_kernels_objects() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let a = hop("10.0.0.1", 2);
         let b = hop("10.0.0.2", 3);
         let id = |n: u32| (100 << SEQ_BITS) | n;
@@ -404,7 +432,7 @@ mod tests {
 
     #[test]
     fn stale_routes_keep_their_group() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         let p = t
             .ensure(&key(&[hop("10.0.0.1", 2), hop("10.0.0.2", 3)]))
             .unwrap();
@@ -416,7 +444,7 @@ mod tests {
 
     #[test]
     fn foreign_ids_are_ignored_by_seed() {
-        let mut t = NexthopTable::new(100);
+        let mut t = table();
         t.seed(&[NexthopRecord {
             id: 7,
             gateway: Some("10.0.0.1".parse().unwrap()),
