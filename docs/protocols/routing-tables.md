@@ -98,6 +98,7 @@ Optional per-route fields, set one per line under `route <subnet>`:
 - `blackhole true`: discard the traffic. The gateway must be `0.0.0.0` (or `::` for IPv6), and `bfd` and `interface` must stay unset. Any other route must not use the unspecified gateway.
 - A static with a `distance` competes against other sources on that number (eBGP 20, OSPF 110): `distance 250` is a floating static that takes over when the dynamic route is withdrawn. On a tie the static wins.
 - A `blackhole` route is installed as a kernel blackhole, shows as `discard` in `show route`, and is not redistributed into BGP or OSPF.
+- A gateway that is not on a connected network and has no `interface` is resolved recursively through the longest route covering it (OSPF, a connected network, or another static; chains up to depth 4). The route follows that route's next hops, including a path change. While nothing resolves it, `show route` lists it as not installed and it is not programmed; a static through an unreachable gateway is no longer installed.
 - `tag` is shown by `show route`. If the `interface` does not exist yet, the route is retried every tick until it does.
 
 The same over REST. An instance is `{"name", "routes"}`, and a route is `{"subnet", "gateway"}`, keyed by its prefix with `/` encoded as `%2F`:

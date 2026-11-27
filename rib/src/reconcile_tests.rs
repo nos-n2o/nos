@@ -308,7 +308,7 @@ impl Env {
             Fake::Interfaced,
         ]);
         e.ifaced()
-            .set_interface(if_status("eth0", &[], &["10.0.0.1/24"]));
+            .set_interface(if_status("eth0", &[], &["10.0.0.1/24", "2001:db8::1/64"]));
         e
     }
 

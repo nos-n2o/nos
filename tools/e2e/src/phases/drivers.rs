@@ -6326,7 +6326,45 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
         let ecmp_gone = removed(ECMP_STATIC);
         let ecmp_gone_base = a.count(&ecmp_gone);
         a.provision(&["--remove-static-route", ECMP_STATIC]).await?;
-        a.wait_new(&ecmp_gone, ecmp_gone_base, 30).await
+        a.wait_new(&ecmp_gone, ecmp_gone_base, 30).await?;
+
+        log("recursive (#1527): a static whose gateway is covered by another static");
+        let cover_added = added(RECURSIVE_COVER, gw);
+        let cover_base = a.count(&cover_added);
+        a.provision(&["--static-route", RECURSIVE_COVER, "--static-gateway", gw])
+            .await?;
+        a.wait_new(&cover_added, cover_base, 30).await?;
+        let resolved = format!(
+            "static next hop resolved prefix={RECURSIVE_STATIC} gateway={RECURSIVE_GATEWAY} via={gw}"
+        );
+        let unresolved = format!(
+            "static next hop unresolved prefix={RECURSIVE_STATIC} gateway={RECURSIVE_GATEWAY}",
+                    );
+        let (res_base, rec_base) = (a.count(&resolved), a.count(&added(RECURSIVE_STATIC, gw)));
+        a.provision(&[
+            "--static-route",
+            RECURSIVE_STATIC,
+            "--static-gateway",
+            RECURSIVE_GATEWAY,
+        ])
+        .await?;
+        a.wait_new(&resolved, res_base, 30).await?;
+        // Installed with the covering route's gateway, not the configured one.
+        a.wait_new(&added(RECURSIVE_STATIC, gw), rec_base, 30).await?;
+        let (unres_base, gone_base) = (a.count(&unresolved), a.count(&removed(RECURSIVE_STATIC)));
+        a.provision(&["--remove-static-route", RECURSIVE_COVER])
+            .await?;
+        a.wait_new(&unresolved, unres_base, 30).await?;
+        a.wait_new(&removed(RECURSIVE_STATIC), gone_base, 30).await?;
+        let (res_base, rec_base) = (a.count(&resolved), a.count(&added(RECURSIVE_STATIC, gw)));
+        a.provision(&["--static-route", RECURSIVE_COVER, "--static-gateway", gw])
+            .await?;
+        a.wait_new(&resolved, res_base, 30).await?;
+        a.wait_new(&added(RECURSIVE_STATIC, gw), rec_base, 30).await?;
+        let gone_base = a.count(&removed(RECURSIVE_STATIC));
+        a.provision(&["--remove-static-route", RECURSIVE_STATIC])
+            .await?;
+        a.wait_new(&removed(RECURSIVE_STATIC), gone_base, 30).await
     }
     .await;
     // Best effort on every path, so a failure leaves no static behind.
@@ -6340,6 +6378,10 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             LINK_LOCAL_STATIC,
             "--remove-static-route",
             ECMP_STATIC,
+            "--remove-static-route",
+            RECURSIVE_COVER,
+            "--remove-static-route",
+            RECURSIVE_STATIC,
         ])
         .await;
     let _ = b.provision(&["--remove-static-route", FLOAT_PREFIX]).await;
