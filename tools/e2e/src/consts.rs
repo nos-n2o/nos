@@ -414,6 +414,13 @@ pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
 /// for the nexthop), beside `REDISTRIBUTE_GATEWAY` (10.50.0.99).
 pub const ECMP_STATIC: &str = "198.18.79.0/24";
 pub const ECMP_EXTRA_GATEWAY: Addr = Addr("10.50.0.98");
+/// `ecmp-nexthop-groups` (#1587): three more benchmark-range prefixes. The first two
+/// share two gateways (one nexthop group), the third has another second gateway.
+pub const NHG_P1: &str = "198.18.80.0/24";
+pub const NHG_P2: &str = "198.18.81.0/24";
+pub const NHG_P3: &str = "198.18.82.0/24";
+pub const NHG_GATEWAY_2: Addr = Addr("10.50.0.98");
+pub const NHG_GATEWAY_3: Addr = Addr("10.50.0.97");
 /// `static-variants` per-hop interface (#1616): an IPv6 prefix through router-b's
 /// fe80 address on `eth0` and its fe80 address on `eth1` (a direct veth pair,
 /// `link_veths`); eth1 gets an address on each router so `nos-interfaced`

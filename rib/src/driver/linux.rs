@@ -427,6 +427,12 @@ impl LinuxRibDriver {
         self.groups_disabled.store(true, Ordering::SeqCst);
     }
 
+    /// Undoes `disable_nexthop_groups` (test-only: SIGUSR1 in a `dev-args` build).
+    #[cfg(feature = "dev-args")]
+    pub fn enable_nexthop_groups(&self) {
+        self.groups_disabled.store(false, Ordering::SeqCst);
+    }
+
     /// How `hops` at a slot want to be installed: a group for a primary
     /// multipath route unless groups are off or this hop set was refused.
     fn form_for(&self, hops: &[NextHop], backup: bool) -> Form {

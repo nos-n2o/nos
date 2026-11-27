@@ -146,7 +146,21 @@ async fn main() -> anyhow::Result<()> {
             if args.dev.inline_multipath {
                 driver.disable_nexthop_groups();
             }
-            Arc::new(driver)
+            let driver = Arc::new(driver);
+            // e2e `ecmp-nexthop-groups`: SIGUSR1 turns groups on again.
+            #[cfg(feature = "dev-args")]
+            {
+                let driver = driver.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut usr1) = signal(SignalKind::user_defined1()) {
+                        while usr1.recv().await.is_some() {
+                            driver.enable_nexthop_groups();
+                            info!("nexthop groups on (SIGUSR1)");
+                        }
+                    }
+                });
+            }
+            driver
         }
     };
 
