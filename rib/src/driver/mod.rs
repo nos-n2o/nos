@@ -10,6 +10,7 @@ use crate::rib::RibEntry;
 
 pub mod linux;
 pub mod mpls;
+pub mod nexthop_groups;
 pub mod noop;
 pub mod route_channel;
 pub mod table_registry;

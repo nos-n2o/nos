@@ -2333,6 +2333,7 @@ dependencies = [
  "netlink-sys",
  "nos-daemon",
  "nos-log-client",
+ "nos-nexthop",
  "nos-pki",
  "nos-proto",
  "nos-test-support",
