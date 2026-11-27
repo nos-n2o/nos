@@ -20,9 +20,10 @@ use tracing::{info, warn};
 
 use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
 use crate::cscd::{self, Advert, Agreement, PortIn, V2Cfg};
+use crate::fallback::{self, FallbackPort};
 use crate::interface_client::LacpPush;
 use crate::link::{self, LinkConfig, PortObservation};
-use crate::link_client::LinkTable;
+use crate::link_client::{self, Gate, LinkTable};
 use crate::mux_machine::MuxState;
 use crate::packet::{state_bit, PortInfo};
 use crate::receive_machine::ReceiveState;
@@ -102,6 +103,9 @@ impl V2Shared {
     }
 }
 
+/// Per member: (fallback enabled, dwell timeout), set by `reconcile_v2`.
+type FallbackCfg = Arc<Mutex<HashMap<String, (bool, Duration)>>>;
+
 type SelectedTxs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
 pub struct AggregateManager {
@@ -144,6 +148,10 @@ pub struct AggregateManager {
     port_numbers: PortNumbers,
     v2: Arc<V2Shared>,
     links: watch::Receiver<LinkTable>,
+    /// Live `lacp fallback` config per member, read by `selection_loop`.
+    fallback_cfg: FallbackCfg,
+    /// The member currently in fallback, for `show lacp`.
+    fallback_current: Arc<Mutex<Option<String>>>,
 }
 
 impl AggregateManager {
@@ -161,6 +169,8 @@ impl AggregateManager {
         let port_priorities = Arc::new(Mutex::new(HashMap::new()));
         let min_links = Arc::new(AtomicU16::new(1));
         let v2 = V2Shared::new();
+        let fallback_cfg: FallbackCfg = Arc::default();
+        let fallback_current = Arc::new(Mutex::new(None));
         let selection_task = tokio::spawn(selection_loop(
             name.to_string(),
             observations.clone(),
@@ -170,6 +180,9 @@ impl AggregateManager {
             min_links.clone(),
             v2.clone(),
             push_tx,
+            fallback_cfg.clone(),
+            fallback_current.clone(),
+            links.clone(),
         ));
         Arc::new(Self {
             name: name.to_string(),
@@ -190,6 +203,8 @@ impl AggregateManager {
             port_numbers,
             v2,
             links,
+            fallback_cfg,
+            fallback_current,
         })
     }
 
@@ -223,13 +238,16 @@ impl AggregateManager {
             system_priority,
             min_links,
             &V2Cfg::default(),
+            &HashMap::new(),
         );
     }
 
     /// [`Self::reconcile`] plus the v2 settings (#894). A changed version or
     /// algorithm restarts every member, a changed `lacp-link-number` only that
     /// member (both are fixed for a link task's lifetime); a changed map only
-    /// republishes the advert.
+    /// republishes the advert. `fallback` maps a member to (enabled, timeout
+    /// seconds), applied in place (#1575).
+    #[allow(clippy::too_many_arguments)] // one call site per shape
     pub fn reconcile_v2(
         &self,
         mut desired: Vec<(String, u16, LacpMode)>,
@@ -238,7 +256,12 @@ impl AggregateManager {
         system_priority: u16,
         min_links: u16,
         v2: &V2Cfg,
+        fallback: &HashMap<String, (bool, u16)>,
     ) {
+        *self.fallback_cfg.lock().unwrap() = fallback
+            .iter()
+            .map(|(k, (on, secs))| (k.clone(), (*on, Duration::from_secs(u64::from(*secs)))))
+            .collect();
         let old_v2 = std::mem::replace(&mut *self.v2.cfg.lock().unwrap(), v2.clone());
         let v2_changed = old_v2.version != v2.version || old_v2.algorithm != v2.algorithm;
         self.min_links.store(min_links, Ordering::Relaxed);
@@ -356,6 +379,8 @@ impl AggregateManager {
         let out = self.v2.out.lock().unwrap();
         let observations = self.observations.lock().unwrap();
         let selected_txs = self.selected_txs.lock().unwrap();
+        let fallback_cfg = self.fallback_cfg.lock().unwrap().clone();
+        let fallback_current = self.fallback_current.lock().unwrap().clone();
         let mut ports: Vec<LacpPortStatus> = observations
             .iter()
             .map(|(interface, obs)| {
@@ -393,7 +418,13 @@ impl AggregateManager {
                     marker_pdus_rx: obs.counters.marker_pdus_rx,
                     marker_responses_tx: obs.counters.marker_responses_tx,
                     marker_responses_rx: obs.counters.marker_responses_rx,
-                    fallback: nos_proto::LacpFallback::Disabled,
+                    fallback: if !fallback_cfg.get(interface).is_some_and(|c| c.0) {
+                        nos_proto::LacpFallback::Disabled
+                    } else if fallback_current.as_deref() == Some(interface.as_str()) {
+                        nos_proto::LacpFallback::Active
+                    } else {
+                        nos_proto::LacpFallback::Armed
+                    },
                     synchronized: obs
                         .partner
                         .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
@@ -466,7 +497,13 @@ async fn selection_loop(
     min_links: Arc<AtomicU16>,
     v2: Arc<V2Shared>,
     push_tx: mpsc::Sender<LacpPush>,
+    fallback_cfg: FallbackCfg,
+    fallback_current: Arc<Mutex<Option<String>>>,
+    mut links: watch::Receiver<LinkTable>,
 ) {
+    let mut up_since: HashMap<String, Instant> = HashMap::new();
+    let mut fb_deadline: Option<Instant> = None;
+    let mut links_open = true;
     let mut last_pushed: Option<Want> = None;
     let mut last_push_at: Option<Instant> = None;
     // Newest computed set held back by the 1 s coalescing window.
@@ -481,6 +518,12 @@ async fn selection_loop(
         };
         tokio::select! {
             () = changed.notified() => {}
+            r = links.changed(), if links_open => {
+                // A closed sender would re-fire at once: stop listening.
+                links_open = r.is_ok();
+            }
+            // Fires once: the recompute below moves `fb_deadline` forward.
+            () = tokio::time::sleep_until(fb_deadline.unwrap_or(deadline)), if fb_deadline.is_some() => {}
             () = tokio::time::sleep_until(deadline), if pending.is_some() => {
                 // Trailing edge: disarmed by taking `pending`.
                 let want = pending.take().expect("guarded by pending.is_some()");
@@ -581,8 +624,69 @@ async fn selection_loop(
             last_agreement = Some(agreement);
         }
 
+        // Fallback (#1575): a push-level injection of one port while nothing
+        // negotiated; Mux/Receive/selection are untouched.
+        let now = Instant::now();
+        let fb_cfg = fallback_cfg.lock().unwrap().clone();
+        let fb_ports: Vec<FallbackPort> = {
+            let table = links.borrow();
+            up_since.retain(|k, _| snapshot.contains_key(k));
+            snapshot
+                .iter()
+                .map(|(interface, obs)| {
+                    let up = matches!(
+                        link_client::gate(&table, interface),
+                        Gate::Up | Gate::Ungated
+                    );
+                    let link_up_since = if up {
+                        Some(*up_since.entry(interface.clone()).or_insert(now))
+                    } else {
+                        up_since.remove(interface);
+                        None
+                    };
+                    let (enabled, timeout) = fb_cfg
+                        .get(interface)
+                        .copied()
+                        .unwrap_or((false, Duration::ZERO));
+                    FallbackPort {
+                        interface: interface.clone(),
+                        enabled,
+                        timeout,
+                        link_up_since,
+                        selectable: obs.selectable(),
+                        last_pdu: obs.counters.last_pdu,
+                        priority: priorities
+                            .get(interface)
+                            .copied()
+                            .unwrap_or(DEFAULT_PRIORITY),
+                        number: obs.actor_port,
+                    }
+                })
+                .collect()
+        };
+        let negotiated_empty = active_members.is_empty();
+        let prev_fb = fallback_current.lock().unwrap().clone();
+        let picked = fallback::pick(&fb_ports, now, negotiated_empty, prev_fb.as_deref());
+        fb_deadline = picked.next_deadline;
+        if picked.chosen != prev_fb {
+            if let Some(old) = &prev_fb {
+                let reason = fallback::end_reason(&fb_ports, old, negotiated_empty);
+                info!(interface = %old, reason = %reason, "lacp fallback ended");
+            }
+            if let Some(new) = &picked.chosen {
+                let secs = fb_cfg.get(new).map_or(0, |c| c.1.as_secs());
+                info!(interface = %new, timeout = secs, "lacp fallback active");
+            }
+            fallback_current.lock().unwrap().clone_from(&picked.chosen);
+        }
+        let fb_active = picked.chosen.is_some();
+        if let Some(p) = picked.chosen {
+            active_members = vec![p];
+        }
+
         let min = min_links.load(Ordering::Relaxed);
-        let min_met = min_links_met(active_members.len(), min);
+        // The fallback port bypasses `min-links` (owner decision, #1563).
+        let min_met = fb_active || min_links_met(active_members.len(), min);
         if !min_met {
             // Only the pushed set is gated: ports stay selected and keep
             // negotiating, so the bond refills the moment the count is met.
@@ -597,7 +701,7 @@ async fn selection_loop(
             active_members.clear();
         }
 
-        let conversations: Vec<LacpLinkConversations> = if min_met {
+        let conversations: Vec<LacpLinkConversations> = if min_met && !fb_active {
             resolved
                 .steer
                 .into_iter()
@@ -913,6 +1017,9 @@ mod tests {
             Arc::new(AtomicU16::new(1)),
             V2Shared::new(),
             tx,
+            Arc::default(),
+            Arc::default(),
+            watch::channel(LinkTable::default()).1,
         ));
         let set = |d: bool| {
             observations.lock().unwrap().insert("eth1".into(), obs(d));
@@ -978,6 +1085,9 @@ mod tests {
             Arc::new(AtomicU16::new(1)),
             v2.clone(),
             tx,
+            Arc::default(),
+            Arc::default(),
+            watch::channel(LinkTable::default()).1,
         ));
         let set = |digest: [u8; 16]| {
             let mut o = obs(true);
@@ -1032,5 +1142,75 @@ mod tests {
             nos_proto::interface::LACP_CONVERSATION_MASK_LEN
         );
         assert!(links[0].mask.iter().all(|b| *b == 0xff));
+    }
+    #[tokio::test]
+    async fn summary_reports_fallback_disabled_armed_active() {
+        use nos_proto::LacpFallback as F;
+        let (tx, _rx) = mpsc::channel(8);
+        let (_ltx, lrx) = watch::channel(LinkTable::default());
+        let m = AggregateManager::new("bond1", 1, tx, PortNumbers::default(), lrx);
+        for n in ["eth1", "eth2", "eth3"] {
+            m.observations.lock().unwrap().insert(n.into(), obs(false));
+        }
+        let on = (true, Duration::from_secs(5));
+        *m.fallback_cfg.lock().unwrap() = [("eth1".into(), on), ("eth2".into(), on)].into();
+        *m.fallback_current.lock().unwrap() = Some("eth1".into());
+        let got: Vec<F> = m.summary().ports.iter().map(|p| p.fallback).collect();
+        assert_eq!(got, vec![F::Active, F::Armed, F::Disabled]);
+        m.shutdown();
+    }
+
+    /// #1575: after `timeout` without a partner the port is pushed alone
+    /// (bypassing `min-links`, no conversations); a heard LACPDU drops it at
+    /// once; the deadline arm fires once, never in a loop.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_injects_one_port_and_a_partner_drops_it() {
+        let observations = Arc::new(Mutex::new(HashMap::new()));
+        let changed = Arc::new(Notify::new());
+        let cfg: FallbackCfg = Arc::new(Mutex::new(
+            [("eth1".to_string(), (true, Duration::from_secs(5)))].into(),
+        ));
+        let current = Arc::new(Mutex::new(None));
+        let (tx, mut rx) = mpsc::channel(32);
+        let (_ltx, lrx) = watch::channel(LinkTable::default());
+        tokio::spawn(selection_loop(
+            "bond1".into(),
+            observations.clone(),
+            changed.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU16::new(2)),
+            V2Shared::new(),
+            tx,
+            cfg,
+            current.clone(),
+            lrx,
+        ));
+        let mut o = obs(false);
+        o.receive_state = ReceiveState::Defaulted;
+        observations.lock().unwrap().insert("eth1".into(), o);
+        changed.notify_one();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(next_members(&mut rx).unwrap().len(), 0);
+        assert!(current.lock().unwrap().is_none());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(next_members(&mut rx).unwrap(), vec!["eth1"]);
+        assert_eq!(current.lock().unwrap().as_deref(), Some("eth1"));
+        // No re-fire: nothing more is pushed while it stays active.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert!(next_members(&mut rx).is_none());
+        // A partner is heard: dropped on the next pass.
+        let mut o = obs(false);
+        o.partner = Some(PortInfo {
+            system: [9; 6],
+            state: state_bit::AGGREGATION,
+            ..PortInfo::ADMINISTRATIVE_DEFAULT
+        });
+        o.counters.last_pdu = Some(Instant::now());
+        observations.lock().unwrap().insert("eth1".into(), o);
+        changed.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(next_members(&mut rx).unwrap().len(), 0);
+        assert!(current.lock().unwrap().is_none());
     }
 }

@@ -659,6 +659,26 @@ mod tests {
         }
     }
 
+    /// `lacp_fallback` is meaningful only on a `Lacp`-mode member; elsewhere
+    /// it is accepted and ignored, never rejected (like `lacp_mode`).
+    #[test]
+    fn lacp_fallback_is_ignored_outside_a_lacp_aggregate() {
+        let mut eth = interface("eth1", &[], None);
+        eth.lacp_fallback = true;
+        eth.lacp_fallback_timeout = Some(9);
+        let mut cfg = Config::default();
+        cfg.interfaces = vec![eth];
+        cfg.validate_with(&cfg).unwrap();
+        // Member of an Xor aggregate: same.
+        cfg.port_aggregates = vec![crate::schema::PortAggregate {
+            name: "bond1".into(),
+            mode: crate::schema::PortAggregateMode::Xor,
+            ..Default::default()
+        }];
+        cfg.interfaces[0].port_aggregate = Some("bond1".into());
+        cfg.validate_with(&cfg).unwrap();
+    }
+
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
             acl_in: None,
