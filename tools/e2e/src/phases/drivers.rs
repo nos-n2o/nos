@@ -6294,13 +6294,11 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             .await?;
         a.wait_new(&cover_added, cover_base, 30).await?;
         let resolved = format!(
-            "static next hop resolved prefix={RECURSIVE_STATIC} gateway={} via={gw}",
-            RECURSIVE_GATEWAY
+            "static next hop resolved prefix={RECURSIVE_STATIC} gateway={RECURSIVE_GATEWAY} via={gw}"
         );
         let unresolved = format!(
-            "static next hop unresolved prefix={RECURSIVE_STATIC} gateway={}",
-            RECURSIVE_GATEWAY
-        );
+            "static next hop unresolved prefix={RECURSIVE_STATIC} gateway={RECURSIVE_GATEWAY}",
+                    );
         let (res_base, rec_base) = (a.count(&resolved), a.count(&added(RECURSIVE_STATIC, gw)));
         a.provision(&[
             "--static-route",
