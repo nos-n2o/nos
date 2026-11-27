@@ -98,7 +98,7 @@ fn gateways_groups_replace_delete_and_dump_agree_with_ip() {
         "replaced in place"
     );
     // The range filter hides the rest.
-    assert!(dump(50..=60).unwrap().is_empty());
+    assert_eq!(dump(50..=60).unwrap(), vec![]);
     // Kernel-proven (Linux 7.2): an IPv6 route cannot use an IPv4-gateway
     // nexthop, alone or through a group.
     for nhid in ["1", "10"] {
@@ -118,7 +118,7 @@ fn gateways_groups_replace_delete_and_dump_agree_with_ip() {
     }
     assert!(send(&Nexthop::Delete { id: 1 }, 0).is_err());
     send(&Nexthop::Delete { id: 1 }, 2).unwrap();
-    assert!(dump(0..=u32::MAX).unwrap().is_empty());
+    assert_eq!(dump(0..=u32::MAX).unwrap(), vec![]);
 }
 
 #[test]

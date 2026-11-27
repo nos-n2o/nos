@@ -7,6 +7,11 @@
 //!
 //! [`send`] and [`dump`] block: call them from `spawn_blocking`.
 
+#![allow(
+    clippy::wildcard_imports,
+    reason = "consts.rs is a flat list of uapi values the other modules use by name"
+)]
+
 mod consts;
 mod decode;
 mod encode;

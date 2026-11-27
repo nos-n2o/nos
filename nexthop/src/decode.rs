@@ -78,7 +78,9 @@ fn record(body: &[u8]) -> io::Result<NexthopRecord> {
             }
             NHA_GROUP => {
                 r.group = Some(
-                    p.chunks_exact(8)
+                    p.as_chunks::<8>()
+                        .0
+                        .iter()
                         .map(|e| {
                             let id = u32::from_ne_bytes(e[..4].try_into().unwrap());
                             let w = u16::from(e[4]) | u16::from(e[5]) << 8;
@@ -101,8 +103,10 @@ fn record(body: &[u8]) -> io::Result<NexthopRecord> {
         for (kind, p) in attrs(encap)? {
             if kind == MPLS_IPTUNNEL_DST {
                 r.labels = p
-                    .chunks_exact(4)
-                    .map(|e| u32::from_be_bytes(e.try_into().unwrap()) >> 12)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|e| u32::from_be_bytes(*e) >> 12)
                     .collect();
             }
         }
