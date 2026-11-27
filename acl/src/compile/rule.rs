@@ -29,9 +29,14 @@ fn families(r: &AclRule) -> Vec<Protocol> {
 /// `r`'s filters, every one carrying `index` as its cookie. `established` is
 /// two filters (ACK set, RST set): flower matches one flag mask per filter.
 ///
-/// An L4 key (ports, TCP flags, ICMP type/code) never matches a non-first
-/// fragment, whose L4 header the flow dissector leaves zero (D12); `fragments`
-/// adds the `LATER_FRAGMENT` flag key so a twin rule can catch those.
+/// flower never parses the L4 header of a fragment, first ones included
+/// (measured, `tests/kernel.rs`), so an L4 key (ports, TCP flags, ICMP
+/// type/code) never matches any fragment. A `permit` thus falls through (fail
+/// closed); a `deny` would let every fragment pass, so it gets one twin filter
+/// per family with its L3 keys that denies ANY fragment (#1539, RFC 1858 style).
+/// The twin has the rule's cookie: `show acl` counts it into the user rule.
+///
+/// ponytail: IPv6 `ip_proto` of a fragment is not verified (e2e covers IPv4).
 pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
     let base = FlowerKeys {
         ip_proto: r.protocol.map(AclProtocol::number),
@@ -49,7 +54,13 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
     } else {
         vec![None]
     };
-    families(r)
+    let l4 = r.source_port.is_some()
+        || r.destination_port.is_some()
+        || r.established
+        || r.icmp_type.is_some()
+        || r.icmp_code.is_some();
+    let twin = l4 && r.action == AclAction::Deny;
+    let mut out: Vec<Filter> = families(r)
         .into_iter()
         .flat_map(|protocol| flags.iter().map(move |&tcp_flags| (protocol, tcp_flags)))
         .map(|(protocol, tcp_flags)| Filter {
@@ -62,7 +73,25 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
             rule: index,
             log: r.log,
         })
-        .collect()
+        .collect();
+    if twin {
+        let any_fragment = (FLAG_IS_FRAGMENT, FLAG_IS_FRAGMENT);
+        out.extend(families(r).into_iter().map(|protocol| Filter {
+            protocol,
+            keys: FlowerKeys {
+                src_port: None,
+                dst_port: None,
+                icmp_type: None,
+                icmp_code: None,
+                flags: Some(any_fragment),
+                ..base.clone()
+            },
+            action: r.action,
+            rule: index,
+            log: r.log,
+        }));
+    }
+    out
 }
 
 /// The implicit IPv6 Neighbor Discovery permit (RFC 4861: RS, RA, NS, NA)
@@ -140,7 +169,8 @@ mod tests {
             });
         });
         let f = filters(&r, 7);
-        assert_eq!(f.len(), 1);
+        // The filter, plus the any-fragment twin of an L4 deny.
+        assert_eq!(f.len(), 2);
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         assert_eq!(
             f[0].keys,
@@ -180,6 +210,33 @@ mod tests {
         assert!(filters(&rule(|_| {}), 0)
             .iter()
             .all(|f| f.keys.flags.is_none()));
+    }
+
+    #[test]
+    fn an_l4_deny_gets_an_any_fragment_twin_per_family() {
+        let l4 = |action| {
+            rule(|r| {
+                r.action = action;
+                r.protocol = Some(AclProtocol::Tcp);
+                r.source = Some("10.0.0.0/8".parse().unwrap());
+                r.destination_port = Some(PortRange { start: 22, end: 22 });
+            })
+        };
+        let f = filters(&l4(AclAction::Deny), 4);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].keys.dst_port, Some((22, 22)));
+        assert_eq!(f[0].keys.flags, None);
+        let t = &f[1];
+        assert_eq!(
+            (t.keys.flags, t.keys.dst_port, t.rule),
+            (Some((1, 1)), None, 4)
+        );
+        assert_eq!((t.keys.ip_proto, t.protocol), (Some(6), Protocol::Ip));
+        assert!(t.keys.src_ip.is_some());
+        // A permit, or a deny without an L4 key, needs none.
+        assert_eq!(filters(&l4(AclAction::Permit), 0).len(), 1);
+        let l3 = rule(|r| r.action = AclAction::Deny);
+        assert!(filters(&l3, 0).iter().all(|f| f.keys.flags.is_none()));
     }
 
     #[test]

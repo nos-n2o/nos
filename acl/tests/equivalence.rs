@@ -26,6 +26,9 @@ struct Packet {
     flags: u16,
     icmp: (u8, u8),
     non_first_fragment: bool,
+    /// Offset 0 with more fragments: carries the L4 header, which flower
+    /// still never parses.
+    first_fragment: bool,
 }
 
 /// Oracle A: the schema's meaning of a rule, written from its doc comments.
@@ -36,14 +39,25 @@ fn rule_matches(r: &AclRule, p: &Packet) -> bool {
         (None, Some(AclProtocol::Icmpv6)) => Some(true),
         (None, _) => None,
     };
-    let l4 = !p.non_first_fragment;
+    let l4 = !p.non_first_fragment && !p.first_fragment;
     let tcp_udp = matches!(p.proto, 6 | 17);
-    family6.is_none_or(|f| f == p.v6)
+    let l3 = family6.is_none_or(|f| f == p.v6)
         && r.protocol.is_none_or(|x| x.number() == p.proto)
         && r.source.is_none_or(|n| n.contains(&p.src))
-        && r.destination.is_none_or(|n| n.contains(&p.dst))
-        && r.source_port
-            .is_none_or(|x| l4 && tcp_udp && (x.start..=x.end).contains(&p.sport))
+        && r.destination.is_none_or(|n| n.contains(&p.dst));
+    // An L4-keyed deny also drops every fragment of its L3 match (#1539).
+    let twin = r.action == AclAction::Deny
+        && (r.source_port.is_some()
+            || r.destination_port.is_some()
+            || r.established
+            || r.icmp_type.is_some()
+            || r.icmp_code.is_some());
+    (twin && !l4 && l3) || (l3 && l4_conds(r, p, l4, tcp_udp))
+}
+
+fn l4_conds(r: &AclRule, p: &Packet, l4: bool, tcp_udp: bool) -> bool {
+    r.source_port
+        .is_none_or(|x| l4 && tcp_udp && (x.start..=x.end).contains(&p.sport))
         && r.destination_port
             .is_none_or(|x| l4 && tcp_udp && (x.start..=x.end).contains(&p.dport))
         && (!r.fragments || p.non_first_fragment)
@@ -56,7 +70,11 @@ fn rule_matches(r: &AclRule, p: &Packet) -> bool {
 
 fn first_match(acl: &Acl, p: &Packet) -> AclAction {
     // A deny default permits ICMPv6 133..=136 after the rules (#1530).
-    let nd = p.v6 && p.proto == 58 && !p.non_first_fragment && (133..=136).contains(&p.icmp.0);
+    let nd = p.v6
+        && p.proto == 58
+        && !p.non_first_fragment
+        && !p.first_fragment
+        && (133..=136).contains(&p.icmp.0);
     acl.rules.iter().find(|r| rule_matches(r, p)).map_or(
         if acl.default_action == AclAction::Deny && nd {
             AclAction::Permit
@@ -70,7 +88,10 @@ fn first_match(acl: &Acl, p: &Packet) -> AclAction {
 /// What the kernel's flower does with one filter.
 fn flower_matches(protocol: Protocol, k: &FlowerKeys, p: &Packet) -> bool {
     let net = |(a, l): (IpAddr, u8), x: IpAddr| IpNet::new(a, l).unwrap().contains(&x);
-    let l4 = !p.non_first_fragment;
+    let l4 = !p.non_first_fragment && !p.first_fragment;
+    // ip_flags bits: 1 = is fragment, 2 = first fragment.
+    let bits =
+        u32::from(p.non_first_fragment || p.first_fragment) | (u32::from(p.first_fragment) << 1);
     (protocol == Protocol::Ipv6) == p.v6
         && k.ip_proto.is_none_or(|x| x == p.proto)
         && k.src_ip.is_none_or(|n| net(n, p.src))
@@ -81,7 +102,7 @@ fn flower_matches(protocol: Protocol, k: &FlowerKeys, p: &Packet) -> bool {
             .is_none_or(|(lo, hi)| l4 && matches!(p.proto, 6 | 17) && (lo..=hi).contains(&p.dport))
         // A non-first fragment has is_fragment=1, first_frag=0; any other packet 0, 0.
         && k.flags
-            .is_none_or(|(v, m)| (u32::from(p.non_first_fragment) ^ v) & m == 0)
+            .is_none_or(|(v, m)| (bits ^ v) & m == 0)
         && k.tcp_flags
             .is_none_or(|(v, m)| l4 && p.proto == 6 && p.flags & m == v & m)
         && k.icmp_type
@@ -239,33 +260,36 @@ fn packet() -> impl Strategy<Value = Packet> {
         (pick(&PORTS), pick(&PORTS)),
         pick(&[0u16, ACK, RST, 0x02, ACK | 0x08]),
         (pick(&[8u8, 0, 135, 133, 134, 136]), 0u8..2),
-        prop::bool::weighted(0.2),
+        (prop::bool::weighted(0.2), prop::bool::weighted(0.1)),
     )
-        .prop_map(|(proto, v6, (s, d), (sport, dport), flags, icmp, nff)| {
-            let v6 = match proto {
-                1 => false,
-                58 => true,
-                _ => v6,
-            };
-            let addr = |i: usize| -> IpAddr {
-                if v6 {
-                    V6_ADDRS[i % V6_ADDRS.len()].parse().unwrap()
-                } else {
-                    V4_ADDRS[i % V4_ADDRS.len()].parse().unwrap()
+        .prop_map(
+            |(proto, v6, (s, d), (sport, dport), flags, icmp, (nff, first))| {
+                let v6 = match proto {
+                    1 => false,
+                    58 => true,
+                    _ => v6,
+                };
+                let addr = |i: usize| -> IpAddr {
+                    if v6 {
+                        V6_ADDRS[i % V6_ADDRS.len()].parse().unwrap()
+                    } else {
+                        V4_ADDRS[i % V4_ADDRS.len()].parse().unwrap()
+                    }
+                };
+                Packet {
+                    v6,
+                    proto,
+                    src: addr(s),
+                    dst: addr(d),
+                    sport,
+                    dport,
+                    flags,
+                    icmp,
+                    non_first_fragment: nff,
+                    first_fragment: first && !nff,
                 }
-            };
-            Packet {
-                v6,
-                proto,
-                src: addr(s),
-                dst: addr(d),
-                sport,
-                dport,
-                flags,
-                icmp,
-                non_first_fragment: nff,
-            }
-        })
+            },
+        )
 }
 
 proptest! {

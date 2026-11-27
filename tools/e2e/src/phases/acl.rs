@@ -33,8 +33,8 @@ const COMPILED_3: &str = "compiled acl acl=EDGE rules=3 filters=2 levels=0 shado
 /// IPv6 = 4 filters), `p-bgp` permit tcp 179, a `deny udp` /26 inside the
 /// first /25 (shadowed) and a trailing `permit` any. Shadowing runs first,
 /// then the trailing `permit` and `p-bgp` (permit = the default) are popped;
-/// the 10 left are pairwise disjoint: levels=1, filters = 8 + 4 + 2 defaults.
-const COMPILED_5: &str = "compiled acl acl=EDGE2 rules=13 filters=14 levels=1 shadowed=1";
+/// the 10 left: each of the 2 `deny tcp` ports also has an any-fragment twin per family (#1539, +4), and the twins overlap each other, so `t2` goes to a second level: levels=2, filters = 8 + 4 + 4 + 2 defaults.
+const COMPILED_5: &str = "compiled acl acl=EDGE2 rules=13 filters=18 levels=2 shadowed=1";
 /// Step 5b (#1530), `EDGE6`: default deny, `p-bgp` (IPv4: 1 filter) and
 /// `p-rest` (tcp 8080, the harness's REST API: IPv4 and IPv6 = 2 filters),
 /// which overlap, so two levels; the 4 implicit ND filters (ICMPv6, disjoint
@@ -43,12 +43,13 @@ const COMPILED_6: &str = "compiled acl acl=EDGE6 rules=2 filters=9 levels=2 shad
 const ATTACHED_6: &str = "acl attached interface=eth0 direction=in acl=EDGE6";
 /// `d-nd` (deny icmpv6 type 135) shadows implicit 135: 1 + 1 + 2 + 3
 /// implicit + 2 defaults = 9 again, still two levels.
-const COMPILED_6B: &str = "compiled acl acl=EDGE6 rules=3 filters=9 levels=2 shadowed=0";
-/// Step 5c (#1539), `EDGE7`: default permit, `d-port` (deny udp from
-/// router-b port 9) and `d-frag` (deny fragments from router-b), both IPv4
-/// and denies, neither trailing; they overlap in the optimiser's
-/// over-approximation: 2 levels, 2 filters + 2 defaults.
-const COMPILED_7: &str = "compiled acl acl=EDGE7 rules=2 filters=4 levels=2 shadowed=0";
+const COMPILED_6B: &str = "compiled acl acl=EDGE6 rules=3 filters=10 levels=2 shadowed=0";
+/// Step 5c (#1539), `EDGE7`: default permit, `d-frag` (deny fragments from
+/// router-b) before `d-port` (deny udp from router-b port 9), IPv4 denies,
+/// neither trailing. `d-port` is two filters (the port match and its
+/// any-fragment twin); they overlap `d-frag` in the optimiser's
+/// over-approximation: 2 levels, 3 filters + 2 defaults = 5.
+const COMPILED_7: &str = "compiled acl acl=EDGE7 rules=2 filters=5 levels=2 shadowed=0";
 const ATTACHED_7: &str = "acl attached interface=eth0 direction=in acl=EDGE7";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
@@ -356,10 +357,11 @@ async fn nd_permit(w: &World) -> anyhow::Result<()> {
 }
 
 /// Step 5c (#1539): router-b sends 20 UDP datagrams of 4000 bytes to port 9
-/// (3 fragments each at MTU 1500). `d-frag` counts the 40 later ones. The 20
-/// first fragments carry the UDP header, but flower never parses it (measured
-/// in `acl/tests/kernel.rs`), so `d-port` stays at 0: the known gap #1539
-/// cannot close with flower. The BGP session (TCP) matches neither.
+/// (3 fragments each at MTU 1500). `d-frag` (first) counts the 40 later
+/// ones. flower never parses the UDP header of the 20 first fragments
+/// (`acl/tests/kernel.rs`), so `d-port`'s any-fragment twin denies them and
+/// counts into `d-port` (not the permit default). The BGP session (TCP)
+/// matches neither.
 async fn fragments(w: &World) -> anyhow::Result<()> {
     log("step 5c (#1539): EDGE7, d-port catches first fragments, d-frag the later ones");
     let a = w.a()?;
@@ -383,7 +385,7 @@ async fn fragments(w: &World) -> anyhow::Result<()> {
     });
     a.rest_expect(
         Method::PUT,
-        &format!("{tx}/acl/EDGE7/rule/d-frag?after=d-port"),
+        &format!("{tx}/acl/EDGE7/rule/d-frag?before=d-port"),
         Some(&rule.to_string()),
         200,
     )
@@ -412,7 +414,7 @@ async fn fragments(w: &World) -> anyhow::Result<()> {
         let n = |name| rule_of(&acl, name).and_then(|r| r["packets"].as_u64());
         if n("d-frag") >= Some(40) {
             anyhow::ensure!(
-                n("d-port") == Some(0) && n("d-frag") == Some(40),
+                n("d-port") == Some(20) && n("d-frag") == Some(40),
                 "fragment counters: {body}"
             );
             break;

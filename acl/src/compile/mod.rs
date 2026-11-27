@@ -166,8 +166,9 @@ mod tests {
         let c = compile(&acl).unwrap();
         assert!(c.logs());
         let f: Vec<_> = c.levels.iter().flat_map(|l| &l.filters).collect();
-        // The ACK and RST filters of both families log, the ICMP one not.
-        assert_eq!(f.iter().filter(|f| f.log).count(), 4);
+        // The ACK and RST filters and the fragment twin, per family, log;
+        // the ICMP one does not.
+        assert_eq!(f.iter().filter(|f| f.log).count(), 6);
         assert!(f.iter().all(|f| f.log == (f.rule == 1)));
     }
 
@@ -228,9 +229,10 @@ mod tests {
         let c = compile(&all).unwrap();
         assert_eq!((c.implicit, c.levels.len(), c.filters()), (0, 1, 3));
         let c = compile(&acl(vec![deny135])).unwrap();
-        // The explicit deny stays; 135 is dropped, the other three are
-        // disjoint from it and share its level.
-        assert_eq!((c.implicit, c.levels.len()), (3, 1));
+        // The explicit deny stays; 135 is dropped. Its any-fragment twin
+        // overlaps the other three (over-approximated: they need L4), so
+        // they move one level down.
+        assert_eq!((c.implicit, c.levels.len()), (3, 2));
         assert_eq!(c.levels[0].filters[0].rule, 0);
         assert!(c.levels[0]
             .filters
