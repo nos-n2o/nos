@@ -626,7 +626,7 @@ async fn echo_rx_loop(
                         .filter(|(_, ttl)| *ttl == 254)
                         .and_then(|(pl, _)| packet::decode(pl).ok())
                         .filter(|c| c.my_discriminator == disc)
-                        .map(|c| Looped::Control(c.state))
+                        .map(|c| Looped::Control(Box::new(c)))
                 } else {
                     echo::parse(&p, local)
                         .filter(|(d, _)| *d == disc)
