@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use nos_ospf_common::exchange as common;
 pub use nos_ospf_common::exchange::{
-    mtu_acceptable, on_lsack_received, take_all_pending_acks, take_pending_acks, Params,
-    DEFAULT_DBD_MAX_HEADERS,
+    due_retransmissions, mtu_acceptable, on_lsack_received, take_all_pending_acks,
+    take_pending_acks, AckCtx, AckMode, Params, DEFAULT_DBD_MAX_HEADERS,
 };
 
 use crate::lsa::{self, Lsa, LsaHeader};
@@ -81,7 +81,7 @@ pub fn on_lsr_received(
 }
 
 /// `nos_ospf_common::exchange::on_lsu_received` with v2's closures: a type-9
-/// LSA lands in the link's own store (RFC 5250 §3, so no other link's resend
+/// LSA lands in the link's own store (RFC 5250 §3, so no other link
 /// floods it), everything else in the area's; an AS-external (or AS-scope
 /// opaque) LSA on a stub area's or NSSA's link, or a Type-7 outside an NSSA
 /// (RFC 3101 §2.4), is discarded unacked (RFC 2328 §13 step 3); no AS store
@@ -92,6 +92,8 @@ pub fn on_lsu_received(
     link_local_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
     now: Instant,
+    origin: Option<nos_ospf_common::lsdb::Origin>,
+    ack: AckMode,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let (stub, nssa) = (adj.stub, adj.nssa);
     let mut stores = common::Stores {
@@ -113,8 +115,8 @@ pub fn on_lsu_received(
         },
         |h| !lsa::in_area_scope(h.lsa_type, stub, nssa),
         |_| false,
-        None,
-        common::AckMode::LegacyDelayed,
+        origin,
+        ack,
     );
     (r.actions, r.installed)
 }
@@ -210,7 +212,15 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l9.clone(), l10.clone()],
         };
-        on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+        on_lsu_received(
+            &mut adj,
+            &mut area,
+            &mut link,
+            &lsu,
+            Instant::now(),
+            None,
+            AckMode::LegacyDelayed,
+        );
         assert!(link.get(&l9.header.key()).is_some());
         assert!(area.get(&l9.header.key()).is_none());
         assert!(area.get(&l10.header.key()).is_some());
@@ -289,7 +299,15 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![as_scope.clone()],
         };
-        on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+        on_lsu_received(
+            &mut adj,
+            &mut area,
+            &mut link,
+            &lsu,
+            Instant::now(),
+            None,
+            AckMode::LegacyDelayed,
+        );
         assert!(area.get(&as_scope.header.key()).is_none());
         assert_eq!(adj.pending_acks, vec![]);
     }
@@ -336,7 +354,15 @@ mod tests {
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![type5.clone(), type7.clone()],
             };
-            on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+            on_lsu_received(
+                &mut adj,
+                &mut area,
+                &mut link,
+                &lsu,
+                Instant::now(),
+                None,
+                AckMode::LegacyDelayed,
+            );
             for (l, want) in [&type5, &type7].into_iter().zip(installed) {
                 assert_eq!(area.get(&l.header.key()).is_some(), want, "nssa={nssa}");
             }

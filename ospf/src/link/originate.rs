@@ -287,7 +287,7 @@ pub(super) fn install_self_originated_with_options(
 /// `lsa::is_newer` only reaches its `MaxAge` tie-break when sequence number and
 /// checksum already tie — which they do here, the body being untouched and
 /// the checksum excluding the age field — so every neighbor accepts the
-/// flushed copy as newer and `flood_full_neighbors`' next resend carries it.
+/// flushed copy as newer and the flood sink carries it.
 /// Not bumping is also what makes this usable at `MAX_SEQUENCE_NUMBER` (see
 /// `install_self_originated`). No-op (returns `false`) if `key` isn't held
 /// or is already at `MAX_AGE`.
@@ -866,7 +866,7 @@ impl LinkManager {
     /// area it is itself attached to (`self.lsdbs`'s full key set), since
     /// real AS-external-LSAs are domain-wide. Another router's Type-5 is
     /// carried across areas by `flood_external_lsas_across_areas`. No new
-    /// flooding code: `flood_full_neighbors` resends each link's area `Lsdb`.
+    /// flooding code: the area `Lsdb`'s flood sink floods every install.
     pub(super) async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr) {
         let redistributed: Vec<Ipv4Net> = self
             .redistribute_filtered
@@ -1063,8 +1063,8 @@ impl LinkManager {
     /// Run from the same tick as `originate_router_lsas`/
     /// `originate_as_external_lsas`, after both, so this tick's freshest
     /// Router-/AS-external-LSAs are what gets summarized. No new flooding
-    /// code needed — `flood_full_neighbors` already resends each link's own
-    /// area's full `Lsdb`, exactly as it already does for Type-5.
+    /// code needed — the area `Lsdb`'s flood sink floods every install,
+    /// exactly as it does for Type-5.
     pub(super) async fn originate_summary_lsas(&self, local_router_id: Ipv4Addr) {
         // An attached area always has a database, even before its first LSA.
         for area in self.attached_areas().await {

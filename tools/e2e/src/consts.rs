@@ -464,6 +464,8 @@ pub const OSPF_BROADCAST_ADDRESS_C: &str = "203.0.113.67/28";
 /// A destination with no neighbor of its own, on router-b's loopback, so
 /// router-a can only learn it through a real SPF computation.
 pub const OSPF_SPF_LOOPBACK_ADDRESS: &str = "203.0.113.80/32";
+/// router-a's loopback for the `ospf-flood` event-driven flooding proof (#1517).
+pub const OSPF_FLOOD_LOOPBACK_ADDRESS: &str = "203.0.113.140/32";
 /// router-c's loopback for the `ospf-dr` multicast data-plane proof (#879).
 pub const OSPF_DR_LOOPBACK_ADDRESS_C: &str = "203.0.113.98/32";
 /// `ospf-remote-lfa`: the five-router ring a-b-c-d-e-a. Ring link `i` (from

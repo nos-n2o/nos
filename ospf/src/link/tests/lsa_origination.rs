@@ -1730,13 +1730,23 @@ async fn handle_lsu_marks_a_reflected_own_lsa_and_wakes_the_originator() {
         &lsdb,
         &link_local,
         &lsu(vec![foreign]),
+        0,
     )
     .await;
     assert_eq!(lsdb.lock().await.reflected_keys(), Vec::<LsaKey>::new());
     assert!(n.notified().now_or_never().is_none());
 
     let newer = own_router_lsa(lsa::INITIAL_SEQUENCE_NUMBER + 5, 1);
-    rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu(vec![newer])).await;
+    rx::handle_lsu(
+        &cfg,
+        id(1),
+        &status,
+        &lsdb,
+        &link_local,
+        &lsu(vec![newer]),
+        0,
+    )
+    .await;
     assert_eq!(lsdb.lock().await.reflected_keys(), vec![router_key(id(1))]);
     assert!(n.notified().now_or_never().is_some());
 }
@@ -1778,6 +1788,7 @@ async fn handle_lsu_refuses_foreign_lsas_past_max_lsa() {
         &lsdb,
         &link_local,
         &lsu(vec![from(2, seq), from(3, seq)]),
+        0,
     )
     .await;
     {
@@ -1794,6 +1805,7 @@ async fn handle_lsu_refuses_foreign_lsas_past_max_lsa() {
         &lsdb,
         &link_local,
         &lsu(vec![from(2, seq + 1)]),
+        0,
     )
     .await;
     let held = lsdb.lock().await.get(&router_key(id(2))).unwrap();

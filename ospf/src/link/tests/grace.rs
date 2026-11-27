@@ -183,7 +183,7 @@ async fn on_startup_is_armed_once_cleared_by_none_and_skipped_after_graceful_res
 }
 
 /// RFC 6987 on-shutdown: B installs A's max-metric Router-LSA at once
-/// (the flood kick, well inside `RXMT_INTERVAL`), then the flushed copy
+/// (flooded by event, well inside `RXMT_INTERVAL`), then the flushed copy
 /// of that same instance once the hold is over.
 #[tokio::test(start_paused = true)]
 async fn on_shutdown_advertises_max_metric_before_the_flush() {
