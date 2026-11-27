@@ -177,6 +177,10 @@ pub struct AdjacencyData<L: Lsa> {
     /// `MIN_LS_ARRIVAL` per LSA. Pruned on each use, so bounded by the LSAs
     /// refuted within that window.
     pub db_resent: HashMap<Key<L>, Instant>,
+    /// #1626: when an LSR was last sent to this neighbor for an LSA of ours
+    /// that its `LSAck` showed in a newer instance (`lsack_hint`); one per
+    /// `MIN_LS_ARRIVAL` per LSA, pruned on use.
+    pub ack_requested: HashMap<Key<L>, Instant>,
 }
 
 // By hand: a derive would demand `L: Default`.
@@ -197,6 +201,7 @@ impl<L: Lsa> Default for AdjacencyData<L> {
             nssa: false,
             unpolled: false,
             db_resent: HashMap::new(),
+            ack_requested: HashMap::new(),
         }
     }
 }
@@ -660,6 +665,44 @@ pub fn on_lsack_received<L: Lsa>(adj: &mut AdjacencyData<L>, acked: &[L::Header]
         {
             adj.retransmission_list.remove(&header.key());
         }
+    }
+}
+
+/// #1626, deviation from §13.7 (which discards an ack for an LSA not on the
+/// retransmission list): an `LSAck` header of an LSA this router advertises
+/// that is NEWER than the held copy shows the neighbor holds an instance of
+/// ours we have lost (a forged or pre-restart one). The answer is an LSR for it,
+/// so §13.4 re-originates above it. One LSR per neighbor and LSA per
+/// `MIN_LS_ARRIVAL`; the caller gates on neighbor state (Exchange or later).
+pub fn lsack_hint<L: Lsa>(
+    adj: &mut AdjacencyData<L>,
+    stores: &[&Lsdb<L>],
+    local: Ipv4Addr,
+    acked: &[L::Header],
+    now: Instant,
+) -> Vec<Action<L>> {
+    let mut keys = Vec::new();
+    for h in acked {
+        if h.advertising_router() != local {
+            continue;
+        }
+        let Some(held) = stores.iter().find_map(|s| s.get(&h.key())) else {
+            continue;
+        };
+        if h.is_newer(held.header()) != Ordering::Greater {
+            continue;
+        }
+        adj.ack_requested
+            .retain(|_, t| now.saturating_duration_since(*t) < MIN_LS_ARRIVAL);
+        if adj.ack_requested.insert(h.key(), now).is_none() {
+            tracing::debug!(lsa = ?h, "ospf lsack shows newer instance of own lsa, requesting it");
+            keys.push(h.key());
+        }
+    }
+    if keys.is_empty() {
+        Vec::new()
+    } else {
+        vec![Action::SendLsr(keys)]
     }
 }
 

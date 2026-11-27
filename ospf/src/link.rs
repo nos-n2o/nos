@@ -620,6 +620,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         nssa: cfg.nssa,
         unpolled: true,
         db_resent: HashMap::new(),
+        ack_requested: HashMap::new(),
     };
     (adj, dbd)
 }
@@ -853,7 +854,11 @@ pub async fn run(
                                         }
                                     }
                                     OspfPacket::LsAck(ack) => {
-                                        handle_lsack(&status, &ack);
+                                        if let Some(actions) =
+                                            handle_lsack(local_router_id, &status, &lsdb, &link_local_lsdb, &ack).await
+                                        {
+                                            execute_actions(&socket, &cfg, local_router_id, &status, ack.router_id, actions, &mut next_seq);
+                                        }
                                     }
                                 }
                             }
