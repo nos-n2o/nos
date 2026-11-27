@@ -409,6 +409,9 @@ pub struct Args {
     /// `--static-route` (repeatable; the route must be in the same run).
     #[arg(long, value_parser = parse_extra_gateway)]
     pub static_extra_gateway: Vec<(IpNet, Vec<IpAddr>)>,
+    /// `<subnet>=<gateway>[,<gateway>...]`: deletes those `next-hops`.
+    #[arg(long, value_parser = parse_extra_gateway)]
+    pub remove_static_extra_gateway: Vec<(IpNet, Vec<IpAddr>)>,
 
     /// If set, configures `redistribute from static to bgp` on
     /// `--routing-table` — requires `--static-route` to also be set (so the
@@ -2364,7 +2367,9 @@ fn parse_extra_gateway(s: &str) -> Result<(IpNet, Vec<IpAddr>), String> {
 /// `--static-extra-gateway` as path edits creating `next-hops` elements.
 fn static_extra_gateway_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = Vec::new();
-    for (subnet, gws) in &args.static_extra_gateway {
+    let add = args.static_extra_gateway.iter().map(|e| (e, true));
+    let del = args.remove_static_extra_gateway.iter().map(|e| (e, false));
+    for ((subnet, gws), add) in add.chain(del) {
         for g in gws {
             v.push((
                 vec![
@@ -2375,7 +2380,7 @@ fn static_extra_gateway_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)>
                     "next-hops".to_string(),
                     g.to_string(),
                 ],
-                Some(format!(r#"{{"gateway":"{g}"}}"#)),
+                add.then(|| format!(r#"{{"gateway":"{g}"}}"#)),
             ));
         }
     }
@@ -2791,6 +2796,11 @@ fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
         .iter_mut()
         .filter(|i| i.name == args.static_routing_instance)
     {
+        for (subnet, gws) in &args.remove_static_extra_gateway {
+            for r in i.routes.iter_mut().filter(|r| r.subnet == *subnet) {
+                r.next_hops.retain(|h| !gws.contains(&h.gateway));
+            }
+        }
         for r in i
             .routes
             .iter_mut()
@@ -7111,6 +7121,10 @@ mod tests {
         let hops = &cfg.static_routing_instances[0].routes[0].next_hops;
         assert_eq!(hops.len(), 2);
         assert_eq!(hops[1].gateway, "10.0.0.3".parse::<IpAddr>().unwrap());
+        let args = parse(&["--remove-static-extra-gateway", "10.9.0.0/24=10.0.0.2"]);
+        assert_eq!(static_extra_gateway_paths(&args)[0].1, None);
+        apply_static_route_fields(&args, &mut cfg);
+        assert_eq!(cfg.static_routing_instances[0].routes[0].next_hops.len(), 1);
         // A route not in this run is a clear error.
         let args = parse(&["--static-extra-gateway", "10.9.0.0/24=10.0.0.2"]);
         assert!(build_ops(&args)

@@ -409,6 +409,11 @@ pub const ROUTES_PAGING_IFACE: &str = "eth0";
 pub const FLOAT_PREFIX: &str = "198.18.77.0/24";
 pub const BLACKHOLE_STATIC: &str = "198.18.78.0/24";
 pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
+/// `static-variants` next-hops (#1556): a second gateway inside router-a's
+/// connected SUBNET (no host owns it; the kernel only needs it on-link-reachable
+/// for the nexthop), beside `REDISTRIBUTE_GATEWAY` (10.50.0.99).
+pub const ECMP_STATIC: &str = "198.18.79.0/24";
+pub const ECMP_EXTRA_GATEWAY: Addr = Addr("10.50.0.98");
 pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is

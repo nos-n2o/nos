@@ -780,24 +780,47 @@ pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr
             .find(|i| &i.name == sri_name)
         {
             for route in &sri.routes {
-                if route.bfd.is_some() && !bfd_up.contains(&route.gateway) {
-                    continue;
+                // One entry per prefix (the Rib holds one `Static` per
+                // prefix): the primary gateway plus every extra one, each
+                // BFD-gated on its own profile (fail closed until `Up`).
+                let mut hops: Vec<IpAddr> = Vec::new();
+                if !route.blackhole {
+                    hops = std::iter::once((route.gateway, route.bfd.is_some()))
+                        .chain(route.next_hops.iter().map(|h| (h.gateway, h.bfd.is_some())))
+                        .filter(|(gw, bfd)| !bfd || bfd_up.contains(gw))
+                        .map(|(gw, _)| gw)
+                        .collect();
+                    if hops.is_empty() {
+                        continue; // every hop BFD-down: not a discard route
+                    }
+                }
+                // Config order must not change the entry (equality, replace).
+                hops.sort();
+                // ponytail: a `RibEntry` pins one interface for all hops, so
+                // a hop naming another interface than the route's cannot be
+                // installed on it (#1556 QUESTION); upgrade: per-hop names.
+                let interface = route
+                    .interface
+                    .clone()
+                    .or_else(|| route.next_hops.iter().find_map(|h| h.interface.clone()));
+                if route
+                    .next_hops
+                    .iter()
+                    .any(|h| h.interface.is_some() && h.interface != interface)
+                {
+                    warn!(prefix = %route.subnet, "static next-hop interface differs from the route's; pinned to one");
                 }
                 rib.insert(RibEntry {
                     prefix: route.subnet,
                     // A blackhole is a discard: no next hop (`is_discard`).
-                    next_hops: if route.blackhole {
-                        Vec::new()
-                    } else {
-                        vec![(route.gateway, None).into()]
-                    },
+                    next_hops: hops.into_iter().map(|gw| (gw, None).into()).collect(),
                     source: RouteSource::Static,
                     backup: None,
                     backup_interface_id: None,
                     backup_tunnel: false,
                     distance: route.distance,
                     tag: route.tag,
-                    interface: route.interface.clone(),
+                    interface,
                 });
             }
         } else {
@@ -823,18 +846,21 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> crate::bfd_client::Target {
         .and_then(|t| t.static_routing_instance.as_ref())
         .and_then(|n| cfg.static_routing_instances.iter().find(|i| &i.name == n))
         .map_or_default(|i| i.routes.as_slice());
+    // Primary and extra hops alike; one session per gateway, so hops sharing
+    // a gateway share a profile (the last one listed wins).
     routes
         .iter()
-        .filter_map(|r| {
-            let profile = cfg
-                .bfd_profiles
-                .iter()
-                .find(|p| Some(&p.name) == r.bfd.as_ref())?;
+        .flat_map(|r| {
+            std::iter::once((r.gateway, r.bfd.as_ref()))
+                .chain(r.next_hops.iter().map(|h| (h.gateway, h.bfd.as_ref())))
+        })
+        .filter_map(|(gateway, bfd)| {
+            let profile = cfg.bfd_profiles.iter().find(|p| Some(&p.name) == bfd)?;
             Some((
-                r.gateway,
+                gateway,
                 crate::bfd_client::Want {
                     profile: profile.clone(),
-                    multihop: !cfg.is_connected(table_name, r.gateway),
+                    multihop: !cfg.is_connected(table_name, gateway),
                 },
             ))
         })
@@ -1150,6 +1176,82 @@ mod tests {
         assert_eq!(a.preference(), 200);
         let b = rib.best_route(&"10.2.0.0/24".parse().unwrap()).unwrap();
         assert!(b.is_discard());
+    }
+
+    #[test]
+    fn static_next_hops_merge_into_one_sorted_entry_with_per_hop_bfd() {
+        let hop = |g: &str, bfd: Option<&str>| nos_proto::schema::static_route::StaticNextHop {
+            gateway: g.parse().unwrap(),
+            bfd: bfd.map(Into::into),
+            ..Default::default()
+        };
+        let mk = |gw: &str, bfd: Option<&str>, extra: Vec<_>| {
+            let mut c = cfg(
+                vec![RoutingTable {
+                    name: "rt1".into(),
+                    static_routing_instance: Some("sri1".into()),
+                    ..RoutingTable::default()
+                }],
+                vec![StaticRoutingInstance {
+                    name: "sri1".into(),
+                    routes: vec![StaticRoute {
+                        subnet: "10.1.0.0/24".parse().unwrap(),
+                        gateway: gw.parse().unwrap(),
+                        bfd: bfd.map(Into::into),
+                        distance: Some(5),
+                        next_hops: extra,
+                        ..Default::default()
+                    }],
+                }],
+            );
+            c.bfd_profiles = vec![BfdProfile {
+                name: "fast".into(),
+                ..BfdProfile::default()
+            }];
+            c
+        };
+        let p = "10.1.0.0/24".parse().unwrap();
+        let gws = |c: &Config, up: &[&str]| {
+            let up = up.iter().map(|g| g.parse().unwrap()).collect();
+            build_from_config(c, "rt1", &up)
+                .unwrap()
+                .best_route(&p)
+                .map(|e| {
+                    (
+                        e.next_hops
+                            .iter()
+                            .map(|h| h.gateway.to_string())
+                            .collect::<Vec<_>>(),
+                        e.distance,
+                    )
+                })
+        };
+        let fwd = mk("10.0.0.2", None, vec![hop("10.0.0.1", None)]);
+        let rev = mk("10.0.0.1", None, vec![hop("10.0.0.2", None)]);
+        // One entry, sorted: config order is irrelevant; distance carried.
+        let want = Some((
+            vec!["10.0.0.1".to_string(), "10.0.0.2".to_string()],
+            Some(5),
+        ));
+        assert_eq!(gws(&fwd, &[]), want);
+        assert_eq!(gws(&rev, &[]), want);
+        // Extra hop BFD-gated: dropped until up; primary BFD-gated likewise.
+        let gated = mk("10.0.0.1", None, vec![hop("10.0.0.2", Some("fast"))]);
+        assert_eq!(gws(&gated, &[]).unwrap().0, ["10.0.0.1"]);
+        assert_eq!(gws(&gated, &["10.0.0.2"]).unwrap().0.len(), 2);
+        let both = mk(
+            "10.0.0.1",
+            Some("fast"),
+            vec![hop("10.0.0.2", Some("fast"))],
+        );
+        assert_eq!(
+            gws(&both, &[]),
+            None,
+            "all hops down: no entry, not a discard"
+        );
+        assert_eq!(gws(&both, &["10.0.0.2"]).unwrap().0, ["10.0.0.2"]);
+        // bfd_target lists the extra hop too.
+        assert!(bfd_target(&gated, "rt1").contains_key(&"10.0.0.2".parse::<IpAddr>().unwrap()));
     }
 
     #[test]
