@@ -216,7 +216,7 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
 - **Build one:**
   - `set acl EDGE default-action permit` (the default is `deny`)
   - `set acl EDGE rule p-bgp action permit`, then `set acl EDGE rule p-bgp protocol tcp` and `set acl EDGE rule p-bgp destination-port 179`
-- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `fragments`, `log`. An unset field matches anything.
+- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `fragments`, `dscp` (0-63, the TOS/traffic-class high six bits; ECN is ignored), `ttl` (exact IPv4 TTL or IPv6 hop limit; no ranges), `log`. An unset field matches anything.
 - **Order:** a new rule is appended. `set acl EDGE rule d-bgp before p-bgp` inserts it, `move acl EDGE rule d-bgp after p-bgp` reorders it (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)). Rule names are required and unique within the ACL.
 - **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate), on a switching-profile port, and when an interface and its untagged subinterface (one kernel device) both set one for the same direction.
 - **Directions:** `acl in` filters what the link receives, `acl out` what it sends, the router's own packets included.

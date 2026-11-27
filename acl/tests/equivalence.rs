@@ -29,7 +29,12 @@ struct Packet {
     /// Offset 0 with more fragments: carries the L4 header, which flower
     /// still never parses.
     first_fragment: bool,
+    dscp: u8,
+    ttl: u8,
 }
+
+const DSCPS: [u8; 3] = [0, 46, 48];
+const TTLS: [u8; 3] = [1, 64, 255];
 
 /// Oracle A: the schema's meaning of a rule, written from its doc comments.
 fn rule_matches(r: &AclRule, p: &Packet) -> bool {
@@ -44,7 +49,9 @@ fn rule_matches(r: &AclRule, p: &Packet) -> bool {
     let l3 = family6.is_none_or(|f| f == p.v6)
         && r.protocol.is_none_or(|x| x.number() == p.proto)
         && r.source.is_none_or(|n| n.contains(&p.src))
-        && r.destination.is_none_or(|n| n.contains(&p.dst));
+        && r.destination.is_none_or(|n| n.contains(&p.dst))
+        && r.dscp.is_none_or(|d| d == p.dscp)
+        && r.ttl.is_none_or(|t| t == p.ttl);
     // An L4-keyed deny also drops every fragment of its L3 match (#1539).
     let twin = r.action == AclAction::Deny
         && (r.source_port.is_some()
@@ -103,6 +110,8 @@ fn flower_matches(protocol: Protocol, k: &FlowerKeys, p: &Packet) -> bool {
         // A non-first fragment has is_fragment=1, first_frag=0; any other packet 0, 0.
         && k.flags
             .is_none_or(|(v, m)| (bits ^ v) & m == 0)
+        && k.ip_tos.is_none_or(|d| d == p.dscp)
+        && k.ip_ttl.is_none_or(|t| t == p.ttl)
         && k.tcp_flags
             .is_none_or(|(v, m)| l4 && p.proto == 6 && p.flags & m == v & m)
         && k.icmp_type
@@ -197,9 +206,10 @@ fn rule() -> impl Strategy<Value = AclRule> {
         extra,
         (any::<bool>(), any::<bool>()),
         any::<bool>(),
+        (prop::option::of(0usize..3), prop::option::of(0usize..3)),
     )
         .prop_map(
-            |(proto, (v6, s, d), (sp, dp), (est, ity, ico), (deny, log), frag)| {
+            |(proto, (v6, s, d), (sp, dp), (est, ity, ico), (deny, log), frag, (dscp, ttl))| {
                 let protocol = proto.map(|i| match i {
                     0 => AclProtocol::Tcp,
                     1 => AclProtocol::Udp,
@@ -246,6 +256,8 @@ fn rule() -> impl Strategy<Value = AclRule> {
                     log,
                     // The validator refuses `fragments` next to an L4 key.
                     fragments: frag && sp.is_none() && dp.is_none() && !est && icmp_type.is_none(),
+                    dscp: dscp.map(|i| DSCPS[i]),
+                    ttl: ttl.map(|i| TTLS[i]),
                     ..Default::default()
                 }
             },
@@ -261,9 +273,10 @@ fn packet() -> impl Strategy<Value = Packet> {
         pick(&[0u16, ACK, RST, 0x02, ACK | 0x08]),
         (pick(&[8u8, 0, 135, 133, 134, 136]), 0u8..2),
         (prop::bool::weighted(0.2), prop::bool::weighted(0.1)),
+        (pick(&DSCPS), pick(&TTLS)),
     )
         .prop_map(
-            |(proto, v6, (s, d), (sport, dport), flags, icmp, (nff, first))| {
+            |(proto, v6, (s, d), (sport, dport), flags, icmp, (nff, first), (dscp, ttl))| {
                 let v6 = match proto {
                     1 => false,
                     58 => true,
@@ -287,6 +300,8 @@ fn packet() -> impl Strategy<Value = Packet> {
                     icmp,
                     non_first_fragment: nff,
                     first_fragment: first && !nff,
+                    dscp,
+                    ttl,
                 }
             },
         )

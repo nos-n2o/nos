@@ -234,6 +234,18 @@ pub struct AclRule {
     #[cli(topic = AclRuleFragments)]
     /// Match only non-first IP fragments (offset > 0); first fragments and unfragmented packets never match. L3 keys still apply, L4 keys are refused.
     pub fragments: bool,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = AclRuleDscp)]
+    /// DSCP (0 to 63) of the IPv4 TOS or IPv6 traffic class; the ECN bits are ignored.
+    pub dscp: Option<u8>,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = AclRuleTtl)]
+    /// Exact IPv4 TTL or IPv6 hop limit (0 to 255).
+    pub ttl: Option<u8>,
 }
 
 /// A named list of rules evaluated in order; the first match wins.
@@ -317,6 +329,9 @@ fn valid_rule(r: &AclRule) -> Result<(), &'static str> {
         return Err(
             "fragments cannot be combined with ports, established or icmp-type/icmp-code: L4 headers are only in the first fragment",
         );
+    }
+    if r.dscp.is_some_and(|d| d > 63) {
+        return Err("dscp is 0 to 63");
     }
     if r.established && r.protocol != Some(Tcp) {
         return Err("established needs protocol tcp");
@@ -658,6 +673,18 @@ mod tests {
         };
         let b = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<AclRule>(&b).unwrap(), r);
+    }
+
+    #[test]
+    fn dscp_is_0_to_63_and_ttl_is_any_byte() {
+        assert!(ok(|r| r.dscp = Some(63)));
+        assert!(!ok(|r| r.dscp = Some(64)));
+        assert!(ok(|r| {
+            r.ttl = Some(255);
+            r.fragments = true;
+        }));
+        let r: AclRule = serde_json::from_str(r#"{"name":"r"}"#).unwrap();
+        assert_eq!((r.dscp, r.ttl), (None, None));
     }
 
     #[test]

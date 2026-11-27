@@ -771,6 +771,34 @@ fn ip_tos_key_is_the_dscp_shifted_with_the_ecn_masked_out() {
 }
 
 #[test]
+fn ip_ttl_key_is_exact() {
+    let k = keys(&flower(
+        Protocol::Ipv6,
+        FlowerKeys {
+            ip_ttl: Some(64),
+            ..FlowerKeys::default()
+        },
+    ));
+    assert!(k.contains(&(TCA_FLOWER_KEY_IP_TTL, vec![64])), "{k:?}");
+    assert!(
+        k.contains(&(TCA_FLOWER_KEY_IP_TTL_MASK, vec![0xFF])),
+        "{k:?}"
+    );
+}
+
+#[test]
+fn ttl_key_refused_under_a_vlan_protocol() {
+    let ttl = FlowerKeys {
+        ip_ttl: Some(1),
+        ..FlowerKeys::default()
+    };
+    assert_eq!(
+        refused(Protocol::Dot1Q, ttl, ActionKind::Gact(Verdict::Ok)),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
 fn police_pedit_and_tos_refusals() {
     let none = FlowerKeys::default;
     let police = |rate, burst| ActionKind::Police {

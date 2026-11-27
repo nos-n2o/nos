@@ -51,6 +51,11 @@ const COMPILED_6B: &str = "compiled acl acl=EDGE6 rules=3 filters=10 levels=2 sh
 /// over-approximation: 2 levels, 3 filters + 2 defaults = 5.
 const COMPILED_7: &str = "compiled acl acl=EDGE7 rules=2 filters=5 levels=2 shadowed=0";
 const ATTACHED_7: &str = "acl attached interface=eth0 direction=in acl=EDGE7";
+/// Step 5d (#1540), `EDGE8`: default permit, `d-dscp` and `d-ttl` (deny udp
+/// from router-b); both IPv4, neither trailing, they overlap (different
+/// keys): 2 levels, 2 filters + 2 defaults = 4. Numbers from the first run.
+const COMPILED_8: &str = "compiled acl acl=EDGE8 rules=2 filters=4 levels=2 shadowed=0";
+const ATTACHED_8: &str = "acl attached interface=eth0 direction=in acl=EDGE8";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 /// Step 2b (#544): router-b's TCP from its address, denied and sampled on
@@ -428,6 +433,95 @@ async fn fragments(w: &World) -> anyhow::Result<()> {
     a.wait_new(DETACHED, detached, 30).await
 }
 
+/// Step 5d (#1540): router-b sends 20 UDP datagrams to port 9 per (TOS, TTL)
+/// variant from a VRF-bound socket; the routers share `eth0`'s link, so the
+/// TTL router-a sees is the one sent. `d-dscp` (dscp 46) and `d-ttl` (ttl 7)
+/// must each count exactly their own variant; the third matches neither.
+async fn dscp_ttl(w: &World) -> anyhow::Result<()> {
+    log("step 5d (#1540): EDGE8, d-dscp and d-ttl count only their own value");
+    let a = w.a()?;
+    let (compiled, attached, ended) = (a.count(COMPILED_8), a.count(ATTACHED_8), a.count(ENDED));
+    a.provision(&[
+        "--acl-default",
+        "EDGE8=permit",
+        "--acl-rule",
+        &format!("EDGE8,d-ttl,deny,udp,{IP_B}/32,any,any"),
+        "--acl-in",
+        "eth0=EDGE8",
+    ])
+    .await?;
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let _ = a.rest(Method::DELETE, &tx, None).await;
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    for (name, extra, before) in [
+        ("d-dscp", r#""dscp":46"#, "?before=d-ttl"),
+        ("d-ttl", r#""ttl":7"#, ""),
+    ] {
+        let rule = format!(
+            r#"{{"name":"{name}","action":"Deny","protocol":"udp","source":"{IP_B}/32",{extra}}}"#
+        );
+        a.rest_expect(
+            Method::PUT,
+            &format!("{tx}/acl/EDGE8/rule/{name}{before}"),
+            Some(&rule),
+            200,
+        )
+        .await?;
+    }
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    a.wait_new(COMPILED_8, compiled, 30).await?;
+    a.wait_new(ATTACHED_8, attached, 30).await?;
+    let send = |tos: u8, ttl: u8| {
+        format!(
+            "use Socket; socket(my $s, AF_INET, SOCK_DGRAM, 0); \
+             setsockopt($s, SOL_SOCKET, 25, \"{RLFA_VRF}\") or die \"bind: $!\"; \
+             setsockopt($s, 0, 1, pack(\"I\", {tos})) or die \"tos: $!\"; \
+             setsockopt($s, 0, 2, pack(\"I\", {ttl})) or die \"ttl: $!\"; \
+             my $d = sockaddr_in(9, inet_aton(\"{IP_A}\")); \
+             send($s, \"x\" x 64, 0, $d) or die \"send: $!\" for 1..20; sleep 1"
+        )
+    };
+    let wait = |d: u64, t: u64| async move {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let body = a
+                .rest_expect(Method::GET, "/v1/acl/EDGE8", None, 200)
+                .await?;
+            let acl: serde_json::Value = serde_json::from_str(&body)?;
+            let n = |name| rule_of(&acl, name).and_then(|r| r["packets"].as_u64());
+            if n("d-dscp") >= Some(d) && n("d-ttl") >= Some(t) {
+                anyhow::ensure!(
+                    n("d-dscp") == Some(d) && n("d-ttl") == Some(t),
+                    "dscp/ttl counters: {body}"
+                );
+                return anyhow::Ok(());
+            }
+            anyhow::ensure!(Instant::now() < deadline, "counters never reached: {body}");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    };
+    // (DSCP 46, ttl 64), (DSCP 0, ttl 7), (DSCP 0, ttl 64), then DSCP 46 with ECN 1.
+    for (tos, ttl, want) in [
+        (0xB8, 64, (20, 0)),
+        (0, 7, (20, 20)),
+        (0, 64, (20, 20)),
+        (0xB9, 64, (40, 20)),
+    ] {
+        let (code, out) = w
+            .dock
+            .exec_root("router-b", &["perl", "-e", &send(tos, ttl)])
+            .await?;
+        anyhow::ensure!(code == 0, "router-b UDP burst failed ({code}): {out}");
+        wait(want.0, want.1).await?;
+    }
+    a.assert_quiet(ENDED, ended, 12).await?;
+    let detached = a.count(DETACHED);
+    a.provision(&["--acl-in", "eth0="]).await?;
+    a.wait_new(DETACHED, detached, 30).await
+}
+
 pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     // A hold-time change restarts the session (`diff_peers`).
@@ -554,6 +648,8 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(DETACHED, detached, 30).await?;
 
     fragments(w).await?;
+
+    dscp_ttl(w).await?;
 
     nd_permit(w).await?;
 
