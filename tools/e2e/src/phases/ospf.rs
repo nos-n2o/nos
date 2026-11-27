@@ -6402,6 +6402,20 @@ async fn assert_only_broadcast_link_lsas(c: &Router, router_id: &str) -> anyhow:
 /// bridge — right at `Full` (the DBD-summary path) and again after a
 /// periodic full resend (`RXMT_INTERVAL`, the flood path).
 pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
+    // `ospf-dr-frr` removes router-c (#887), so it may not be running here.
+    if w.c().is_err() {
+        // The same router-c `ospf-dr` leaves behind (OSPFv2 instance + the
+        // bridge's routing table, which the ospfv3 bridge profile requires).
+        w.start(crate::router::C, None, &[]).await?;
+        let c = w.c()?;
+        for flags in [
+            ospf_instance_only(OSPF_ROUTER_ID_C),
+            ospf_broadcast(OSPF_BROADCAST_ADDRESS_C),
+        ] {
+            c.provision_flags(&with_base(crate::router::C, flags))
+                .await?;
+        }
+    }
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     c.provision_flags(&with_base(
         crate::router::C,
