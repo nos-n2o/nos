@@ -869,7 +869,14 @@ impl ReflectorNet {
 
     /// Follows the running config: the policy, then the sockets of every table.
     pub async fn configure(&self, cfg: &nos_proto::Config) {
-        self.reflector.set_policy(crate::reflector::policy_of(cfg));
+        let policy = crate::reflector::policy_of(cfg);
+        debug!(
+            discriminators = policy.discriminators.len(),
+            keys = policy.keys.len(),
+            configured = cfg.sbfd_reflector.auth.len(),
+            "bfd reflector policy"
+        );
+        self.reflector.set_policy(policy);
         let tables: Vec<String> = cfg.routing_tables.iter().map(|t| t.name.clone()).collect();
         self.apply(&tables).await;
     }
