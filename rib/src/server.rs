@@ -426,7 +426,7 @@ fn vpn_entry(r: &VpnRoute) -> RibEntry {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     }
 }
 
@@ -767,7 +767,7 @@ fn bgp_entry(r: BgpRoute) -> RibEntry {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     }
 }
 
@@ -796,7 +796,7 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
         backup_tunnel: r.backup_next_hop.is_none() && r.backup_tunnel.is_some() && !r.discard,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: std::collections::BTreeMap::new(),
     }
 }
 
@@ -1001,7 +1001,7 @@ mod authz_tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: std::collections::BTreeMap::new(),
             }
         };
         let c = &to_prefix_routes(e.prefix, &[e], &Rib::new(), &plain()).candidates[0];
@@ -1101,7 +1101,7 @@ mod authz_tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         };
         let evpn = EvpnState {
             remotes: [(vtep, [2, 0, 0, 0, 0, 3])].into(),
@@ -1357,7 +1357,7 @@ mod authz_tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         };
         rib.insert(mk(RouteSource::Bgp, "10.0.0.1", Some(7)));
         rib.insert(mk(RouteSource::Static, "10.0.0.2", None));
@@ -1409,7 +1409,7 @@ mod authz_tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: std::collections::BTreeMap::new(),
             });
         }
         rib

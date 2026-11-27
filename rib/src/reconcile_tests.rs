@@ -398,7 +398,7 @@ async fn resync_without_a_config_leaves_everything_alone() {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: BTreeMap::new(),
     });
     e.resync().await;
     assert_eq!(e.best().await.len(), 1, "previous RIB kept");
@@ -421,7 +421,7 @@ async fn resync_of_a_table_missing_from_config_clears_the_statics() {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: BTreeMap::new(),
     });
     e.resync().await;
     let best = e.best().await;
@@ -1069,7 +1069,7 @@ fn bgp_add(prefix: &str) -> RibEntry {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: BTreeMap::new(),
     }
 }
 
@@ -1237,7 +1237,7 @@ async fn a_resync_withdraws_only_unconfigured_ospf_owners() {
         backup_tunnel: false,
         distance: None,
         tag: None,
-        interface: None,
+        interfaces: BTreeMap::new(),
     };
     {
         let mut rib = e.rib.write().await;

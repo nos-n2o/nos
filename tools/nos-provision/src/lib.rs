@@ -409,6 +409,10 @@ pub struct Args {
     /// `--static-route` (repeatable; the route must be in the same run).
     #[arg(long, value_parser = parse_extra_gateway)]
     pub static_extra_gateway: Vec<(IpNet, Vec<IpAddr>)>,
+    /// `<gateway>=<interface>`: pins that extra `next-hops` gateway to a link
+    /// (repeatable; used with `--static-extra-gateway`).
+    #[arg(long, value_parser = parse_extra_interface)]
+    pub static_extra_interface: Vec<(IpAddr, String)>,
     /// `<subnet>=<gateway>[,<gateway>...]`: deletes those `next-hops`.
     #[arg(long, value_parser = parse_extra_gateway)]
     pub remove_static_extra_gateway: Vec<(IpNet, Vec<IpAddr>)>,
@@ -2408,6 +2412,22 @@ fn parse_extra_gateway(s: &str) -> Result<(IpNet, Vec<IpAddr>), String> {
     Ok((subnet.parse::<IpNet>().map_err(|e| e.to_string())?, gws))
 }
 
+fn parse_extra_interface(s: &str) -> Result<(IpAddr, String), String> {
+    let (gw, iface) = s.split_once('=').ok_or("expected <gateway>=<interface>")?;
+    Ok((
+        gw.parse::<IpAddr>().map_err(|e| e.to_string())?,
+        iface.to_string(),
+    ))
+}
+
+/// The `--static-extra-interface` of `gateway`, as a JSON field.
+fn extra_interface_json(args: &Args, gateway: IpAddr) -> String {
+    args.static_extra_interface
+        .iter()
+        .find(|(g, _)| *g == gateway)
+        .map_or_default(|(_, i)| format!(r#","interface":"{i}""#))
+}
+
 /// `--static-extra-gateway` as path edits creating `next-hops` elements.
 fn static_extra_gateway_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = Vec::new();
@@ -2424,7 +2444,7 @@ fn static_extra_gateway_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)>
                     "next-hops".to_string(),
                     g.to_string(),
                 ],
-                add.then(|| format!(r#"{{"gateway":"{g}"}}"#)),
+                add.then(|| format!(r#"{{"gateway":"{g}"{}}}"#, extra_interface_json(args, *g))),
             ));
         }
     }
@@ -2878,11 +2898,17 @@ fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
                 .iter()
                 .filter(|(s, _)| *s == r.subnet)
             {
-                r.next_hops
-                    .extend(gws.iter().map(|&gateway| nos_proto::StaticNextHop {
+                r.next_hops.extend(gws.iter().map(|&gateway| {
+                    nos_proto::StaticNextHop {
                         gateway,
+                        interface: args
+                            .static_extra_interface
+                            .iter()
+                            .find(|(g, _)| *g == gateway)
+                            .map(|(_, i)| i.clone()),
                         ..Default::default()
-                    }));
+                    }
+                }));
             }
         }
     }
@@ -7198,6 +7224,22 @@ mod tests {
         let hops = &cfg.static_routing_instances[0].routes[0].next_hops;
         assert_eq!(hops.len(), 2);
         assert_eq!(hops[1].gateway, "10.0.0.3".parse::<IpAddr>().unwrap());
+        assert_eq!(hops[1].interface, None);
+        let pinned = parse(&[
+            "--static-route",
+            "10.9.0.0/24",
+            "--static-gateway",
+            "10.0.0.1",
+            "--static-extra-gateway",
+            "10.9.0.0/24=10.0.0.2",
+            "--static-extra-interface",
+            "10.0.0.2=eth1",
+        ]);
+        assert!(static_extra_gateway_paths(&pinned)[0]
+            .1
+            .as_deref()
+            .unwrap()
+            .contains(r#""interface":"eth1""#));
         let args = parse(&["--remove-static-extra-gateway", "10.9.0.0/24=10.0.0.2"]);
         assert_eq!(static_extra_gateway_paths(&args)[0].1, None);
         apply_static_route_fields(&args, &mut cfg);

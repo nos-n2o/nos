@@ -232,11 +232,14 @@ type Hops = Vec<NextHop>;
 /// change is a changed route (replace).
 type Key = Vec<(IpAddr, Option<u32>, Vec<u32>)>;
 
-/// `entry` with every next hop leaving over `ifindex`.
-fn pin_interface(entry: &RibEntry, ifindex: u32) -> RibEntry {
+/// `entry` with each pinned hop leaving over its link's ifindex (`ifindexes`
+/// by link name); unpinned hops stay as they are.
+fn pin_interface(entry: &RibEntry, ifindexes: &HashMap<&str, u32>) -> RibEntry {
     let mut e = entry.clone();
     for hop in &mut e.next_hops {
-        hop.interface_id = Some(ifindex);
+        if let Some(i) = entry.interfaces.get(&hop.gateway) {
+            hop.interface_id = ifindexes.get(i.as_str()).copied();
+        }
     }
     e
 }
@@ -375,8 +378,9 @@ impl LinuxRibDriver {
     /// hops' `interface_id`, so the link-local/`RTA_OIF` path takes over). An
     /// entry whose link does not exist yet is left out and reported as an
     /// error, so the caller `mark_dirty`s and retries on the next tick (#686).
-    // ponytail: the slot key ignores the ifindex of a non-link-local gateway, so
-    // re-pinning such a route to another interface alone does not re-install.
+    // ponytail: per hop, the slot key ignores the ifindex of a non-link-local
+    // gateway, so re-pinning such a hop to another interface alone does not
+    // re-install.
     async fn resolve_pinned<'a>(
         &self,
         entries: impl Iterator<Item = (IpNet, &'a RibEntry)>,
@@ -384,20 +388,29 @@ impl LinuxRibDriver {
         let mut out = HashMap::new();
         let mut err = None;
         for (prefix, entry) in entries {
-            let Some(name) = &entry.interface else {
-                out.insert(prefix, entry.clone());
-                continue;
-            };
-            match self.find_link(name).await {
-                Ok(Some(link)) => {
-                    out.insert(prefix, pin_interface(entry, link.header.index));
+            let mut ifindexes = HashMap::new();
+            let mut missing = None;
+            for name in entry.interfaces.values() {
+                if ifindexes.contains_key(name.as_str()) {
+                    continue;
                 }
-                other => {
-                    warn!(%prefix, interface = %name, "static route interface not found, install deferred");
-                    err = Some(other.err().unwrap_or_else(|| {
-                        DriverError::Other(format!("interface {name} not found"))
-                    }));
+                match self.find_link(name).await {
+                    Ok(Some(link)) => {
+                        ifindexes.insert(name.as_str(), link.header.index);
+                    }
+                    other => {
+                        warn!(%prefix, interface = %name, "static route interface not found, install deferred");
+                        missing = Some(other.err().unwrap_or_else(|| {
+                            DriverError::Other(format!("interface {name} not found"))
+                        }));
+                        break;
+                    }
                 }
+            }
+            if missing.is_some() {
+                err = missing;
+            } else {
+                out.insert(prefix, pin_interface(entry, &ifindexes));
             }
         }
         (out, err)
@@ -1822,15 +1835,43 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: Some("eth1".into()),
+            interfaces: [(addr("fe80::1"), "eth1".to_string())].into(),
         };
-        let pinned = pin_interface(&entry, 7);
+        let pinned = pin_interface(&entry, &HashMap::from([("eth1", 7)]));
         assert_eq!(pinned.next_hops[0].interface_id, Some(7));
         let msg = build_route(pinned.prefix, &pinned.next_hops, 100, false, false).unwrap();
         assert_eq!(
             hops_of(&extract_route(&wire(&msg)).unwrap().1)[0].interface_id,
             Some(7)
         );
+    }
+
+    #[test]
+    fn each_hop_is_pinned_to_its_own_link() {
+        let entry = RibEntry {
+            prefix: net("2001:db8:9::/48"),
+            next_hops: vec![plain("fe80::1"), plain("fe80::2"), plain("fe80::3")],
+            source: RouteSource::Static,
+            backup: None,
+            backup_interface_id: None,
+            backup_tunnel: false,
+            distance: None,
+            tag: None,
+            interfaces: [
+                (addr("fe80::1"), "eth0".to_string()),
+                (addr("fe80::2"), "eth1".to_string()),
+            ]
+            .into(),
+        };
+        let pinned = pin_interface(&entry, &HashMap::from([("eth0", 7), ("eth1", 9)]));
+        let oifs: Vec<_> = pinned.next_hops.iter().map(|h| h.interface_id).collect();
+        assert_eq!(oifs, [Some(7), Some(9), None]);
+        let msg = build_route(pinned.prefix, &pinned.next_hops, 100, false, false).unwrap();
+        let back: Vec<_> = hops_of(&extract_route(&wire(&msg)).unwrap().1)
+            .iter()
+            .map(|h| h.interface_id)
+            .collect();
+        assert!(back.contains(&Some(7)) && back.contains(&Some(9)));
     }
 
     #[test]
@@ -1989,7 +2030,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         assert_eq!(
             slots(p, &entry),
@@ -2284,7 +2325,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         let keyed = |e: &RibEntry| -> HashMap<Slot, Key> {
             slots(p, e).iter().map(|(s, h)| (*s, key(h))).collect()

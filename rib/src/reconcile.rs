@@ -762,7 +762,7 @@ fn connected_entries(
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         });
     }
     entries
@@ -947,7 +947,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1198,7 +1198,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: std::collections::BTreeMap::new(),
             },
         );
 
@@ -1238,7 +1238,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: std::collections::BTreeMap::new(),
         };
         routes.insert(entry.prefix, entry);
 
@@ -1429,7 +1429,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: std::collections::BTreeMap::new(),
             },
         );
 

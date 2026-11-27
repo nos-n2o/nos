@@ -21,10 +21,10 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 
 ## Static variants (#1523)
 
-- `RibEntry.distance` is a static's own preference (`RibEntry::preference`, then the source default as a tie-break, so a static wins a tie); `tag` and `interface` ride along, all part of entry equality.
+- `RibEntry.distance` is a static's own preference (`RibEntry::preference`, then the source default as a tie-break, so a static wins a tie); `tag` and `interfaces` ride along, all part of entry equality.
 - A `blackhole` static has an empty `next_hops` (`is_discard`, installed as `RTN_BLACKHOLE`), is never redistributed and never resolves a BGP next hop.
-- `interface` is a kernel link name: `LinuxRibDriver::resolve_pinned` turns it into the hops' ifindex before install; a missing link defers the route and fails the apply, so it is retried on the next tick.
-- `next-hops` (#1556): `build_from_config` makes one `Static` entry per prefix with the primary gateway and every extra one as hops, sorted by gateway so config order never changes the entry; a hop with `bfd` is dropped while its session is not Up, and a route with no hop left is not inserted (never an empty list, which would read as a discard). `bfd_target` lists every hop. `ponytail:` one pinned interface per entry, so a hop naming another interface than the route's is installed on the route's (logged).
+- `interfaces` maps a gateway to its kernel link name (the route's `interface` pins the primary, each `next-hops` element its own, #1616): `LinuxRibDriver::resolve_pinned` looks each name up once and sets the ifindex on that hop only before install (unpinned hops stay as they are); a missing link defers the route and fails the apply, so it is retried on the next tick.
+- `next-hops` (#1556): `build_from_config` makes one `Static` entry per prefix with the primary gateway and every extra one as hops, sorted by gateway so config order never changes the entry; a hop with `bfd` is dropped while its session is not Up, and a route with no hop left is not inserted (never an empty list, which would read as a discard). `bfd_target` lists every hop. A BFD-dropped hop loses its pin with it. `ponytail:` the slot key ignores the ifindex of a non-link-local gateway, so re-pinning such a hop to another link alone does not re-install.
 
 ## Recursive static next hops (#1527)
 

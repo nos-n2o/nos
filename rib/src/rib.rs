@@ -114,9 +114,10 @@ pub struct RibEntry {
     pub distance: Option<u8>,
     /// A `Static` route's tag, shown by `show route`. Part of equality.
     pub tag: Option<u32>,
-    /// A `Static` route's pinned outgoing interface NAME, resolved to an
-    /// ifindex by the Linux driver at install. Part of equality.
-    pub interface: Option<String>,
+    /// A `Static` route's pinned outgoing interface NAME per gateway, resolved
+    /// to an ifindex by the Linux driver at install (#1616). Empty for other
+    /// sources. Part of equality.
+    pub interfaces: BTreeMap<IpAddr, String>,
 }
 
 impl RibEntry {
@@ -451,7 +452,7 @@ impl Rib {
             .map(|e| e.prefix)
             .collect();
         let on_link = |e: &RibEntry, gw: IpAddr| {
-            e.interface.is_some() || connected.iter().any(|n| n.contains(&gw))
+            e.interfaces.contains_key(&gw) || connected.iter().any(|n| n.contains(&gw))
         };
         let recursive: Vec<RibEntry> = self
             .static_cfg
@@ -957,19 +958,21 @@ pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr
                 }
                 // Config order must not change the entry (equality, replace).
                 hops.sort();
-                // ponytail: a `RibEntry` pins one interface for all hops, so
-                // a hop naming another interface than the route's cannot be
-                // installed on it (#1556 QUESTION); upgrade: per-hop names.
-                let interface = route
-                    .interface
-                    .clone()
-                    .or_else(|| route.next_hops.iter().find_map(|h| h.interface.clone()));
-                if route
-                    .next_hops
-                    .iter()
-                    .any(|h| h.interface.is_some() && h.interface != interface)
-                {
-                    warn!(prefix = %route.subnet, "static next-hop interface differs from the route's; pinned to one");
+                // Each hop pins its own link; the primary takes the route's.
+                let mut interfaces = BTreeMap::new();
+                if !route.blackhole {
+                    let extra = route
+                        .next_hops
+                        .iter()
+                        .filter_map(|h| Some((h.gateway, h.interface.clone()?)));
+                    let all = route
+                        .interface
+                        .clone()
+                        .map(|i| (route.gateway, i))
+                        .into_iter()
+                        .chain(extra);
+                    // A BFD-dropped hop's pin goes with it.
+                    interfaces.extend(all.filter(|(gw, _)| hops.contains(gw)));
                 }
                 rib.insert(RibEntry {
                     prefix: route.subnet,
@@ -981,7 +984,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str, bfd_up: &HashSet<IpAddr
                     backup_tunnel: false,
                     distance: route.distance,
                     tag: route.tag,
-                    interface,
+                    interfaces,
                 });
             }
         } else {
@@ -1032,7 +1035,9 @@ pub fn bfd_target(cfg: &Config, table_name: &str) -> crate::bfd_client::Target {
 mod tests {
     use super::*;
     use nos_proto::schema::BfdProfile;
-    use nos_proto::{RouteSourceKind, RoutingTable, StaticRoute, StaticRoutingInstance};
+    use nos_proto::{
+        RouteSourceKind, RoutingTable, StaticNextHop, StaticRoute, StaticRoutingInstance,
+    };
 
     fn cfg(tables: Vec<RoutingTable>, instances: Vec<StaticRoutingInstance>) -> Config {
         Config {
@@ -1052,7 +1057,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         }
     }
 
@@ -1136,7 +1141,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
@@ -1201,7 +1206,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Ospf);
         rib.evpn.local = None;
@@ -1228,7 +1233,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(
             rib.best_route(&prefix).unwrap().next_hops[0].gateway,
@@ -1252,7 +1257,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -1263,7 +1268,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Static);
     }
@@ -1333,7 +1338,12 @@ mod tests {
         let rib = build_from_config(&cfg(tables, instances), "rt1", &HashSet::new()).unwrap();
         let a = rib.best_route(&"10.1.0.0/24".parse().unwrap()).unwrap();
         assert_eq!((a.distance, a.tag), (Some(200), Some(7)));
-        assert_eq!(a.interface.as_deref(), Some("eth1"));
+        assert_eq!(
+            a.interfaces
+                .get(&"10.0.0.1".parse().unwrap())
+                .map(String::as_str),
+            Some("eth1")
+        );
         assert_eq!(a.preference(), 200);
         let b = rib.best_route(&"10.2.0.0/24".parse().unwrap()).unwrap();
         assert!(b.is_discard());
@@ -1416,6 +1426,44 @@ mod tests {
     }
 
     #[test]
+    fn each_static_hop_keeps_its_own_interface() {
+        let route = |hops: Vec<StaticNextHop>| StaticRoute {
+            subnet: "2001:db8:1::/48".parse().unwrap(),
+            gateway: "fe80::1".parse().unwrap(),
+            interface: Some("eth0".into()),
+            next_hops: hops,
+            ..Default::default()
+        };
+        let hop = |gw: &str, i: &str| StaticNextHop {
+            gateway: gw.parse().unwrap(),
+            interface: Some(i.into()),
+            ..Default::default()
+        };
+        let build = |r: StaticRoute| {
+            let instances = vec![StaticRoutingInstance {
+                name: "sri1".into(),
+                routes: vec![r],
+            }];
+            let tables = vec![RoutingTable {
+                static_routing_instance: Some("sri1".into()),
+                name: "rt1".into(),
+                ..Default::default()
+            }];
+            build_from_config(&cfg(tables, instances), "rt1", &HashSet::new())
+                .unwrap()
+                .best_route(&"2001:db8:1::/48".parse().unwrap())
+                .unwrap()
+                .clone()
+        };
+        let a = build(route(vec![hop("fe80::2", "eth1"), hop("fe80::3", "eth2")]));
+        assert_eq!(a.interfaces.len(), 3);
+        assert_eq!(a.interfaces[&"fe80::2".parse::<IpAddr>().unwrap()], "eth1");
+        // Config order of the extra hops does not change the entry.
+        let b = build(route(vec![hop("fe80::3", "eth2"), hop("fe80::2", "eth1")]));
+        assert_eq!(a, b);
+    }
+
+    #[test]
     fn variant_fields_are_part_of_equality() {
         let base = entry("10.0.0.0/24", "10.0.0.1", RouteSource::Static);
         assert_ne!(base, floating("10.0.0.0/24", 5));
@@ -1429,7 +1477,7 @@ mod tests {
         assert_ne!(
             base,
             RibEntry {
-                interface: Some("e".into()),
+                interfaces: [("10.0.0.1".parse().unwrap(), "e".to_string())].into(),
                 ..base.clone()
             }
         );
@@ -1445,7 +1493,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         }
     }
 
@@ -1627,7 +1675,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -1638,7 +1686,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(rib.best_routes().len(), 2);
     }
@@ -1766,7 +1814,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -1777,7 +1825,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix: p2,
@@ -1788,7 +1836,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
 
         let all = rib.all_routes();
@@ -1816,7 +1864,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix: narrow,
@@ -1827,7 +1875,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
 
         let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
@@ -1880,7 +1928,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.replace_source(
             RouteSource::Static,
@@ -1893,7 +1941,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: BTreeMap::new(),
             }],
         );
         let candidates = rib
@@ -1920,7 +1968,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.replace_source(RouteSource::Static, Vec::new());
         assert!(rib.is_empty());
@@ -1939,7 +1987,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.upsert(RibEntry {
             prefix,
@@ -1950,7 +1998,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.upsert(RibEntry {
             prefix,
@@ -1961,7 +2009,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         let candidates = rib
             .all_routes()
@@ -1993,7 +2041,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(entry.clone()),
@@ -2015,7 +2063,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         // Static already wins this prefix, so a new/changed Bgp candidate
         // never becomes the winner — no kernel-visible change.
@@ -2029,7 +2077,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: BTreeMap::new(),
             }),
             BestPathChange::Unchanged
         );
@@ -2048,7 +2096,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
@@ -2061,7 +2109,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: BTreeMap::new(),
             })
         );
         let static_entry = RibEntry {
@@ -2073,7 +2121,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         };
         assert_eq!(
             rib.upsert_and_diff(static_entry.clone()),
@@ -2094,7 +2142,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Bgp),
@@ -2115,7 +2163,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -2126,7 +2174,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         // Static still wins after Bgp's candidate is removed.
         assert_eq!(
@@ -2148,7 +2196,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -2159,7 +2207,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
@@ -2172,7 +2220,7 @@ mod tests {
                 backup_tunnel: false,
                 distance: None,
                 tag: None,
-                interface: None,
+                interfaces: BTreeMap::new(),
             })
         );
     }
@@ -2190,7 +2238,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.insert(RibEntry {
             prefix,
@@ -2201,7 +2249,7 @@ mod tests {
             backup_tunnel: false,
             distance: None,
             tag: None,
-            interface: None,
+            interfaces: BTreeMap::new(),
         });
         rib.remove(&prefix, RouteSource::Bgp);
         let candidates = rib
