@@ -6402,6 +6402,20 @@ async fn assert_only_broadcast_link_lsas(c: &Router, router_id: &str) -> anyhow:
 /// bridge — right at `Full` (the DBD-summary path) and again after a
 /// periodic full resend (`RXMT_INTERVAL`, the flood path).
 pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
+    // `ospf-dr-frr` removes router-c (#887), so it may not be running here.
+    if w.c().is_err() {
+        // The same router-c `ospf-dr` leaves behind (OSPFv2 instance + the
+        // bridge's routing table, which the ospfv3 bridge profile requires).
+        w.start(crate::router::C, None, &[]).await?;
+        let c = w.c()?;
+        for flags in [
+            ospf_instance_only(OSPF_ROUTER_ID_C),
+            ospf_broadcast(OSPF_BROADCAST_ADDRESS_C),
+        ] {
+            c.provision_flags(&with_base(crate::router::C, flags))
+                .await?;
+        }
+    }
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     c.provision_flags(&with_base(
         crate::router::C,
@@ -8616,6 +8630,12 @@ async fn mpls_packets(w: &World, router: &str) -> anyhow::Result<(u64, u64)> {
     Ok((rx, tx))
 }
 
+/// Runs one `ip ...` argv in router-a's netns.
+async fn router_a_ip(w: &World, cmd: &[String]) -> anyhow::Result<String> {
+    let cmd: Vec<&str> = cmd.iter().map(String::as_str).collect();
+    w.dock.in_netns(NETNS_HELPER_IMAGE, "router-a", &cmd).await
+}
+
 /// `ping -I vrf100` from router-a, requiring no loss.
 async fn ping_from_a(w: &World, dst: &str, count: u32) -> anyhow::Result<()> {
     let out = w
@@ -8754,88 +8774,63 @@ pub async fn ospf_sr(w: &mut World) -> anyhow::Result<()> {
     let host = format!("{target}/32");
     let (rx0, _) = mpls_packets(w, "router-b").await?;
     let sid_s = sid.to_string();
-    let add = [
-        "ip",
-        "route",
-        "replace",
-        &host,
-        "encap",
-        "mpls",
-        &sid_s,
-        "via",
-        IP_B.s(),
-        "dev",
-        "eth0",
-        "table",
-        "100",
+    // #1512: not in table 100, which nos-ribd owns and reconciles away (a
+    // foreign route is deleted within ms to 10 s). Table 200 is allocated by
+    // no scenario (`rt1` is always 100); the rule at pref 900 sits before the
+    // VRF l3mdev rule, so the VRF-bound ping still hits it.
+    let ip = |args: &[&str]| -> Vec<String> {
+        std::iter::once("ip")
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    let cleanup = [
+        ip(&["rule", "del", "to", &host, "pref", "900"]),
+        ip(&["route", "flush", "table", "200"]),
     ];
-    // The host route may be overwritten in table 100 under us (#1468: seen as
-    // a plain route at the first ping): re-add it before every batch, ping
-    // only once `route get` shows the label, and retry the batch once.
-    let mut seen: Vec<String> = Vec::new();
-    let mut moved = false;
-    let mut last = Ok(());
-    for attempt in 1..=2 {
-        w.dock
-            .in_netns(NETNS_HELPER_IMAGE, "router-a", &add)
-            .await?;
-        let mut got = String::new();
-        for _ in 0..5 {
-            got = w
-                .dock
-                .in_netns(
-                    NETNS_HELPER_IMAGE,
-                    "router-a",
-                    &["ip", "route", "get", target, "oif", "eth0"],
-                )
-                .await
-                .unwrap_or_else(|e| e.to_string());
-            if got.contains("encap mpls") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            w.dock
-                .in_netns(NETNS_HELPER_IMAGE, "router-a", &add)
-                .await?;
-        }
-        let tbl = w
-            .dock
-            .in_netns(
-                NETNS_HELPER_IMAGE,
-                "router-a",
-                &["ip", "route", "show", "table", "100"],
-            )
-            .await
-            .unwrap_or_else(|e| e.to_string());
-        seen.push(format!(
-            "\nattempt {attempt}: route get: {got}\ntable 100: {tbl}"
-        ));
-        last = ping_from_a(w, target, 10).await;
-        if last.is_err() {
-            break;
-        }
-        // ponytail: one labelled packet is the proof; the unlabelled packets
-        // seen were the first of a fresh route, hence one retry, no more.
-        if mpls_packets(w, "router-b").await?.0 > rx0 {
-            moved = true;
+    let setup = [
+        ip(&[
+            "route",
+            "replace",
+            &host,
+            "encap",
+            "mpls",
+            &sid_s,
+            "via",
+            IP_B.s(),
+            "dev",
+            "eth0",
+            "onlink",
+            "table",
+            "200",
+        ]),
+        ip(&["rule", "add", "to", &host, "lookup", "200", "pref", "900"]),
+    ];
+    let mut res: anyhow::Result<()> = Ok(());
+    for cmd in &setup {
+        if let Err(e) = router_a_ip(w, cmd).await {
+            res = Err(e);
             break;
         }
     }
-    let _ = w
-        .dock
-        .in_netns(
-            NETNS_HELPER_IMAGE,
-            "router-a",
-            &["ip", "route", "del", &host, "table", "100"],
-        )
-        .await;
-    last?;
+    let ping = if res.is_ok() {
+        ping_from_a(w, target, 10).await
+    } else {
+        Ok(())
+    };
+    let diag = router_a_ip(w, &ip(&["route", "get", target, "oif", RLFA_VRF]))
+        .await
+        .unwrap_or_else(|e| e.to_string());
+    for cmd in &cleanup {
+        let _ = router_a_ip(w, cmd).await;
+    }
+    res?;
+    ping?;
     let (rx1, _) = mpls_packets(w, "router-b").await?;
     let (_, atx2) = mpls_packets(w, "router-a").await?;
-    if !moved {
+    if rx1 <= rx0 {
         bail!(
-            "adj-sid {sid}: router-b mpls rx {rx0}->{rx1}, router-a tx {atx1} -> {atx2}{}",
-            seen.join("")
+            "adj-sid {sid}: router-b mpls rx {rx0}->{rx1}, router-a tx {atx1} -> {atx2}\nroute get: {diag}"
         );
     }
 
