@@ -86,6 +86,9 @@ pub struct FlowerKeys {
     /// two ECN bits are never matched. Needs `Protocol::Ip`/`Ipv6`. Flower
     /// has no IPv6 flow-label key on Linux 7.2: that match is unsupported.
     pub ip_tos: Option<u8>,
+    /// The IPv4 TTL or IPv6 hop limit, exact (mask `0xFF`). Needs
+    /// `Protocol::Ip`/`Ipv6`.
+    pub ip_ttl: Option<u8>,
     /// The VLAN id (`0..=4094`); needs `Protocol::Dot1Q`, which refuses L3/L4
     /// keys (`KEY_VLAN_ETH_TYPE` is not modelled).
     pub vlan_id: Option<u16>,
@@ -323,7 +326,8 @@ fn check(f: &Filter) -> io::Result<()> {
                 || k.icmp_type.is_some()
                 || k.icmp_code.is_some()
                 || k.flags.is_some()
-                || k.ip_tos.is_some())
+                || k.ip_tos.is_some()
+                || k.ip_ttl.is_some())
         {
             return Err(invalid("a VLAN protocol with an L3/L4 key is not modelled"));
         }
@@ -655,6 +659,10 @@ fn flower(o: &mut Vec<u8>, k: &FlowerKeys, protocol: Protocol) {
     if let Some(dscp) = k.ip_tos {
         nla(o, TCA_FLOWER_KEY_IP_TOS, &[dscp << 2]);
         nla(o, TCA_FLOWER_KEY_IP_TOS_MASK, &[0xFC]);
+    }
+    if let Some(ttl) = k.ip_ttl {
+        nla(o, TCA_FLOWER_KEY_IP_TTL, &[ttl]);
+        nla(o, TCA_FLOWER_KEY_IP_TTL_MASK, &[0xFF]);
     }
     match k.enc_src_ip {
         Some(IpAddr::V4(a)) => nla(o, TCA_FLOWER_KEY_ENC_IPV4_SRC, &a.octets()),

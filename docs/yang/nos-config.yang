@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-10 {
+  revision 2026-12-11 {
     description "Generated.";
   }
 
@@ -2375,6 +2375,14 @@ module nos-config {
       leaf fragments {
         type boolean;
         description "Match non-first IP fragments only.";
+      }
+      leaf dscp {
+        type uint8;
+        description "Match the DSCP of the IP header.";
+      }
+      leaf ttl {
+        type uint8;
+        description "Match the exact TTL or hop limit.";
       }
     }
   }

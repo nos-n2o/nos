@@ -681,6 +681,10 @@ topics! {
     AclRuleLog,
     /// `AclRule.fragments`
     AclRuleFragments,
+    /// `AclRule.dscp`
+    AclRuleDscp,
+    /// `AclRule.ttl`
+    AclRuleTtl,
     /// `Interface.acl_in`
     InterfaceAclIn,
     /// `Interface.acl_out`

@@ -110,6 +110,8 @@ fn attach_replace_detach_leave_foreign_filters() {
         name: "frags".into(),
         action: AclAction::Deny,
         fragments: true,
+        dscp: Some(46),
+        ttl: Some(64),
         ..Default::default()
     };
     let two = compile(&acl(vec![established, deny_bgp.clone(), frags])).unwrap();
@@ -126,6 +128,10 @@ fn attach_replace_detach_leave_foreign_filters() {
     );
     assert!(chain.contains("src_port 1000-2000"), "{chain}");
     assert!(chain.contains("ip_flags frag/nofirstfrag"), "{chain}");
+    assert!(
+        chain.contains("ip_tos 184/0xfc") && chain.contains("ip_ttl 64/ff"),
+        "{chain}"
+    );
     assert_eq!(d.live_chain(i, Direction::In).unwrap(), Some(ACL_CHAIN_B));
     // Flushing an empty chain again is fine.
     d.flush(i, Direction::In, ACL_CHAIN_A).unwrap();

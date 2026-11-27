@@ -47,6 +47,8 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
         icmp_type: r.icmp_type,
         icmp_code: r.icmp_code,
         flags: r.fragments.then_some(LATER_FRAGMENT),
+        ip_tos: r.dscp,
+        ip_ttl: r.ttl,
         ..Default::default()
     };
     let flags: Vec<Option<(u16, u16)>> = if r.established {
@@ -199,6 +201,21 @@ mod tests {
             (f[0].keys.ip_proto, f[0].keys.icmp_type, f[0].keys.icmp_code),
             (Some(58), Some(135), Some(0))
         );
+    }
+
+    #[test]
+    fn dscp_and_ttl_become_keys_on_every_filter() {
+        let r = rule(|r| {
+            r.dscp = Some(46);
+            r.ttl = Some(7);
+            r.action = AclAction::Deny;
+            r.destination_port = Some(PortRange { start: 9, end: 9 });
+        });
+        let f = filters(&r, 0);
+        assert!(f.len() > 2, "twins keep the L3 keys too");
+        assert!(f
+            .iter()
+            .all(|f| f.keys.ip_tos == Some(46) && f.keys.ip_ttl == Some(7)));
     }
 
     #[test]
