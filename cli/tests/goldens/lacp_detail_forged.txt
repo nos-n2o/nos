@@ -14,6 +14,12 @@ lacp x\nFORGED\x1b[2J
     synchronized              yes
     churn                     none
     individual                no
+    lacpdus-rx                0
+    lacpdus-tx                0
+    illegal-pdus              0
     unsupported-version-pdus  0
+    marker-pdus-rx            0
+    marker-responses-tx       0
+    marker-responses-rx       0
     partner                   02:00:00:00:00:01 key 3 port 9
     partner-priority          200/60

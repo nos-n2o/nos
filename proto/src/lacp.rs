@@ -101,6 +101,32 @@ pub struct LacpPortStatus {
     pub partner_version: Option<u8>,
     /// The partner's advertised Port Algorithm, if any.
     pub partner_port_algorithm: Option<crate::schema::LacpPortAlgorithm>,
+    /// LACPDUs (subtype 1, v1/v2) that decoded, counted before the receive
+    /// rate limiter so a flood stays visible. In memory only: restarts at 0
+    /// with the port's link task. Last fields: postcard is positional.
+    #[serde(default)]
+    pub lacpdus_rx: u64,
+    /// LACPDUs written to the socket successfully. In memory only: restarts at 0
+    /// with the port's link task.
+    #[serde(default)]
+    pub lacpdus_tx: u64,
+    /// Slow-protocol frames that failed to decode (short frame, wrong
+    /// subtype), excluding unsupported versions and Marker PDUs. In memory
+    /// only: restarts at 0 with the port's link task.
+    #[serde(default)]
+    pub illegal_pdus: u64,
+    /// Marker requests received, including those the Marker rate limiter then
+    /// dropped. In memory only: restarts at 0 with the port's link task.
+    #[serde(default)]
+    pub marker_pdus_rx: u64,
+    /// Marker Responses sent. In memory only: restarts at 0 with the port's
+    /// link task.
+    #[serde(default)]
+    pub marker_responses_tx: u64,
+    /// Marker Responses received. In memory only: restarts at 0 with the
+    /// port's link task.
+    #[serde(default)]
+    pub marker_responses_rx: u64,
 }
 
 /// Whether both ends agreed on conversation-sensitive operation.

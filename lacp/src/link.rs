@@ -62,6 +62,26 @@ pub struct LinkConfig {
     pub advert_rx: watch::Receiver<Advert>,
 }
 
+/// Per-port frame counters for `show lacp` (in memory only). Reported with
+/// the observation but never a reason to wake selection (see [`report`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Counters {
+    /// LACPDUs that decoded, before the receive rate limiter.
+    pub lacpdus_rx: u64,
+    /// LACPDUs successfully written to the socket.
+    pub lacpdus_tx: u64,
+    /// Frames failing decode (not an unsupported version, not a Marker).
+    pub illegal_pdus: u64,
+    /// LACPDUs dropped for a Version byte other than 1 or 2.
+    pub unsupported_version_pdus: u64,
+    /// Marker requests received (limiter drops included).
+    pub marker_pdus_rx: u64,
+    /// Marker Responses sent.
+    pub marker_responses_tx: u64,
+    /// Marker Responses received.
+    pub marker_responses_rx: u64,
+}
+
 /// One member port's currently-observed state, as reported up to
 /// `aggregate.rs` after every event that could change it — the input to
 /// `selection::select`, the active-member-set computation, and `show lacp`.
@@ -77,9 +97,8 @@ pub struct PortObservation {
     pub partner: Option<PortInfo>,
     pub actor_churn: ChurnState,
     pub partner_churn: ChurnState,
-    /// LACPDUs dropped for a Version byte other than 1 or 2 since this link
-    /// task started (in memory only).
-    pub unsupported_version_pdus: u64,
+    /// Frame counters since this link task started.
+    pub counters: Counters,
     /// The partner's version and v2 TLVs from its last LACPDU (#894).
     pub v2: PartnerV2,
 }
@@ -262,8 +281,8 @@ struct Port {
     /// Whether the loopback warning already fired for the current run of
     /// looped LACPDUs (reset by the next accepted one).
     loopback_logged: bool,
-    /// LACPDUs with an unsupported Version byte (`show lacp`).
-    unsupported_version_pdus: u64,
+    /// Frame counters (`show lacp`); `lacpdus_tx` is filled from `tx.sent`.
+    counters: Counters,
     churn: Churn,
     /// Whether the last LACPDU's Partner block described us (recordPDU).
     partner_view_matches: bool,
@@ -316,7 +335,7 @@ impl Port {
             rx_limiter: TxLimiter::new(Instant::now(), MAX_RX_PER_WINDOW),
             rx_dropped: 0,
             loopback_logged: false,
-            unsupported_version_pdus: 0,
+            counters: Counters::default(),
             churn,
             partner_view_matches: true,
             partner_v2: PartnerV2::default(),
@@ -340,6 +359,13 @@ impl Port {
         )
     }
 
+    /// NTT send, then publish the counters (`lacpdus_tx` moves on a send).
+    fn send_if_changed(&mut self, sink: &dyn FrameSink) {
+        self.tx
+            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.report();
+    }
+
     fn report(&self) {
         report(
             &self.observations,
@@ -350,7 +376,10 @@ impl Port {
             self.mux_state,
             self.partner,
             &self.churn,
-            self.unsupported_version_pdus,
+            Counters {
+                lacpdus_tx: self.tx.sent,
+                ..self.counters
+            },
             self.partner_v2,
         );
     }
@@ -359,8 +388,7 @@ impl Port {
     /// a differing PDU goes out through the usual `TxLimiter`.
     fn on_advert(&mut self, advert: Advert, sink: &dyn FrameSink) {
         self.advert = advert;
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 
     /// Re-evaluates what depends on the machines' state after any event, then
@@ -384,8 +412,7 @@ impl Port {
             self.partner,
         );
         self.settle();
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 
     fn on_periodic(&mut self, sink: &dyn FrameSink) {
@@ -404,6 +431,7 @@ impl Port {
             )
             .unwrap_or(Duration::from_hours(24));
         self.tx.transmit(sink, &self.config.interface, pdu);
+        self.report();
     }
 
     fn on_current_while_expired(&mut self, sink: &dyn FrameSink) {
@@ -445,8 +473,7 @@ impl Port {
             self.partner,
         );
         self.settle();
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 
     fn on_actor_churn(&mut self) {
@@ -466,8 +493,7 @@ impl Port {
         apply_mux_action(action, &mut self.wait_while_deadline);
         info!(interface = %self.config.interface, mux_state = ?self.mux_state, "lacp mux machine transitioned");
         self.settle();
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 
     /// The task is ending on its own: forget the observation so selection does
@@ -488,16 +514,17 @@ impl Port {
         apply_mux_action(action, &mut self.wait_while_deadline);
         info!(interface = %self.config.interface, mux_state = ?self.mux_state, selected, "lacp mux machine transitioned");
         self.settle();
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 
     fn on_frame(&mut self, bytes: &[u8], sink: &dyn FrameSink) {
         if let Some(m) = packet::decode_marker(bytes) {
+            self.counters.marker_pdus_rx += 1;
             // §6.5.4.2 responder: stateless, same port, no effect on the LACP machines.
             if self.marker_limiter.try_take(Instant::now()) {
                 match sink.send(&packet::encode_marker_response(&m)) {
                     Ok(()) => {
+                        self.counters.marker_responses_tx += 1;
                         info!(interface = %self.config.interface, requester_port = m.requester_port, requester_system = ?m.requester_system, transaction_id = m.transaction_id, "lacp marker answered");
                     }
                     Err(e) if crate::socket::is_link_down(&e) => {
@@ -510,15 +537,27 @@ impl Port {
             } else {
                 debug!(interface = %self.config.interface, "marker rate limit hit, dropping");
             }
+            self.report();
+            return;
+        }
+        if packet::is_marker_response(bytes) {
+            self.counters.marker_responses_rx += 1;
+            self.report();
             return;
         }
         let decoded = packet::decode(bytes);
         // Dropped before touching any machine: a flood costs one decode.
         if decoded.is_err() && !matches!(decoded, Err(packet::PacketError::UnsupportedVersion(_))) {
+            self.counters.illegal_pdus += 1;
+            self.report();
             return;
+        }
+        if decoded.is_ok() {
+            self.counters.lacpdus_rx += 1;
         }
         if !self.rx_limiter.try_take(Instant::now()) {
             self.rx_dropped += 1;
+            self.report();
             if self.rx_dropped == 1 {
                 warn!(interface = %self.config.interface, "lacp receive rate limit hit, dropping");
             }
@@ -531,7 +570,7 @@ impl Port {
         let Ok(pdu) = decoded else {
             // Silent in the log (flood vector); counted, and rate-limited
             // above so a flood cannot spin selection.
-            self.unsupported_version_pdus += 1;
+            self.counters.unsupported_version_pdus += 1;
             self.report();
             return;
         };
@@ -642,8 +681,7 @@ impl Port {
             self.partner,
         );
         self.settle();
-        self.tx
-            .send_if_changed(sink, &self.config.interface, self.pdu());
+        self.send_if_changed(sink);
     }
 }
 
@@ -695,7 +733,7 @@ fn report(
     mux_state: MuxState,
     partner: Option<PortInfo>,
     churn: &Churn,
-    unsupported_version_pdus: u64,
+    counters: Counters,
     v2: PartnerV2,
 ) {
     let observation = PortObservation {
@@ -705,7 +743,7 @@ fn report(
         partner,
         actor_churn: churn.actor,
         partner_churn: churn.partner,
-        unsupported_version_pdus,
+        counters,
         v2,
     };
     let mut observations = observations.lock().unwrap();
@@ -713,12 +751,19 @@ fn report(
     // notification by re-running Selection Logic and feeding verdicts back to
     // the ports, so a redundant signal is one turn of a potential feedback
     // loop.
-    if observations.get(interface) == Some(&observation) {
-        return;
-    }
+    // Counters are stored but never wake selection: every frame would.
+    let quiet = |o: PortObservation| PortObservation {
+        counters: Counters::default(),
+        ..o
+    };
+    let same = observations
+        .get(interface)
+        .is_some_and(|old| quiet(*old) == quiet(observation));
     observations.insert(interface.to_string(), observation);
     drop(observations);
-    changed.notify_one();
+    if !same {
+        changed.notify_one();
+    }
 }
 
 /// Both Churn Detection machines (§6.4.17) with their timer deadlines.
@@ -947,15 +992,16 @@ fn v2_tlvs(advert: &Advert, link_number: Option<u16>, attached: bool) -> V2Tlvs 
     }
 }
 
-fn send_lacpdu(socket: &dyn FrameSink, interface: &str, pdu: &Lacpdu) {
+fn send_lacpdu(socket: &dyn FrameSink, interface: &str, pdu: &Lacpdu) -> bool {
     match socket.send(&packet::encode(pdu)) {
-        Ok(()) => {}
+        Ok(()) => return true,
         // Expected while the link is down; the fast periodic send retries.
         Err(e) if crate::socket::is_link_down(&e) => {
             debug!(interface = %interface, "link down, lacpdu not sent");
         }
         Err(e) => warn!(interface = %interface, error = %e, "failed to send lacpdu"),
     }
+    false
 }
 
 /// 802.1AX §6.4.16: at most 3 LACPDUs per `Fast_Periodic_Time`, whatever the
@@ -1009,6 +1055,8 @@ struct TxState {
     /// 802.1AX `NO_PERIODIC`: both ends Passive. Nothing is transmitted at all
     /// (periodic or event-driven) until a partner LACPDU says it is Active.
     no_periodic: bool,
+    /// LACPDUs successfully written.
+    sent: u64,
 }
 
 fn needs_transmit(last_sent: Option<&Lacpdu>, pdu: &Lacpdu) -> bool {
@@ -1024,6 +1072,7 @@ impl TxState {
             // First send is immediate.
             next_periodic_send: now,
             no_periodic: false,
+            sent: 0,
         }
     }
 
@@ -1063,7 +1112,7 @@ impl TxState {
             return;
         }
         if self.limiter.try_take(Instant::now()) {
-            send_lacpdu(socket, interface, &pdu);
+            self.sent += u64::from(send_lacpdu(socket, interface, &pdu));
             self.last_sent = Some(pdu);
         } else {
             debug!(interface = %interface, "lacpdu rate limit hit, deferring");
@@ -1093,6 +1142,7 @@ mod tests {
 
         let observations = Arc::new(Mutex::new(HashMap::new()));
         let changed = Arc::new(Notify::new());
+        let counters = std::cell::Cell::new(Counters::default());
         let report_once = || {
             report(
                 &observations,
@@ -1103,7 +1153,7 @@ mod tests {
                 MuxState::Detached,
                 None,
                 &Churn::new("eth1", Duration::from_secs(60)),
-                0,
+                counters.get(),
                 PartnerV2::default(),
             );
         };
@@ -1119,6 +1169,17 @@ mod tests {
             changed.notified().now_or_never().is_none(),
             "an identical report must not notify"
         );
+
+        counters.set(Counters {
+            lacpdus_rx: 5,
+            ..Counters::default()
+        });
+        report_once();
+        assert!(
+            changed.notified().now_or_never().is_none(),
+            "a counter-only change must not notify"
+        );
+        assert_eq!(observations.lock().unwrap()["eth1"].counters.lacpdus_rx, 5);
     }
 
     #[test]
