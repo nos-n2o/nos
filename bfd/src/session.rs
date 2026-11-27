@@ -35,13 +35,13 @@ pub struct EchoPath {
 }
 
 /// What came back through the peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Looped {
     /// An affiliated Echo payload's sequence number.
     Seq(u32),
-    /// An unaffiliated session's own Control packet (RFC 9747), with the
-    /// state it carried.
-    Control(BfdState),
+    /// An unaffiliated session's own Control packet (RFC 9747), whole so its
+    /// auth section can be verified.
+    Control(Box<Packet>),
 }
 
 /// The Tx of a session with no Control traffic (RFC 9747).
@@ -358,7 +358,11 @@ impl Core {
         e.next_tx = now + iv;
         let seq = e.sent;
         let payload = if self.unaffiliated() {
-            self.packet(false).encode().to_vec()
+            if self.unkeyed() {
+                return None; // fail closed (#510)
+            }
+            let p = self.packet(false);
+            self.sign(now, &p)
         } else {
             crate::echo::payload(self.local_disc, seq).to_vec()
         };
@@ -375,8 +379,15 @@ impl Core {
                 e.acked = seq;
                 e.last_ok = now;
             }
-            Looped::Control(s) if self.profile.echo_mode == EchoMode::Unaffiliated => {
-                e.last_ok = now;
+            Looped::Control(p) if self.profile.echo_mode == EchoMode::Unaffiliated => {
+                // RFC 9747 §5: a spoofed Echo must not keep the session Up.
+                if self.authenticate(now, &p).is_err() {
+                    return;
+                }
+                let s = p.state;
+                if let Some(e) = self.echo.as_mut() {
+                    e.last_ok = now;
+                }
                 self.remote_disc = self.local_disc;
                 if self.apply(Event::RxState(s)) && self.state == BfdState::Up {
                     // The 1 s pace of the climb ends; the provisioned one starts.
@@ -414,6 +425,12 @@ impl Core {
     }
 
     fn detection_time(&self) -> Option<Duration> {
+        if self.unaffiliated() {
+            // No Control timers run: the echo detection time is the clock.
+            return Some(Duration::from_micros(
+                u64::from(self.echo_interval_us()) * u64::from(self.profile.detect_multiplier),
+            ));
+        }
         self.timers.detection_time_us().map(Duration::from_micros)
     }
 
@@ -473,9 +490,6 @@ impl Core {
         changed
     }
 
-    // ponytail: RFC 9747 says SHOULD authenticate; unaffiliated Control packets
-    // go out unsigned (`sign` is only called for the Control path). Add the auth
-    // section to the Echo payload if an operator needs it.
     fn packet(&self, final_: bool) -> Packet {
         // RFC 9747 §3: populated, never used by anyone; 1 s each.
         let (desired_min_tx, required_min_rx) = if self.unaffiliated() {
@@ -1168,7 +1182,7 @@ mod tests {
             if let Some((_, pl)) = c.echo_due(*now) {
                 let p = crate::packet::decode(&pl).expect("a Control packet");
                 if loop_ok {
-                    c.on_echo(*now, Looped::Control(p.state));
+                    c.on_echo(*now, Looped::Control(Box::new(p.clone())));
                 }
                 sent.push((*now, p));
             }
@@ -1247,8 +1261,105 @@ mod tests {
         assert!(c.echo.is_none() && c.echo_due(now).is_none());
         assert!(c.deadline() > now);
         // A looped state from nowhere moves nothing without Echo running.
-        c.on_echo(now, Looped::Control(BfdState::Init));
+        c.on_echo(now, Looped::Control(Box::new(theirs.clone())));
         assert_eq!(c.state, BfdState::Down);
+    }
+
+    fn unaff_authed(key: &str, id: u8) -> BfdProfile {
+        BfdProfile {
+            auth: authed(key, id).auth,
+            ..unaffiliated(50)
+        }
+    }
+
+    /// Echo payloads of `c` run through `through` (a tamper hook) and back.
+    fn loop_signed(
+        c: &mut Core,
+        now: &mut Instant,
+        steps: usize,
+        mut through: impl FnMut(Vec<u8>) -> Option<Vec<u8>>,
+    ) {
+        for _ in 0..steps {
+            *now = c.deadline();
+            c.on_timer(*now, 100);
+            if let Some((_, pl)) = c.echo_due(*now)
+                && let Some(b) = through(pl)
+                && let Ok(p) = crate::packet::decode(&b)
+            {
+                c.on_echo(*now, Looped::Control(Box::new(p)));
+            }
+        }
+    }
+
+    #[test]
+    fn unaffiliated_signed_loop_reaches_up_and_unsigned_or_wrong_key_is_dropped() {
+        let t0 = Instant::now();
+        let mut now = t0;
+        let mut c = core(unaff_authed("k", 1), 7, t0);
+        c.set_echo_path(true);
+        loop_signed(&mut c, &mut now, 8, |b| {
+            assert!(b.len() > 24, "auth section present");
+            Some(b)
+        });
+        assert_eq!(c.state, BfdState::Up);
+        assert_eq!(c.status().auth_failures, 0);
+        // Unsigned (auth stripped, length cut to 24, A bit cleared).
+        let mut c = core(unaff_authed("k", 1), 7, t0);
+        c.set_echo_path(true);
+        let mut now = t0;
+        loop_signed(&mut c, &mut now, 8, |mut b| {
+            b.truncate(24);
+            b[1] &= !0x04;
+            b[3] = 24;
+            Some(b)
+        });
+        assert_ne!(c.state, BfdState::Up);
+        assert!(c.status().auth_failures > 0);
+        // A digest forged with another key.
+        let mut other = core(unaff_authed("x", 1), 7, t0);
+        other.set_echo_path(true);
+        let mut c = core(unaff_authed("k", 1), 7, t0);
+        c.set_echo_path(true);
+        let mut now;
+        for _ in 0..8 {
+            now = c.deadline();
+            c.on_timer(now, 100);
+            other.on_timer(now, 100);
+            let _ = c.echo_due(now);
+            if let Some((_, pl)) = other.echo_due(now)
+                && let Ok(p) = crate::packet::decode(&pl)
+            {
+                c.on_echo(now, Looped::Control(Box::new(p)));
+            }
+        }
+        assert_ne!(c.state, BfdState::Up);
+        assert!(c.status().auth_failures > 0);
+    }
+
+    #[test]
+    fn unaffiliated_replayed_looped_packet_is_dropped_by_meticulous_auth() {
+        let t0 = Instant::now();
+        let mut now = t0;
+        let mut c = core(unaff_authed("k", 1), 7, t0);
+        c.set_echo_path(true);
+        let mut first: Option<Vec<u8>> = None;
+        loop_signed(&mut c, &mut now, 8, |b| {
+            first.get_or_insert_with(|| b.clone());
+            Some(b)
+        });
+        assert_eq!(c.state, BfdState::Up);
+        let before = c.status().auth_failures;
+        let p = crate::packet::decode(&first.unwrap()).unwrap();
+        c.on_echo(now, Looped::Control(Box::new(p)));
+        assert_eq!(c.status().auth_failures, before + 1);
+    }
+
+    #[test]
+    fn unaffiliated_unkeyed_sends_nothing() {
+        let t0 = Instant::now();
+        let mut c = Core::new(unaff_authed("gone", 1), None, 7, t0);
+        c.set_echo_path(true);
+        assert!(c.echo_due(t0).is_none());
     }
 
     fn authed(key: &str, id: u8) -> BfdProfile {

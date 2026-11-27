@@ -143,7 +143,8 @@ pub async fn bfd_echo(w: &mut World) -> anyhow::Result<()> {
 /// up`, REST `echo_only`) and the guarded route in; a `tc` filter dropping UDP
 /// 3785 on router-a's ingress takes it Down by `echo-function-failed` within
 /// about `echo-interval x multiplier` and ribd removes the route; lifting it
-/// brings both back.
+/// brings both back. The session is authenticated (`meticulous-sha1`, RFC 9747
+/// §5): Up proves the signed echo verifies, REST shows `auth_failures` 0.
 pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
     fa.extend(bfd_route(BFD_PREFIX_B, IP_B.s()));
@@ -152,6 +153,9 @@ pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
         "unaffiliated",
         "--bfd-echo-interval",
         "50",
+        // RFC 9747 §5: the looped Control packet carries an auth section.
+        "--bfd-auth",
+        "meticulous-sha1:1:echo-secret",
     ]));
     w.start(A, Some(fa), &[]).await?;
     w.start(B, Some(B.base_flags()), &[]).await?;
@@ -180,6 +184,11 @@ pub async fn bfd_echo_unaffiliated(w: &mut World) -> anyhow::Result<()> {
     anyhow::ensure!(
         body.contains("\"echo_only\":true") && body.contains("\"echo_active\":true"),
         "expected an echo-only session: {body}"
+    );
+    // Up means the signed packets verified on return; none was rejected.
+    anyhow::ensure!(
+        body.contains("\"auth_failures\":0") && body.contains("\"auth_key_id\":1"),
+        "expected an authenticated loop with no failures: {body}"
     );
     session_is(a, IP_B.s(), "Up", None, 5).await?;
 
