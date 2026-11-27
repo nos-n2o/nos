@@ -407,6 +407,7 @@ async fn handle_text_action(
         | Resolved::ShowInterfaceBrief
         | Resolved::ShowPortAggregate { .. }
         | Resolved::ShowLacp { .. }
+        | Resolved::ShowLacpCounters { .. }
         | Resolved::ShowLldpNeighbors { .. }
         | Resolved::ShowLldpStatistics
         | Resolved::ShowAcl { .. }
@@ -500,7 +501,21 @@ async fn run_query(action: Resolved, mode: Mode, socket: &Path, watchdog_socket:
             Outcome::Continue(mode)
         }
         Resolved::ShowLacp { name, detail } => {
-            show_lacp(watchdog_socket, name.as_deref(), detail).await;
+            let render = if detail {
+                format::render_lacp_detail
+            } else {
+                format::render_lacp_tables
+            };
+            show_lacp(watchdog_socket, name.as_deref(), render).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowLacpCounters { name } => {
+            show_lacp(
+                watchdog_socket,
+                name.as_deref(),
+                format::render_lacp_counters,
+            )
+            .await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLldpNeighbors { detail, interface } => {
@@ -1081,20 +1096,17 @@ async fn show_interface_brief(watchdog_socket: &Path) {
 
 /// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
 /// port-aggregate query instead.
-async fn show_lacp(watchdog_socket: &Path, name: Option<&str>, detail: bool) {
+async fn show_lacp(
+    watchdog_socket: &Path,
+    name: Option<&str>,
+    render: fn(&[nos_proto::PortAggregateLacpSummary]) -> String,
+) {
     let Some(lacp_socket) =
         resolve_service(watchdog_socket, nos_proto::ServiceRef::Lacp, "nos-lacpd").await
     else {
         return;
     };
 
-    let render = |s: &[nos_proto::PortAggregateLacpSummary]| {
-        if detail {
-            format::render_lacp_detail(s)
-        } else {
-            format::render_lacp_tables(s)
-        }
-    };
     match lacp_client::get_summary(&lacp_socket).await {
         Ok(summaries) => match name {
             None => println!("{}", render(&summaries)),

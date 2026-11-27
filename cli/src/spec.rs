@@ -987,6 +987,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLacp { name: None, detail: true }),
+    cmd!(["show" "lacp" "counters"],
+        Doc::Local {
+            summary: "Show every LACP member port's frame counters.",
+            detail: "Per member port: LACPDUs received (before the receive rate limiter) and \
+                     sent, illegal and unsupported-version frames, Marker requests received and \
+                     Marker Responses sent and received. In memory only: a counter restarts \
+                     at 0 with the port's link task.",
+        },
+        Always,
+        Command::ShowLacpCounters { name: None }),
     cmd!(["show" "lacp" (name: PortAggregateName)],
         Doc::Local {
             summary: "Show one LACP port aggregate's negotiation state as tables.",
@@ -1009,6 +1019,13 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             name: Some(name.to_string()),
             detail: true,
         }),
+    cmd!(["show" "lacp" (name: PortAggregateName) "counters"],
+        Doc::Local {
+            summary: "Show one LACP port aggregate's member port frame counters.",
+            detail: "Like show lacp counters, for the named aggregate.",
+        },
+        Always,
+        |name| Command::ShowLacpCounters { name: Some(name.to_string()) }),
     cmd!(["show" "interface"],
         Doc::Local {
             summary: "Show every interface's link state and reconciled status.",

@@ -14,7 +14,13 @@ lacp bond1
     synchronized              yes
     churn                     none
     individual                no
+    lacpdus-rx                0
+    lacpdus-tx                0
+    illegal-pdus              0
     unsupported-version-pdus  0
+    marker-pdus-rx            0
+    marker-responses-tx       0
+    marker-responses-rx       0
     partner                   02:00:00:00:00:01 key 3 port 9
     partner-priority          200/60
   port eth2
@@ -27,7 +33,13 @@ lacp bond1
     synchronized              no
     churn                     actor+partner
     individual                yes
+    lacpdus-rx                18446744073709551615
+    lacpdus-tx                1234
+    illegal-pdus              2
     unsupported-version-pdus  3
+    marker-pdus-rx            7
+    marker-responses-tx       5
+    marker-responses-rx       1
     partner                   none (defaulted)
     partner-priority          200/60
 lacp bond22
@@ -50,7 +62,13 @@ lacp bond22
     synchronized              yes
     churn                     none
     individual                no
+    lacpdus-rx                0
+    lacpdus-tx                0
+    illegal-pdus              0
     unsupported-version-pdus  0
+    marker-pdus-rx            0
+    marker-responses-tx       0
+    marker-responses-rx       0
     partner                   02:00:00:00:00:01 key 3 port 9
     partner-priority          200/60
     partner-version           2

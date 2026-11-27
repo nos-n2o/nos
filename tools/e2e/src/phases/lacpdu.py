@@ -1,4 +1,5 @@
-"""Injects a version-2 (longer than 110 bytes) and a version-3 LACPDU on eth1.
+"""Injects a version-2 (longer than 110 bytes) and a version-3 LACPDU on eth1,
+then one short (illegal) slow-protocol frame and one Marker Response (#1522).
 
 Runs in the *sender* router's netns with that router's own eth1 MAC as source,
 so only the partner's nos-lacpd processes them. The actors carry distinctive
@@ -45,4 +46,8 @@ s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x8809))
 s.bind(("eth1", 0x8809))
 for version, last in ((2, 2), (3, 3)):
     send_retry(s, dst + mac + struct.pack(">H", 0x8809) + lacpdu(version, bytes([2, 0, 0, 0, 0x0A, last])))
-print("injected v2 and v3 LACPDUs")
+# Counted as illegal (too short) and as a received Marker Response.
+send_retry(s, dst + mac + struct.pack(">H", 0x8809) + bytes([1, 1]) + b"\0" * 18)
+resp = bytes([2, 1, 2, 16]) + struct.pack(">H", 7) + bytes.fromhex("020000000b08") + struct.pack(">I", 1)
+send_retry(s, dst + mac + struct.pack(">H", 0x8809) + resp.ljust(110, b"\0"))
+print("injected v2 and v3 LACPDUs, an illegal frame and a Marker Response")

@@ -60,6 +60,10 @@ pub enum Command {
         name: Option<String>,
         detail: bool,
     },
+    /// `show lacp [<name>] counters`: the per-port frame counters table.
+    ShowLacpCounters {
+        name: Option<String>,
+    },
     /// `show lldp neighbors [interface <if>] [detail]` — the LLDP neighbors
     /// heard on any (or one) interface, one line each or (`detail`) one block
     /// each.
@@ -647,6 +651,20 @@ mod tests {
             Command::ShowLacp {
                 name: Some("bond1".to_string()),
                 detail: true
+            }
+        );
+    }
+
+    #[test]
+    fn show_lacp_counters() {
+        assert_eq!(
+            Command::parse("show lacp counters"),
+            Command::ShowLacpCounters { name: None }
+        );
+        assert_eq!(
+            Command::parse("show lacp bond1 counters"),
+            Command::ShowLacpCounters {
+                name: Some("bond1".to_string())
             }
         );
     }

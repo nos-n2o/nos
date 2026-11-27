@@ -118,6 +118,9 @@ pub enum Resolved {
         name: Option<String>,
         detail: bool,
     },
+    ShowLacpCounters {
+        name: Option<String>,
+    },
     /// `show lldp neighbors [interface <if>] [detail]` — data-plane, valid in
     /// any mode.
     ShowLldpNeighbors {
@@ -347,6 +350,7 @@ impl Resolved {
             | Resolved::ShowInterfaceBrief
             | Resolved::ShowPortAggregate { .. }
             | Resolved::ShowLacp { .. }
+            | Resolved::ShowLacpCounters { .. }
             | Resolved::ShowLldpNeighbors { .. }
             | Resolved::ShowLldpStatistics
             | Resolved::ShowVersion
@@ -453,6 +457,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowInterfaceBrief => Resolved::ShowInterfaceBrief,
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
         Command::ShowLacp { name, detail } => Resolved::ShowLacp { name, detail },
+        Command::ShowLacpCounters { name } => Resolved::ShowLacpCounters { name },
         Command::ShowLldpNeighbors { detail, interface } => {
             Resolved::ShowLldpNeighbors { detail, interface }
         }
@@ -619,6 +624,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowInterfaceBrief
         | Command::ShowPortAggregate { .. }
         | Command::ShowLacp { .. }
+        | Command::ShowLacpCounters { .. }
         | Command::ShowLldpNeighbors { .. }
         | Command::ShowLldpStatistics
         | Command::ShowVersion

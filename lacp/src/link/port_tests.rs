@@ -248,17 +248,17 @@ fn unsupported_versions_are_counted_and_v1_v2_are_not() {
     let mut v3 = partner_frame(ACTIVE_PARTNER);
     v3[1] = 3;
     r.port.on_frame(&v3, &r.sink);
-    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    assert_eq!(r.observed().counters.unsupported_version_pdus, 1);
     assert!(r.observed().partner.is_none(), "a v3 PDU is not processed");
     // Other decode errors are not counted.
     r.port.on_frame(&[1, 2, 3], &r.sink);
-    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    assert_eq!(r.observed().counters.unsupported_version_pdus, 1);
     // v2 (longer) is processed like v1 and not counted.
     let mut v2 = partner_frame(ACTIVE_PARTNER);
     v2[1] = 2;
     v2.extend_from_slice(&[0x04, 0x06, 0x80, 0xc2, 0, 1]);
     r.port.on_frame(&v2, &r.sink);
-    assert_eq!(r.observed().unsupported_version_pdus, 1);
+    assert_eq!(r.observed().counters.unsupported_version_pdus, 1);
     assert!(r.observed().partner.is_some());
 }
 
@@ -373,6 +373,57 @@ fn markers_are_echoed_within_budget_and_send_errors_are_not_fatal() {
 }
 
 #[test]
+fn frame_counters_count_each_class_once() {
+    let mut r = rig(true, LacpRate::Slow);
+    r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
+    let c = r.observed().counters;
+    assert_eq!((c.lacpdus_rx, c.lacpdus_tx, c.illegal_pdus), (1, 1, 0));
+
+    r.port.on_frame(&[1, 2, 3], &r.sink);
+    let mut wrong = partner_frame(ACTIVE_PARTNER);
+    wrong[0] = 5;
+    r.port.on_frame(&wrong, &r.sink);
+    let mut v3 = partner_frame(ACTIVE_PARTNER);
+    v3[1] = 3;
+    r.port.on_frame(&v3, &r.sink);
+    let c = r.observed().counters;
+    assert_eq!(
+        (c.lacpdus_rx, c.illegal_pdus, c.unsupported_version_pdus),
+        (1, 2, 1)
+    );
+
+    // A Marker Response is not illegal; a request answered bumps both.
+    let mut resp = marker_request(1);
+    resp[2] = 0x02;
+    r.port.on_frame(&resp, &r.sink);
+    for txid in 0..6 {
+        r.port.on_frame(&marker_request(txid), &r.sink);
+    }
+    let c = r.observed().counters;
+    assert_eq!((c.marker_responses_rx, c.illegal_pdus), (1, 2));
+    assert_eq!(
+        (c.marker_pdus_rx, c.marker_responses_tx),
+        (6, 5),
+        "limiter drops are still received"
+    );
+
+    // A failed send counts no tx.
+    let before = r.observed().counters.lacpdus_tx;
+    *r.sink.fail_with.lock().unwrap() = Some(EIO);
+    r.port.on_periodic(&r.sink);
+    assert_eq!(r.observed().counters.lacpdus_tx, before);
+}
+
+#[test]
+fn rx_is_counted_before_the_rate_limiter() {
+    let mut r = rig(true, LacpRate::Slow);
+    for _ in 0..30 {
+        r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
+    }
+    assert_eq!(r.observed().counters.lacpdus_rx, 30);
+}
+
+#[test]
 fn the_limiter_defers_the_fourth_pdu_to_the_next_refill() {
     let mut r = rig(true, LacpRate::Slow);
     let pdu = r.port.pdu();
@@ -424,7 +475,7 @@ fn observation_predicates_follow_the_partner_and_churn() {
         partner: None,
         actor_churn: ChurnState::NoChurn,
         partner_churn: ChurnState::NoChurn,
-        unsupported_version_pdus: 0,
+        counters: Counters::default(),
         v2: PartnerV2::default(),
     };
     assert!(o.current() && !o.is_churned() && !o.partner_individual());
@@ -681,7 +732,18 @@ async fn lacpdus_beyond_the_rx_budget_are_dropped_and_refill_after_a_second() {
     let before = r.observed();
     r.port.on_frame(&partner_frame(sync), &r.sink);
     assert_eq!(r.port.rx_dropped, 1);
-    assert_eq!(r.observed(), before, "a dropped LACPDU changes no state");
+    // Only the received counter moves (before the limiter).
+    let after = r.observed();
+    assert_eq!(after.counters.lacpdus_rx, before.counters.lacpdus_rx + 1);
+    let quiet = |mut o: PortObservation| {
+        o.counters = Counters::default();
+        o
+    };
+    assert_eq!(
+        quiet(after),
+        quiet(before),
+        "a dropped LACPDU changes no state"
+    );
     // Markers have their own budget.
     let sent = r.sink.count();
     r.port.on_frame(&marker_request(1), &r.sink);

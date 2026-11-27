@@ -13,16 +13,16 @@ A real, from-scratch Link Aggregation Control Protocol implementation for NOS (b
 Each was a real hot loop or stall found by `nos-e2e lacp`:
 
 - **Never leave an elapsed deadline armed.** `link::run` uses `sleep_until(deadline)` arms; a deadline left in the past re-fires on every loop iteration, flooding the log and the wire. Handling any timer-expiry event must move its deadline forward — but `Action::None` must *not* disarm a still-pending timer.
-- **Ignore our own frames.** An `AF_PACKET` socket also receives its own outgoing frames (`socket::payload_of_foreign_frame` drops them by source MAC); otherwise a port negotiates with itself. Members keep their own MACs until Distributing, so the MAC filter is not enough: `Port::on_frame` also drops (after the RX budget, before any machine) a LACPDU whose actor system id equals ours, warning once per run (`lacp loopback detected`, #658).
-- **Only signal on a real change.** `watch::Sender::send` wakes the receiver even for an identical value, so `aggregate::set_if_changed` and `link::report`'s dedupe exist to break the report → re-select → notify feedback loop.
+- **Ignore our own frames.** An `AF_PACKET` socket also receives its own outgoing frames (`socket::payload_of_foreign_frame` drops them by source MAC); otherwise a port negotiates with itself. Members keep their MACs until Distributing, so: `Port::on_frame` also drops (after the RX budget, before any machine) a LACPDU whose actor system id equals ours, warning once per run (`lacp loopback detected`, #658).
+- **Only signal on a real change.** `watch::Sender::send` wakes the receiver even for an identical value, so `aggregate::set_if_changed` and `link::report`'s dedupe exist to break the report → re-select → notify feedback loop. `link::Counters` (#1522, `docs/internals/lacp.md`) are stored but never compared.
 - **A down link is not fatal.** `ENETDOWN` on read/send (link administratively down, or just coming up) is retried (`socket::is_link_down`), not a reason for the link task to exit; a task that ends on its own is respawned by `reconcile`.
 - **A recreated netdev is fatal for the task (#1333).** The socket is bound to an ifindex the kernel unhooks on unregister, so `drive` watches `link_client`'s epoch for its name (`LinkRemoved`/`LinkAdded`, no polling; a carrier flap keeps it) and exits, dropping its observation; `reconcile` respawns (<=10s).
 - **Bound the receive path (#397).** `Port::on_frame` takes an RX budget (10 LACPDUs/s per port, Markers excluded) before touching any machine, warning once per burst; `lacp lacpdu received` is `info!` only when receive state, mux state or partner changed, else `debug!`. `selection_loop` coalesces `PushLacpMembers` to one per second (leading edge immediate, newest set trailing, A->B->A pushes nothing).
 
 ## Explicitly deferred (documented, not silently missing)
 
-- **Marker Generator** (§6.5.4.1, optional) — irrelevant with config-fixed membership. The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester ids, without touching any LACP machine (own `TxLimiter`, 5/s).
-- **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above; permanent, not temporary.
+- **Marker Generator** (§6.5.4.1, optional) (irrelevant: fixed membership). The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester ids, without touching any LACP machine (own `TxLimiter`, 5/s).
+- **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above.
 
 ## Invariants to keep
 
@@ -33,7 +33,7 @@ Each was a real hot loop or stall found by `nos-e2e lacp`:
 - Selection is config-scoped, permanently: it only checks the wire agrees with the configured aggregate (`selection.rs`); it never discovers membership.
 - Actor System ID is derived (FNV-1a of hostname + machine-id, `aggregate::local_system_id`), never from a member port (bonding rewrites slave MACs), overridable by `lacp-system-id`; no persisted registry. Internal state types are never `nos_proto::lacp`'s wire types.
 - LACP v2 (#894, 6.6, `docs/internals/lacp-v2.md`): default `lacp-version 1`, `2` opt-in (downgrades per port on a v1 PDU). The digest is of the config-only admin map (never link state); `cscd::resolve` over the Collecting ports gives agreement, `Link_Number` adoption and the per-link masks; steering whenever a map exists, `discard_wrong` only when agreed. `nos-interfaced` applies the masks (#895).
-- Changing rate, system id, system priority, version or algorithm restarts every member link (a link number: that member); a port priority change restarts only that member; `lacp-mode` and `min-links` restart nothing (`Port::on_activity`).
+- Changing rate, system id, system priority, version or algorithm restarts every member link; a port priority change restarts only that member; `lacp-mode` and `min-links` restart nothing (`Port::on_activity`).
 
 ## Modules
 

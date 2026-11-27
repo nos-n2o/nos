@@ -3482,6 +3482,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "illegal_pdus": {
+            "description": "Slow-protocol frames that failed to decode (short frame, wrong\nsubtype), excluding unsupported versions and Marker PDUs. In memory\nonly: restarts at 0 with the port's link task.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "individual": {
             "description": "The partner's last LACPDU had `Actor_State.Aggregation` clear: it\ntreats this link as an Individual (non-aggregatable) one, so the port\nis never selected into the bond.",
             "type": "boolean"
@@ -3489,6 +3495,36 @@
           "interface": {
             "description": "Member port name.",
             "type": "string"
+          },
+          "lacpdus_rx": {
+            "description": "LACPDUs (subtype 1, v1/v2) that decoded, counted before the receive\nrate limiter so a flood stays visible. In memory only: restarts at 0\nwith the port's link task. Last fields: postcard is positional.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lacpdus_tx": {
+            "description": "LACPDUs written to the socket successfully. In memory only: restarts at 0\nwith the port's link task.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "marker_pdus_rx": {
+            "description": "Marker requests received, including those the Marker rate limiter then\ndropped. In memory only: restarts at 0 with the port's link task.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "marker_responses_rx": {
+            "description": "Marker Responses received. In memory only: restarts at 0 with the\nport's link task.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "marker_responses_tx": {
+            "description": "Marker Responses sent. In memory only: restarts at 0 with the port's\nlink task.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "mode": {
             "$ref": "#/components/schemas/LacpMode",

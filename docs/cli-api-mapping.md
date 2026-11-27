@@ -19,7 +19,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show interface` / `show interface <name>` | `GET /v1/interfaces` / `GET /v1/interfaces/{name}` |
 | `show interface brief` | `GET /v1/interfaces` + `GET /v1/port-aggregates` |
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
-| `show lacp [<name>] [detail]` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
+| `show lacp [<name>] [detail\|counters]` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show acl` / `show acl <name>` | `GET /v1/acl` / `GET /v1/acl/{name}` |
 | `show acl` (flowspec rules, at the end) | `GET /v1/flowspec` |
 | `show lldp neighbors [interface <if>] [detail]` (`interface` filters client-side) | `GET /v1/lldp/neighbors` |

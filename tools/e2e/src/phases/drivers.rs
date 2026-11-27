@@ -636,6 +636,18 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         )
         .await?;
     let marker_base = a.count("lacp marker answered interface=eth1");
+    // #1522: counters are silent (no log line), read through the REST view.
+    for r in [a, b] {
+        for f in ["lacpdus_rx", "lacpdus_tx"] {
+            anyhow::ensure!(
+                lacp_counter(r, f).await? > 0,
+                "{}: eth1 {f} is 0 after Distributing",
+                r.name()
+            );
+        }
+    }
+    let marker_rx = lacp_counter(a, "marker_pdus_rx").await?;
+    let marker_tx = lacp_counter(a, "marker_responses_tx").await?;
     w.dock
         .in_netns(
             PYTHON_HELPER_IMAGE,
@@ -649,12 +661,16 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         15,
     )
     .await?;
+    lacp_counter_reaches(a, "marker_pdus_rx", marker_rx + 1).await?;
+    lacp_counter_reaches(a, "marker_responses_tx", marker_tx + 1).await?;
 
     // #688: a version-2 LACPDU (longer than 110 bytes, extra TLVs) must reach
     // the Receive machine; a version-3 one is dropped and only counted.
     log("router-a accepts an injected v2 LACPDU and counts a v3 one on eth1");
     let v2_seen = "lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 2\\]";
     let v2_base = a.count(v2_seen);
+    let illegal_before = lacp_counter(a, "illegal_pdus").await?;
+    let resp_rx_before = lacp_counter(a, "marker_responses_rx").await?;
     let unsupported_before = lacp_port(a, "eth1").await?["unsupported_version_pdus"]
         .as_u64()
         .context("unsupported_version_pdus missing from GET /v1/lacp")?;
@@ -673,6 +689,10 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         unsupported_after == unsupported_before + 1,
         "v3 LACPDU should add exactly one: {unsupported_before} -> {unsupported_after}"
     );
+    // The same script injected one short frame and one Marker Response; the
+    // Marker Response must not count as illegal.
+    lacp_counter_reaches(a, "illegal_pdus", illegal_before + 1).await?;
+    lacp_counter_reaches(a, "marker_responses_rx", resp_rx_before + 1).await?;
     anyhow::ensure!(
         a.count("lacp lacpdu received interface=eth1 .*partner_system=\\[2, 0, 0, 0, 10, 3\\]")
             == 0,
@@ -1007,6 +1027,27 @@ async fn lacp_settled(r: &Router, hold_ms: u64) -> anyhow::Result<()> {
 }
 
 /// One member port of `LACP_AGGREGATE` in `r`'s `GET /v1/lacp`.
+/// One of eth1's silent counters from `GET /v1/lacp` (#1522).
+async fn lacp_counter(r: &Router, field: &str) -> anyhow::Result<u64> {
+    lacp_port(r, "eth1").await?[field]
+        .as_u64()
+        .with_context(|| format!("{field} missing from GET /v1/lacp"))
+}
+
+/// Waits (15s) until eth1's `field` is exactly `want`: the peer never sends
+/// these frame classes, so it must not overshoot.
+async fn lacp_counter_reaches(r: &Router, field: &str, want: u64) -> anyhow::Result<()> {
+    let mut got = 0;
+    for _ in 0..30 {
+        got = lacp_counter(r, field).await?;
+        if got == want {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    bail!("{}: eth1 {field} is {got}, want {want}", r.name())
+}
+
 async fn lacp_port(r: &Router, name: &str) -> anyhow::Result<serde_json::Value> {
     let body = r
         .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)

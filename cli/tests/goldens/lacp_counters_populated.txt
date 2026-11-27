@@ -1,0 +1,6 @@
+Counters
+  Aggregate  Interface            LACPDUs-Rx  LACPDUs-Tx  Illegal  Unsupported-Version  Marker-Rx  Marker-Resp-Tx  Marker-Resp-Rx
+  ---------  ---------  --------------------  ----------  -------  -------------------  ---------  --------------  --------------
+  bond1      eth1                          0           0        0                    0          0               0               0
+  bond1      eth2       18446744073709551615        1234        2                    3          7               5               1
+  bond22     eth3                          0           0        0                    0          0               0               0
