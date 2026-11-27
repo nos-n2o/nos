@@ -684,6 +684,16 @@ pub const OSPFV3_A1_IP_B: Addr = Addr("10.52.0.2");
 pub const OSPFV3_A1_IP_C: Addr = Addr("10.52.0.3");
 pub const OSPFV3_A1_ADDRESS_B: Addr = Addr("fd19:3::2/64");
 pub const OSPFV3_A1_ADDRESS_C: Addr = Addr("fd19:3::3/64");
+/// `ospfv3-bfd-two-link`: a second docker network between router-a and router-b,
+/// so each has `eth0` (the shared lab net) and `eth1` (this one): docker names the
+/// second NIC `eth1` deterministically, like `NET_OSPFV3_A1`.
+pub const NET_OSPFV3_BFD2: &str = "nos-verify-net-ospfv3-bfd2";
+pub const OSPFV3_BFD2_SUBNET: Addr = Addr("10.53.0.0/24");
+pub const OSPFV3_BFD2_SUBNET6: Addr = Addr("fd19:4::/64");
+pub const OSPFV3_BFD2_IP_A: Addr = Addr("10.53.0.2");
+pub const OSPFV3_BFD2_IP_B: Addr = Addr("10.53.0.3");
+pub const OSPFV3_BFD2_ADDRESS_A: Addr = Addr("fd19:4::2/64");
+pub const OSPFV3_BFD2_ADDRESS_B: Addr = Addr("fd19:4::3/64");
 /// RFC 5340 A.4.1 Inter-Area-Router-LSA (0x2004) and RFC 8362 E-Inter-Area-Router (0xA024).
 pub const LSA_TYPE_INTER_AREA_ROUTER: u16 = 0x2004;
 pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0xA024;

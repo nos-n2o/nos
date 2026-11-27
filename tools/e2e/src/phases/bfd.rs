@@ -66,6 +66,39 @@ pub(super) async fn session_is(
     )
 }
 
+/// Polls until the link-local session on `iface` (`key.interface`) has
+/// `state`: two sessions can share one `fe80::` peer on different interfaces (#1603).
+pub(super) async fn session_on_interface(
+    r: &crate::router::Router,
+    iface: &str,
+    state: &str,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..secs * 5 {
+        last = r
+            .rest_expect(Method::GET, "/v1/bfd/sessions", None, 200)
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&last)?;
+        if v.as_array().is_some_and(|a| {
+            a.iter().any(|s| {
+                s["key"]["interface"] == iface
+                    && s["key"]["peer"]
+                        .as_str()
+                        .is_some_and(|p| p.starts_with("fe80::"))
+                    && s["state"] == state
+            })
+        }) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    anyhow::bail!(
+        "{}: bfd session on {iface} never reached {state}: {last}",
+        r.name()
+    )
+}
+
 /// The one session to `peer` as REST reports it (#1456).
 async fn session_json(r: &crate::router::Router, peer: &str) -> anyhow::Result<serde_json::Value> {
     let body = r
