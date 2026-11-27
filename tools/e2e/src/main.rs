@@ -13,6 +13,7 @@
 
 mod consts;
 mod docker;
+mod hrw;
 mod lab;
 mod logd_mem;
 mod logs;

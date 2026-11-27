@@ -8698,14 +8698,56 @@ async fn arp_requests(
         .with_context(|| format!("counting ARP requests in {file}: {out:?}"))
 }
 
-/// `hrw` sets `df-algorithm hrw` on both PEs' bonds; the DF is then router-b
-/// (see the HRW note in `consts.rs`), modulo's router-a. Returns (router-a's bond,
-/// router-b's bond).
-async fn dataplane_setup(
-    w: &mut World,
-    single_active: bool,
-    hrw: bool,
-) -> anyhow::Result<(String, String)> {
+/// One PE of the data-plane topology: its segment bond, the docker network of
+/// its CE link and the CE's interface on that link.
+struct Pe {
+    id: Id,
+    rd: &'static str,
+    bond: String,
+    net_ce: &'static str,
+    ce_eth: &'static str,
+}
+
+/// The data-plane topology: the PEs (router-a, router-b), which one is the
+/// election's DF and which one the host sits behind.
+struct Dp {
+    pes: [Pe; 2],
+    df: usize,
+    host: usize,
+}
+
+impl Dp {
+    fn df(&self) -> &Pe {
+        &self.pes[self.df]
+    }
+    fn ndf(&self) -> &Pe {
+        &self.pes[1 - self.df]
+    }
+    fn host(&self) -> &Pe {
+        &self.pes[self.host]
+    }
+    /// The PE the host is not behind.
+    fn other(&self) -> &Pe {
+        &self.pes[1 - self.host]
+    }
+}
+
+/// How many requests of `arp_broadcast`'s `(CE eth0, CE eth1, host)` came in on the CE's `eth`.
+fn on_ce_eth(counts: (usize, usize, usize), eth: &str) -> usize {
+    if eth == "eth0" {
+        counts.0
+    } else {
+        counts.1
+    }
+}
+
+/// `hrw` sets `df-algorithm hrw` on both PEs' bonds; the DF is then the
+/// harness-computed HRW winner (`hrw::df_for_lab`, lab-dependent) and the host
+/// sits behind it, so the checks cross the VXLAN whichever PE wins. Modulo's DF
+/// is router-a, the host stays behind router-b.
+async fn dataplane_setup(w: &mut World, single_active: bool, hrw: bool) -> anyhow::Result<Dp> {
+    let df_id = if hrw { crate::hrw::df_for_lab() } else { A };
+    let host_id = if hrw { df_id } else { B };
     w.start(A, Some(evpn_pe_flags(A, EVPN_DP_RD_A)), &[])
         .await?;
     w.start(B, Some(evpn_pe_flags(B, EVPN_DP_RD_B)), &[])
@@ -8729,7 +8771,10 @@ async fn dataplane_setup(
             .await?;
     }
 
-    log("wiring the CE (to both PEs) and the host (to router-b) over docker networks");
+    log(format!(
+        "wiring the CE (to both PEs) and the host (to {}) over docker networks",
+        host_id.name
+    ));
     for net in [NET_CE_A, NET_CE_B, NET_H] {
         if !w.dock.network_exists(net).await {
             w.dock.network_create(net, &[], false).await?;
@@ -8737,7 +8782,7 @@ async fn dataplane_setup(
     }
     w.dock.network_connect(NET_CE_A, "router-a").await;
     w.dock.network_connect(NET_CE_B, "router-b").await;
-    w.dock.network_connect(NET_H, "router-b").await;
+    w.dock.network_connect(NET_H, host_id.name).await;
     w.dock
         .ensure_image(
             HOST_IMAGE,
@@ -8766,9 +8811,14 @@ async fn dataplane_setup(
     };
     a.provision_flags(&segment_flags(EVPN_DP_RD_A, A)).await?;
     b.provision_flags(&segment_flags(EVPN_DP_RD_B, B)).await?;
-    let mut host_port = evpn_pe_flags(B, EVPN_DP_RD_B);
+    let (host_rd, host_router) = if host_id.name == A.name {
+        (EVPN_DP_RD_A, a)
+    } else {
+        (EVPN_DP_RD_B, b)
+    };
+    let mut host_port = evpn_pe_flags(host_id, host_rd);
     host_port.extend(bond_flags("bond2", false, "eth2"));
-    b.provision_flags(&host_port).await?;
+    host_router.provision_flags(&host_port).await?;
 
     let vxlan = format!("vx{EVPN_VNI}");
     for r in [a, b] {
@@ -8789,12 +8839,15 @@ async fn dataplane_setup(
     // Both PEs always advertise AC-DF (both nos), so `ac_df=true`; `pes=`
     // names both, so a PE's own lone election before the other's Type-4
     // arrives can't match.
-    let (alg, a_role, b_role) = if hrw {
-        log("election (hrw): router-b wins on weight, router-a does not");
-        ("hrw", "non-df", "df")
+    let alg = if hrw { "hrw" } else { "modulo" };
+    log(format!(
+        "election ({alg}): {} is the segment's DF, the other PE is not",
+        df_id.name
+    ));
+    let (a_role, b_role) = if df_id.name == A.name {
+        ("df", "non-df")
     } else {
-        log("election (modulo): router-a (lower address) is the segment's DF, router-b is not");
-        ("modulo", "df", "non-df")
+        ("non-df", "df")
     };
     let (bond_a, bond_b) = (bond_name(a, "bond1").await?, bond_name(b, "bond1").await?);
     let role = |bond: &str, r: &str| {
@@ -8813,7 +8866,26 @@ async fn dataplane_setup(
     if !evpn.contains(&community) {
         bail!("router-a's show bgp evpn does not show router-b's {community}: {evpn}");
     }
-    Ok((bond_a, bond_b))
+    Ok(Dp {
+        pes: [
+            Pe {
+                id: A,
+                rd: EVPN_DP_RD_A,
+                bond: bond_a,
+                net_ce: NET_CE_A,
+                ce_eth: "eth0",
+            },
+            Pe {
+                id: B,
+                rd: EVPN_DP_RD_B,
+                bond: bond_b,
+                net_ce: NET_CE_B,
+                ce_eth: "eth1",
+            },
+        ],
+        df: usize::from(df_id.name != A.name),
+        host: usize::from(host_id.name != A.name),
+    })
 }
 
 /// The dual-homed CE's bond (`bond_opts` picks its mode) and the host's address.
@@ -8842,6 +8914,7 @@ async fn dataplane_teardown(w: &World) -> anyhow::Result<()> {
     for (net, router) in [
         (NET_CE_A, "router-a"),
         (NET_CE_B, "router-b"),
+        (NET_H, "router-a"),
         (NET_H, "router-b"),
     ] {
         w.dock.network_disconnect(net, router).await;
@@ -8852,26 +8925,33 @@ async fn dataplane_teardown(w: &World) -> anyhow::Result<()> {
 
 /// The EVPN data plane, for real: two `nos` PEs over a VXLAN underlay in a
 /// VRF, a CE dual-homed to both through one Ethernet Segment (a bond of one
-/// docker-network link to each PE), and a host behind router-b. Unlike
+/// docker-network link to each PE), and a host behind the DF. Unlike
 /// `evpn-fdb`/`evpn-esi` (control plane and kernel state, against GoBGP) this
 /// sends frames.
 ///
-/// Both PEs run RFC 8584 HRW (`df-algorithm hrw`), which elects router-b
-/// where modulo would elect router-a (the HRW note in `consts.rs`), so the DF read
-/// back from the kernel proves HRW ran. With the CE's link to router-b gone
-/// (from below, so router-b's bond loses carrier and its segment is down),
-/// every frame the CE sends enters router-a and must cross the VXLAN to reach
-/// the host, and back: router-b reaches the CE through router-a (its remote
-/// Type-2 falls back to a VXLAN entry). With the link back, router-b pins the
-/// CE's MAC to its own bond (#173, read back from the kernel, as is learning
-/// off on the VXLAN port); one broadcast from the host reaches the CE through
-/// the DF only — once — while the non-DF's link stays silent; with the CE's
-/// link to router-a down instead, the CE is bridged locally on router-b.
+/// Both PEs run RFC 8584 HRW (`df-algorithm hrw`). The DF is the winner the
+/// harness computes (`hrw::df_for_lab`: router-b on labs 0 and 1, router-a on
+/// lab 2) and the host is wired behind it; on lab 0 modulo would elect the
+/// other PE, so the DF read back from the kernel proves HRW ran. With the CE's
+/// link to the DF gone (from below, so its bond loses carrier and its segment
+/// is down), every frame the CE sends enters the non-DF and must cross the
+/// VXLAN to reach the host, and back: the DF reaches the CE through the
+/// non-DF (its remote Type-2 falls back to a VXLAN entry). With the link back,
+/// the DF pins the CE's MAC to its own bond (#173, read back from the kernel,
+/// as is learning off on the VXLAN port); one broadcast from the host reaches
+/// the CE through the DF only — once — while the non-DF's link stays silent;
+/// with the CE's link to the other PE down instead, the CE is bridged locally
+/// on the host's PE.
 pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
-    let (bond_a, bond_b) = dataplane_setup(w, false, true).await?;
+    let dp = dataplane_setup(w, false, true).await?;
+    // Everything below says df/ndf/host, never a router: the HRW winner differs per lab.
+    let (df, ndf, host_pe, other_pe) = (dp.df(), dp.ndf(), dp.host(), dp.other());
     let (a, b) = (w.a()?, w.b()?);
-    bridge_port_flood(w, "router-a", &bond_a, false).await?;
-    bridge_port_flood(w, "router-b", &bond_b, true).await?;
+    let (bond_a, bond_b) = (&dp.pes[0].bond, &dp.pes[1].bond);
+    let (dfr, ndfr) = (w.get(df.id)?, w.get(ndf.id)?);
+    let (dfn, ndfn) = (df.id.name, ndf.id.name);
+    bridge_port_flood(w, ndfn, &ndf.bond, false).await?;
+    bridge_port_flood(w, dfn, &df.bond, true).await?;
     let vxlan = format!("vx{EVPN_VNI}");
     for router in ["router-a", "router-b"] {
         let link = w
@@ -8886,9 +8966,9 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
             bail!("{router}'s {vxlan} does not read learning off: {link}");
         }
     }
-    log("local bias in the kernel: router-a (non-DF) drops core BUM too, router-b (DF) only the other PE's");
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), true).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), false).await?;
+    log("local bias in the kernel: the non-DF drops core BUM too, the DF only the other PE's");
+    local_bias_readback(w, ndfn, &ndf.bond, &vxlan, df.id.ip.s(), true).await?;
+    local_bias_readback(w, dfn, &df.bond, &vxlan, ndf.id.ip.s(), false).await?;
 
     log("the CE bonds its two links; the host takes an address");
     dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
@@ -8897,44 +8977,61 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
         .trim()
         .to_string();
 
-    log("unicast across the VXLAN: router-b loses its CE link, so every frame enters router-a");
-    let carrier_b = |up: bool| {
-        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond_b} up={up}")
+    log(format!(
+        "unicast across the VXLAN: {dfn} (the DF, the host's PE) loses its CE link, so every frame enters {ndfn}"
+    ));
+    let carrier_df = |up: bool| {
+        format!(
+            "segment port carrier changed domain={EVPN_DOMAIN} port={} up={up}",
+            df.bond
+        )
     };
-    // Before router-b's Type-4 arrived, router-a may have elected itself alone.
-    let df_a = format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_a} role=df");
-    let df_a_base = a.count(&df_a);
-    host_sh(w, CE_HOST, "ip link set eth1 down").await?;
-    link_lost(w, "router-b", &[NET_CE_B]).await;
-    b.wait(&carrier_b(false)).await?;
-    a.wait_new(&df_a, df_a_base, 60).await?;
+    // Before the DF's Type-4 arrived, the other PE may have elected itself alone.
+    let df_ndf = format!(
+        "df elected domain={EVPN_DOMAIN} esi={ESI} port={} role=df",
+        ndf.bond
+    );
+    let df_ndf_base = ndfr.count(&df_ndf);
+    host_sh(w, CE_HOST, &format!("ip link set {} down", df.ce_eth)).await?;
+    link_lost(w, dfn, &[df.net_ce]).await;
+    dfr.wait(&carrier_df(false)).await?;
+    ndfr.wait_new(&df_ndf, df_ndf_base, 60).await?;
     ping_until(w, CE_HOST, H_IP, 30).await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
-    // Router-b's own segment is down: the CE's MAC goes to router-a.
-    b.wait(&format!(
-        "remote mac installed domain={EVPN_DOMAIN} mac={ce_mac} vtep={IP_A}"
+    // The DF's own segment is down: the CE's MAC goes to the other PE.
+    dfr.wait(&format!(
+        "remote mac installed domain={EVPN_DOMAIN} mac={ce_mac} vtep={}",
+        ndf.id.ip
     ))
     .await?;
 
-    neigh_suppression(w).await?;
+    neigh_suppression(w, &dp).await?;
 
-    log("router-b's CE link back: it is the DF again and pins the CE's MAC to its bond");
-    let df_b = format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_b} role=df");
-    let pinned = format!("remote mac pinned domain={EVPN_DOMAIN} mac={ce_mac} port={bond_b}");
-    let (df_base, pin_base) = (b.count(&df_b), b.count(&pinned));
-    link_back(w, "router-b", &[NET_CE_B], &["eth1"]).await?;
-    b.wait(&carrier_b(true)).await?;
-    b.wait_new(&pinned, pin_base, 30).await?;
-    b.wait_new(&df_b, df_base, 60).await?;
+    log(format!(
+        "{dfn}'s CE link back: it is the DF again and pins the CE's MAC to its bond"
+    ));
+    let df_df = format!(
+        "df elected domain={EVPN_DOMAIN} esi={ESI} port={} role=df",
+        df.bond
+    );
+    let pinned = format!(
+        "remote mac pinned domain={EVPN_DOMAIN} mac={ce_mac} port={}",
+        df.bond
+    );
+    let (df_base, pin_base) = (dfr.count(&df_df), dfr.count(&pinned));
+    link_back(w, dfn, &[df.net_ce], &["eth1"]).await?;
+    dfr.wait(&carrier_df(true)).await?;
+    dfr.wait_new(&pinned, pin_base, 30).await?;
+    dfr.wait_new(&df_df, df_base, 60).await?;
     let mut fdb = String::new();
     for _ in 0..10 {
         fdb = w
             .dock
             .in_netns(
                 NETNS_HELPER_IMAGE,
-                "router-b",
-                &["bridge", "fdb", "show", "dev", &bond_b],
+                dfn,
+                &["bridge", "fdb", "show", "dev", &df.bond],
             )
             .await?;
         if fdb
@@ -8949,45 +9046,57 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
         .lines()
         .any(|l| l.contains(&ce_mac) && l.contains("static"))
     {
-        bail!("router-b's {bond_b} holds no pin for the CE's MAC {ce_mac}: {fdb}");
+        bail!(
+            "{dfn}'s {} holds no pin for the CE's MAC {ce_mac}: {fdb}",
+            df.bond
+        );
     }
 
-    log("BUM: one broadcast from the host reaches the CE once, through the DF (router-b) only");
-    host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
-    let (via_non_df, via_df, _) = arp_broadcast(w, None).await?;
+    log("BUM: one broadcast from the host reaches the CE once, through the DF only");
+    host_sh(
+        w,
+        CE_HOST,
+        &format!("ip link set {} up; sleep 1", df.ce_eth),
+    )
+    .await?;
+    let counts = arp_broadcast(w, None).await?;
+    let (via_df, via_non_df) = (on_ce_eth(counts, df.ce_eth), on_ce_eth(counts, ndf.ce_eth));
     if (via_df, via_non_df) != (1, 0) {
         bail!(
-            "the host's broadcast reached the CE {via_df}x through router-b (the DF) and \
-             {via_non_df}x through router-a (the non-DF); expected exactly 1 and 0\n\
+            "the host's broadcast reached the CE {via_df}x through {dfn} (the DF) and \
+             {via_non_df}x through {ndfn} (the non-DF); expected exactly 1 and 0\n\
              captures: {}",
             host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
         );
     }
 
     // The echo local bias removes (RFC 8365 §8.3.1): the CE broadcasts on its
-    // link to router-a (non-DF), router-a floods it to router-b, and router-b
-    // — the DF — used to send it back out of the segment.
-    log("local bias: the CE's broadcast out of its link to router-a is not echoed back through router-b (the DF), and the host gets it once");
+    // link to the non-DF, the non-DF floods it to the DF, and the DF used to
+    // send it back out of the segment.
+    log("local bias: the CE's broadcast out of its link to the non-DF is not echoed back through the DF, and the host gets it once");
     // The link flaps and DF re-elections above rewrote the filters: read them
     // back again, so a missing one fails here by name rather than as a count.
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), true).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), false).await?;
-    let (echo_a, echo_b, host) = arp_broadcast(w, Some("eth0")).await?;
-    if (echo_a, echo_b, host) != (0, 0, 1) {
+    local_bias_readback(w, ndfn, &ndf.bond, &vxlan, df.id.ip.s(), true).await?;
+    local_bias_readback(w, dfn, &df.bond, &vxlan, ndf.id.ip.s(), false).await?;
+    let (echo_0, echo_1, host) = arp_broadcast(w, Some(ndf.ce_eth)).await?;
+    if (echo_0, echo_1, host) != (0, 0, 1) {
         bail!(
-            "the CE's own broadcast came back {echo_a}x on its link to router-a and {echo_b}x on \
-             its link to router-b, and reached the host {host}x; expected 0, 0 and 1\n\
+            "the CE's own broadcast came back {echo_0}x on its eth0 (router-a) and {echo_1}x on \
+             its eth1 (router-b), and reached the host {host}x; expected 0, 0 and 1\n\
              captures: {}\ntc:{}",
             host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?,
-            bias_counters(w, [&bond_a, &bond_b], &vxlan).await
+            bias_counters(w, [bond_a, bond_b], &vxlan).await
         );
     }
 
     // Local bias changes who delivers a non-DF's own hosts' BUM: with modulo
-    // router-a is the DF and router-b, the host's PE, the non-DF. The host's
-    // broadcast must now reach the CE once through router-b (a non-DF delivers
-    // what it sourced locally) and never through router-a.
-    log("modulo instead of hrw: router-a becomes the DF; the host's broadcast still reaches the CE once, through its own PE router-b (the non-DF)");
+    // router-a is the DF. The host's broadcast must reach the CE once through
+    // the host's PE (a non-DF delivers what it sourced locally, and a DF does
+    // anyway) and never through the other PE.
+    log(format!(
+        "modulo instead of hrw: router-a becomes the DF; the host's broadcast still reaches the CE once, through its own PE {}",
+        host_pe.id.name
+    ));
     let df_alg = |id: Id, rd: &str| {
         let mut f = evpn_pe_flags(id, rd);
         f.extend(bond_flags("bond1", true, "eth1"));
@@ -9001,29 +9110,43 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
         )
     };
     let (base_a, base_b) = (
-        a.count(&role(&bond_a, "df")),
-        b.count(&role(&bond_b, "non-df")),
+        a.count(&role(bond_a, "df")),
+        b.count(&role(bond_b, "non-df")),
     );
     a.provision_flags(&df_alg(A, EVPN_DP_RD_A)).await?;
     b.provision_flags(&df_alg(B, EVPN_DP_RD_B)).await?;
-    a.wait_new(&role(&bond_a, "df"), base_a, 60).await?;
-    b.wait_new(&role(&bond_b, "non-df"), base_b, 60).await?;
-    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B.s(), false).await?;
-    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A.s(), true).await?;
-    let (via_a, via_b, _) = arp_broadcast(w, None).await?;
-    if (via_b, via_a) != (1, 0) {
+    a.wait_new(&role(bond_a, "df"), base_a, 60).await?;
+    b.wait_new(&role(bond_b, "non-df"), base_b, 60).await?;
+    local_bias_readback(w, "router-a", bond_a, &vxlan, IP_B.s(), false).await?;
+    local_bias_readback(w, "router-b", bond_b, &vxlan, IP_A.s(), true).await?;
+    let counts = arp_broadcast(w, None).await?;
+    let (via_host, via_other) = (
+        on_ce_eth(counts, host_pe.ce_eth),
+        on_ce_eth(counts, other_pe.ce_eth),
+    );
+    if (via_host, via_other) != (1, 0) {
         bail!(
-            "the host's broadcast reached the CE {via_b}x through router-b (the non-DF, its own PE) \
-             and {via_a}x through router-a (the DF); expected exactly 1 and 0\n\
+            "the host's broadcast reached the CE {via_host}x through {} (its own PE) and \
+             {via_other}x through {} (the other); expected exactly 1 and 0\n\
              captures: {}",
+            host_pe.id.name,
+            other_pe.id.name,
             host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
         );
     }
 
-    log("the CE's link to router-a goes down: it is bridged locally on router-b");
-    host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
+    log(format!(
+        "the CE's link to {} goes down: it is bridged locally on {}",
+        other_pe.id.name, host_pe.id.name
+    ));
+    host_sh(
+        w,
+        CE_HOST,
+        &format!("ip link set {} down; sleep 1", other_pe.ce_eth),
+    )
+    .await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
-    // The CE now sends through router-b's pin, so router-b advertises it too.
+    // The CE now sends through the host PE's pin, so it advertises it too.
     same_segment_no_move(w, &ce_mac, [(A, IP_B.s()), (B, IP_A.s())]).await?;
 
     dataplane_teardown(w).await
@@ -9086,8 +9209,12 @@ async fn ce_arps_host(w: &World) -> anyhow::Result<(i64, usize)> {
 /// on router-b's bridge) and router-a holds it as a neighbour, router-a's
 /// bridge answers the request itself and nothing crosses the VXLAN; with the
 /// setting cleared the request floods to the host again.
-async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
-    let (a, b) = (w.a()?, w.b()?);
+async fn neigh_suppression(w: &World, dp: &Dp) -> anyhow::Result<()> {
+    // The DF's CE link is down, so the CE's ARP enters the non-DF (`a`); the
+    // host's PE is the DF (`b`).
+    let (ndf, df) = (dp.ndf(), dp.df());
+    let (a, b) = (w.get(ndf.id)?, w.get(df.id)?);
+    let (an, bn) = (ndf.id.name, df.id.name);
     let vxlan = format!("vx{EVPN_VNI}");
 
     log("neigh-suppress: without it, the CE's ARP for the host crosses the VXLAN");
@@ -9096,11 +9223,13 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
         bail!("control: arping exited {code}, the host saw {seen} request(s); expected 0 and 1");
     }
 
-    log("neigh-suppress on router-a; router-b originates the host's MAC+IP");
-    let mut on_a = evpn_pe_flags(A, EVPN_DP_RD_A);
+    log(format!(
+        "neigh-suppress on {an}; {bn} originates the host's MAC+IP"
+    ));
+    let mut on_a = evpn_pe_flags(ndf.id, ndf.rd);
     on_a.extend(strings(&["--evpn-neigh-suppress", "true"]));
     a.provision_flags(&on_a).await?;
-    let mut on_b = evpn_pe_flags(B, EVPN_DP_RD_B);
+    let mut on_b = evpn_pe_flags(df.id, df.rd);
     on_b.extend(strings(&["--evpn-redistribute-arp-bgp", "r1"]));
     b.provision_flags(&on_b).await?;
     let fdb: serde_json::Value = serde_json::from_str(
@@ -9109,7 +9238,7 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
     )?;
     let bridge_b = fdb["bridge"]
         .as_str()
-        .context("router-b's show fdb has no bridge name")?
+        .context("the host PE's show fdb has no bridge name")?
         .to_string();
     let h_mac = host_sh(w, H_HOST, "cat /sys/class/net/eth0/address")
         .await?
@@ -9118,7 +9247,7 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
     w.dock
         .in_netns(
             NETNS_HELPER_IMAGE,
-            "router-b",
+            bn,
             &[
                 "ip",
                 "neigh",
@@ -9138,29 +9267,32 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait(&format!(
-        "remote neighbour installed domain={EVPN_DOMAIN} mac={h_mac} ip={H_IP} vtep={IP_B}"
+        "remote neighbour installed domain={EVPN_DOMAIN} mac={h_mac} ip={H_IP} vtep={}",
+        df.id.ip
     ))
     .await?;
     let link = w
         .dock
         .in_netns(
             NETNS_HELPER_IMAGE,
-            "router-a",
+            an,
             &["bridge", "-d", "link", "show", "dev", &vxlan],
         )
         .await?;
     if !link.contains("neigh_suppress on") {
-        bail!("router-a's {vxlan} does not read neigh_suppress on: {link}");
+        bail!("{an}'s {vxlan} does not read neigh_suppress on: {link}");
     }
     let fdb: serde_json::Value = serde_json::from_str(
         &a.rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
             .await?,
     )?;
     if fdb["neigh_suppress"] != true {
-        bail!("router-a's show fdb does not report neigh_suppress: {fdb}");
+        bail!("{an}'s show fdb does not report neigh_suppress: {fdb}");
     }
 
-    log("router-a's bridge answers the CE's ARP itself: nothing reaches the host");
+    log(format!(
+        "{an}'s bridge answers the CE's ARP itself: nothing reaches the host"
+    ));
     let (code, seen) = ce_arps_host(w).await?;
     if code != 0 || seen != 0 {
         bail!("suppressed: arping exited {code}, the host saw {seen} request(s); expected 0 and 0");
@@ -9170,7 +9302,7 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
     let base = a.count(&format!(
         "vxlan neigh suppression set vxlan={vxlan} suppress=false"
     ));
-    let mut off_a = evpn_pe_flags(A, EVPN_DP_RD_A);
+    let mut off_a = evpn_pe_flags(ndf.id, ndf.rd);
     off_a.extend(strings(&["--evpn-neigh-suppress", "false"]));
     a.provision_flags(&off_a).await?;
     a.wait_new(
@@ -9189,7 +9321,7 @@ async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
     w.dock
         .in_netns(
             NETNS_HELPER_IMAGE,
-            "router-b",
+            bn,
             &["ip", "neigh", "del", H_IP, "dev", &bridge_b],
         )
         .await?;
@@ -9255,7 +9387,8 @@ async fn ping_until(w: &World, host: &str, ip: &str, secs: u32) -> anyhow::Resul
 /// ARP probes unanswered on router-a's dead link) moves over; when the link
 /// returns router-a is elected again and router-b is blocked again.
 pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
-    let (bond_a, bond_b) = dataplane_setup(w, true, false).await?;
+    let dp = dataplane_setup(w, true, false).await?;
+    let (bond_a, bond_b) = (dp.pes[0].bond.clone(), dp.pes[1].bond.clone());
     let (a, b) = (w.a()?, w.b()?);
     let role = |bond: &str, r: &str| {
         format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}")

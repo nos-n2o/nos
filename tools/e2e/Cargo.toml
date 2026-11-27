@@ -19,6 +19,7 @@ serde_json    = { workspace = true }
 serde_norway    = { workspace = true }
 reqwest       = { workspace = true, features = ["rustls-no-provider", "http2"] }
 nos-pki       = { workspace = true }
+crc32fast     = { workspace = true }
 rustls        = { workspace = true }
 tokio-rustls  = { workspace = true }
 base64        = { workspace = true }

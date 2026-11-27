@@ -1930,6 +1930,7 @@ dependencies = [
  "bollard",
  "bytes",
  "clap",
+ "crc32fast",
  "futures",
  "nos-pki",
  "nos-proto",
