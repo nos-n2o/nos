@@ -1,6 +1,6 @@
 //! Overlap and containment of two filters' matches (pure). Exact on the
 //! fields `rule::filters` sets: family, IP protocol, prefixes, port ranges,
-//! TCP flags, fragment flags, ICMP type/code. Anything else a `FlowerKeys`
+//! TCP flags, fragment flags, ICMP type/code, DSCP, TTL. Anything else a `FlowerKeys`
 //! can hold (MAC, tunnel) is never set by a rule and is ignored here. An
 //! L4-keyed filter and a `fragments` one never share a packet, yet overlap is
 //! reported (over-approximation only costs a level).
@@ -43,7 +43,7 @@ fn point<T: Copy>(x: Option<T>) -> Option<(T, T)> {
 }
 
 /// Every dimension as a range pair, `(a, b)`.
-type Dims = [(Option<(u128, u128)>, Option<(u128, u128)>); 7];
+type Dims = [(Option<(u128, u128)>, Option<(u128, u128)>); 9];
 
 fn dims(a: &Filter, b: &Filter) -> Dims {
     let (ka, kb) = (&a.keys, &b.keys);
@@ -57,6 +57,8 @@ fn dims(a: &Filter, b: &Filter) -> Dims {
         (wide(ka.dst_port), wide(kb.dst_port)),
         (byte(ka.icmp_type), byte(kb.icmp_type)),
         (byte(ka.icmp_code), byte(kb.icmp_code)),
+        (byte(ka.ip_tos), byte(kb.ip_tos)),
+        (byte(ka.ip_ttl), byte(kb.ip_ttl)),
     ]
 }
 
@@ -204,6 +206,17 @@ mod tests {
         assert_eq!(rel(&any_frag, &later), (true, true, false));
         assert_eq!(rel(&later, &first), (false, false, false));
         assert_eq!(rel(&v4(|_| {}), &later), (true, true, false));
+    }
+
+    #[test]
+    fn dscp_and_ttl_are_exact() {
+        let d = |v| v4(|k| k.ip_tos = Some(v));
+        let t = |v| v4(|k| k.ip_ttl = Some(v));
+        assert_eq!(rel(&d(46), &d(48)), (false, false, false));
+        assert_eq!(rel(&t(1), &t(64)), (false, false, false));
+        assert_eq!(rel(&d(46), &d(46)), (true, true, true));
+        assert_eq!(rel(&v4(|_| {}), &t(64)), (true, true, false));
+        assert_eq!(rel(&d(46), &t(64)), (true, false, false));
     }
 
     #[test]

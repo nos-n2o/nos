@@ -2451,6 +2451,14 @@ module nos-config {
         type boolean;
         description "Match non-first IP fragments only.";
       }
+      leaf dscp {
+        type uint8;
+        description "Match the DSCP of the IP header.";
+      }
+      leaf ttl {
+        type uint8;
+        description "Match the exact TTL or hop limit.";
+      }
     }
   }
   container admin {

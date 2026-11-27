@@ -927,6 +927,23 @@ fn ip_tos_key_matches_the_dscp_not_the_ecn() {
     assert!(shown.contains("ip_tos 184/0xfc"), "{shown}");
 }
 
+/// The ttl key installs and reads back exact (v4 TTL and v6 hop limit).
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn ip_ttl_key_reads_back_exact() {
+    let (_, b) = pair("l0", "l1", 30);
+    for (proto, prio) in [(Protocol::Ip, 1), (Protocol::Ipv6, 2)] {
+        let keys = FlowerKeys {
+            ip_ttl: Some(64),
+            ..udp_dport(7105)
+        };
+        add(b, 0, prio, proto, keys, gact(Verdict::Pipe));
+    }
+    let shown = show("l1", "ingress");
+    println!("IP_TTL {shown}");
+    assert!(shown.contains("ip_ttl 64/ff"), "{shown}");
+}
+
 /// `Pedit::Dscp` on egress rewrites real packets: the peer's ingress key
 /// sees the new DSCP, ECN survives, and (IPv4) the header checksum still
 /// verifies.
