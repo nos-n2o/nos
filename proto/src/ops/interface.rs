@@ -184,6 +184,25 @@ pub enum InterfaceOp {
         /// Name of the interface this op targets.
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpFallback {
+        /// Name of the interface this op targets.
+        name: String,
+        /// Whether LACP fallback is enabled.
+        enabled: bool,
+    },
+    /// Appended (postcard indexes variants by position).
+    SetLacpFallbackTimeout {
+        /// Name of the interface this op targets.
+        name: String,
+        /// Seconds before fallback activates (1..=3600, checked at commit).
+        seconds: u16,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearLacpFallbackTimeout {
+        /// Name of the interface this op targets.
+        name: String,
+    },
 }
 
 impl InterfaceOp {
@@ -325,6 +344,18 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.lacp_link_number = None;
                 Ok(())
             }
+            InterfaceOp::SetLacpFallback { name, enabled } => {
+                find_interface_mut(config, name)?.lacp_fallback = *enabled;
+                Ok(())
+            }
+            InterfaceOp::SetLacpFallbackTimeout { name, seconds } => {
+                find_interface_mut(config, name)?.lacp_fallback_timeout = Some(*seconds);
+                Ok(())
+            }
+            InterfaceOp::ClearLacpFallbackTimeout { name } => {
+                find_interface_mut(config, name)?.lacp_fallback_timeout = None;
+                Ok(())
+            }
             InterfaceOp::SetLacpMode { name, mode } => {
                 find_interface_mut(config, name)?.lacp_mode = *mode;
                 Ok(())
@@ -379,6 +410,8 @@ mod tests {
             stp_port_profile: None,
             lacp_port_priority: None,
             lacp_link_number: None,
+            lacp_fallback: false,
+            lacp_fallback_timeout: None,
             lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
@@ -430,6 +463,8 @@ mod tests {
                 stp_port_profile: None,
                 lacp_port_priority: None,
                 lacp_link_number: None,
+                lacp_fallback: false,
+                lacp_fallback_timeout: None,
                 lacp_mode: crate::schema::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
@@ -734,6 +769,39 @@ mod tests {
             .apply(&mut cfg)
             .unwrap();
         assert_eq!(cfg.interfaces[0].lacp_port_priority, None);
+    }
+
+    #[test]
+    fn set_and_clear_lacp_fallback() {
+        let mut cfg = Config::default();
+        let name = "eth1".to_string();
+        InterfaceOp::Ensure { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        InterfaceOp::SetLacpFallback {
+            name: name.clone(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        InterfaceOp::SetLacpFallbackTimeout {
+            name: name.clone(),
+            seconds: 9,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(cfg.interfaces[0].lacp_fallback);
+        assert_eq!(cfg.interfaces[0].lacp_fallback_timeout, Some(9));
+        InterfaceOp::ClearLacpFallbackTimeout { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_fallback_timeout, None);
+        assert!(InterfaceOp::SetLacpFallback {
+            name: "nope".into(),
+            enabled: true
+        }
+        .apply(&mut cfg)
+        .is_err());
     }
 
     #[test]

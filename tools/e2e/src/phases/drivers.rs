@@ -1262,8 +1262,11 @@ async fn lacp_v2(w: &World, both: &[&str]) -> anyhow::Result<()> {
         let s = lacp_aggregate(r).await?;
         if s["conversations_per_link"] != serde_json::json!([["eth1", 2048], ["eth2", 2048]])
             || s["ports"].as_array().is_none_or(|p| {
-                p.iter()
-                    .any(|p| p["partner_version"] != 2 || p["partner_port_algorithm"] != "CVlan")
+                p.iter().any(|p| {
+                    p["partner_version"] != 2
+                        || p["fallback"] != "Disabled"
+                        || p["partner_port_algorithm"] != "CVlan"
+                })
             })
         {
             bail!("{}: unexpected v2 summary: {s}", r.name());

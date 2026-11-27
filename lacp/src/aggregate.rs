@@ -393,6 +393,7 @@ impl AggregateManager {
                     marker_pdus_rx: obs.counters.marker_pdus_rx,
                     marker_responses_tx: obs.counters.marker_responses_tx,
                     marker_responses_rx: obs.counters.marker_responses_rx,
+                    fallback: nos_proto::LacpFallback::Disabled,
                     synchronized: obs
                         .partner
                         .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),

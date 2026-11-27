@@ -45,6 +45,20 @@ pub enum LacpMuxState {
     Distributing,
 }
 
+/// A member port's LACP fallback state (`lacp fallback`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LacpFallback {
+    /// Fallback is not configured on this port.
+    #[default]
+    Disabled,
+    /// Configured, no fallback in effect (a partner is heard or the dwell timer runs).
+    Armed,
+    /// The port carries traffic alone, no partner heard.
+    Active,
+}
+
 /// One member port's current LACP state, for `show lacp`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
@@ -127,6 +141,9 @@ pub struct LacpPortStatus {
     /// port's link task.
     #[serde(default)]
     pub marker_responses_rx: u64,
+    /// Fallback state (appended, #1573). Last field: postcard is positional.
+    #[serde(default)]
+    pub fallback: LacpFallback,
 }
 
 /// Whether both ends agreed on conversation-sensitive operation.

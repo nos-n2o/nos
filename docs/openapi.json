@@ -3196,6 +3196,19 @@
             "description": "Applies the flowspec rules of the BGP instance owning this device's\nrouting table to the IP packets arriving here (RFC 8955 section 5:\ningress only); placement rules are `acl::valid_flowspec_placements`.",
             "type": "boolean"
           },
+          "lacp_fallback": {
+            "description": "LACP fallback (PXE / no-partner use): while no partner is heard on\nthis port, `nos-lacpd` may let it carry traffic alone. Only\nmeaningful on a `Lacp`-mode aggregate member; ignored otherwise.",
+            "type": "boolean"
+          },
+          "lacp_fallback_timeout": {
+            "description": "Seconds without a LACPDU before fallback activates; `None` = 30,\nvalid 1..=3600. Ignored without `lacp_fallback`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "lacp_link_number": {
             "description": "The 802.1AX-2014 `Link_Number` naming this link in its aggregate's\nconversation map, 1-65535 and unique among the aggregate's members;\n`None` = nos-lacpd picks one. Accepted and shown; nothing reads it yet.",
             "format": "int32",
@@ -3423,6 +3436,15 @@
         ],
         "type": "string"
       },
+      "LacpFallback": {
+        "description": "A member port's LACP fallback state (`lacp fallback`).",
+        "enum": [
+          "Disabled",
+          "Armed",
+          "Active"
+        ],
+        "type": "string"
+      },
       "LacpLinkSteering": {
         "description": "One member link's installed conversation steering and its tc counters.",
         "properties": {
@@ -3503,6 +3525,10 @@
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "fallback": {
+            "$ref": "#/components/schemas/LacpFallback",
+            "description": "Fallback state (appended, #1573). Last field: postcard is positional."
           },
           "illegal_pdus": {
             "description": "Slow-protocol frames that failed to decode (short frame, wrong\nsubtype), excluding unsupported versions and Marker PDUs. In memory\nonly: restarts at 0 with the port's link task.",
@@ -63130,6 +63156,432 @@
           }
         },
         "summary": "Set: The `flowspec` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/interface/{interface}/lacp-fallback": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lacp-fallback` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "LACP fallback (PXE / no-partner use): while no partner is heard on\nthis port, `nos-lacpd` may let it carry traffic alone. Only\nmeaningful on a `Lacp`-mode aggregate member; ignored otherwise.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lacp-fallback` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "interface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "LACP fallback (PXE / no-partner use): while no partner is heard on\nthis port, `nos-lacpd` may let it carry traffic alone. Only\nmeaningful on a `Lacp`-mode aggregate member; ignored otherwise.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `lacp-fallback` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "LACP fallback (PXE / no-partner use): while no partner is heard on\nthis port, `nos-lacpd` may let it carry traffic alone. Only\nmeaningful on a `Lacp`-mode aggregate member; ignored otherwise.",
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "LACP fallback (PXE / no-partner use): while no partner is heard on\nthis port, `nos-lacpd` may let it carry traffic alone. Only\nmeaningful on a `Lacp`-mode aggregate member; ignored otherwise.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lacp-fallback` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/interface/{interface}/lacp-fallback-timeout": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Remove: The `lacp-fallback-timeout` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds without a LACPDU before fallback activates; `None` = 30,\nvalid 1..=3600. Ignored without `lacp_fallback`.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Read: The `lacp-fallback-timeout` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "interface",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "description": "RFC 7396 JSON Merge Patch (`null` deletes a key, arrays replace). Needs `Content-Type: application/merge-patch+json` (415 otherwise); otherwise as PUT.",
+        "requestBody": {
+          "content": {
+            "application/merge-patch+json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds without a LACPDU before fallback activates; `None` = 30,\nvalid 1..=3600. Ignored without `lacp_fallback`.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          },
+          "415": {
+            "description": "Content-Type is not application/merge-patch+json"
+          }
+        },
+        "summary": "Merge-patch: The `lacp-fallback-timeout` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Seconds without a LACPDU before fallback activates; `None` = 30,\nvalid 1..=3600. Ignored without `lacp_fallback`.",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds without a LACPDU before fallback activates; `None` = 30,\nvalid 1..=3600. Ignored without `lacp_fallback`.",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "the key matches several list elements and none exactly"
+          }
+        },
+        "summary": "Set: The `lacp-fallback-timeout` setting.",
         "tags": [
           "transactions"
         ]

@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-11 {
+  revision 2026-12-12 {
     description "Generated.";
   }
 
@@ -1399,6 +1399,14 @@ module nos-config {
         enum "Passive";
       }
       description "Set an interface's LACP mode (active or passive).";
+    }
+    leaf lacp_fallback {
+      type boolean;
+      description "Let an interface carry traffic alone while no LACP partner answers.";
+    }
+    leaf lacp_fallback_timeout {
+      type uint16;
+      description "Set the seconds before LACP fallback activates.";
     }
     leaf mtu {
       type uint32;
