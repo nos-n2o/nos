@@ -571,7 +571,12 @@ pub async fn ospf_flood(w: &mut World) -> anyhow::Result<()> {
     // Back to the base lab: the clearing re-originates and floods once.
     let installed1 = b.count(&lsa_a);
     a.provision(&["--clear-ospf-loopback-profile"]).await?;
-    b.wait_new(&lsa_a, installed1, 30).await
+    b.wait_new(&lsa_a, installed1, 30).await?;
+    // The address must go too (#887): `nos-ospfd` advertises only a loopback's
+    // first address, so one left behind hides a later phase's loopback
+    // address (`ospf-graceful-restart`'s 203.0.113.112/32) from OSPF.
+    a.provision(&["--loopback-remove-address", OSPF_FLOOD_LOOPBACK_ADDRESS])
+        .await
 }
 
 /// Polls `r`'s `GET /v1/ospf/database` until `advertiser`'s live Type-5 for
