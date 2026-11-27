@@ -77,7 +77,7 @@ pub fn on_lsr_received(
     link_local_lsdb: &Lsdb,
     lsr: &LsrPacket,
 ) -> Vec<Action> {
-    common::on_lsr_received(adj, &[lsdb, link_local_lsdb], &lsr.requests)
+    common::on_lsr_received(adj, &[lsdb, link_local_lsdb], &lsr.requests, Instant::now())
 }
 
 /// `nos_ospf_common::exchange::on_lsu_received` with v2's closures: a type-9
@@ -99,7 +99,7 @@ pub fn on_lsu_received(
         link_local: link_local_lsdb,
         as_scope: None,
     };
-    common::on_lsu_received(
+    let r = common::on_lsu_received(
         adj,
         &mut stores,
         &lsu.lsas,
@@ -113,7 +113,10 @@ pub fn on_lsu_received(
         },
         |h| !lsa::in_area_scope(h.lsa_type, stub, nssa),
         |_| false,
-    )
+        None,
+        common::AckMode::LegacyDelayed,
+    );
+    (r.actions, r.installed)
 }
 
 #[cfg(test)]

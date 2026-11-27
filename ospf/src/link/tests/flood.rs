@@ -261,8 +261,13 @@ async fn retransmission_resend_stays_unicast() {
             .adjacency
             .as_mut()
             .unwrap();
-        adj.retransmission_list
-            .insert(l.header.key(), Arc::new(l.clone()));
+        adj.retransmission_list.insert(
+            l.header.key(),
+            nos_ospf_common::exchange::Rxmt {
+                lsa: Arc::new(l.clone()),
+                last_sent: std::time::Instant::now(),
+            },
+        );
     });
     retransmit_pending(&socket, &cfg, id(1), &status, &mut 0);
     assert_eq!(

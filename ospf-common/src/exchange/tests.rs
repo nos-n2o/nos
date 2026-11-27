@@ -168,6 +168,7 @@ fn slave_accepts_masters_reply_as_exstart_trigger() {
                 lsa_headers: Vec::new(),
             }),
             Action::NeighborEvent(Event::NegotiationDone),
+            Action::SendLsr(adj.request_list.clone()),
             Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
         ]
     );
@@ -254,6 +255,7 @@ fn master_accepts_neighbors_reply_as_exstart_trigger() {
         actions,
         vec![
             Action::NeighborEvent(Event::NegotiationDone),
+            Action::SendLsr(adj.request_list.clone()),
             Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
         ]
     );
@@ -447,9 +449,10 @@ fn exchange_requests_lsas_missing_locally() {
     assert_eq!(adj.request_list, vec![neighbor_header.key()]);
     assert_eq!(
         actions,
-        vec![Action::NeighborEvent(Event::ExchangeDone {
-            more_to_load: true
-        })]
+        vec![
+            Action::SendLsr(adj.request_list.clone()),
+            Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
+        ]
     );
 }
 
@@ -681,9 +684,10 @@ fn rfc5243_emptied_summary_still_terminates() {
     );
     assert_eq!(
         actions,
-        vec![Action::NeighborEvent(Event::ExchangeDone {
-            more_to_load: true
-        })]
+        vec![
+            Action::SendLsr(adj.request_list.clone()),
+            Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
+        ]
     );
 }
 
@@ -873,9 +877,10 @@ fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
     );
     assert_eq!(
         actions,
-        vec![Action::NeighborEvent(Event::ExchangeDone {
-            more_to_load: true
-        })]
+        vec![
+            Action::SendLsr(adj.request_list.clone()),
+            Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
+        ]
     );
 }
 
@@ -1191,14 +1196,17 @@ const SEQ1: i32 = 0x8000_0001u32.cast_signed();
 /// Runs one LSU into `area`/`link`/`as_scope`: scope by id (100s are
 /// link-local, 200s AS, anything else area), ids 900+ discarded, id 500
 /// exempt from the `MaxAge` discard.
-fn lsu_at(
+#[allow(clippy::too_many_arguments)]
+fn lsu_full(
     adj: &mut AdjacencyData,
     area: &mut Lsdb<L>,
     link: &mut Lsdb<L>,
     as_scope: Option<&mut Lsdb<L>>,
     lsas: &[L],
     now: Instant,
-) -> (Vec<Action>, Vec<H>) {
+    origin: Option<Origin>,
+    ack: AckMode,
+) -> LsuResult<L> {
     let mut stores = Stores {
         area,
         link_local: link,
@@ -1216,7 +1224,37 @@ fn lsu_at(
         },
         |h| h.id >= 900,
         |h| h.id == 500,
+        origin,
+        ack,
     )
+}
+
+fn lsu_at(
+    adj: &mut AdjacencyData,
+    area: &mut Lsdb<L>,
+    link: &mut Lsdb<L>,
+    as_scope: Option<&mut Lsdb<L>>,
+    lsas: &[L],
+    now: Instant,
+) -> (Vec<Action>, Vec<H>) {
+    let r = lsu_full(
+        adj,
+        area,
+        link,
+        as_scope,
+        lsas,
+        now,
+        None,
+        AckMode::LegacyDelayed,
+    );
+    (r.actions, r.installed)
+}
+
+fn rxmt(l: L) -> Rxmt<L> {
+    Rxmt {
+        lsa: Arc::new(l),
+        last_sent: Instant::now(),
+    }
 }
 
 fn lsu(adj: &mut AdjacencyData, area: &mut Lsdb<L>, lsas: &[L]) -> (Vec<Action>, Vec<H>) {
@@ -1229,11 +1267,11 @@ fn lsr_for_held_lsas_sends_one_lsu_from_whichever_store_holds_each() {
     let (mut area, mut link) = (Lsdb::new(), Lsdb::new());
     area.install(lsa_id(1, SEQ1));
     link.install(lsa_id(101, SEQ1));
-    let actions = on_lsr_received(&mut adj, &[&area, &link], &[1, 101]);
+    let actions = on_lsr_received(&mut adj, &[&area, &link], &[1, 101], Instant::now());
     assert!(matches!(&actions[..], [Action::SendLsu(lsas)] if lsas.len() == 2));
     assert!(adj.retransmission_list.contains_key(&1));
     assert!(adj.retransmission_list.contains_key(&101));
-    assert_eq!(on_lsr_received(&mut adj, &[&area], &[]), []);
+    assert_eq!(on_lsr_received(&mut adj, &[&area], &[], Instant::now()), []);
 }
 
 #[test]
@@ -1243,7 +1281,7 @@ fn lsr_for_unknown_lsa_triggers_seq_number_mismatch() {
     area.install(lsa_id(1, SEQ1));
     // 101 lives in another link's store, so it is not servable here.
     assert_eq!(
-        on_lsr_received(&mut adj, &[&area, &Lsdb::new()], &[1, 101]),
+        on_lsr_received(&mut adj, &[&area, &Lsdb::new()], &[1, 101], Instant::now()),
         vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
     );
     assert!(adj.retransmission_list.is_empty());
@@ -1373,7 +1411,7 @@ fn lsu_with_newer_instance_too_soon_is_discarded_without_ack() {
     };
     let mut area = Lsdb::new();
     let t0 = Instant::now();
-    area.install_received(first, t0);
+    area.install_received(first, t0, None);
     let run = |adj: &mut AdjacencyData, area: &mut Lsdb<L>, at| {
         lsu_at(
             adj,
@@ -1513,7 +1551,7 @@ fn lsu_max_age_of_requested_key_installs_but_unknown_key_only_acks() {
 fn lsack_clears_retransmission_list() {
     let l = lsa_id(1, SEQ1);
     let mut adj = AdjacencyData {
-        retransmission_list: HashMap::from([(1, Arc::new(l.clone()))]),
+        retransmission_list: HashMap::from([(1, rxmt(l.clone()))]),
         ..Default::default()
     };
     on_lsack_received(&mut adj, &[l.0]);
@@ -1525,7 +1563,7 @@ fn lsack_of_other_instance_keeps_entry() {
     for acked_seq in [SEQ1 - 1, SEQ1 + 1] {
         let l = lsa_id(1, SEQ1);
         let mut adj = AdjacencyData {
-            retransmission_list: HashMap::from([(1, Arc::new(l))]),
+            retransmission_list: HashMap::from([(1, rxmt(l))]),
             ..Default::default()
         };
         on_lsack_received(&mut adj, &[lsa_id(1, acked_seq).0]);
@@ -1581,5 +1619,144 @@ fn take_all_pending_acks_dedupes_drains_and_keeps_oldest_since() {
     assert_eq!(
         take_all_pending_acks([&mut a, &mut b].into_iter()),
         (vec![], None)
+    );
+}
+
+// #1516: the §13.5 verdicts, the origin and the implied ack.
+
+use crate::flood::{LinkFlood, Receipt, RxVerdict};
+
+fn rfc(link: LinkFlood, from_dr: bool, other_adjacent: bool) -> AckMode {
+    AckMode::Rfc(AckCtx {
+        link,
+        rx: Receipt {
+            from: router_id("1.1.1.1"),
+            from_dr_or_bdr: from_dr,
+        },
+        other_adjacent,
+    })
+}
+
+const BCAST: LinkFlood = LinkFlood {
+    broadcast: true,
+    we_are_dr: false,
+    we_are_bdr: false,
+};
+
+fn lsu_rfc(adj: &mut AdjacencyData, area: &mut Lsdb<L>, l: L, ack: AckMode) -> LsuResult<L> {
+    lsu_full(
+        adj,
+        area,
+        &mut Lsdb::new(),
+        None,
+        &[l],
+        Instant::now(),
+        None,
+        ack,
+    )
+}
+
+#[test]
+fn verdicts_cover_every_table_row() {
+    let mut area = Lsdb::new();
+    let mut adj = AdjacencyData::default();
+    let ack = rfc(BCAST, false, true);
+    // New, flooded back: no ack.
+    let r = lsu_rfc(&mut adj, &mut area, lsa_id(1, SEQ1), ack);
+    assert_eq!(r.verdicts[0].1, RxVerdict::NewerFloodedBack);
+    assert!(adj.pending_acks.is_empty() && r.installed.len() == 1);
+    // New, nobody to flood to: delayed.
+    let r = lsu_rfc(
+        &mut adj,
+        &mut area,
+        lsa_id(3, SEQ1),
+        rfc(BCAST, false, false),
+    );
+    assert_eq!(r.verdicts[0].1, RxVerdict::Newer);
+    assert_eq!(adj.pending_acks.len(), 1);
+    // Same instance again: duplicate, direct ack.
+    let r = lsu_rfc(&mut adj, &mut area, lsa_id(3, SEQ1), ack);
+    assert_eq!(r.verdicts[0].1, RxVerdict::Duplicate);
+    assert!(matches!(&r.actions[..], [Action::SendLsAck(h), ..] if h.len() == 1));
+    assert_eq!(r.installed, Vec::new());
+    // Ours is newer: no ack.
+    let before = adj.pending_acks.len();
+    let r = lsu_rfc(&mut adj, &mut area, lsa_id(3, SEQ1 - 1), ack);
+    assert_eq!(r.verdicts[0].1, RxVerdict::DbNewer);
+    assert!(!r.actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+    assert_eq!(adj.pending_acks.len(), before);
+    // MaxAge with no copy: direct ack, not installed.
+    let mut old = lsa_id(2, SEQ1);
+    old.0.age = MAX_AGE;
+    let r = lsu_rfc(&mut adj, &mut area, old, ack);
+    assert_eq!(r.verdicts[0].1, RxVerdict::MaxAgeNoCopy);
+    assert!(matches!(&r.actions[0], Action::SendLsAck(_)));
+    assert!(area.get(&2).is_none());
+}
+
+#[test]
+fn duplicate_on_the_senders_retransmission_list_is_an_implied_ack() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    let mut adj = AdjacencyData::default();
+    adj.retransmission_list.insert(1, rxmt(lsa_id(1, SEQ1)));
+    let r = lsu_rfc(
+        &mut adj,
+        &mut area,
+        lsa_id(1, SEQ1),
+        rfc(BCAST, false, false),
+    );
+    assert_eq!(r.verdicts[0].1, RxVerdict::DuplicateImplied);
+    assert!(adj.retransmission_list.is_empty());
+    assert_eq!(adj.pending_acks, Vec::new());
+    assert!(!r.actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+    // As the BDR, an implied ack from the DR is delayed.
+    adj.retransmission_list.insert(1, rxmt(lsa_id(1, SEQ1)));
+    let bdr = LinkFlood {
+        we_are_bdr: true,
+        ..BCAST
+    };
+    lsu_rfc(&mut adj, &mut area, lsa_id(1, SEQ1), rfc(bdr, true, false));
+    assert_eq!(adj.pending_acks.len(), 1);
+}
+
+#[test]
+fn origin_reaches_the_flood_sink() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+    let mut area = Lsdb::new();
+    area.set_flood_sink(tx);
+    let o = Origin {
+        link: 3,
+        neighbor: router_id("1.1.1.1"),
+    };
+    let mut adj = AdjacencyData::default();
+    let mut stores = Stores {
+        area: &mut area,
+        link_local: &mut Lsdb::new(),
+        as_scope: None,
+    };
+    on_lsu_received(
+        &mut adj,
+        &mut stores,
+        &[lsa_id(1, SEQ1)],
+        Instant::now(),
+        |_| Scope::Area,
+        |_| false,
+        |_| false,
+        Some(o),
+        AckMode::LegacyDelayed,
+    );
+    assert_eq!(rx.try_recv().unwrap().origin, Some(o));
+}
+
+#[test]
+fn exchange_done_with_an_empty_request_list_has_no_lsr() {
+    let mut actions = Vec::new();
+    push_exchange_done(&AdjacencyData::default(), &mut actions);
+    assert_eq!(
+        actions,
+        vec![Action::NeighborEvent(Event::ExchangeDone {
+            more_to_load: false
+        })]
     );
 }

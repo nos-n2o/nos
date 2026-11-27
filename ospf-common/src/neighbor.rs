@@ -9,7 +9,7 @@
 /// is an ongoing, valid state here, not a signal to tear down the driver
 /// task (a point-to-point link keeps sending Hellos while `Down`, hoping to
 /// hear one back).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NeighborState {
     Down,
     Init,
