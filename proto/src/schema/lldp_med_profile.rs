@@ -242,6 +242,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn defaults_commit_and_names_are_checked() {
         assert!(ok(|_| {}));
         assert!(!ok(|p| p.name = String::new()));
@@ -250,6 +254,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn duplicate_names_are_refused() {
         let p = LldpMedProfile {
             name: "p".into(),
@@ -263,6 +271,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn policy_bounds() {
         let with = |f: fn(&mut LldpMedNetworkPolicy)| {
             ok(|p| {
@@ -286,6 +298,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn policies_are_capped_and_unique() {
         use LldpMedAppType::*;
         let all = [
@@ -312,6 +328,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn poe_power_is_ten_bits() {
         let poe = |power| {
             Some(LldpMedPoe {

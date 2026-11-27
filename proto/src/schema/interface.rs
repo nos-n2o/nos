@@ -1337,6 +1337,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn lldp_med_profile_reference_must_exist() {
         let mut iface = interface("eth0", &[], None);
         iface.lldp_med_profile = Some("voice".into());
@@ -1351,6 +1355,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn lldp_location_needs_a_profile_and_is_per_interface() {
         let mut a = interface("eth0", &[], None);
         a.lldp_location = elin("1234567890");
@@ -1372,6 +1380,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "full-Config validation, slow under the interpreter; pure logic covered natively"
+    )]
     fn lldp_med_on_loopback_fails() {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.lldp_med_profile = Some("p".into());
