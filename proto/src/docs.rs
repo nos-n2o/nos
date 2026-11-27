@@ -679,6 +679,8 @@ topics! {
     AclRuleIcmpCode,
     /// `AclRule.log`
     AclRuleLog,
+    /// `AclRule.fragments`
+    AclRuleFragments,
     /// `Interface.acl_in`
     InterfaceAclIn,
     /// `Interface.acl_out`

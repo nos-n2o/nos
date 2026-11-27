@@ -228,6 +228,12 @@ pub struct AclRule {
     #[cli(topic = AclRuleLog)]
     /// Log the packets this rule matches.
     pub log: bool,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = AclRuleFragments)]
+    /// Match only non-first IP fragments (offset > 0); first fragments and unfragmented packets never match. L3 keys still apply, L4 keys are refused.
+    pub fragments: bool,
 }
 
 /// A named list of rules evaluated in order; the first match wins.
@@ -300,6 +306,17 @@ fn valid_rule(r: &AclRule) -> Result<(), &'static str> {
         if p.start > p.end {
             return Err("port range start is above its end");
         }
+    }
+    if r.fragments
+        && (r.source_port.is_some()
+            || r.destination_port.is_some()
+            || r.established
+            || r.icmp_type.is_some()
+            || r.icmp_code.is_some())
+    {
+        return Err(
+            "fragments cannot be combined with ports, established or icmp-type/icmp-code: L4 headers are only in the first fragment",
+        );
     }
     if r.established && r.protocol != Some(Tcp) {
         return Err("established needs protocol tcp");
@@ -604,6 +621,43 @@ mod tests {
                 r.destination_port = bad;
             }));
         }
+    }
+
+    #[test]
+    fn fragments_refuse_l4_keys_only() {
+        assert!(ok(|r| r.fragments = true));
+        assert!(ok(|r| {
+            r.fragments = true;
+            r.protocol = Some(AclProtocol::Tcp);
+            r.source = net("10.0.0.0/8");
+        }));
+        assert!(!ok(|r| {
+            r.fragments = true;
+            r.protocol = Some(AclProtocol::Udp);
+            r.destination_port = port(9, 9);
+        }));
+        assert!(!ok(|r| {
+            r.fragments = true;
+            r.protocol = Some(AclProtocol::Tcp);
+            r.established = true;
+        }));
+        assert!(!ok(|r| {
+            r.fragments = true;
+            r.protocol = Some(AclProtocol::Icmp);
+            r.icmp_type = Some(8);
+        }));
+    }
+
+    #[test]
+    fn a_rule_without_fragments_still_parses() {
+        let r: AclRule = serde_json::from_str(r#"{"name":"r"}"#).unwrap();
+        assert!(!r.fragments);
+        let r = AclRule {
+            fragments: true,
+            ..r
+        };
+        let b = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<AclRule>(&b).unwrap(), r);
     }
 
     #[test]
