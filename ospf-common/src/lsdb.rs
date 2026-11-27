@@ -63,6 +63,28 @@ pub struct Lsdb<L: Lsa> {
     /// Received LSAs refused by `limit`, total.
     refused: u64,
     warn: crate::ratelimit::WarnLimiter,
+    /// Flood sink (#1516): one event per accepted install and `MaxAge` transition.
+    flood_tx: Option<tokio::sync::broadcast::Sender<FloodEvent<L>>>,
+}
+
+/// Where an LSA was received from (links are the daemon's own opaque ids).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Origin {
+    pub link: u32,
+    /// The sender's router-id.
+    pub neighbor: Ipv4Addr,
+}
+
+/// One LSA the store accepted (or aged to `MAX_AGE`) that RFC 2328 §13.3 says
+/// to flood. A lagging receiver sees `RecvError::Lagged` and must re-flood the
+/// whole store once on its link.
+#[derive(Clone, Debug)]
+pub struct FloodEvent<L: Lsa> {
+    pub lsa: Arc<L>,
+    /// `None`: self-originated, aged, flushed or an ABR copy.
+    pub origin: Option<Origin>,
+    /// `Installed` or `Superseded` only.
+    pub outcome: InstallOutcome,
 }
 
 /// Default `max-lsa`: non-self LSAs one store holds.
@@ -83,6 +105,7 @@ impl<L: Lsa> Default for Lsdb<L> {
             foreign: 0,
             refused: 0,
             warn: crate::ratelimit::WarnLimiter::default(),
+            flood_tx: None,
         }
     }
 }
@@ -122,6 +145,23 @@ impl<L: Lsa> Lsdb<L> {
         Self {
             notify: Some(notify),
             ..Self::default()
+        }
+    }
+
+    /// Sends a `FloodEvent` for every accepted install and `MaxAge` transition.
+    /// Fired under the store's mutex; `broadcast::send` never blocks.
+    pub fn set_flood_sink(&mut self, tx: tokio::sync::broadcast::Sender<FloodEvent<L>>) {
+        self.flood_tx = Some(tx);
+    }
+
+    fn emit(&self, lsa: &Arc<L>, origin: Option<Origin>, outcome: InstallOutcome) {
+        if let Some(tx) = &self.flood_tx {
+            // A send error means no receiver is subscribed: fine.
+            let _ = tx.send(FloodEvent {
+                lsa: Arc::clone(lsa),
+                origin,
+                outcome,
+            });
         }
     }
 
@@ -223,6 +263,10 @@ impl<L: Lsa> Lsdb<L> {
     /// Installs `lsa` if it's newer than (or new relative to) what's held —
     /// see `LsaHeader::is_newer`.
     pub fn install(&mut self, lsa: L) -> InstallOutcome {
+        self.install_inner(lsa, None)
+    }
+
+    fn install_inner(&mut self, lsa: L, origin: Option<Origin>) -> InstallOutcome {
         let key = lsa.header().key();
         match self.entries.get(&key) {
             Some(existing) if lsa.header().is_newer(existing.header()) != Ordering::Greater => {
@@ -236,15 +280,19 @@ impl<L: Lsa> Lsdb<L> {
                 self.max_age_ticks.remove(&key);
                 self.foreign -= usize::from(self.counted(&existing));
                 self.foreign += usize::from(self.counted(&lsa));
-                self.entries.insert(key, Arc::new(lsa));
+                let lsa = Arc::new(lsa);
+                self.entries.insert(key, Arc::clone(&lsa));
                 self.kick();
+                self.emit(&lsa, origin, InstallOutcome::Superseded);
                 InstallOutcome::Superseded
             }
             None => {
                 self.note_topology(&lsa, None);
                 self.foreign += usize::from(self.counted(&lsa));
-                self.entries.insert(key, Arc::new(lsa));
+                let lsa = Arc::new(lsa);
+                self.entries.insert(key, Arc::clone(&lsa));
                 self.kick();
+                self.emit(&lsa, origin, InstallOutcome::Installed);
                 InstallOutcome::Installed
             }
         }
@@ -254,7 +302,12 @@ impl<L: Lsa> Lsdb<L> {
     /// `MIN_LS_ARRIVAL`: a newer instance arriving within it of the last one
     /// accepted for the same key is `TooSoon` and left uninstalled — the
     /// sender's retransmission brings it back after `RxmtInterval`.
-    pub fn install_received(&mut self, lsa: L, now: Instant) -> InstallOutcome {
+    pub fn install_received(
+        &mut self,
+        lsa: L,
+        now: Instant,
+        origin: Option<Origin>,
+    ) -> InstallOutcome {
         let key = lsa.header().key();
         let too_soon = self
             .last_received
@@ -283,7 +336,7 @@ impl<L: Lsa> Lsdb<L> {
                 return InstallOutcome::LimitReached;
             }
         }
-        let outcome = self.install(lsa);
+        let outcome = self.install_inner(lsa, origin);
         if outcome != InstallOutcome::Rejected {
             self.last_received.insert(key, now);
         }
@@ -334,6 +387,7 @@ impl<L: Lsa> Lsdb<L> {
         let last_received = &mut self.last_received;
         let own = self.limit.as_ref().map(|(o, _)| *o);
         let mut uncounted = 0;
+        let mut flushed = Vec::new();
         self.entries.retain(|key, lsa| {
             if lsa.header().age() >= MAX_AGE {
                 let ticks = max_age_ticks.entry(*key).or_insert(0);
@@ -358,9 +412,16 @@ impl<L: Lsa> Lsdb<L> {
                 updated.header_mut().set_age(aged);
                 *lsa = Arc::new(updated);
             }
+            if aged >= MAX_AGE {
+                flushed.push(Arc::clone(lsa));
+            }
             true
         });
         self.foreign -= uncounted;
+        // RFC 2328 §14: an LSA reaching MaxAge is flooded.
+        for l in &flushed {
+            self.emit(l, None, InstallOutcome::Superseded);
+        }
         if !evicted.is_empty() {
             self.kick();
         }
@@ -440,15 +501,15 @@ mod tests {
         let t0 = Instant::now();
         let mut db = limited(1, 2);
         assert_eq!(
-            db.install_received(with(10, 1, 0, 0), t0),
+            db.install_received(with(10, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
         assert_eq!(
-            db.install_received(with(11, 1, 0, 0), t0),
+            db.install_received(with(11, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
         assert_eq!(
-            db.install_received(with(12, 1, 0, 0), t0),
+            db.install_received(with(12, 1, 0, 0), t0, None),
             InstallOutcome::LimitReached
         );
         assert_eq!(db.refused(), 1);
@@ -456,17 +517,17 @@ mod tests {
         // An update of a held key is always accepted.
         let later = t0 + Duration::from_secs(2);
         assert_eq!(
-            db.install_received(with(10, 2, 0, 0), later),
+            db.install_received(with(10, 2, 0, 0), later, None),
             InstallOutcome::Superseded
         );
         // Own LSAs are exempt, however installed.
         assert_eq!(db.install(with(1, 1, 0, 0)), InstallOutcome::Installed);
         assert_eq!(
-            db.install_received(with(1, 2, 0, 0), later),
+            db.install_received(with(1, 2, 0, 0), later, None),
             InstallOutcome::Superseded
         );
         assert_eq!(
-            db.install_received(with(1, 3, 0, 0), later + Duration::from_secs(2)),
+            db.install_received(with(1, 3, 0, 0), later + Duration::from_secs(2), None),
             InstallOutcome::Superseded
         );
     }
@@ -476,41 +537,41 @@ mod tests {
         let t0 = Instant::now();
         let mut db = limited(1, 1);
         assert_eq!(
-            db.install_received(with(10, 1, 0, 0), t0),
+            db.install_received(with(10, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
         // A flushed instance of a new key is not counted.
         assert_eq!(
-            db.install_received(with(11, 1, 0, MAX_AGE), t0),
+            db.install_received(with(11, 1, 0, MAX_AGE), t0, None),
             InstallOutcome::Installed
         );
         assert_eq!(
-            db.install_received(with(12, 1, 0, 0), t0),
+            db.install_received(with(12, 1, 0, 0), t0, None),
             InstallOutcome::LimitReached
         );
         // A held LSA aging to MaxAge stops counting.
         db.age_and_evict(MAX_AGE, &HashSet::new());
         assert_eq!(
-            db.install_received(with(12, 1, 0, 0), t0),
+            db.install_received(with(12, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
         db.remove(&12);
         assert_eq!(
-            db.install_received(with(13, 1, 0, 0), t0),
+            db.install_received(with(13, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
         // The cap is read live.
         let mut db = limited(1, 1);
         let max = Arc::new(AtomicU32::new(1));
         db.set_limit(Ipv4Addr::from(1), Arc::clone(&max));
-        db.install_received(with(10, 1, 0, 0), t0);
+        db.install_received(with(10, 1, 0, 0), t0, None);
         assert_eq!(
-            db.install_received(with(11, 1, 0, 0), t0),
+            db.install_received(with(11, 1, 0, 0), t0, None),
             InstallOutcome::LimitReached
         );
         max.store(5, AtomicOrdering::Relaxed);
         assert_eq!(
-            db.install_received(with(11, 1, 0, 0), t0),
+            db.install_received(with(11, 1, 0, 0), t0, None),
             InstallOutcome::Installed
         );
     }
@@ -645,25 +706,28 @@ mod tests {
     fn install_received_paces_newer_instances_by_min_ls_arrival() {
         let mut db = Db::new();
         let t0 = Instant::now();
-        assert_eq!(db.install_received(lsa(1), t0), InstallOutcome::Installed);
         assert_eq!(
-            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL / 2),
+            db.install_received(lsa(1), t0, None),
+            InstallOutcome::Installed
+        );
+        assert_eq!(
+            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL / 2, None),
             InstallOutcome::TooSoon
         );
         assert_eq!(db.get(&key()).unwrap().header().seq(), 1);
         // A duplicate is still just rejected, never `TooSoon`.
         assert_eq!(
-            db.install_received(lsa(1), t0 + MIN_LS_ARRIVAL / 2),
+            db.install_received(lsa(1), t0 + MIN_LS_ARRIVAL / 2, None),
             InstallOutcome::Rejected
         );
         assert_eq!(
-            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL),
+            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL, None),
             InstallOutcome::Superseded
         );
         assert_eq!(db.get(&key()).unwrap().header().seq(), 2);
         // The pacing clock restarts from the accepted instance.
         assert_eq!(
-            db.install_received(lsa(3), t0 + MIN_LS_ARRIVAL + MIN_LS_ARRIVAL / 2),
+            db.install_received(lsa(3), t0 + MIN_LS_ARRIVAL + MIN_LS_ARRIVAL / 2, None),
             InstallOutcome::TooSoon
         );
     }
@@ -675,7 +739,10 @@ mod tests {
         let mut db = Db::new();
         let t0 = Instant::now();
         db.install(lsa(1));
-        assert_eq!(db.install_received(lsa(2), t0), InstallOutcome::Superseded);
+        assert_eq!(
+            db.install_received(lsa(2), t0, None),
+            InstallOutcome::Superseded
+        );
     }
 
     /// `remove` forgets the pacing clock too.
@@ -683,9 +750,12 @@ mod tests {
     fn remove_clears_pacing() {
         let mut db = Db::new();
         let t0 = Instant::now();
-        db.install_received(lsa(1), t0);
+        db.install_received(lsa(1), t0, None);
         db.remove(&key());
-        assert_eq!(db.install_received(lsa(2), t0), InstallOutcome::Installed);
+        assert_eq!(
+            db.install_received(lsa(2), t0, None),
+            InstallOutcome::Installed
+        );
     }
 
     #[tokio::test]
@@ -720,5 +790,87 @@ mod tests {
         assert!(!fired(&n));
         db.remove(&key());
         assert!(fired(&n));
+    }
+
+    fn sink(db: &mut Db) -> tokio::sync::broadcast::Receiver<FloodEvent<L>> {
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        db.set_flood_sink(tx);
+        rx
+    }
+
+    #[test]
+    fn sink_fires_for_installed_and_superseded_with_origin() {
+        let mut db = Db::new();
+        let mut rx = sink(&mut db);
+        let o = Origin {
+            link: 1,
+            neighbor: Ipv4Addr::from(5),
+        };
+        db.install(lsa(1));
+        db.install_received(lsa(2), Instant::now(), Some(o));
+        let a = rx.try_recv().unwrap();
+        assert_eq!((a.origin, a.outcome), (None, InstallOutcome::Installed));
+        let b = rx.try_recv().unwrap();
+        assert_eq!((b.origin, b.outcome), (Some(o), InstallOutcome::Superseded));
+        assert_eq!(b.lsa.header().seq(), 2);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sink_ignores_rejected_too_soon_limit_remove_and_evict() {
+        let mut db = limited(1, 1);
+        let mut rx = sink(&mut db);
+        let t0 = Instant::now();
+        db.install_received(with(10, 5, 0, 0), t0, None);
+        rx.try_recv().unwrap();
+        db.install(with(10, 5, 0, 0)); // Rejected
+        db.install_received(with(10, 6, 0, 0), t0, None); // TooSoon
+        db.install_received(with(11, 1, 0, 0), t0, None); // LimitReached
+        db.remove(&10);
+        db.install(with(12, 1, 0, MAX_AGE));
+        rx.try_recv().unwrap();
+        for _ in 0..MAX_AGE_HOLD_TICKS {
+            db.age_and_evict(1, &HashSet::new());
+        }
+        assert!(db.get(&12).is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn no_receiver_is_not_an_error() {
+        let mut db = Db::new();
+        drop(sink(&mut db));
+        assert_eq!(db.install(lsa(1)), InstallOutcome::Installed);
+    }
+
+    #[test]
+    fn aging_fires_once_on_the_max_age_transition_not_while_held() {
+        let mut db = Db::new();
+        db.install(with(10, 1, 0, MAX_AGE - 1));
+        let mut rx = sink(&mut db);
+        db.age_and_evict(1, &HashSet::new());
+        let e = rx.try_recv().unwrap();
+        assert_eq!((e.origin, e.outcome), (None, InstallOutcome::Superseded));
+        assert_eq!(e.lsa.header().age(), MAX_AGE);
+        db.age_and_evict(1, &HashSet::new());
+        assert!(rx.try_recv().is_err(), "held, not refired");
+        // A grace-held LSA never reaches MaxAge.
+        db.install(with(11, 1, 0, MAX_AGE - 1));
+        rx.try_recv().unwrap();
+        db.age_and_evict(1, &HashSet::from([Ipv4Addr::from(11)]));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_lagging_receiver_sees_lagged() {
+        let mut db = Db::new();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        db.set_flood_sink(tx);
+        db.install(with(1, 1, 0, 0));
+        db.install(with(2, 1, 0, 0));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(1))
+        ));
     }
 }

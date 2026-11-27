@@ -65,9 +65,19 @@ pub fn on_lsr_received(
 ) -> Vec<Action> {
     // A stub area's link never answers for an AS-scope LSA.
     if stub {
-        return common::on_lsr_received(adj, &[area_lsdb, link_local_lsdb], &lsr.requests);
+        return common::on_lsr_received(
+            adj,
+            &[area_lsdb, link_local_lsdb],
+            &lsr.requests,
+            Instant::now(),
+        );
     }
-    common::on_lsr_received(adj, &[area_lsdb, link_local_lsdb, as_lsdb], &lsr.requests)
+    common::on_lsr_received(
+        adj,
+        &[area_lsdb, link_local_lsdb, as_lsdb],
+        &lsr.requests,
+        Instant::now(),
+    )
 }
 
 /// `nos_ospf_common::exchange::on_lsu_received` with v3's closures: a
@@ -95,7 +105,7 @@ pub fn on_lsu_received(
         link_local: link_local_lsdb,
         as_scope: Some(as_lsdb),
     };
-    common::on_lsu_received(
+    let r = common::on_lsu_received(
         adj,
         &mut stores,
         &lsu.lsas,
@@ -112,7 +122,10 @@ pub fn on_lsu_received(
         // §13 step 3: reserved scope, or AS-scope in a stub area.
         |h| lsa::is_reserved_scope(h.lsa_type) || !lsa::in_area_scope(h.lsa_type, stub, nssa),
         |h| h.lsa_type == lsa::LSA_TYPE_GRACE,
-    )
+        None,
+        common::AckMode::LegacyDelayed,
+    );
+    (r.actions, r.installed)
 }
 
 #[cfg(test)]

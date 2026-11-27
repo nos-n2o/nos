@@ -1644,7 +1644,11 @@ fn retransmit_pending(
             }
         }
         if !adj.retransmission_list.is_empty() {
-            let lsas: Vec<_> = adj.retransmission_list.values().cloned().collect();
+            let lsas: Vec<_> = adj
+                .retransmission_list
+                .values()
+                .map(|r| r.lsa.clone())
+                .collect();
             for payload in lsu_packets(cfg, local_router_id, &lsas) {
                 if let Err(e) = socket.send_unicast(info.address, cfg.interface_id, &payload) {
                     warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 lsu");
@@ -8774,10 +8778,13 @@ pub(crate) mod tests {
                 let mut adj = AdjacencyData::default();
                 adj.retransmission_list.insert(
                     header.key(),
-                    Arc::new(Lsa {
-                        header,
-                        body: LsaBody::Opaque(vec![]),
-                    }),
+                    nos_ospf_common::exchange::Rxmt {
+                        lsa: Arc::new(Lsa {
+                            header,
+                            body: LsaBody::Opaque(vec![]),
+                        }),
+                        last_sent: std::time::Instant::now(),
+                    },
                 );
                 info.adjacency = Some(adj);
                 s.neighbors.insert(neighbor_id, info);
@@ -9017,7 +9024,13 @@ pub(crate) mod tests {
                 .adjacency
                 .as_mut()
                 .unwrap();
-            adj.retransmission_list.insert(l.header.key(), Arc::new(l));
+            adj.retransmission_list.insert(
+                l.header.key(),
+                nos_ospf_common::exchange::Rxmt {
+                    lsa: Arc::new(l),
+                    last_sent: std::time::Instant::now(),
+                },
+            );
         });
         retransmit_pending(&socket, &cfg, id(1), &status);
         assert_eq!(

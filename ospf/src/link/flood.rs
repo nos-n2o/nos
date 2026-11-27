@@ -166,7 +166,7 @@ pub(super) fn retransmit_pending(
         let retransmit: Vec<Lsa> = adj
             .retransmission_list
             .values()
-            .map(|l| (**l).clone())
+            .map(|r| (*r.lsa).clone())
             .collect();
         for payload in split_lsu(cfg, next_seq, local_router_id, &retransmit) {
             if let Err(e) = socket.send_unicast(info.address, &payload) {

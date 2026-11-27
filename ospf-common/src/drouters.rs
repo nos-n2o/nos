@@ -30,7 +30,7 @@ pub const fn wants_all_drouters(is_dr_or_backup: bool, point_to_point: bool) -> 
 }
 
 /// Where a flooded LSU or delayed `LSAck` goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dest {
     /// One unicast per adjacent neighbor.
     Unicast,

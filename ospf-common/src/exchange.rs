@@ -20,10 +20,11 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::flood::{ack_action, floods_back, AckAction, LinkFlood, Receipt, RxVerdict};
 use crate::lsa::{Lsa, LsaHeader, MAX_AGE};
-use crate::lsdb::{InstallOutcome, Key, Lsdb};
+use crate::lsdb::{InstallOutcome, Key, Lsdb, Origin};
 use crate::neighbor::{Event, NeighborState};
 
 /// The LSA header's wire length, identical in RFC 2328 and RFC 5340.
@@ -113,6 +114,13 @@ pub struct Dbd<H, X = ()> {
 /// The `Dbd` of an LSA family `L`.
 type DbdOf<L> = Dbd<<L as Lsa>::Header, <L as Lsa>::Lls>;
 
+/// A retransmission-list entry: the LSA and when it was last sent (#1516).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rxmt<L: Lsa> {
+    pub lsa: Arc<L>,
+    pub last_sent: Instant,
+}
+
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 // Independent flags, each read on its own.
 #[allow(clippy::struct_excessive_bools)]
@@ -128,7 +136,7 @@ pub struct AdjacencyData<L: Lsa> {
     pub request_list: Vec<Key<L>>,
     /// LSAs sent via LSU, awaiting an `LSAck` — resent by `link.rs`'s
     /// retransmit sweep until acked.
-    pub retransmission_list: HashMap<Key<L>, Arc<L>>,
+    pub retransmission_list: HashMap<Key<L>, Rxmt<L>>,
     /// The most recent DBD this router sent this neighbor (negotiation
     /// packet, poll, or reply) — resent by `link.rs`'s retransmit sweep
     /// until superseded by the next stage of the exchange. Necessary
@@ -363,9 +371,7 @@ fn on_dbd_in_exstart<L: Lsa>(
                 Action::NeighborEvent(Event::NegotiationDone),
             ];
             if done {
-                actions.push(Action::NeighborEvent(Event::ExchangeDone {
-                    more_to_load: !adj.request_list.is_empty(),
-                }));
+                push_exchange_done(adj, &mut actions);
             }
             actions
         }
@@ -403,9 +409,7 @@ fn on_dbd_in_exstart<L: Lsa>(
             }
             actions.push(Action::NeighborEvent(Event::NegotiationDone));
             if done {
-                actions.push(Action::NeighborEvent(Event::ExchangeDone {
-                    more_to_load: !adj.request_list.is_empty(),
-                }));
+                push_exchange_done(adj, &mut actions);
             }
             actions
         }
@@ -560,9 +564,7 @@ fn on_dbd_in_exchange<L: Lsa>(
             actions.push(Action::SendDbd(poll));
         }
         if done {
-            actions.push(Action::NeighborEvent(Event::ExchangeDone {
-                more_to_load: !adj.request_list.is_empty(),
-            }));
+            push_exchange_done(adj, &mut actions);
         }
         actions
     } else {
@@ -584,12 +586,21 @@ fn on_dbd_in_exchange<L: Lsa>(
         let (reply, done) = slave_process_poll(adj, p, dbd, local_lsdb_headers);
         let mut actions = vec![Action::SendDbd(reply)];
         if done {
-            actions.push(Action::NeighborEvent(Event::ExchangeDone {
-                more_to_load: !adj.request_list.is_empty(),
-            }));
+            push_exchange_done(adj, &mut actions);
         }
         actions
     }
+}
+
+/// `ExchangeDone`, preceded by the first LSR when there is something to load
+/// (RFC 2328 §10.8) so it leaves at once instead of on the retransmit sweep.
+fn push_exchange_done<L: Lsa>(adj: &AdjacencyData<L>, actions: &mut Vec<Action<L>>) {
+    if !adj.request_list.is_empty() {
+        actions.push(Action::SendLsr(adj.request_list.clone()));
+    }
+    actions.push(Action::NeighborEvent(Event::ExchangeDone {
+        more_to_load: !adj.request_list.is_empty(),
+    }));
 }
 
 /// RFC 2328 §13.5: takes every queued ack for this neighbor as one `LSAck`
@@ -639,11 +650,29 @@ pub fn on_lsack_received<L: Lsa>(adj: &mut AdjacencyData<L>, acked: &[L::Header]
         if adj
             .retransmission_list
             .get(&header.key())
-            .is_some_and(|l| l.header().is_newer(header) == std::cmp::Ordering::Equal)
+            .is_some_and(|r| r.lsa.header().is_newer(header) == std::cmp::Ordering::Equal)
         {
             adj.retransmission_list.remove(&header.key());
         }
     }
+}
+
+/// RFC 2328 §13.6: the retransmission-list entries due for another send
+/// (`now - last_sent >= rxmt`), stamped `last_sent = now` so the next sweep
+/// skips them. `HashMap` order; the daemon chunks with `chunk_by_budget`.
+pub fn due_retransmissions<L: Lsa>(
+    adj: &mut AdjacencyData<L>,
+    now: Instant,
+    rxmt: Duration,
+) -> Vec<Arc<L>> {
+    adj.retransmission_list
+        .values_mut()
+        .filter(|r| now.saturating_duration_since(r.last_sent) >= rxmt)
+        .map(|r| {
+            r.last_sent = now;
+            Arc::clone(&r.lsa)
+        })
+        .collect()
 }
 
 /// Which store a received LSA belongs in (`on_lsu_received`'s `scope`).
@@ -674,6 +703,7 @@ pub fn on_lsr_received<L: Lsa>(
     adj: &mut AdjacencyData<L>,
     stores: &[&Lsdb<L>],
     requests: &[Key<L>],
+    now: Instant,
 ) -> Vec<Action<L>> {
     let mut found = Vec::with_capacity(requests.len());
     for key in requests {
@@ -686,29 +716,63 @@ pub fn on_lsr_received<L: Lsa>(
         return Vec::new();
     }
     for l in &found {
-        adj.retransmission_list.insert(l.header().key(), l.clone());
+        adj.retransmission_list.insert(
+            l.header().key(),
+            Rxmt {
+                lsa: l.clone(),
+                last_sent: now,
+            },
+        );
     }
     vec![Action::SendLsu(found)]
 }
 
+/// How `on_lsu_received` acknowledges (#1516).
+#[derive(Debug, Clone, Copy)]
+pub enum AckMode {
+    /// Every acked LSA is queued on `pending_acks`, never `SendLsAck`.
+    /// ponytail: deleted by whichever of #1517/#1518 lands second.
+    LegacyDelayed,
+    /// RFC 2328 §13.5 Table 19 through `ack_action`.
+    Rfc(AckCtx),
+}
+
+/// The link facts `AckMode::Rfc` needs. `rx.from_dr_or_bdr` doubles as
+/// "from the DR" when we are the BDR (the only case `ack_action` reads it).
+#[derive(Debug, Clone, Copy)]
+pub struct AckCtx {
+    pub link: LinkFlood,
+    pub rx: Receipt,
+    pub other_adjacent: bool,
+}
+
+/// What `on_lsu_received` did.
+#[derive(Debug)]
+pub struct LsuResult<L: Lsa> {
+    pub actions: Vec<Action<L>>,
+    /// Headers actually installed/superseded, so the daemon logs nothing for
+    /// the duplicates its own periodic resend produces.
+    pub installed: Vec<L::Header>,
+    /// The §13.5 row of every acknowledged-or-not LSA.
+    pub verdicts: Vec<(L::Header, RxVerdict)>,
+}
+
 /// Handles one received LSU (RFC 2328 §13): installs every carried LSA into
-/// the store `scope` picks, clears now-satisfied requests, and queues an ack
-/// for every LSA, newer or not (an ack for a stale instance still stops the
-/// sender retransmitting it). Fires `LoadingDone` once the request list is
-/// empty. Returns the actions plus the headers *actually*
-/// installed/superseded, so the daemon logs nothing for the duplicates its
-/// own periodic resend produces.
+/// the store `scope` picks, clears now-satisfied requests and acknowledges per
+/// `ack`. Fires `LoadingDone` once the request list is empty.
 ///
 /// - `discard`: dropped, neither installed nor acked (§13 step 3; v2: out of
 ///   stub/NSSA scope, v3: S2/S1 reserved).
 /// - `exempt_max_age`: skips §13 step 4 (v3 Grace-LSA: never held, and its
 ///   `MaxAge` copy is what ends a grace).
+/// - `origin`: who sent the LSU, handed to the store's flood sink.
+/// - `ack`: `LegacyDelayed` queues every ack on `adj.pending_acks` for the
+///   daemon's `RXMT_INTERVAL` sweep; `Rfc` applies `ack_action`: `Direct` is an
+///   `Action::SendLsAck` for the daemon to unicast at once.
 ///
-/// Acks are delayed (§13.5): queued on `adj.pending_acks` for the daemon's
-/// `RXMT_INTERVAL` sweep (`take_pending_acks`), never returned as
-/// `SendLsAck`. `ponytail:` the RFC's direct-ack cases key off "was this LSA
-/// flooded back out", which periodic-resend flooding has no equivalent of,
-/// so every ack is delayed.
+/// A `Rejected` instance equal to one on the sender's retransmission list is
+/// an implied ack (§13 step 7a): the entry is removed.
+#[allow(clippy::too_many_arguments)]
 pub fn on_lsu_received<L, FS, FD, FE>(
     adj: &mut AdjacencyData<L>,
     stores: &mut Stores<'_, L>,
@@ -717,14 +781,20 @@ pub fn on_lsu_received<L, FS, FD, FE>(
     scope: FS,
     discard: FD,
     exempt_max_age: FE,
-) -> (Vec<Action<L>>, Vec<L::Header>)
+    origin: Option<Origin>,
+    ack: AckMode,
+) -> LsuResult<L>
 where
     L: Lsa,
     FS: Fn(&L::Header) -> Scope,
     FD: Fn(&L::Header) -> bool,
     FE: Fn(&L::Header) -> bool,
 {
-    let mut newly_installed = Vec::new();
+    let mut res = LsuResult {
+        actions: Vec::new(),
+        installed: Vec::new(),
+        verdicts: Vec::new(),
+    };
     // Hash view of the request list: O(list + LSAs) per LSU, not O(LSAs x list).
     // Keys leave it as they're satisfied; one `retain` at the end keeps the Vec's order.
     let mut pending: std::collections::HashSet<Key<L>> = adj.request_list.iter().copied().collect();
@@ -756,28 +826,75 @@ where
             && store.get(&key).is_none()
             && !pending.contains(&key)
         {
-            adj.pending_acks.push(h);
+            ack_lsa(adj, &mut res, &ack, h, RxVerdict::MaxAgeNoCopy);
             continue;
         }
-        match store.install_received(l.clone(), now) {
+        let verdict = match store.install_received(l.clone(), now, origin) {
             // §13 step 5a (`MinLSArrival`): neither acked nor answering a
             // request; the sender's retransmission brings it back.
             // `max-lsa` (#1146): discarded unacked, like a bad checksum.
             InstallOutcome::TooSoon | InstallOutcome::LimitReached => continue,
-            InstallOutcome::Rejected => {}
-            InstallOutcome::Installed | InstallOutcome::Superseded => newly_installed.push(h),
-        }
-        adj.pending_acks.push(h);
+            InstallOutcome::Rejected => {
+                if adj
+                    .retransmission_list
+                    .get(&key)
+                    .is_some_and(|r| r.lsa.header().is_newer(&h) == Ordering::Equal)
+                {
+                    adj.retransmission_list.remove(&key);
+                    RxVerdict::DuplicateImplied
+                } else if store
+                    .get(&key)
+                    .is_some_and(|held| h.is_newer(held.header()) == Ordering::Less)
+                {
+                    RxVerdict::DbNewer
+                } else {
+                    RxVerdict::Duplicate
+                }
+            }
+            InstallOutcome::Installed | InstallOutcome::Superseded => {
+                res.installed.push(h);
+                match ack {
+                    AckMode::Rfc(c) if floods_back(c.rx, c.link, c.other_adjacent) => {
+                        RxVerdict::NewerFloodedBack
+                    }
+                    _ => RxVerdict::Newer,
+                }
+            }
+        };
+        ack_lsa(adj, &mut res, &ack, h, verdict);
         pending.remove(&key);
     }
     if pending.len() != adj.request_list.len() {
         adj.request_list.retain(|k| pending.contains(k));
     }
-    let mut actions = Vec::new();
     if adj.request_list.is_empty() {
-        actions.push(Action::NeighborEvent(Event::LoadingDone));
+        res.actions.push(Action::NeighborEvent(Event::LoadingDone));
     }
-    (actions, newly_installed)
+    res
+}
+
+/// Records `verdict` for `h` and acknowledges it per `ack`.
+fn ack_lsa<L: Lsa>(
+    adj: &mut AdjacencyData<L>,
+    res: &mut LsuResult<L>,
+    ack: &AckMode,
+    h: L::Header,
+    verdict: RxVerdict,
+) {
+    res.verdicts.push((h, verdict));
+    let what = match ack {
+        AckMode::LegacyDelayed => {
+            // Today's behaviour: every acked LSA, delayed. `DbNewer` was
+            // queued too before the RFC table existed.
+            AckAction::Delayed
+        }
+        AckMode::Rfc(c) => ack_action(verdict, c.link.we_are_bdr, c.rx.from_dr_or_bdr),
+    };
+    match what {
+        AckAction::None => {}
+        AckAction::Delayed => adj.pending_acks.push(h),
+        AckAction::Direct => res.actions.push(Action::SendLsAck(vec![h])),
+    }
 }
 
 /// RFC 2328 §10.8: request any LSA the neighbor's summary lists that this

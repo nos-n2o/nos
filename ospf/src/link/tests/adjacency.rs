@@ -455,10 +455,13 @@ fn lsack_ignored_below_exchange() {
             let mut adj = AdjacencyData::default();
             adj.retransmission_list.insert(
                 key,
-                Arc::new(Lsa {
-                    header,
-                    body: router_body(0),
-                }),
+                nos_ospf_common::exchange::Rxmt {
+                    lsa: Arc::new(Lsa {
+                        header,
+                        body: router_body(0),
+                    }),
+                    last_sent: std::time::Instant::now(),
+                },
             );
             info.adjacency = Some(adj);
             s.neighbors.insert(neighbor_id, info);

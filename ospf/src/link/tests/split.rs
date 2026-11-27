@@ -96,8 +96,13 @@ async fn retransmit_pending_splits_the_retransmission_list() {
         let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
         let mut adj = AdjacencyData::default();
         for l in &lsas {
-            adj.retransmission_list
-                .insert(l.header.key(), Arc::new(l.clone()));
+            adj.retransmission_list.insert(
+                l.header.key(),
+                nos_ospf_common::exchange::Rxmt {
+                    lsa: Arc::new(l.clone()),
+                    last_sent: std::time::Instant::now(),
+                },
+            );
         }
         info.adjacency = Some(adj);
         s.neighbors.insert(neighbor_id, info);
