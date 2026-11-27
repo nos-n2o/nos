@@ -6357,9 +6357,14 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             // The link-local address appears once the kernel has the link up.
             let mut found = None;
             for _ in 0..30 {
-                let body = b
+                // 404 until `nos-interfaced` has applied the new interface.
+                let Ok(body) = b
                     .rest_expect(Method::GET, &format!("/v1/interfaces/{dev}"), None, 200)
-                    .await?;
+                    .await
+                else {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                };
                 let st: serde_json::Value = serde_json::from_str(&body)?;
                 found = std::iter::once(&st)
                     .chain(st["subinterfaces"].as_array().into_iter().flatten())
