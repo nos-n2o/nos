@@ -1123,6 +1123,14 @@ fn lacp_mode_word(m: nos_proto::LacpMode) -> &'static str {
     }
 }
 
+fn fallback_word(f: nos_proto::LacpFallback) -> &'static str {
+    match f {
+        nos_proto::LacpFallback::Disabled => "-",
+        nos_proto::LacpFallback::Armed => "armed",
+        nos_proto::LacpFallback::Active => "active",
+    }
+}
+
 fn rate_word(r: LacpRate) -> &'static str {
     match r {
         LacpRate::Slow => "slow",
@@ -1202,6 +1210,7 @@ fn render_lacp_tables_raw(summaries: &[PortAggregateLacpSummary]) -> String {
                 yes_no(p.synchronized).to_string(),
                 churn_word(p.actor_churn, p.partner_churn).to_string(),
                 lacp_mode_word(p.mode).to_string(),
+                fallback_word(p.fallback).to_string(),
             ]
         })
         .collect();
@@ -1237,6 +1246,7 @@ fn render_lacp_tables_raw(summaries: &[PortAggregateLacpSummary]) -> String {
                 Col::left("Sync"),
                 Col::left("Churn"),
                 Col::left("Mode"),
+                Col::left("Fallback"),
             ],
             &ports,
         )
@@ -1375,6 +1385,7 @@ fn render_lacp_detail_raw(summaries: &[PortAggregateLacpSummary]) -> String {
                     ("port-number", p.actor_port_number.to_string()),
                     ("port-priority", p.actor_port_priority.to_string()),
                     ("mode", lacp_mode_word(p.mode).to_string()),
+                    ("fallback", fallback_word(p.fallback).to_string()),
                     ("receive", receive_word(p.receive_state).to_string()),
                     ("mux", mux_word(p.mux_state).to_string()),
                     ("selected", yes_no(p.selected).to_string()),
@@ -3812,6 +3823,7 @@ mod tests {
             marker_pdus_rx: 4,
             marker_responses_tx: 5,
             marker_responses_rx: u64::MAX,
+            fallback: nos_proto::LacpFallback::Active,
         }
     }
 
@@ -3929,6 +3941,9 @@ mod tests {
         assert_eq!(churn_word(false, true), "partner");
         assert_eq!(churn_word(true, true), "actor+partner");
         assert_eq!(lacp_mode_word(nos_proto::LacpMode::Active), "active");
+        assert_eq!(fallback_word(nos_proto::LacpFallback::Disabled), "-");
+        assert_eq!(fallback_word(nos_proto::LacpFallback::Armed), "armed");
+        assert_eq!(fallback_word(nos_proto::LacpFallback::Active), "active");
         assert_eq!(rate_word(LacpRate::Slow), "slow");
     }
 

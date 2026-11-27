@@ -8,6 +8,7 @@ lacp x\nFORGED\x1b[2J
     port-number               4
     port-priority             50
     mode                      passive
+    fallback                  -
     receive                   current
     mux                       waiting
     selected                  yes

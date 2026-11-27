@@ -509,6 +509,10 @@ topics! {
     InterfaceLacpPortPriority,
     /// `Interface.lacp_link_number`
     InterfaceLacpLinkNumber,
+    /// `Interface.lacp_fallback`
+    InterfaceLacpFallback,
+    /// `Interface.lacp_fallback_timeout`
+    InterfaceLacpFallbackTimeout,
     /// `PortAggregate.lacp_version`
     PortAggregateLacpVersion,
     /// `PortAggregate.lacp_port_algorithm`

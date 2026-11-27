@@ -26,3 +26,4 @@ acl/CLAUDE.md 8192
 tc/CLAUDE.md 8192
 ssh/CLAUDE.md 8192
 sandbox/CLAUDE.md 8192
+nexthop/CLAUDE.md 8192
