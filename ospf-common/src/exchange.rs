@@ -689,7 +689,10 @@ pub fn lsack_hint<L: Lsa>(
         let Some(held) = stores.iter().find_map(|s| s.get(&h.key())) else {
             continue;
         };
-        if h.is_newer(held.header()) != Ordering::Greater {
+        // An age-only difference (same sequence and checksum) is the same instance.
+        if h.is_newer(held.header()) != Ordering::Greater
+            || (h.seq() == held.header().seq() && h.checksum() == held.header().checksum())
+        {
             continue;
         }
         adj.ack_requested
@@ -934,6 +937,12 @@ fn resend_db_copy<L: Lsa>(
 ) {
     let hh = held.header();
     if hh.age() >= MAX_AGE && hh.seq() == i32::MAX {
+        return;
+    }
+    // Same sequence and checksum, only an age more than `MAX_AGE_DIFF` apart
+    // (a restart, or a scaled aging clock): the same instance, not an older
+    // one, so nothing to refute and answering would reset the peer's age clock.
+    if received.seq() == hh.seq() && received.checksum() == hh.checksum() {
         return;
     }
     adj.db_resent

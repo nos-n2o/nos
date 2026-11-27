@@ -1846,6 +1846,18 @@ fn max_age_max_sequence_database_copy_is_not_resent() {
     assert_eq!(db_copies(&r), Vec::<usize>::new());
 }
 
+#[test]
+fn same_instance_with_a_far_age_is_not_refuted() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    let mut old = lsa_id(1, SEQ1);
+    old.0.age = 2000;
+    let mut adj = AdjacencyData::default();
+    let r = older_at(&mut adj, &mut area, &[old], Instant::now());
+    assert_eq!(r.verdicts[0].1, RxVerdict::DbNewer);
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+}
+
 fn hint(adj: &mut AdjacencyData, area: &Lsdb<L>, acked: &L, now: Instant) -> Vec<Action> {
     lsack_hint(adj, &[area], Ipv4Addr::from(1u32), &[acked.0], now)
 }
