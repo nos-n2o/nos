@@ -515,7 +515,7 @@ async fn lsr_and_lsu_ignored_below_exchange() {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![],
         };
-        let got = rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu).await;
+        let got = rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu, 0).await;
         assert_eq!(got.is_some(), handled, "lsu {state:?}");
     }
 }

@@ -3,10 +3,15 @@
 
 use super::rx::split_lsack;
 use super::rx::{execute_actions, next_crypto_seq, split_lsr, split_lsu};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use nos_ospf_common::flood::{flood_on_link, merge_floods, LinkFlood, Peer, Receipt};
+use nos_ospf_common::lsdb::{FloodEvent, InstallOutcome};
+
 use super::{
     bfd, exchange, info, lsa, neighbor, warn, Dest, Duration, Instant, InterfaceState, Ipv4Addr,
-    LinkConfig, LinkSocket, Lsa, Lsdb, Mutex, NeighborInfo, NeighborState, NetworkType,
-    StatusHandle,
+    LinkConfig, LinkSocket, Lsa, NeighborInfo, NeighborState, NetworkType, StatusHandle,
 };
 
 /// RFC 2328 §13.3 step 5 / §13.5: where this link's flooded LSUs and delayed
@@ -24,9 +29,8 @@ fn current_dest(cfg: &LinkConfig, status: &StatusHandle) -> Dest {
 
 /// RFC 2328 §13.5 delayed acknowledgment: sends each neighbor's queued acks
 /// (`AdjacencyData::pending_acks`, filled by `on_lsu_received`) as one
-/// `LSAck`. Runs on the `RXMT_INTERVAL` sweep — the RFC only requires the
-/// delay to stay below `RxmtInterval`, and one more tick per link keeps
-/// `run()`'s `select!` no wider.
+/// `LSAck`. Runs on the 1 s `ACK_INTERVAL` tick: the RFC requires the delay
+/// to stay below `RxmtInterval`.
 pub(super) fn flush_pending_acks(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -121,11 +125,8 @@ fn flush_pending_acks_group(
 
 /// Resends every neighbor's last-sent DBD (if any — see `AdjacencyData::
 /// last_dbd_sent`'s doc comment for why this is necessary, not just a
-/// reliability nicety) and outstanding request/retransmission list —
-/// ponytail: the whole set every tick, rather than tracking each entry's
-/// own last-sent time, since `RXMT_INTERVAL` is already the granularity RFC
-/// 2328 uses and this NOS's per-neighbor outstanding set is tiny (a handful
-/// of LSAs on a lab topology).
+/// reliability nicety), its request list and the retransmission-list entries
+/// older than `RXMT_INTERVAL` (RFC 2328 §13.6, `due_retransmissions`, unicast).
 pub(super) fn retransmit_pending(
     socket: &LinkSocket,
     cfg: &LinkConfig,
@@ -133,6 +134,25 @@ pub(super) fn retransmit_pending(
     status: &StatusHandle,
     next_seq: &mut u64,
 ) {
+    let now = tokio::time::Instant::now().into_std();
+    let mut due: HashMap<Ipv4Addr, Vec<Lsa>> = HashMap::new();
+    status.send_if_modified(|s| {
+        for (id, info) in &mut s.neighbors {
+            if !matches!(
+                info.state,
+                NeighborState::Exchange | NeighborState::Loading | NeighborState::Full
+            ) {
+                continue;
+            }
+            if let Some(adj) = &mut info.adjacency {
+                let lsas = exchange::due_retransmissions(adj, now, super::RXMT_INTERVAL);
+                if !lsas.is_empty() {
+                    due.insert(*id, lsas.iter().map(|l| (**l).clone()).collect());
+                }
+            }
+        }
+        false
+    });
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
@@ -163,11 +183,7 @@ pub(super) fn retransmit_pending(
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsr");
             }
         }
-        let retransmit: Vec<Lsa> = adj
-            .retransmission_list
-            .values()
-            .map(|r| (*r.lsa).clone())
-            .collect();
+        let retransmit = due.remove(neighbor_id).unwrap_or_default();
         for payload in split_lsu(cfg, next_seq, local_router_id, &retransmit) {
             if let Err(e) = socket.send_unicast(info.address, &payload) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
@@ -176,114 +192,143 @@ pub(super) fn retransmit_pending(
     }
 }
 
-/// Resends the entire local LSDB — the area's plus this link's own type-9
-/// LSAs — to every `Full` neighbor on this link; opaque LSAs only to a
-/// neighbor whose DBD set the O-bit (RFC 5250 §3).
-///
-/// # ponytail: periodic full resend, not RFC 2328 §13's event-driven flood
-/// A neighbor's one-shot DBD/LSR/LSU exchange (see `exchange.rs`'s own
-/// `ponytail:` note) only ever sees the LSDB's contents at the moment
-/// negotiation completes — a self-originated LSA that appears afterward (or
-/// one learned from a different link, since every link in an area shares one
-/// `Lsdb`) would otherwise never reach an already-`Full` neighbor. Resending
-/// everything on every `RXMT_INTERVAL` tick is safe (`Lsdb::install`/
-/// `on_lsu_received` already reject and cheaply ack non-newer duplicates)
-/// and simple, at the cost of up to one `RXMT_INTERVAL` of propagation delay
-/// and some wasted bandwidth on a lab-scale LSDB. This is the permanent
-/// design, not a placeholder: nothing in this NOS consumes the LSDB in a
-/// time-sensitive way yet (no SPF/route computation), so real event-driven
-/// flooding would add real complexity
-/// (threading a fan-out channel through every link task) for a latency bound
-/// nothing needs tightened. Revisit once a SPF phase makes convergence speed
-/// actually matter.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the link task's own state, passed through"
-)]
-pub(super) async fn flood_full_neighbors(
-    socket: &LinkSocket,
+/// Logs the flood destination once per change (`ospf lsu flood destination
+/// changed`, asserted by `nos-e2e ospf-dr`); also run on the ack tick so a
+/// role change is reported without waiting for the next flood.
+pub(super) fn note_flood_dest(
     cfg: &LinkConfig,
-    local_router_id: Ipv4Addr,
-    lsdb: &Mutex<Lsdb>,
-    link_local_lsdb: &Mutex<Lsdb>,
     status: &StatusHandle,
-    next_seq: &mut u64,
     last_dest: &mut Option<Dest>,
-) {
+) -> Dest {
     let dest = current_dest(cfg, status);
     if *last_dest != Some(dest) {
         *last_dest = Some(dest);
         info!(link = %cfg.attach_point, dest = %dest.as_str(), "ospf lsu flood destination changed");
     }
-    let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr, bool)> = status
-        .borrow()
-        .neighbors
-        .iter()
-        .filter(|(_, info)| info.state == NeighborState::Full)
-        .map(|(id, info)| {
-            let opaque = info.adjacency.as_ref().is_some_and(|a| a.opaque_capable);
-            (*id, info.address, opaque)
-        })
-        .collect();
-    if full_neighbors.is_empty() {
-        return;
+    dest
+}
+
+fn link_flood(cfg: &LinkConfig, s: &super::LinkStatus) -> LinkFlood {
+    LinkFlood {
+        broadcast: cfg.network_type == NetworkType::Broadcast,
+        we_are_dr: s.interface_state == InterfaceState::Dr,
+        we_are_bdr: s.interface_state == InterfaceState::Backup,
     }
-    let mut lsas = lsdb.lock().await.all();
-    lsas.extend(link_local_lsdb.lock().await.all());
-    // A stub area carries no AS-scope LSA (RFC 2328 §3.6) — one held from
-    // before the area turned stub just ages out here.
-    lsas.retain(|l| lsa::in_area_scope(l.header.lsa_type, cfg.stub, cfg.nssa));
-    // One signed payload per group (opaque-capable or not), reused for every
-    // neighbor in it — safe even under Crypto auth: RFC 2328 D.4.3's
-    // anti-replay check is per-neighbor on the receive side
-    // (`accept_crypto_sequence` keys on the sender's own `router_id`), so two
-    // different neighbors each independently accepting the same sequence
-    // number is correct, not a replay.
-    // Multicast (RFC 2328 §13.3 step 5): each chunk goes out once to the
-    // group. Opaque LSAs (RFC 5250 §3) ride along only when every Full
-    // neighbor is opaque-capable; otherwise they stay unicast below.
-    // Under Crypto auth one packet is valid for all receivers (anti-replay is
-    // per neighbor). A send error falls back to the unicast loop for this pass.
-    let all_opaque = full_neighbors.iter().all(|n| n.2);
-    let mut multicast_done = false;
-    if dest != Dest::Unicast {
-        let group: Vec<Lsa> = lsas
+}
+
+/// RFC 2328 §13.5 context for an LSU received from `from` on this link.
+pub(super) fn ack_ctx(cfg: &LinkConfig, status: &StatusHandle, from: Ipv4Addr) -> exchange::AckCtx {
+    let s = status.borrow();
+    exchange::AckCtx {
+        link: link_flood(cfg, &s),
+        rx: Receipt {
+            from,
+            from_dr_or_bdr: s.dr == Some(from) || s.bdr == Some(from),
+        },
+        other_adjacent: s
+            .neighbors
             .iter()
-            .filter(|l| all_opaque || !lsa::is_opaque(l.header.lsa_type))
-            .map(|l| (**l).clone())
-            .collect();
-        multicast_done = true;
-        if !group.is_empty() {
-            for payload in split_lsu(cfg, next_seq, local_router_id, &group) {
+            .any(|(id, n)| *id != from && neighbor::exchange_or_later(n.state)),
+    }
+}
+
+/// Every LSA of a store as a synthetic flood event (lag recovery only).
+pub(super) fn as_events(lsas: Vec<Arc<Lsa>>) -> Vec<FloodEvent<Lsa>> {
+    lsas.into_iter()
+        .map(|lsa| FloodEvent {
+            lsa,
+            origin: None,
+            outcome: InstallOutcome::Installed,
+        })
+        .collect()
+}
+
+/// RFC 2328 §13.3: floods each event's LSA out this link. Adds it to the
+/// retransmission list of every neighbor `>= Exchange` (but the sender) and
+/// sends at once, MTU-split: to the group on broadcast links (unicast
+/// fallback if the group send fails), unicast otherwise. Opaque LSAs go
+/// unicast to O-bit neighbors only (RFC 5250 §3). `link_id` is this link's
+/// `Origin.link`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the link task's own state, passed through"
+)]
+pub(super) fn flood_events(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    link_id: u32,
+    status: &StatusHandle,
+    events: &[FloodEvent<Lsa>],
+    next_seq: &mut u64,
+    last_dest: &mut Option<Dest>,
+) {
+    note_flood_dest(cfg, status, last_dest);
+    let now = tokio::time::Instant::now().into_std();
+    let mut outs = Vec::new();
+    let mut addrs: HashMap<Ipv4Addr, Ipv4Addr> = HashMap::new();
+    status.send_if_modified(|s| {
+        let link = link_flood(cfg, s);
+        let (dr, bdr) = (s.dr, s.bdr);
+        addrs.extend(s.neighbors.iter().map(|(id, n)| (*id, n.address)));
+        for ev in events {
+            let ty = ev.lsa.header.lsa_type;
+            if !lsa::in_area_scope(ty, cfg.stub, cfg.nssa) {
+                continue;
+            }
+            let opaque = lsa::is_opaque(ty);
+            let rx = ev.origin.filter(|o| o.link == link_id).map(|o| Receipt {
+                from: o.neighbor,
+                from_dr_or_bdr: dr == Some(o.neighbor) || bdr == Some(o.neighbor),
+            });
+            let mut peers: Vec<Peer<'_, Lsa>> = s
+                .neighbors
+                .iter_mut()
+                .filter_map(|(id, n)| {
+                    let state = n.state;
+                    let adj = n.adjacency.as_mut()?;
+                    (!opaque || adj.opaque_capable).then_some(Peer {
+                        id: *id,
+                        state,
+                        adj,
+                    })
+                })
+                .collect();
+            if let Some(mut out) = flood_on_link(&ev.lsa, rx, link, &mut peers, now) {
+                if opaque {
+                    out.dest = Dest::Unicast;
+                }
+                outs.push(out);
+            }
+        }
+        // Nothing here changes what `originate_router_lsas` snapshots.
+        false
+    });
+    for (dest, to, lsas) in merge_floods(outs) {
+        let lsas: Vec<Lsa> = lsas.iter().map(|l| (**l).clone()).collect();
+        let mut sent_group = dest != Dest::Unicast;
+        if sent_group {
+            for payload in split_lsu(cfg, next_seq, local_router_id, &lsas) {
                 if let Err(e) = socket.send_flood(dest, Ipv4Addr::UNSPECIFIED, &payload) {
                     warn!(link = %cfg.attach_point, dest = %dest.as_str(), error = %e, "failed to multicast ospf lsu, falling back to unicast");
-                    multicast_done = false;
+                    sent_group = false;
                     break;
                 }
             }
         }
-    }
-    for opaque in [true, false] {
-        if multicast_done && (!opaque || all_opaque) {
-            continue;
-        }
-        let group: Vec<_> = full_neighbors.iter().filter(|n| n.2 == opaque).collect();
-        let lsas: Vec<Lsa> = lsas
-            .iter()
-            .filter(|l| opaque || !lsa::is_opaque(l.header.lsa_type))
-            .filter(|l| !multicast_done || lsa::is_opaque(l.header.lsa_type))
-            .map(|l| (**l).clone())
-            .collect();
-        if group.is_empty() || lsas.is_empty() {
-            continue;
-        }
-        for payload in split_lsu(cfg, next_seq, local_router_id, &lsas) {
-            for (neighbor_id, neighbor_addr, _) in &group {
-                if let Err(e) = socket.send_unicast(*neighbor_addr, &payload) {
-                    warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+        if !sent_group {
+            for payload in split_lsu(cfg, next_seq, local_router_id, &lsas) {
+                for addr in to.iter().filter_map(|id| addrs.get(id)) {
+                    if let Err(e) = socket.send_unicast(*addr, &payload) {
+                        warn!(link = %cfg.attach_point, error = %e, "failed to send ospf lsu");
+                    }
                 }
             }
         }
+        info!(
+            link = %cfg.attach_point, dest = %dest.as_str(), neighbors = to.len(), lsas = lsas.len(),
+            "ospf lsu flooded"
+        );
     }
 }
 

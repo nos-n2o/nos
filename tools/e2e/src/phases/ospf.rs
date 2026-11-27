@@ -535,11 +535,43 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     a.provision(&["--remove-static-route", ASBR_PREFIX_SPECIFIC])
         .await?;
 
-    // RFC 2328 §13.5 delayed acknowledgment: router-b acks router-a's periodic
-    // LSUs on its own RxmtInterval sweep, so some batch is held a second or
-    // more before it goes out — impossible with an immediate per-LSU ack.
-    b.wait_new("ospf lsack sent.*delayed_ms=[1-9][0-9][0-9][0-9]", 0, 30)
-        .await
+    // RFC 2328 §13.5 delayed acknowledgment: router-b acks the Type-5s it
+    // installed through the 1 s delayed-ack tick (latency is `ospf-flood`'s).
+    b.wait_new("ospf lsack sent.*delayed_ms=", 0, 30).await
+}
+
+/// #1517, RFC 2328 §13.3/§13.6: a new LSA is flooded the moment it is
+/// installed, not on a sweep, and a settled LSDB is not resent. Router-a
+/// attaches a loopback to OSPF; router-b must hold its new Router-LSA within
+/// seconds of router-a originating it (the old 5 s sweep made that 0-5 s), and
+/// afterwards neither router floods anything for 15 s (no whole-LSDB resend).
+pub async fn ospf_flood(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let lsa_a = format!("ospf lsa installed.*advertising_router={OSPF_ROUTER_ID}");
+    let originated0 = a.count("ospf lsa originated.*lsa_type=1");
+    let installed0 = b.count(&lsa_a);
+    a.provision(&[
+        "--loopback-address",
+        OSPF_FLOOD_LOOPBACK_ADDRESS,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new("ospf lsa originated.*lsa_type=1", originated0, 30)
+        .await?;
+    b.wait_new(&lsa_a, installed0, 3).await?;
+    // Let the relays and acks of this change land, then nothing may flood.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let (fa, fb) = (
+        a.count_fresh("ospf lsu flooded").await,
+        b.count_fresh("ospf lsu flooded").await,
+    );
+    a.assert_quiet("ospf lsu flooded", fa, 15).await?;
+    b.assert_quiet("ospf lsu flooded", fb, 15).await?;
+    // Back to the base lab: the clearing re-originates and floods once.
+    let installed1 = b.count(&lsa_a);
+    a.provision(&["--clear-ospf-loopback-profile"]).await?;
+    b.wait_new(&lsa_a, installed1, 30).await
 }
 
 /// Polls `r`'s `GET /v1/ospf/database` until `advertiser`'s live Type-5 for

@@ -388,7 +388,17 @@ async fn adjacency_survives_lost_hellos(network_type: NetworkType) {
         .lock()
         .unwrap()
         .insert(Ipv4Addr::new(10, 0, 0, 1));
-    settle(3 * 40).await;
+    // A's only traffic is an LSU per new LSA (there is no periodic resend).
+    for i in 0..6u8 {
+        let mut l = foreign_type5(0);
+        l.header.link_state_id = Ipv4Addr::new(198, 51, 100, i);
+        a.lsdb_for(Ipv4Addr::UNSPECIFIED)
+            .await
+            .lock()
+            .await
+            .install(l);
+        settle(20).await;
+    }
     let n = b.neighbor_summaries().await;
     assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
     // Reported column stays Hello-only.
