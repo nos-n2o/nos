@@ -1,7 +1,7 @@
 //! Goldens of `show lacp` (tables) and `show lacp detail` (#1465).
 //! Goldens are in `tests/goldens/`; edit them by hand from the failing diff.
 
-use nos_cli::format::{render_lacp_detail, render_lacp_tables};
+use nos_cli::format::{render_lacp_counters, render_lacp_detail, render_lacp_tables};
 use nos_proto::{
     LacpAgreement, LacpMode, LacpMuxState, LacpPortAlgorithm, LacpPortStatus, LacpRate,
     LacpReceiveState, LacpVersion, PortAggregateLacpSummary,
@@ -36,6 +36,12 @@ fn port(name: &str, receive: LacpReceiveState, mux: LacpMuxState) -> LacpPortSta
         unsupported_version_pdus: 0,
         partner_version: None,
         partner_port_algorithm: None,
+        lacpdus_rx: 0,
+        lacpdus_tx: 0,
+        illegal_pdus: 0,
+        marker_pdus_rx: 0,
+        marker_responses_tx: 0,
+        marker_responses_rx: 0,
     }
 }
 
@@ -65,6 +71,12 @@ fn populated() -> Vec<PortAggregateLacpSummary> {
     defaulted.individual = true;
     defaulted.mode = LacpMode::Active;
     defaulted.unsupported_version_pdus = 3;
+    defaulted.lacpdus_rx = u64::MAX;
+    defaulted.lacpdus_tx = 1234;
+    defaulted.illegal_pdus = 2;
+    defaulted.marker_pdus_rx = 7;
+    defaulted.marker_responses_tx = 5;
+    defaulted.marker_responses_rx = 1;
     let mut v2 = agg(
         "bond22",
         vec![port(
@@ -110,4 +122,10 @@ fn lacp_goldens() {
     check("lacp_forged", &render_lacp_tables(&forged()));
     check("lacp_detail_populated", &render_lacp_detail(&populated()));
     check("lacp_detail_forged", &render_lacp_detail(&forged()));
+    check("lacp_counters_empty", &render_lacp_counters(&[]));
+    check(
+        "lacp_counters_populated",
+        &render_lacp_counters(&populated()),
+    );
+    check("lacp_counters_forged", &render_lacp_counters(&forged()));
 }

@@ -100,7 +100,9 @@ async fn retransmit_pending_splits_the_retransmission_list() {
                 l.header.key(),
                 nos_ospf_common::exchange::Rxmt {
                     lsa: Arc::new(l.clone()),
-                    last_sent: std::time::Instant::now(),
+                    last_sent: std::time::Instant::now()
+                        .checked_sub(Duration::from_secs(10))
+                        .unwrap(),
                 },
             );
         }

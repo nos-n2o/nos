@@ -294,12 +294,15 @@ pub struct ReflectorDiscards {
     pub filtered: u64,
     /// Over the reflector's global packet rate.
     pub rate_limited: u64,
-    /// The A bit is set: reflector authentication is not built yet.
+    /// The A bit is set but no configured key matches its type and key id.
     pub authenticated: u64,
     /// D bit clear (RFC 7880 §7.2.3).
     pub demand_clear: u64,
     /// Your Discriminator is not one of the reflector's.
     pub unknown_discriminator: u64,
+    /// The A bit is set, a key matches, but the digest or password is wrong.
+    #[serde(default)]
+    pub auth_failed: u64,
 }
 
 /// The S-BFD reflector, for `show bfd reflector`.

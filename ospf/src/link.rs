@@ -12,8 +12,8 @@ mod grace;
 mod originate;
 mod rx;
 use self::flood::{
-    flood_full_neighbors, flush_pending_acks, kill_bfd_neighbor, note_alive, retransmit_pending,
-    sweep_dead_neighbors,
+    as_events, flood_events, flush_pending_acks, kill_bfd_neighbor, note_alive, note_flood_dest,
+    retransmit_pending, sweep_dead_neighbors,
 };
 use self::grace::{exit_grace_on_topology_change, expire_grace, send_grace_lsas};
 use self::originate::local_subnet;
@@ -30,13 +30,15 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ipnet::{IpNet, Ipv4Net};
+use nos_ospf_common::lsdb::FloodEvent;
 use nos_proto::schema::BfdProfile;
 use nos_proto::{
     BfdDiag, InterfaceSummary, LinkInterfaceState, LlsSummary, LsaSummary, NeighborRole,
     NeighborSummary, NetworkType, OspfNeighborState, RedistributeUpdate, RouteSummary,
 };
 use nos_rpl::CompiledPolicy;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -135,6 +137,17 @@ pub type Opener = Arc<dyn Fn(&LinkConfig) -> std::io::Result<LinkSocket> + Send 
 /// `hello_interval`'s exact pattern) if an operator ever needs to tune it.
 const RXMT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// RFC 2328 §13.5: delayed acknowledgments are flushed this often (the RFC
+/// only requires the delay to stay below `RxmtInterval`).
+const ACK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Flood events one link task holds before its receiver lags (`RecvError::
+/// Lagged`: the store is re-flooded once on that link).
+const FLOOD_CHANNEL_CAPACITY: usize = 1024;
+
+/// Flood events handled per `select!` pass (one LSU batch).
+const FLOOD_BATCH: usize = 256;
+
 /// How often `LinkManager` recomputes and reinstalls this router's own
 /// self-originated LSAs — independent of, and much more frequent than, the
 /// 10s config-reapply tick, so a freshly-`Full` adjacency's Router-LSA
@@ -150,14 +163,13 @@ const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long `LinkManager::shutdown` keeps the link tasks alive after
 /// prematurely aging every self-originated LSA (RFC 2328 §14.1), so each
-/// link's own `RXMT_INTERVAL` resend actually carries the `MaxAge` copies out
-/// before the process exits: one resend period plus a second of margin.
+/// link's retransmission of any unacked `MaxAge` copy (`RXMT_INTERVAL`) can
+/// still happen before the process exits: one period plus a second of margin.
 /// With `max-metric router-lsa on-shutdown`'s hold (at most
 /// `MAX_METRIC_SHUTDOWN_HOLD_MAX`) it must fit `nos-watchdogd`'s 10s
 /// SIGINT-to-SIGKILL budget (`docs/architecture/supervision.md`) with a
-/// second to spare for the exit — see the assertion below. The flush is kicked
-/// out at once (`LinkCommand::FloodNow`), so the window buys one `RXMT_INTERVAL`
-/// retransmission on top.
+/// second to spare for the exit — see the assertion below. The flush leaves at
+/// once, by flood event; the window only buys one retransmission on top.
 const PREMATURE_AGE_FLOOD_WINDOW: Duration = Duration::from_secs(6);
 
 /// The longest RFC 6987 on-shutdown hold `OspfInstance.max_metric_on_shutdown`
@@ -611,6 +623,80 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     (adj, dbd)
 }
 
+/// What a link task needs to flood by event (#1517): its `Origin.link` id and
+/// receivers on its area's store and its own type-9 store.
+pub struct FloodFeed {
+    id: u32,
+    area: Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+    link_local: Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+}
+
+/// Next event of `rx`, pending forever once it is gone.
+async fn recv_flood(
+    rx: &mut Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+) -> Result<FloodEvent<Lsa>, RecvError> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Floods what `rx` yielded (a batch if more is queued). A lagged receiver
+/// re-floods its whole store once: the only full dump left.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the link task's own state, passed through"
+)]
+async fn on_flood_event(
+    first: Result<FloodEvent<Lsa>, RecvError>,
+    rx: &mut Option<broadcast::Receiver<FloodEvent<Lsa>>>,
+    store: &Mutex<Lsdb>,
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    link_id: u32,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+    last_dest: &mut Option<Dest>,
+) {
+    let mut lagged = false;
+    let mut events = Vec::new();
+    match first {
+        Ok(e) => events.push(e),
+        Err(RecvError::Lagged(_)) => lagged = true,
+        Err(RecvError::Closed) => {
+            *rx = None;
+            return;
+        }
+    }
+    if let Some(r) = rx.as_mut() {
+        while events.len() < FLOOD_BATCH {
+            match r.try_recv() {
+                Ok(e) => events.push(e),
+                Err(TryRecvError::Lagged(_)) => {
+                    lagged = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if lagged {
+        warn!(link = %cfg.attach_point, "ospf flood channel lagged, reflooding the store");
+        events.extend(as_events(store.lock().await.all()));
+    }
+    flood_events(
+        socket,
+        cfg,
+        local_router_id,
+        link_id,
+        status,
+        &events,
+        next_seq,
+        last_dest,
+    );
+}
+
 /// Runs until aborted (link removed from config, or process shutdown — see
 /// `LinkManager`). Owns the raw socket, the Hello send ticker, and every
 /// timer this link's network type needs.
@@ -629,6 +715,7 @@ pub async fn run(
     dbd_max_headers: Option<usize>,
     boot_count: u32,
     mut commands: mpsc::UnboundedReceiver<LinkCommand>,
+    mut feed: FloodFeed,
 ) {
     let socket = match socket {
         Ok(s) => s,
@@ -668,6 +755,8 @@ pub async fn run(
     // Floored at wall-clock seconds so it never regresses across a link
     // restart (a fresh `next_crypto_seq` call always floors back up to
     // "now" if the in-memory counter would otherwise be behind).
+    let mut ack_tick = tokio::time::interval(ACK_INTERVAL);
+    ack_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut next_seq = initial_crypto_seq(&cfg.auth, boot_count);
     let mut last_flood_dest: Option<Dest> = None;
 
@@ -757,7 +846,7 @@ pub async fn run(
                                             );
                                         }
                                         if let Some(actions) =
-                                            handle_lsu(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsu).await
+                                            handle_lsu(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsu, feed.id).await
                                         {
                                             execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions, &mut next_seq);
                                         }
@@ -779,6 +868,12 @@ pub async fn run(
                     }
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospf recv error"),
                 }
+            }
+            first = recv_flood(&mut feed.area) => {
+                on_flood_event(first, &mut feed.area, &lsdb, &socket, &cfg, local_router_id, feed.id, &status, &mut next_seq, &mut last_flood_dest).await;
+            }
+            first = recv_flood(&mut feed.link_local) => {
+                on_flood_event(first, &mut feed.link_local, &link_local_lsdb, &socket, &cfg, local_router_id, feed.id, &status, &mut next_seq, &mut last_flood_dest).await;
             }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
@@ -809,17 +904,16 @@ pub async fn run(
                 LinkCommand::FlushGrace => {
                     send_grace_lsas(&socket, &cfg, local_router_id, &status, 0, lsa::MAX_AGE, &mut next_seq);
                 }
-                LinkCommand::FloodNow => {
-                    flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
-                }
                 LinkCommand::BfdDown(address) => kill_bfd_neighbor(&cfg, &status, address),
                 LinkCommand::OobResync => start_oob_resync(&socket, &cfg, local_router_id, &status, &mut next_seq),
                 LinkCommand::TopologyChanged(origins) => exit_grace_on_topology_change(&cfg, &status, &origins),
             },
-            _ = rxmt_sweep.tick() => {
+            _ = ack_tick.tick() => {
+                note_flood_dest(&cfg, &status, &mut last_flood_dest);
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
+            }
+            _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq, &mut last_flood_dest).await;
             }
         }
     }
@@ -830,9 +924,6 @@ pub async fn run(
 pub enum LinkCommand {
     /// Send Grace-LSAs (the grace period, seconds).
     Grace(u32),
-    /// Resend the LSDB to every `Full` neighbor now, not on the next
-    /// `RXMT_INTERVAL` — the shutdown path only (`LinkManager::flood_now`).
-    FloodNow,
     /// `nos-bfdd` reports the path to this neighbor address down (RFC 2328
     /// §10.2 `KillNbr`).
     BfdDown(Ipv4Addr),
@@ -878,6 +969,10 @@ pub struct LinkManager {
     /// multi-valued in this NOS's config schema, so a flat LSDB would leak
     /// LSAs across areas the moment a second one is configured.
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
+    /// Each area store's flood-event sender (`lsdb_for` sets it as the sink).
+    flood_txs: Mutex<HashMap<Ipv4Addr, broadcast::Sender<FloodEvent<Lsa>>>>,
+    /// Source of `Origin.link` ids.
+    next_link_id: AtomicU32,
     /// Woken by every LSDB change; see `route_changed`.
     route_changed: Arc<tokio::sync::Notify>,
     /// Woken when a neighbor floods one of our own LSAs back newer
@@ -1089,6 +1184,8 @@ impl LinkManager {
             virtual_links: Mutex::new(Vec::new()),
             resolved_virtual: Mutex::new(Vec::new()),
             lsdbs: Mutex::new(HashMap::new()),
+            flood_txs: Mutex::new(HashMap::new()),
+            next_link_id: AtomicU32::new(0),
             route_changed: Arc::new(tokio::sync::Notify::new()),
             reoriginate: Arc::new(tokio::sync::Notify::new()),
             router_id: Mutex::new(None),
@@ -1573,12 +1670,27 @@ impl LinkManager {
         if let Some(l) = stores.get(&area_id) {
             return Arc::clone(l);
         }
-        let db = self.new_store().await;
+        let mut db = self.new_store().await;
+        let (tx, _) = broadcast::channel(FLOOD_CHANNEL_CAPACITY);
+        db.set_flood_sink(tx.clone());
+        self.flood_txs.lock().await.insert(area_id, tx);
         Arc::clone(
             stores
                 .entry(area_id)
                 .or_insert_with(|| Arc::new(Mutex::new(db))),
         )
+    }
+
+    /// A receiver on `area_id`'s flood events (the store is created if
+    /// missing, so the sender exists).
+    async fn flood_rx_for(&self, area_id: Ipv4Addr) -> broadcast::Receiver<FloodEvent<Lsa>> {
+        self.lsdb_for(area_id).await;
+        self.flood_txs
+            .lock()
+            .await
+            .get(&area_id)
+            .expect("lsdb_for registered the sender")
+            .subscribe()
     }
 
     /// RFC 2328 §14: ages every installed LSA, in every area, by one
@@ -1769,7 +1881,15 @@ impl LinkManager {
                 0
             };
             let (commands, commands_rx) = mpsc::unbounded_channel();
-            let link_local_lsdb = Arc::new(Mutex::new(self.new_store().await));
+            let mut link_local = self.new_store().await;
+            let (ll_tx, link_local_rx) = broadcast::channel(FLOOD_CHANNEL_CAPACITY);
+            link_local.set_flood_sink(ll_tx);
+            let link_local_lsdb = Arc::new(Mutex::new(link_local));
+            let feed = FloodFeed {
+                id: self.next_link_id.fetch_add(1, Ordering::Relaxed),
+                area: Some(self.flood_rx_for(cfg.area_id).await),
+                link_local: Some(link_local_rx),
+            };
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
@@ -1780,6 +1900,7 @@ impl LinkManager {
                 self.dbd_max_headers,
                 boot_count,
                 commands_rx,
+                feed,
             ));
             links.insert(
                 key,
@@ -2058,15 +2179,10 @@ impl LinkManager {
         }
     }
 
-    /// Has every link resend its LSDB to its `Full` neighbors now.
-    async fn flood_now(&self) {
-        self.send_to_links(LinkCommand::FloodNow).await;
-    }
-
     /// Graceful shutdown: flushes every self-originated LSA (RFC 2328
     /// §14.1) — unless a graceful restart was announced, which must keep
     /// them (RFC 3623 §2) — and keeps the link tasks alive for `PREMATURE_AGE_FLOOD_WINDOW`
-    /// so their periodic resend carries the `MaxAge` copies to every neighbor
+    /// so the flood events (and one retransmission) carry the `MaxAge` copies to every neighbor
     /// — which then drops this router's routes at once instead of only when
     /// its LSAs age out an hour later — then aborts every link task. Called
     /// once when `crate::reconcile::run`'s loop exits on shutdown.
@@ -2086,7 +2202,6 @@ impl LinkManager {
                 withdrawn,
                 "ospf flushing self-originated lsas before shutdown"
             );
-            self.flood_now().await;
             tokio::time::sleep(PREMATURE_AGE_FLOOD_WINDOW).await;
         }
         for (_, entry) in self.links.lock().await.drain() {

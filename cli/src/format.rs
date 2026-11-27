@@ -598,6 +598,7 @@ fn render_bfd_reflector_raw(v: &nos_proto::ReflectorView) -> String {
         ("not-in-allow-from", d.filtered),
         ("rate-limited", d.rate_limited),
         ("authenticated", d.authenticated),
+        ("auth-failed", d.auth_failed),
         ("demand-bit-clear", d.demand_clear),
         ("unknown-discriminator", d.unknown_discriminator),
     ]
@@ -1243,6 +1244,47 @@ fn render_lacp_tables_raw(summaries: &[PortAggregateLacpSummary]) -> String {
     format!("{agg_table}\n\n{port_table}")
 }
 
+/// `show lacp [<name>] counters`: one row per member port.
+pub fn render_lacp_counters(summaries: &[PortAggregateLacpSummary]) -> String {
+    let rows: Vec<Vec<String>> = summaries
+        .iter()
+        .flat_map(|s| s.ports.iter().map(move |p| (s, p)))
+        .map(|(s, p)| {
+            vec![
+                s.aggregate.clone(),
+                p.interface.clone(),
+                p.lacpdus_rx.to_string(),
+                p.lacpdus_tx.to_string(),
+                p.illegal_pdus.to_string(),
+                p.unsupported_version_pdus.to_string(),
+                p.marker_pdus_rx.to_string(),
+                p.marker_responses_tx.to_string(),
+                p.marker_responses_rx.to_string(),
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        return none(None, "lacp member ports");
+    }
+    let r = Col::right;
+    sanitize(&titled_table(
+        "Counters",
+        &[
+            Col::left("Aggregate"),
+            Col::left("Interface"),
+            r("LACPDUs-Rx"),
+            r("LACPDUs-Tx"),
+            r("Illegal"),
+            r("Unsupported-Version"),
+            r("Marker-Rx"),
+            r("Marker-Resp-Tx"),
+            r("Marker-Resp-Rx"),
+        ],
+        &rows,
+    ))
+    .into_owned()
+}
+
 /// `key  value` lines at `indent`, values aligned.
 fn kv_lines(indent: &str, pairs: &[(&str, String)]) -> Vec<String> {
     let w = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
@@ -1342,10 +1384,16 @@ fn render_lacp_detail_raw(summaries: &[PortAggregateLacpSummary]) -> String {
                         churn_word(p.actor_churn, p.partner_churn).to_string(),
                     ),
                     ("individual", yes_no(p.individual).to_string()),
+                    ("lacpdus-rx", p.lacpdus_rx.to_string()),
+                    ("lacpdus-tx", p.lacpdus_tx.to_string()),
+                    ("illegal-pdus", p.illegal_pdus.to_string()),
                     (
                         "unsupported-version-pdus",
                         p.unsupported_version_pdus.to_string(),
                     ),
+                    ("marker-pdus-rx", p.marker_pdus_rx.to_string()),
+                    ("marker-responses-tx", p.marker_responses_tx.to_string()),
+                    ("marker-responses-rx", p.marker_responses_rx.to_string()),
                     ("partner", partner),
                 ];
                 if let (Some(sys), Some(port)) =
@@ -3756,6 +3804,12 @@ mod tests {
             unsupported_version_pdus: 0,
             partner_version: None,
             partner_port_algorithm: None,
+            lacpdus_rx: 11,
+            lacpdus_tx: 22,
+            illegal_pdus: 3,
+            marker_pdus_rx: 4,
+            marker_responses_tx: 5,
+            marker_responses_rx: u64::MAX,
         }
     }
 
@@ -3774,6 +3828,30 @@ mod tests {
             agreement: nos_proto::LacpAgreement::NotApplicable,
             conversations_per_link: Vec::new(),
         }
+    }
+
+    #[test]
+    fn render_lacp_counters_table_and_detail() {
+        let a = lacp_agg(
+            "bond1",
+            vec![lacp_port(
+                "eth1",
+                LacpReceiveState::Current,
+                LacpMuxState::Distributing,
+            )],
+        );
+        let out = render_lacp_counters(std::slice::from_ref(&a));
+        assert!(
+            out.contains("Counters") && out.contains("Marker-Resp-Rx"),
+            "{out}"
+        );
+        assert!(out.contains("18446744073709551615"), "{out}");
+        let d = render_lacp_detail(&[a]);
+        assert!(
+            d.contains("illegal-pdus") && d.contains("marker-responses-rx"),
+            "{d}"
+        );
+        assert_eq!(render_lacp_counters(&[]), "no lacp member ports");
     }
 
     #[test]

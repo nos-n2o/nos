@@ -182,6 +182,7 @@ impl Config {
                     .iter()
                     .filter_map(|p| p.auth.as_ref().map(|a| a.key.clone())),
             );
+            keep.extend(self.sbfd_reflector.auth.iter().map(|k| k.key.clone()));
         }
         if v.aaa {
             keep.extend(self.aaa.servers.iter().map(|s| s.secret_ref.clone()));
@@ -316,6 +317,27 @@ mod tests {
     fn seen(c: &Config) -> Vec<&'static str> {
         let json = serde_json::to_string(c).unwrap();
         SENTINELS.into_iter().filter(|s| json.contains(s)).collect()
+    }
+
+    #[test]
+    fn bfdd_sees_the_sbfd_reflector_keys() {
+        let mut c = Config::default();
+        c.admin.keys = vec![
+            AdminKey {
+                label: "r".into(),
+                secret: "SECRET-reflector".into(),
+            },
+            AdminKey {
+                label: "other".into(),
+                secret: "SECRET-other".into(),
+            },
+        ];
+        c.sbfd_reflector.auth = vec![crate::schema::SbfdReflectorKey {
+            key: "r".into(),
+            ..Default::default()
+        }];
+        let got = serde_json::to_string(&c.for_role(Role::Bfdd)).unwrap();
+        assert!(got.contains("SECRET-reflector") && !got.contains("SECRET-other"));
     }
 
     #[test]

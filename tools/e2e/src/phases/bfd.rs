@@ -573,7 +573,12 @@ async fn reflector_is(
 /// Down by `control-detection-time-expired`, the route is withdrawn, the
 /// reflector counts the probes as `unknown_discriminator` and the classical
 /// session never blinks; naming 10.77.0.1 as `sbfd-remote-discriminator` on
-/// router-a brings it Up and the route back.
+/// router-a brings it Up and the route back. Last, authentication (RFC 7880
+/// §11, #1534): router-a's `sb` profile gets a keyed-SHA1 key the reflector
+/// lacks (A-bit probes counted `authenticated`, Down), the reflector gets it
+/// (Up, REST shows `auth_method`, `replied` grows, no `auth_failed`), a
+/// different secret on the reflector counts `auth_failed` and takes it Down
+/// again, the matching one restores it.
 pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
     let mut fa = A.base_flags();
     fa.extend(strings(&[
@@ -662,6 +667,89 @@ pub async fn bfd_sbfd(w: &mut World) -> anyhow::Result<()> {
         "10.77.0.1",
     ])
     .await?;
+    a.wait_new(&up, n_up, 30).await?;
+    a.wait_new(&added, n_added, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
+    a.assert_quiet(&frr_down, n_frr, 3).await?;
+
+    log("S-BFD authentication (#1534): an initiator with a key and a reflector without");
+    let (n_down, n_removed, n_up, n_added) = (
+        a.count(&down),
+        a.count(&removed),
+        a.count(&up),
+        a.count(&added),
+    );
+    let init = |secret: &str| {
+        strings(&[
+            "--sbfd-static-route",
+            BFD_PREFIX_B,
+            "--sbfd-remote-discriminator",
+            "10.77.0.1",
+            "--sbfd-auth",
+            &format!("keyed-sha1:1:{secret}"),
+        ])
+    };
+    a.provision(&init("secretA")).await?;
+    a.wait_new(&down, n_down, 10).await?;
+    a.wait_new(&removed, n_removed, 10).await?;
+    reflector_is(b, 10, "A-bit probes without a key", |v| {
+        v["discarded"]["authenticated"].as_u64() > Some(0)
+    })
+    .await?;
+
+    log("the reflector gets the same key: Up again, signed in both directions");
+    b.provision(&["--sbfd-reflector-auth", "keyed-sha1:1:secretA"])
+        .await?;
+    a.wait_new(&up, n_up, 30).await?;
+    a.wait_new(&added, n_added, 30).await?;
+    session_is(a, IP_B.s(), "Up", None, 5).await?;
+    let body = a
+        .rest_expect(
+            Method::GET,
+            &format!("/v1/bfd/sessions?peer={IP_B}"),
+            None,
+            200,
+        )
+        .await?;
+    let sess: serde_json::Value = serde_json::from_str(&body)?;
+    anyhow::ensure!(
+        sess[0]["auth_method"] == "KeyedSha1"
+            && sess[0]["auth_key_id"] == 1
+            && sess[0]["auth_failures"] == 0
+            && !body.contains("secretA"),
+        "expected an authenticated session without failures: {body}"
+    );
+    let before = reflector_is(b, 10, "replies", |_| true).await?["replied"]
+        .as_u64()
+        .unwrap_or(0);
+    let v = reflector_is(b, 10, "replies still growing", |v| {
+        v["replied"].as_u64() > Some(before)
+    })
+    .await?;
+    anyhow::ensure!(
+        v["discarded"]["auth_failed"] == 0,
+        "no probe fails verification: {v}"
+    );
+
+    log("a different secret on the reflector: Down, route withdrawn, failures counted");
+    let (n_down, n_removed, n_up, n_added) = (
+        a.count(&down),
+        a.count(&removed),
+        a.count(&up),
+        a.count(&added),
+    );
+    b.provision(&["--sbfd-reflector-auth", "keyed-sha1:1:secretB"])
+        .await?;
+    a.wait_new(&down, n_down, 10).await?;
+    a.wait_new(&removed, n_removed, 10).await?;
+    reflector_is(b, 10, "auth_failed drops", |v| {
+        v["discarded"]["auth_failed"].as_u64() > Some(0)
+    })
+    .await?;
+
+    log("restoring the matching key: Up again, route re-added");
+    b.provision(&["--sbfd-reflector-auth", "keyed-sha1:1:secretA"])
+        .await?;
     a.wait_new(&up, n_up, 30).await?;
     a.wait_new(&added, n_added, 30).await?;
     session_is(a, IP_B.s(), "Up", None, 5).await?;

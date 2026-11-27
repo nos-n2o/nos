@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-09 {
+  revision 2026-12-10 {
     description "Generated.";
   }
 
@@ -2152,6 +2152,27 @@ module nos-config {
     leaf-list allow_from {
       type inet:ip-prefix;
       description "Only answer probes from these sources.";
+    }
+    list auth {
+      key "key_id";
+      description "Authenticate S-BFD probes with a key.";
+      leaf key_id {
+        type uint8;
+      }
+      leaf method {
+        type enumeration {
+          enum "SimplePassword";
+          enum "KeyedMd5";
+          enum "MeticulousMd5";
+          enum "KeyedSha1";
+          enum "MeticulousSha1";
+        }
+        description "Authenticate S-BFD probes with a key.";
+      }
+      leaf key {
+        type string;
+        description "Authenticate S-BFD probes with a key.";
+      }
     }
   }
   container spanning_tree {

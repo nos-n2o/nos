@@ -386,7 +386,13 @@ impl AggregateManager {
                     partner_port_priority: Some(pd.port_priority),
                     selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
                     individual: obs.partner_individual(),
-                    unsupported_version_pdus: obs.unsupported_version_pdus,
+                    unsupported_version_pdus: obs.counters.unsupported_version_pdus,
+                    lacpdus_rx: obs.counters.lacpdus_rx,
+                    lacpdus_tx: obs.counters.lacpdus_tx,
+                    illegal_pdus: obs.counters.illegal_pdus,
+                    marker_pdus_rx: obs.counters.marker_pdus_rx,
+                    marker_responses_tx: obs.counters.marker_responses_tx,
+                    marker_responses_rx: obs.counters.marker_responses_rx,
                     synchronized: obs
                         .partner
                         .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
@@ -874,7 +880,7 @@ mod tests {
             partner: None,
             actor_churn: ChurnState::NoChurn,
             partner_churn: ChurnState::NoChurn,
-            unsupported_version_pdus: 0,
+            counters: crate::link::Counters::default(),
             v2: crate::cscd::PartnerV2::default(),
         }
     }

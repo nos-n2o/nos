@@ -848,6 +848,20 @@ pub struct Args {
     /// Removes every S-BFD reflector discriminator.
     #[arg(long)]
     pub no_sbfd_reflector: bool,
+    /// The S-BFD reflector's authentication key (#1534), `<method>:<key-id>:<secret>`
+    /// as `--bfd-auth`; replaces the list.
+    #[arg(long, value_parser = parse_bfd_auth)]
+    pub sbfd_reflector_auth: Option<nos_proto::schema::BfdAuth>,
+    /// Authentication on the S-BFD initiator profile `sb` (#1534), `<method>:<key-id>:<secret>`
+    /// as `--bfd-auth` (which would also cover `fast`, the classical sessions).
+    #[arg(long, value_parser = parse_bfd_auth)]
+    pub sbfd_auth: Option<nos_proto::schema::BfdAuth>,
+    /// Removes the `sb` profile's authentication.
+    #[arg(long)]
+    pub no_sbfd_auth: bool,
+    /// Removes the S-BFD reflector's authentication keys.
+    #[arg(long)]
+    pub no_sbfd_reflector_auth: bool,
 
     #[arg(long)]
     pub save: bool,
@@ -2165,6 +2179,28 @@ fn virtual_link_spec(flag: &str, spec: &str) -> anyhow::Result<(Ipv4Addr, Ipv4Ad
 
 /// Label of the admin key holding `--bfd-auth`'s secret (#510): derived from
 /// the profile, so re-provisioning a new secret rotates it in place.
+/// Label of the admin key holding `--sbfd-reflector-auth`'s secret.
+const SBFD_REFLECTOR_KEY_LABEL: &str = "sbfd-reflector";
+/// Label of the admin key holding `--sbfd-auth`'s secret.
+const SBFD_KEY_LABEL: &str = "sbfd-initiator";
+
+/// `--sbfd-reflector-auth` as the reflector stores it (secret swapped for its label).
+fn reflector_auth(a: &nos_proto::schema::BfdAuth) -> nos_proto::schema::SbfdReflectorKey {
+    nos_proto::schema::SbfdReflectorKey {
+        key_id: a.key_id,
+        method: a.method,
+        key: SBFD_REFLECTOR_KEY_LABEL.to_string(),
+    }
+}
+
+/// `--sbfd-auth` as the `sb` profile stores it.
+fn sbfd_auth(a: &nos_proto::schema::BfdAuth) -> nos_proto::schema::BfdAuth {
+    nos_proto::schema::BfdAuth {
+        key: SBFD_KEY_LABEL.to_string(),
+        ..a.clone()
+    }
+}
+
 fn bfd_key_label() -> String {
     format!("bfd-{BFD_PROFILE}")
 }
@@ -2338,6 +2374,14 @@ fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     if let Some(d) = args.sbfd_remote_discriminator {
         v.push((sb("sbfd-remote-discriminator"), Some(format!("\"{d}\""))));
     }
+    if args.sbfd_auth.is_some() || args.no_sbfd_auth {
+        v.push((
+            sb("auth"),
+            args.sbfd_auth
+                .as_ref()
+                .map(|a| serde_json::to_string(&sbfd_auth(a)).expect("BfdAuth serializes")),
+        ));
+    }
     for subnet in &args.sbfd_static_route {
         v.push((
             vec![
@@ -2485,6 +2529,17 @@ pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         ));
     }
     v.extend(sbfd_static_paths(args));
+    if args.sbfd_reflector_auth.is_some() || args.no_sbfd_reflector_auth {
+        let keys: Vec<_> = args
+            .sbfd_reflector_auth
+            .iter()
+            .map(reflector_auth)
+            .collect();
+        v.push((
+            vec!["sbfd-reflector".to_string(), "auth".to_string()],
+            Some(serde_json::to_string(&keys).expect("BfdAuth serializes")),
+        ));
+    }
     v.extend(static_route_field_paths(args));
     v.extend(static_extra_gateway_paths(args));
     if !args.sbfd_reflector.is_empty() || args.no_sbfd_reflector {
@@ -2877,6 +2932,9 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             if let Some(d) = args.sbfd_remote_discriminator {
                 p.sbfd_remote_discriminator = Some(d);
             }
+            if args.sbfd_auth.is_some() || args.no_sbfd_auth {
+                p.auth = args.sbfd_auth.as_ref().map(sbfd_auth);
+            }
         }
         for i in config
             .static_routing_instances
@@ -2898,6 +2956,13 @@ pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
             .sbfd_reflector
             .discriminators
             .clone_from(&args.sbfd_reflector);
+    }
+    if args.sbfd_reflector_auth.is_some() || args.no_sbfd_reflector_auth {
+        config.sbfd_reflector.auth = args
+            .sbfd_reflector_auth
+            .iter()
+            .map(reflector_auth)
+            .collect();
     }
     if !args.wants_bfd_profile() {
         return;
@@ -4195,6 +4260,18 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             label: bfd_key_label(),
             secret: a.key.clone(),
         }));
+    }
+
+    for (label, a) in [
+        (SBFD_REFLECTOR_KEY_LABEL, &args.sbfd_reflector_auth),
+        (SBFD_KEY_LABEL, &args.sbfd_auth),
+    ] {
+        if let Some(a) = a {
+            ops.push(ConfigOp::Admin(AdminOp::SetKey {
+                label: label.to_string(),
+                secret: a.key.clone(),
+            }));
+        }
     }
 
     for (label, secret) in &args.admin_keys {

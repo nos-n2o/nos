@@ -414,6 +414,11 @@ pub const LINK_LOCAL_STATIC: &str = "2001:db8:1523::/48";
 /// for the nexthop), beside `REDISTRIBUTE_GATEWAY` (10.50.0.99).
 pub const ECMP_STATIC: &str = "198.18.79.0/24";
 pub const ECMP_EXTRA_GATEWAY: Addr = Addr("10.50.0.98");
+/// `static-variants` recursion (#1527): a static through `REDISTRIBUTE_GATEWAY`
+/// and a static whose gateway lies inside it.
+pub const RECURSIVE_COVER: &str = "198.18.80.0/24";
+pub const RECURSIVE_STATIC: &str = "198.18.81.0/24";
+pub const RECURSIVE_GATEWAY: &str = "198.18.80.5";
 pub const REDISTRIBUTE_GATEWAY: Addr = Addr("10.50.0.99");
 /// `blackhole` (#861): TEST-NET-3 host routes router-a tags BLACKHOLE;
 /// router-b's prefix-list covers `BLACKHOLE_NET` at /32 only, so the first is
@@ -464,6 +469,8 @@ pub const OSPF_BROADCAST_ADDRESS_C: &str = "203.0.113.67/28";
 /// A destination with no neighbor of its own, on router-b's loopback, so
 /// router-a can only learn it through a real SPF computation.
 pub const OSPF_SPF_LOOPBACK_ADDRESS: &str = "203.0.113.80/32";
+/// router-a's loopback for the `ospf-flood` event-driven flooding proof (#1517).
+pub const OSPF_FLOOD_LOOPBACK_ADDRESS: &str = "203.0.113.140/32";
 /// router-c's loopback for the `ospf-dr` multicast data-plane proof (#879).
 pub const OSPF_DR_LOOPBACK_ADDRESS_C: &str = "203.0.113.98/32";
 /// `ospf-remote-lfa`: the five-router ring a-b-c-d-e-a. Ring link `i` (from

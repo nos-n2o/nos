@@ -1,0 +1,4 @@
+Counters
+  Aggregate         Interface         LACPDUs-Rx  LACPDUs-Tx  Illegal  Unsupported-Version  Marker-Rx  Marker-Resp-Tx  Marker-Resp-Rx
+  ----------------  ----------------  ----------  ----------  -------  -------------------  ---------  --------------  --------------
+  x\nFORGED\x1b[2J  x\nFORGED\x1b[2J           0           0        0                    0          0               0               0

@@ -805,8 +805,7 @@ pub(super) async fn handle_dbd(
     // A MaxAge entry is never offered in the summary: it may be evicted
     // (`Lsdb::MAX_AGE_HOLD_TICKS`) before the neighbor's LSR for it lands,
     // which would read as `BadLSReq` and restart the adjacency for nothing.
-    // The periodic resend still carries the flush to an already-`Full`
-    // neighbor.
+    // The flood sink still carries the flush to an already-`Full` neighbor.
     let mut local_lsdb_headers = lsdb.lock().await.headers();
     local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
     local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
@@ -897,6 +896,7 @@ pub(super) async fn handle_lsu(
     lsdb: &Mutex<Lsdb>,
     link_local_lsdb: &Mutex<Lsdb>,
     lsu: &LsuPacket,
+    link_id: u32,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
         let snapshot = status.borrow();
@@ -908,6 +908,11 @@ pub(super) async fn handle_lsu(
         return None;
     }
 
+    let ack = exchange::AckMode::Rfc(super::flood::ack_ctx(cfg, status, lsu.router_id));
+    let origin = nos_ospf_common::lsdb::Origin {
+        link: link_id,
+        neighbor: lsu.router_id,
+    };
     let (actions, newly_installed) = {
         let mut lsdb = lsdb.lock().await;
         let mut link_local_lsdb = link_local_lsdb.lock().await;
@@ -918,6 +923,8 @@ pub(super) async fn handle_lsu(
             lsu,
             // tokio's clock, so paused-time tests see MinLSArrival pass.
             tokio::time::Instant::now().into_std(),
+            Some(origin),
+            ack,
         );
         // A Grace-LSA is acted on at once and never held, even in the link
         // store (RFC 3623), so it is never offered back to the restarted

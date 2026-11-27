@@ -53,6 +53,12 @@ pub fn decode_marker(data: &[u8]) -> Option<Marker> {
     })
 }
 
+/// Whether `data` is a Marker Response (subtype 2, TLV 2): never sent by a
+/// Linux peer, counted so it does not read as an illegal PDU.
+pub fn is_marker_response(data: &[u8]) -> bool {
+    data.len() >= 16 && data[0] == SUBTYPE_MARKER && data[2] == TLV_MARKER_RESPONSE
+}
+
 /// A clean Marker Response PDU (same 110-byte body as a LACPDU).
 pub fn encode_marker_response(m: &Marker) -> Vec<u8> {
     let mut buf = Vec::with_capacity(LACPDU_LEN);
@@ -297,6 +303,27 @@ pub fn decode(data: &[u8]) -> Result<Lacpdu, PacketError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_response_is_told_from_a_request() {
+        let m = Marker {
+            requester_port: 1,
+            requester_system: [2; 6],
+            transaction_id: 9,
+        };
+        assert!(is_marker_response(&encode_marker_response(&m)));
+        assert!(!is_marker_response(&[
+            SUBTYPE_MARKER,
+            1,
+            TLV_MARKER_INFO,
+            16
+        ]));
+        assert!(!is_marker_response(&[
+            SUBTYPE_MARKER,
+            1,
+            TLV_MARKER_RESPONSE
+        ]));
+    }
 
     fn sample_info() -> PortInfo {
         PortInfo {

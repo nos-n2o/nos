@@ -41,7 +41,7 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - A label that does not resolve (config race) fails closed: `bfd auth key not found label=...` is logged, `Core::unkeyed` makes every received packet fail (`AuthError::NoKey`) and nothing is sent until the key arrives; it never falls back to no authentication.
 - `session::run` logs `bfd auth failed` (rate limited to one per 10 s per session); `Status` and `BfdSessionView` carry `auth_method`, `auth_key_id`, `auth_failures`.
 - Unit tests check digests against an independent re-implementation of the RFC recipe in `auth.rs` tests. `ponytail:` no FRR positive proof: FRR `bfdd` has no §6.7 support, so `nos-e2e`'s `bfd-auth` only proves the negative case against it.
-- #294 (S-BFD) will add reflector authentication on top of this module.
+- `verify(section, keys)` (#1534) is the stateless §6.7.2 check (type, key id, constant-time digest, no sequence) the S-BFD reflector and initiator use.
 
 ## FSM
 
@@ -114,17 +114,21 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 
 ## Seamless BFD (#294)
 
-- `sbfd` (pure): `reflect(packet, source, destination, policy)` returns the reply or a `Discard` reason, in this order: source port 7784, martian source, `allow-from`, A bit, D bit clear, unknown discriminator. `Initiator` is RFC 7880 Figure 4 (Down and Up only) with the same `now`-as-argument style as `session::Core`.
+- `sbfd` (pure): `reflect(packet, source, destination, policy)` returns the reply (with the key and received sequence number to sign it with, `Policy::wire`) or a `Discard` reason, in this order: source port 7784, martian source, `allow-from`, D bit clear, unknown discriminator, authentication. `Initiator` is RFC 7880 Figure 4 (Down and Up only) with the same `now`-as-argument style as `session::Core`.
 - `reflector`: `Reflector` holds the policy (`policy_of(&Config)`), a global token bucket (10 000 pps, burst 2 000, checked before the packet is parsed) and the counters `GetReflector` returns. It lives in the `Manager` (`manager.reflector()`); `handle` takes the datagram and returns the reply bytes.
 - `socket::ReflectorNet`: one UDP 7784 socket per (table VRF, family) while a discriminator is configured, `IP_PKTINFO`/`IPV6_RECVPKTINFO` to learn the probed address and a `sendmsg` with that address as the source of the reply (a wildcard-bound socket would pick the route's source); TTL 255. A recreated VRF device (new ifindex) reopens the socket. `micro_sessions::run` drives it from the same config resync (scopes `SbfdReflector` and `RoutingTables`, plus the 10 s re-apply that also retries a VRF `nos-ribd` has not created yet).
 - An initiator is a `Manager` session whose profile has `mode sbfd`: no `Demux` slot (the reflection comes back to the session's own connected socket, `Net::open_sbfd`, which also reads the TTL), and `sbfd::run` instead of `session::run`. A change of `mode` replaces the session, like `echo-mode unaffiliated`. `BfdSessionView.kind` tells them apart.
 - The target discriminator is `sbfd-remote-discriminator`, else the peer's IPv4 address (`sbfd::remote_discriminator`); none (IPv6 peer) logs a warning and the session stays `down` and silent.
-- `ponytail:` the reflector rate limit is one global bucket and its constants are not configurable; reflector authentication (RFC 7880 section 11) is a follow-up after #289.
+- S-BFD authentication (#1534, RFC 7880 section 11):
+    - Reflector: `sbfd-reflector auth` lists keys (admin-key labels, picked by Auth Key ID); `policy_of` resolves them from the same config the reflector follows, so a rotated secret takes effect on the next resync. A probe with the A bit needs a key of its type and key id (else `authenticated`) and a good digest (else `auth_failed`, one `debug!` `bfd reflector auth failed peer=` a second); the reply is signed with that key and the probe's sequence number. No sequence check: the reflector keeps no state. Probes without the A bit are still answered, unsigned.
+    - Initiator: the `sb` profile's `auth` signs every probe (`Initiator::wire`) and a reflection is accepted only if it verifies and echoes one of the last `2 x detect-multiplier` sequence numbers sent; anything else counts in `auth_failures` (`bfd sbfd reply discarded: auth`, `warn!` first of a streak). An unresolved key sends nothing (Down), never unauthenticated probes.
+    - Simple password is allowed, as for any profile, but discouraged by the RFC.
+- `ponytail:` the reflector rate limit is one global bucket and its constants are not configurable.
 
 ## Check it by hand
 
 - `nos show bfd sessions` or `GET /v1/bfd/sessions` lists what the daemon holds.
-- `cargo run -p nos-e2e -- bfd-sbfd` proves an S-BFD initiator Up from reflections alone, the reflector's counters over REST, the Down and route withdrawal when the reflector stops answering for the discriminator, and a classical FRR session undisturbed beside it.
+- `cargo run -p nos-e2e -- bfd-sbfd` proves an S-BFD initiator Up from reflections alone, the reflector's counters over REST, the Down and route withdrawal when the reflector stops answering for the discriminator, a classical FRR session undisturbed beside it, and the authentication steps (key missing, matching, wrong secret, restored).
 - `cargo run -p nos-e2e -- bfd-padded` proves 1400-byte packets between the routers, the `EMSGSIZE` warning and the peer's detection-time Down when router-a's MTU drops to 1300, recovery, and FRR `bfdd` accepting padded packets.
 - `cargo run -p nos-e2e -- bfd-auth` proves matching and wrong keys, a live key and method change without a flap, and the unauthenticated FRR staying down.
 - `cargo run -p nos-e2e -- bfd-echo-unaffiliated` proves a BFD-less forwarding gateway (router-b with `ip_forward`) brings the session and the guarded route up from looped packets, `echo-function-failed` and route withdrawal when UDP 3785 is dropped, and recovery.

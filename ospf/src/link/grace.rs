@@ -412,7 +412,7 @@ impl LinkManager {
     }
 
     /// RFC 6987 on-shutdown: re-originates the Router-LSAs with max-metric
-    /// transit links, kicks them out and holds `on_shutdown` seconds so
+    /// transit links (flooded by event) and holds `on_shutdown` seconds so
     /// neighbors move traffic away before the flush. Skipped when off, when
     /// max-metric is already active (neighbors already avoid us), and when
     /// `MinLSInterval` holds the Router-LSA back (it changed under 5s ago).
@@ -433,7 +433,6 @@ impl LinkManager {
             reason = "on-shutdown",
             "ospf stub router max-metric changed"
         );
-        self.flood_now().await;
         tokio::time::sleep(Duration::from_secs(u64::from(hold)).min(MAX_METRIC_SHUTDOWN_HOLD_MAX))
             .await;
     }

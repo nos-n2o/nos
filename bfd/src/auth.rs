@@ -184,6 +184,43 @@ fn seq_ok(kind: u8, rcv: u32, seq: u32, mult: u8) -> bool {
     }
 }
 
+/// §6.7.2 without state: the key of `keys` whose type, key id and digest (or
+/// password) match `s`. No sequence check: the S-BFD reflector (RFC 7880 §11)
+/// keeps none.
+pub fn verify<'a>(
+    s: &AuthSection,
+    keys: impl IntoIterator<Item = &'a AuthKey>,
+) -> Result<&'a AuthKey, AuthError> {
+    let typed: Vec<&AuthKey> = keys
+        .into_iter()
+        .filter(|k| wire_type(k.method) == s.kind)
+        .collect();
+    if typed.is_empty() {
+        return Err(AuthError::TypeMismatch);
+    }
+    let mut named = typed
+        .into_iter()
+        .filter(|k| k.key_id == s.key_id)
+        .peekable();
+    if named.peek().is_none() {
+        return Err(AuthError::KeyIdMismatch);
+    }
+    named
+        .find(|k| {
+            let want = if s.kind == 1 {
+                k.secret.clone()
+            } else {
+                digest(s.kind, &k.secret, &s.raw)
+            };
+            ct_eq(&want, &s.data)
+        })
+        .ok_or(if s.kind == 1 {
+            AuthError::BadPassword
+        } else {
+            AuthError::BadDigest
+        })
+}
+
 /// One session's authentication state.
 #[derive(Debug)]
 pub struct AuthState {
@@ -257,35 +294,7 @@ impl AuthState {
             return Err(AuthError::Missing);
         };
         let old = self.old.as_ref().filter(|(_, until)| *until > now);
-        let keys: Vec<&AuthKey> = std::iter::once(cfg).chain(old.map(|(k, _)| k)).collect();
-        let keys: Vec<&AuthKey> = {
-            let typed: Vec<_> = keys
-                .into_iter()
-                .filter(|k| wire_type(k.method) == s.kind)
-                .collect();
-            if typed.is_empty() {
-                return Err(AuthError::TypeMismatch);
-            }
-            typed.into_iter().filter(|k| k.key_id == s.key_id).collect()
-        };
-        if keys.is_empty() {
-            return Err(AuthError::KeyIdMismatch);
-        }
-        let genuine = keys.iter().any(|k| {
-            let want = if s.kind == 1 {
-                k.secret.clone()
-            } else {
-                digest(s.kind, &k.secret, &s.raw)
-            };
-            ct_eq(&want, &s.data)
-        });
-        if !genuine {
-            return Err(if s.kind == 1 {
-                AuthError::BadPassword
-            } else {
-                AuthError::BadDigest
-            });
-        }
+        verify(s, std::iter::once(cfg).chain(old.map(|(k, _)| k)))?;
         if s.kind != 1 {
             if self.seq_known && !seq_ok(s.kind, self.rcv_seq, s.seq, mult) {
                 return Err(AuthError::Sequence);
@@ -295,6 +304,10 @@ impl AuthState {
         }
         self.last_ok = Some(now);
         Ok(())
+    }
+
+    pub fn xmit_seq(&self) -> u32 {
+        self.xmit_seq
     }
 
     /// The wire bytes of the 24-byte `hdr`: signed when authentication is on.
