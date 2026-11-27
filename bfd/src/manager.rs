@@ -488,6 +488,7 @@ impl Manager {
         let initiator = sbfd.then(|| {
             Initiator::new(
                 profile,
+                self.resolve(profile),
                 disc,
                 sbfd::remote_discriminator(key.peer, profile),
                 tokio::time::Instant::now().into_std(),

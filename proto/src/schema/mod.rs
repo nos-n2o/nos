@@ -115,7 +115,7 @@ pub use routing_table::{
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
     RoutingTableVpn, SshServer, REST_API_PORT_DEFAULT, SSH_SERVER_PORT_DEFAULT,
 };
-pub use sbfd::SbfdReflector;
+pub use sbfd::{SbfdReflector, SbfdReflectorKey};
 pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};
 pub use static_route::{StaticNextHop, StaticRoute};
 pub use static_routing_instance::StaticRoutingInstance;
@@ -275,7 +275,7 @@ pub struct Config {
     /// RFC 7880 S-BFD reflector. `serde(default)` so on-disk config saved
     /// before this field existed still loads.
     #[serde(default)]
-    #[garde(custom(|r: &SbfdReflector, _ctx: &Config| r.check()))]
+    #[garde(custom(|r: &SbfdReflector, ctx: &Config| r.check(ctx)))]
     #[cli(topic = SbfdReflector, words = "sbfd reflector")]
     pub sbfd_reflector: SbfdReflector,
 

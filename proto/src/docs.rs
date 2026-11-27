@@ -597,6 +597,8 @@ topics! {
     SbfdReflectorDiscriminator,
     /// `SbfdReflector.allow_from`
     SbfdReflectorAllowFrom,
+    /// `SbfdReflector.auth`
+    SbfdReflectorAuth,
     /// The `bfd` reference on a peer-group, OSPF/OSPFv3 profile or static route
     BfdReference,
     /// `Config.spanning_tree`

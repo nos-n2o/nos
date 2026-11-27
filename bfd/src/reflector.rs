@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 use nos_proto::{Config, ReflectorDiscards, ReflectorView};
 
+use crate::auth::AuthKey;
 use crate::packet;
 use crate::sbfd::{reflect, Discard, Policy};
+use tracing::debug;
 
 /// Packets per second the reflector handles in total (RFC 7880 §7.2.1 "rate
 /// limiter"): 100 initiators at the 10 ms floor fit. ponytail: one global
@@ -45,7 +47,7 @@ impl Bucket {
     }
 }
 
-const REASONS: usize = 8;
+const REASONS: usize = 9;
 
 fn slot(d: Discard) -> usize {
     match d {
@@ -57,6 +59,7 @@ fn slot(d: Discard) -> usize {
         Discard::Authenticated => 5,
         Discard::DemandClear => 6,
         Discard::UnknownDiscriminator => 7,
+        Discard::AuthFailed => 8,
     }
 }
 
@@ -66,6 +69,8 @@ pub struct Reflector {
     received: AtomicU64,
     replied: AtomicU64,
     discarded: [AtomicU64; REASONS],
+    /// When the last auth failure was logged (one `debug!` per second).
+    last_auth_log: Mutex<Option<Instant>>,
 }
 
 impl Default for Reflector {
@@ -79,6 +84,7 @@ impl Default for Reflector {
             received: AtomicU64::new(0),
             replied: AtomicU64::new(0),
             discarded: Default::default(),
+            last_auth_log: Mutex::default(),
         }
     }
 }
@@ -93,6 +99,13 @@ pub fn policy_of(cfg: &Config) -> Policy {
             .map(|d| u32::from(*d))
             .collect(),
         allow_from: cfg.sbfd_reflector.allow_from.clone(),
+        // A label missing from the keystore is skipped: fail closed.
+        keys: cfg
+            .sbfd_reflector
+            .auth
+            .iter()
+            .filter_map(|a| cfg.key(&a.key).map(|s| AuthKey::new(&a.as_auth(), s)))
+            .collect(),
     }
 }
 
@@ -133,10 +146,19 @@ impl Reflector {
         match reflect(&p, src, dst, &policy) {
             Ok(reply) => {
                 self.replied.fetch_add(1, Ordering::Relaxed);
-                Some(reply.encode().to_vec())
+                Some(Policy::wire(&reply))
             }
             Err(d) => {
                 self.count(d);
+                if d == Discard::AuthFailed {
+                    let mut last = self.last_auth_log.lock().unwrap();
+                    if last
+                        .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1))
+                    {
+                        *last = Some(now);
+                        debug!(peer = %src.ip(), "bfd reflector auth failed");
+                    }
+                }
                 None
             }
         }
@@ -159,6 +181,7 @@ impl Reflector {
                 authenticated: n(Discard::Authenticated),
                 demand_clear: n(Discard::DemandClear),
                 unknown_discriminator: n(Discard::UnknownDiscriminator),
+                auth_failed: n(Discard::AuthFailed),
             },
         }
     }
@@ -203,6 +226,7 @@ mod tests {
         r.set_policy(Policy {
             discriminators: vec![9, 3],
             allow_from: vec![],
+            keys: vec![],
         });
         r
     }
@@ -265,5 +289,55 @@ mod tests {
         assert!(r.enabled());
         r.set_policy(policy_of(&Config::default()));
         assert!(!r.enabled());
+    }
+
+    #[test]
+    fn auth_failures_are_counted_and_keys_come_from_the_config() {
+        use nos_proto::schema::{AdminKey, BfdAuth, BfdAuthMethod, SbfdReflectorKey};
+        let mut cfg = Config::default();
+        cfg.sbfd_reflector.discriminators = vec!["0.0.0.9".parse().unwrap()];
+        cfg.sbfd_reflector.auth = vec![
+            SbfdReflectorKey {
+                key_id: 1,
+                method: BfdAuthMethod::KeyedSha1,
+                key: "k".into(),
+            },
+            SbfdReflectorKey {
+                key_id: 2,
+                method: BfdAuthMethod::KeyedSha1,
+                key: "gone".into(),
+            },
+        ];
+        cfg.admin.keys = vec![AdminKey {
+            label: "k".into(),
+            secret: "secretA".into(),
+        }];
+        let r = Reflector::default();
+        r.set_policy(policy_of(&cfg));
+        let k = |secret: &str, id| {
+            AuthKey::new(
+                &BfdAuth {
+                    key_id: id,
+                    method: BfdAuthMethod::KeyedSha1,
+                    key: String::new(),
+                },
+                secret,
+            )
+        };
+        let signed = |key: &AuthKey| crate::auth::sign(&probe(9), key, 7);
+        let t = Instant::now();
+        assert!(r
+            .handle(t, src(), dst(), &signed(&k("secretA", 1)))
+            .is_some());
+        assert!(r.handle(t, src(), dst(), &signed(&k("wrong", 1))).is_none());
+        assert!(r
+            .handle(t, src(), dst(), &signed(&k("secretA", 2)))
+            .is_none());
+        let d = r.view().discarded;
+        assert_eq!(
+            (d.auth_failed, d.authenticated),
+            (1, 1),
+            "unresolved label is absent"
+        );
     }
 }

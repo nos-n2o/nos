@@ -8,6 +8,7 @@
 //!   when the detection time passes without a reply.
 //! - The reflector keeps nothing per initiator: one packet in, at most one out.
 
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use nos_proto::{BfdDiag, BfdSessionKind, BfdState, SessionKey};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
+use crate::auth::{self, AuthError, AuthKey, AuthState};
 use crate::manager::ttl_ok;
 use crate::packet::Packet;
 use crate::session::{self, Status, Tx};
@@ -41,6 +43,8 @@ pub enum Discard {
     Filtered,
     RateLimited,
     Authenticated,
+    /// The A bit is set and a key matches, but the digest is wrong.
+    AuthFailed,
     DemandClear,
     UnknownDiscriminator,
 }
@@ -50,6 +54,22 @@ pub enum Discard {
 pub struct Policy {
     pub discriminators: Vec<u32>,
     pub allow_from: Vec<IpNet>,
+    /// RFC 7880 §11 keys (resolved from the keystore), picked by Auth Key ID.
+    pub keys: Vec<AuthKey>,
+}
+
+/// A reply and, for an authenticated probe, the key and sequence number it
+/// is signed with (§11: the reflector reuses the received sequence number).
+pub type Reply = (Packet, Option<(AuthKey, u32)>);
+
+impl Policy {
+    /// The wire bytes of a `reflect` reply.
+    pub fn wire((p, sign): &Reply) -> Vec<u8> {
+        match sign {
+            Some((k, seq)) => auth::sign(&p.encode(), k, *seq),
+            None => p.encode().to_vec(),
+        }
+    }
 }
 
 /// RFC 7881 §7: sources that must never be acted on or answered. A link-local
@@ -77,7 +97,7 @@ pub fn reflect(
     src: SocketAddr,
     dst: IpAddr,
     policy: &Policy,
-) -> Result<Packet, Discard> {
+) -> Result<Reply, Discard> {
     // RFC 7881 §6: a probe from the reflector port is a reflection.
     if src.port() == PORT {
         return Err(Discard::SourcePort);
@@ -88,11 +108,6 @@ pub fn reflect(
     if !policy.allow_from.is_empty() && !policy.allow_from.iter().any(|n| n.contains(&src.ip())) {
         return Err(Discard::Filtered);
     }
-    // RFC 7880 §11: answering an authenticated packet needs the reflector
-    // procedures of that section; not built, so it is not answered.
-    if p.auth.is_some() {
-        return Err(Discard::Authenticated);
-    }
     // RFC 7880 §7.2.3.
     if !p.demand {
         return Err(Discard::DemandClear);
@@ -100,7 +115,19 @@ pub fn reflect(
     if !policy.discriminators.contains(&p.your_discriminator) {
         return Err(Discard::UnknownDiscriminator);
     }
-    Ok(Packet {
+    // RFC 7880 §11: the sequence number is not checked (no state), the key is
+    // picked by type and Auth Key ID; unsigned probes are answered unsigned.
+    let sign = match &p.auth {
+        None => None,
+        Some(sec) => {
+            let k = auth::verify(sec, &policy.keys).map_err(|e| match e {
+                AuthError::TypeMismatch | AuthError::KeyIdMismatch => Discard::Authenticated,
+                _ => Discard::AuthFailed,
+            })?;
+            Some((k.clone(), sec.seq))
+        }
+    };
+    let reply = Packet {
         diag: BfdDiag::NoDiagnostic.code(),
         // RFC 7880 §7.2.3: Up (AdminDown is only for an entity out of service).
         state: BfdState::Up,
@@ -117,7 +144,8 @@ pub fn reflect(
         // No S-BFD Echo loopback (RFC 7880 §7.2.2 allows 0).
         required_min_echo_rx: 0,
         auth: None,
-    })
+    };
+    Ok((reply, sign))
 }
 
 /// The S-BFD discriminator an initiator probes for `peer` under `profile`:
@@ -133,6 +161,10 @@ pub fn remote_discriminator(peer: IpAddr, profile: &BfdProfile) -> Option<u32> {
 
 /// An S-BFD initiator session (RFC 7880 §7.3), pure like `session::Core`.
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent flags of one small state machine"
+)]
 pub struct Initiator {
     tx_us: u32,
     detect_mult: u8,
@@ -148,11 +180,23 @@ pub struct Initiator {
     backoff: bool,
     last_rx: Instant,
     next_tx: Instant,
+    /// The profile asks for authentication (§11); without its key nothing is
+    /// sent (fail closed).
+    auth_required: bool,
+    auth: AuthState,
+    /// The sequence numbers of the last `2 x detect_mult` probes: the
+    /// permissible range of a reflected one (§11).
+    sent_seqs: VecDeque<u32>,
+    auth_failures: u64,
+    /// Failures since the last good reply; the first of a run is `warn!`ed.
+    auth_streak: bool,
+    auth_note: Option<bool>,
 }
 
 impl Initiator {
     pub fn new(
         profile: &BfdProfile,
+        key: Option<AuthKey>,
         local_disc: u32,
         remote_disc: Option<u32>,
         now: Instant,
@@ -170,6 +214,12 @@ impl Initiator {
             backoff: false,
             last_rx: now,
             next_tx: now,
+            auth_required: profile.auth.is_some(),
+            auth: AuthState::new(key, session::rand_u32(), now),
+            sent_seqs: VecDeque::new(),
+            auth_failures: 0,
+            auth_streak: false,
+            auth_note: None,
         };
         i.settle(now);
         i
@@ -177,7 +227,9 @@ impl Initiator {
 
     /// Whether packets go out at all.
     fn active(&self) -> bool {
-        !self.shutdown && self.remote_disc.is_some()
+        !self.shutdown
+            && self.remote_disc.is_some()
+            && (!self.auth_required || self.auth.cfg().is_some())
     }
 
     /// Keeps the state in line with `active` after a configuration change.
@@ -219,9 +271,9 @@ impl Initiator {
             tx_interval_us: self.interval_us(),
             detection_time_us: u32::try_from(self.detect_us()).unwrap_or(u32::MAX),
             control_plane_independent: self.state == BfdState::Up && CPI && self.remote_cpi,
-            auth_method: None,
-            auth_key_id: None,
-            auth_failures: 0,
+            auth_method: self.auth.cfg().map(|k| k.method),
+            auth_key_id: self.auth.cfg().map(|k| k.key_id),
+            auth_failures: self.auth_failures,
             echo_active: false,
             echo_interval_us: 0,
             echo_only: false,
@@ -251,6 +303,34 @@ impl Initiator {
         }
     }
 
+    /// Whether a new auth failure was counted since the last call, and if it
+    /// is the first of a streak.
+    pub fn take_auth_failure(&mut self) -> Option<bool> {
+        self.auth_note.take()
+    }
+
+    /// §11: an authenticated profile takes only a reflection signed with its
+    /// key whose sequence number is one of the recent probes'; an
+    /// unauthenticated one takes none with the A bit.
+    fn reply_authentic(&mut self, p: &Packet) -> bool {
+        let ok = match (self.auth_required, &p.auth, self.auth.cfg()) {
+            (false, None, _) => true,
+            (true, Some(sec), Some(k)) => {
+                auth::verify(sec, [k]).is_ok()
+                    && (sec.kind == 1 || self.sent_seqs.contains(&sec.seq))
+            }
+            _ => false,
+        };
+        if ok {
+            self.auth_streak = false;
+        } else {
+            self.auth_failures += 1;
+            self.auth_note = Some(!self.auth_streak);
+            self.auth_streak = true;
+        }
+        ok
+    }
+
     /// A reply from the reflector. Whether the state changed.
     pub fn on_packet(&mut self, now: Instant, p: &Packet) -> bool {
         // RFC 7880 §7.1: a packet with D=1 is not a reflection; the rest must
@@ -260,6 +340,9 @@ impl Initiator {
             || p.your_discriminator != self.local_disc
             || Some(p.my_discriminator) != self.remote_disc
         {
+            return false;
+        }
+        if !self.reply_authentic(p) {
             return false;
         }
         match p.state {
@@ -316,9 +399,31 @@ impl Initiator {
         Some(self.packet())
     }
 
+    /// The wire bytes of a probe from `on_timer`: signed when the profile has a key.
+    pub fn wire(&mut self, now: Instant, p: &Packet) -> Vec<u8> {
+        let d = Some(Duration::from_micros(self.detect_us()));
+        let b = self.auth.sign(now, &p.encode(), d);
+        if self.auth.cfg().is_some() {
+            self.sent_seqs.push_back(self.auth.xmit_seq());
+            while self.sent_seqs.len() > 2 * usize::from(self.detect_mult) {
+                self.sent_seqs.pop_front();
+            }
+        }
+        b
+    }
+
     /// A re-`Register` with a new profile or remote discriminator.
-    pub fn update(&mut self, profile: &BfdProfile, remote_disc: Option<u32>, now: Instant) {
+    pub fn update(
+        &mut self,
+        profile: &BfdProfile,
+        key: Option<AuthKey>,
+        remote_disc: Option<u32>,
+        now: Instant,
+    ) {
         let was_active = self.active();
+        self.auth_required = profile.auth.is_some();
+        self.auth
+            .set(key, now, Duration::from_micros(self.detect_us()));
         self.tx_us = profile.min_tx_interval * MS;
         self.detect_mult = profile.detect_multiplier;
         if remote_disc != self.remote_disc {
@@ -381,6 +486,11 @@ pub async fn run(
                     if ttl_ok(key.multihop, ttl, min_ttl) {
                         counters.count_rx();
                         core.on_packet(now(), &p);
+                        match core.take_auth_failure() {
+                            Some(true) => warn!(peer = %key.peer, "bfd sbfd reply discarded: auth"),
+                            Some(false) => debug!(peer = %key.peer, "bfd sbfd reply discarded: auth"),
+                            None => {}
+                        }
                     } else {
                         debug!(peer = %key.peer, ttl = ?ttl, "bfd sbfd reply discarded: ttl");
                     }
@@ -389,10 +499,9 @@ pub async fn run(
                 None => break,
             },
             c = cmds.recv() => match c {
-                // S-BFD carries no auth (`sbfd_compatible`): the key is dropped.
-                Some((c, _)) => {
+                Some((c, k)) => {
                     min_ttl = c.minimum_ttl;
-                    core.update(&c, remote_discriminator(key.peer, &c), now());
+                    core.update(&c, k, remote_discriminator(key.peer, &c), now());
                     None
                 }
                 None => break,
@@ -400,7 +509,8 @@ pub async fn run(
             () = tokio::time::sleep_until(deadline) => core.on_timer(now(), session::jitter_pct()),
         };
         if let Some(p) = out {
-            match path.tx.send(&p.encode()) {
+            let wire = core.wire(now(), &p);
+            match path.tx.send(&wire) {
                 Ok(()) => counters.count_tx(),
                 Err(e) => debug!(peer = %key.peer, error = %e, "bfd sbfd send failed"),
             }
@@ -455,6 +565,7 @@ mod tests {
         Policy {
             discriminators: vec![DISC],
             allow_from: vec![],
+            keys: vec![],
         }
     }
 
@@ -468,7 +579,9 @@ mod tests {
 
     #[test]
     fn reply_fields_follow_rfc_7880_section_7_2_2() {
-        let r = reflect(&probe(), src("10.0.0.1", 50000), dst(), &policy()).unwrap();
+        let r = reflect(&probe(), src("10.0.0.1", 50000), dst(), &policy())
+            .unwrap()
+            .0;
         assert_eq!(r.state, BfdState::Up);
         assert!(!r.demand, "D=0 marks a reflection");
         assert_eq!(r.detect_mult, 3);
@@ -493,7 +606,8 @@ mod tests {
             dst(),
             &policy(),
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(r.final_ && !r.poll);
     }
 
@@ -624,7 +738,7 @@ mod tests {
     #[test]
     fn initiator_packet_follows_rfc_7880_section_7_3_2() {
         let now = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), now);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), now);
         let p = i.on_timer(now, 100).expect("the first packet goes at once");
         assert!(p.demand);
         assert_eq!(p.state, BfdState::Down);
@@ -640,7 +754,7 @@ mod tests {
     #[test]
     fn up_on_an_up_reply_and_down_on_silence() {
         let t0 = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
         i.on_timer(t0, 100);
         assert!(i.on_packet(t0, &reply(BfdState::Up, REFLECTOR_RX_US)));
         assert_eq!(i.state, BfdState::Up);
@@ -666,7 +780,7 @@ mod tests {
     #[test]
     fn the_reflected_required_min_rx_slows_the_probe() {
         let t0 = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
         i.on_packet(t0, &reply(BfdState::Up, 500_000));
         assert_eq!(i.status().tx_interval_us, 500_000);
         assert_eq!(i.status().detection_time_us, 1_500_000);
@@ -675,7 +789,7 @@ mod tests {
     #[test]
     fn admin_down_backs_off_to_a_second_without_a_failure_diag() {
         let t0 = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
         i.on_packet(t0, &reply(BfdState::Up, REFLECTOR_RX_US));
         assert!(i.on_packet(t0, &reply(BfdState::AdminDown, REFLECTOR_RX_US)));
         assert_eq!(i.state, BfdState::Down);
@@ -693,7 +807,7 @@ mod tests {
     #[test]
     fn replies_that_are_not_ours_are_discarded() {
         let t0 = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
         let ok = reply(BfdState::Up, REFLECTOR_RX_US);
         for bad in [
             Packet {
@@ -728,29 +842,180 @@ mod tests {
         let t0 = Instant::now();
         let mut down = profile(100);
         down.shutdown = true;
-        let mut i = Initiator::new(&down, MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&down, None, MINE, Some(DISC), t0);
         assert_eq!(i.state, BfdState::AdminDown);
         assert!(i.on_timer(t0 + Duration::from_secs(5), 100).is_none());
         assert!(!i.on_packet(t0, &reply(BfdState::Up, 0)));
         // Enabled again: probing resumes at once.
-        i.update(&profile(100), Some(DISC), t0);
+        i.update(&profile(100), None, Some(DISC), t0);
         assert_eq!(i.state, BfdState::Down);
         assert!(i.on_timer(t0, 100).is_some());
 
-        let mut none = Initiator::new(&profile(100), MINE, None, t0);
+        let mut none = Initiator::new(&profile(100), None, MINE, None, t0);
         assert!(none.on_timer(t0, 100).is_none());
         // Naming one starts it.
-        none.update(&profile(100), Some(DISC), t0);
+        none.update(&profile(100), None, Some(DISC), t0);
         assert!(none.on_timer(t0, 100).is_some());
     }
 
     #[test]
     fn a_new_remote_discriminator_restarts_the_probe() {
         let t0 = Instant::now();
-        let mut i = Initiator::new(&profile(100), MINE, Some(DISC), t0);
+        let mut i = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
         i.on_packet(t0, &reply(BfdState::Up, REFLECTOR_RX_US));
-        i.update(&profile(100), Some(DISC + 1), t0);
+        i.update(&profile(100), None, Some(DISC + 1), t0);
         assert_eq!(i.state, BfdState::Down);
         assert_eq!(i.on_timer(t0, 100).unwrap().your_discriminator, DISC + 1);
+    }
+
+    use nos_proto::schema::{BfdAuth, BfdAuthMethod};
+
+    fn key(id: u8, secret: &str) -> AuthKey {
+        AuthKey::new(
+            &BfdAuth {
+                key_id: id,
+                method: BfdAuthMethod::KeyedSha1,
+                key: "l".into(),
+            },
+            secret,
+        )
+    }
+
+    fn keyed_policy() -> Policy {
+        Policy {
+            keys: vec![key(1, "secretA")],
+            ..policy()
+        }
+    }
+
+    fn signed_probe(k: &AuthKey, seq: u32) -> Packet {
+        crate::packet::decode(&auth::sign(&probe().encode(), k, seq)).unwrap()
+    }
+
+    fn auth_profile(tx: u32) -> BfdProfile {
+        BfdProfile {
+            auth: Some(BfdAuth {
+                key_id: 1,
+                method: BfdAuthMethod::KeyedSha1,
+                key: "l".into(),
+            }),
+            ..profile(tx)
+        }
+    }
+
+    #[test]
+    fn reflector_signs_the_reply_with_the_received_sequence_number() {
+        let from = src("10.0.0.1", 50000);
+        let reply = reflect(
+            &signed_probe(&key(1, "secretA"), 0xdead_beef),
+            from,
+            dst(),
+            &keyed_policy(),
+        )
+        .unwrap();
+        let wire = Policy::wire(&reply);
+        let sec = crate::packet::decode(&wire).unwrap().auth.unwrap();
+        assert_eq!((sec.kind, sec.key_id, sec.seq), (4, 1, 0xdead_beef));
+        assert!(auth::verify(&sec, &[key(1, "secretA")]).is_ok());
+        // Unsigned probes are still answered, unsigned.
+        let plain = reflect(&probe(), from, dst(), &keyed_policy()).unwrap();
+        assert!(plain.1.is_none());
+        assert!(crate::packet::decode(&Policy::wire(&plain))
+            .unwrap()
+            .auth
+            .is_none());
+        // Any old sequence number is fine: the reflector has no state.
+        assert!(reflect(
+            &signed_probe(&key(1, "secretA"), 1),
+            from,
+            dst(),
+            &keyed_policy()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn reflector_auth_discards() {
+        let from = src("10.0.0.1", 50000);
+        let go = |k: &AuthKey| reflect(&signed_probe(k, 5), from, dst(), &keyed_policy());
+        assert_eq!(go(&key(1, "other")).unwrap_err(), Discard::AuthFailed);
+        assert_eq!(go(&key(2, "secretA")).unwrap_err(), Discard::Authenticated);
+        let md5 = AuthKey::new(
+            &BfdAuth {
+                key_id: 1,
+                method: BfdAuthMethod::KeyedMd5,
+                key: "l".into(),
+            },
+            "secretA",
+        );
+        assert_eq!(go(&md5).unwrap_err(), Discard::Authenticated);
+        assert_eq!(
+            reflect(&signed_probe(&key(1, "secretA"), 5), from, dst(), &policy()).unwrap_err(),
+            Discard::Authenticated,
+            "no key configured"
+        );
+    }
+
+    fn up_auth_initiator(t0: Instant, k: Option<AuthKey>) -> Initiator {
+        Initiator::new(&auth_profile(100), k, MINE, Some(DISC), t0)
+    }
+
+    /// One probe through the real reflector and back.
+    fn round_trip(i: &mut Initiator, now: Instant, pol: &Policy) -> Vec<u8> {
+        let p = i.on_timer(now, 100).unwrap();
+        let wire = i.wire(now, &p);
+        let probe = crate::packet::decode(&wire).unwrap();
+        let reply = reflect(&probe, src("10.0.0.1", 50000), dst(), pol).unwrap();
+        Policy::wire(&reply)
+    }
+
+    #[test]
+    fn initiator_signs_and_accepts_a_signed_reflection() {
+        let t0 = Instant::now();
+        let mut i = up_auth_initiator(t0, Some(key(1, "secretA")));
+        let wire = round_trip(&mut i, t0, &keyed_policy());
+        let reply = crate::packet::decode(&wire).unwrap();
+        assert!(i.on_packet(t0, &reply));
+        let st = i.status();
+        assert_eq!(st.auth_method, Some(BfdAuthMethod::KeyedSha1));
+        assert_eq!((st.auth_key_id, st.auth_failures), (Some(1), 0));
+    }
+
+    #[test]
+    fn initiator_rejects_bad_missing_and_out_of_range_reflections() {
+        let t0 = Instant::now();
+        let k = key(1, "secretA");
+        let mut i = up_auth_initiator(t0, Some(k.clone()));
+        let wire = round_trip(&mut i, t0, &keyed_policy());
+        let good = crate::packet::decode(&wire).unwrap();
+        let seq = good.auth.as_ref().unwrap().seq;
+        let unsigned = Packet {
+            auth: None,
+            ..good.clone()
+        };
+        assert!(!i.on_packet(t0, &unsigned));
+        assert_eq!(i.take_auth_failure(), Some(true), "first of a streak");
+        let bad = crate::packet::decode(&auth::sign(&good.encode(), &key(1, "nope"), seq)).unwrap();
+        assert!(!i.on_packet(t0, &bad));
+        assert_eq!(i.take_auth_failure(), Some(false), "same streak");
+        let far = crate::packet::decode(&auth::sign(&good.encode(), &k, seq ^ 0x1000)).unwrap();
+        assert!(!i.on_packet(t0, &far));
+        assert_eq!(i.status().auth_failures, 3);
+        assert_eq!(i.state, BfdState::Down);
+        assert!(i.on_packet(t0, &good));
+        // A reflection with the A bit on an unauthenticated profile.
+        let mut plain = Initiator::new(&profile(100), None, MINE, Some(DISC), t0);
+        assert!(!plain.on_packet(t0, &good));
+        assert_eq!(plain.status().auth_failures, 1);
+    }
+
+    #[test]
+    fn an_unresolved_key_sends_nothing_until_it_arrives() {
+        let t0 = Instant::now();
+        let mut i = up_auth_initiator(t0, None);
+        assert!(i.on_timer(t0 + Duration::from_secs(5), 100).is_none());
+        assert_eq!(i.status().auth_method, None);
+        i.update(&auth_profile(100), Some(key(1, "secretA")), Some(DISC), t0);
+        assert!(i.on_timer(t0, 100).is_some());
     }
 }
