@@ -671,7 +671,7 @@ async fn selection_loop(
         if picked.chosen != prev_fb {
             if let Some(old) = &prev_fb {
                 let reason = fallback::end_reason(&fb_ports, old, negotiated_empty);
-                info!(interface = %old, reason = %reason, "lacp fallback ended");
+                info!(interface = %old, reason, "lacp fallback ended");
             }
             if let Some(new) = &picked.chosen {
                 let secs = fb_cfg.get(new).map_or(0, |c| c.1.as_secs());

@@ -30,9 +30,7 @@ impl FallbackPort {
     }
 
     fn eligible(&self, now: Instant) -> bool {
-        self.enabled
-            && !self.selectable
-            && self.origin().is_some_and(|o| now >= o + self.timeout)
+        self.enabled && !self.selectable && self.origin().is_some_and(|o| now >= o + self.timeout)
     }
 }
 

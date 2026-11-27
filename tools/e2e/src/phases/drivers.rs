@@ -848,6 +848,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
 
     lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
+    lacp_fallback(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
     lacp_v2(w, &both).await?;
     lacp_steering(w, &both).await?;
@@ -981,6 +982,79 @@ async fn lacp_system_id_change(a: &Router, b: &Router, both: &[&str]) -> anyhow:
         }
     }
     Ok(())
+}
+
+/// #1575: router-b withdraws both members; with fallback off nothing happens,
+/// with `lacp-fallback` on router-a eth1 carries traffic alone after the
+/// timeout, and router-b coming back ends it with `reason="partner"`. The
+/// bond is briefly empty between the end and `Distributing` (accepted).
+async fn lacp_fallback(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+    log("lacp fallback: off by default, active after the timeout, ended by a partner");
+    let active = "lacp fallback active interface=eth[12] timeout=5";
+    let active_base = a.count(active);
+    let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
+    withdraw.extend(strings(&[
+        "--clear-port-aggregate-member",
+        "eth1",
+        "--clear-port-aggregate-member",
+        "eth2",
+    ]));
+    b.provision(&withdraw).await?;
+    wait_lacp_ports(a, "no port Distributing", |p| {
+        p["mux_state"] != "Distributing"
+    })
+    .await?;
+    // Defaulted is 3 s after the last LACPDU at the fast rate.
+    a.assert_quiet("lacp fallback active", active_base, 10)
+        .await?;
+
+    let single =
+        "lacp reconciled aggregate members aggregate=".to_string() + LACP_AGGREGATE + " members=1";
+    let single_base = a.count(&single);
+    let mut on = lacp_flags(&[
+        "--lacp-rate",
+        "fast",
+        "--lacp-fallback",
+        "--lacp-fallback-timeout",
+        "5",
+    ]);
+    on.extend(strings(both));
+    a.provision(&on).await?;
+    a.wait_new(active, active_base, 40).await?;
+    a.wait_new(&single, single_base, 15).await?;
+    let (e1, e2) = (lacp_port(a, "eth1").await?, lacp_port(a, "eth2").await?);
+    // Which of the two carries it can move (enslaving flaps the link and
+    // restarts the dwell), but there is exactly one.
+    anyhow::ensure!(
+        [&e1, &e2]
+            .iter()
+            .filter(|p| p["fallback"] == "Active")
+            .count()
+            == 1
+            && [&e1, &e2]
+                .iter()
+                .filter(|p| p["fallback"] == "Armed")
+                .count()
+                == 1,
+        "expected one Active and one Armed port: {e1} {e2}"
+    );
+
+    let ended = "lacp fallback ended interface=eth[12] reason=\"partner\"";
+    let ended_base = a.count(ended);
+    let mut restore = lacp_flags(&["--lacp-rate", "fast"]);
+    restore.extend(strings(both));
+    b.provision(&restore).await?;
+    a.wait_new(ended, ended_base, 60).await?;
+    wait_lacp_ports(a, "all ports Distributing", |p| {
+        p["mux_state"] == "Distributing"
+    })
+    .await?;
+
+    let mut off = lacp_flags(&["--lacp-rate", "fast", "--no-lacp-fallback"]);
+    off.extend(strings(both));
+    a.provision(&off).await?;
+    lacp_settled(a, 0).await?;
+    lacp_settled(b, 0).await
 }
 
 /// Polls `GET /v1/lacp` on `r` until every port of the aggregate satisfies

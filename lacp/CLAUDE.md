@@ -1,6 +1,6 @@
 # nos-lacp — LACP (IEEE 802.1AX) Daemon
 
-A real, from-scratch Link Aggregation Control Protocol implementation for NOS (binary `nos-lacpd`, a single fixed process — see `docs/architecture/supervision.md` for why, the same reasoning as `nos-interfaced`/`nos-logd`: `PortAggregate` has no per-VRF/per-instance multiplicity to key a dynamic per-object spawn off).
+A real, from-scratch Link Aggregation Control Protocol implementation for NOS (binary `nos-lacpd`, a single fixed process (`docs/architecture/supervision.md`: no per-object multiplicity to key a spawn off)).
 
 ## Scope and the critical design boundary
 
@@ -10,7 +10,7 @@ A real, from-scratch Link Aggregation Control Protocol implementation for NOS (b
 
 ## Robustness rules learned the hard way (each has a regression test)
 
-Each was a real hot loop or stall found by `nos-e2e lacp`:
+Each was a hot loop or stall found by `nos-e2e lacp`:
 
 - **Never leave an elapsed deadline armed.** `link::run` uses `sleep_until(deadline)` arms; a deadline left in the past re-fires on every loop iteration, flooding the log and the wire. Handling any timer-expiry event must move its deadline forward — but `Action::None` must *not* disarm a still-pending timer.
 - **Ignore our own frames.** An `AF_PACKET` socket also receives its own outgoing frames (`socket::payload_of_foreign_frame` drops them by source MAC); otherwise a port negotiates with itself. Members keep their MACs until Distributing, so: `Port::on_frame` also drops (after the RX budget, before any machine) a LACPDU whose actor system id equals ours, warning once per run (`lacp loopback detected`, #658).
@@ -21,7 +21,7 @@ Each was a real hot loop or stall found by `nos-e2e lacp`:
 
 ## Explicitly deferred (documented, not silently missing)
 
-- **Marker Generator** (§6.5.4.1, optional) (irrelevant: fixed membership). The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester ids, without touching any LACP machine (own `TxLimiter`, 5/s).
+- **Marker Generator** (§6.5.4.1, optional). The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester ids, without touching any LACP machine (own `TxLimiter`, 5/s).
 - **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above.
 
 ## Invariants to keep
@@ -33,6 +33,7 @@ Each was a real hot loop or stall found by `nos-e2e lacp`:
 - Selection is config-scoped, permanently: it only checks the wire agrees with the configured aggregate (`selection.rs`); it never discovers membership.
 - Actor System ID is derived (FNV-1a of hostname + machine-id, `aggregate::local_system_id`), never from a member port (bonding rewrites slave MACs), overridable by `lacp-system-id`; no persisted registry. Internal state types are never `nos_proto::lacp`'s wire types.
 - LACP v2 (#894, 6.6, `docs/internals/lacp-v2.md`): default `lacp-version 1`, `2` opt-in (downgrades per port on a v1 PDU). The digest is of the config-only admin map (never link state); `cscd::resolve` over the Collecting ports gives agreement, `Link_Number` adoption and the per-link masks; steering whenever a map exists, `discard_wrong` only when agreed. `nos-interfaced` applies the masks (#895).
+- Fallback (#1575): a push-level injection in `selection_loop`, never in `selection::select`; dwell from `Counters.last_pdu`.
 - Changing rate, system id, system priority, version or algorithm restarts every member link; a port priority change restarts only that member; `lacp-mode` and `min-links` restart nothing (`Port::on_activity`).
 
 ## Modules
@@ -45,6 +46,7 @@ Each was a real hot loop or stall found by `nos-e2e lacp`:
 | `cscd.rs` | Pure v2 policy (#894): admin map, `Advert`, `resolve` (flags, adoption, masks) |
 | `socket.rs` | `LacpSocket` over `nos-l2-socket`: one member interface, ethertype `0x8809`, group `01:80:C2:00:00:02` |
 | `receive_machine.rs`, `periodic_tx_machine.rs`, `mux_machine.rs`, `churn_machine.rs` | The pure state machines |
+| `fallback.rs` | Pure fallback pick (#1575) |
 | `selection.rs` | Config-scoped `select` |
 | `link.rs` | Per-port `run()` (open the socket, build a `Port`) and `drive()` (the event loop); `Port` has one method per event. Test seam (#346): `FrameSink`/`FrameLink` abstract the socket (no `CAP_NET_RAW` in `link/port_tests.rs`); deadlines use `tokio::time::Instant` so paused-time tests work |
 | `aggregate.rs` | `AggregateManager`: per-aggregate `reconcile` and `selection_loop` |

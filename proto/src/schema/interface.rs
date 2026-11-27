@@ -666,8 +666,10 @@ mod tests {
         let mut eth = interface("eth1", &[], None);
         eth.lacp_fallback = true;
         eth.lacp_fallback_timeout = Some(9);
-        let mut cfg = Config::default();
-        cfg.interfaces = vec![eth];
+        let mut cfg = Config {
+            interfaces: vec![eth],
+            ..Config::default()
+        };
         cfg.validate_with(&cfg).unwrap();
         // Member of an Xor aggregate: same.
         cfg.port_aggregates = vec![crate::schema::PortAggregate {
