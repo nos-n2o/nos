@@ -748,23 +748,23 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::StaticRouteDistance => (
             "Set the administrative distance of a static route.",
-            "1 to 255; unset keeps the source default (1). A lower distance wins against other sources for the same prefix. Not yet honoured: the RIB ignores it.",
+            "1 to 255; unset keeps the source default (1). A lower distance wins against other sources for the same prefix.",
         ),
         Topic::StaticRouteTag => (
             "Tag a static route.",
-            "An opaque number carried on the route, for policy matching. Unset sets none. Not yet honoured: the RIB ignores it.",
+            "An opaque number carried on the route, for policy matching. Unset sets none.",
         ),
         Topic::StaticRouteInterface => (
             "Pin a static route to an outgoing interface.",
-            "The name of an interface, or `<interface>.<tag>` for a subinterface, that sits in a routing table bound to this static routing instance. Required when the gateway is an IPv6 link-local address. The commit is refused when the interface does not exist or is in another table. Not yet honoured: the RIB ignores it.",
+            "The name of an interface, or `<interface>.<tag>` for a subinterface, that sits in a routing table bound to this static routing instance. Required when the gateway is an IPv6 link-local address. The commit is refused when the interface does not exist or is in another table.",
         ),
         Topic::StaticRouteBlackhole => (
             "Make a static route discard its traffic.",
-            "With `blackhole` the gateway must be the unspecified address (`0.0.0.0` or `::`, matching the subnet), and `bfd` and `interface` must stay unset; `distance` and `tag` still apply. Without it the gateway must not be unspecified. Not yet honoured: the RIB ignores it.",
+            "With `blackhole` the gateway must be the unspecified address (`0.0.0.0` or `::`, matching the subnet), and `bfd` and `interface` must stay unset; `distance` and `tag` still apply. Without it the gateway must not be unspecified.",
         ),
         Topic::StaticRouteNextHops => (
             "Add or remove an extra gateway of a static route.",
-            "Each next hop (keyed by its gateway address) joins the route's own gateway in one ECMP set; `distance` and `tag` are shared. A hop has its own optional `interface` and `bfd`. Same address family as the subnet, no repeats, none on a blackhole. Not yet honoured: the RIB ignores it.",
+            "Each next hop (keyed by its gateway address) joins the route's own gateway in one ECMP set; `distance` and `tag` are shared. A hop has its own optional `interface` and `bfd`. Same address family as the subnet, no repeats, none on a blackhole.",
         ),
         Topic::Interface => (
             "Create an interface in the transaction if it doesn't already exist.",

@@ -24,6 +24,7 @@ There is an external query API: `server.rs` serves `nos_proto::rib::{RibRequest,
 - `RibEntry.distance` is a static's own preference (`RibEntry::preference`, then the source default as a tie-break, so a static wins a tie); `tag` and `interface` ride along, all part of entry equality.
 - A `blackhole` static has an empty `next_hops` (`is_discard`, installed as `RTN_BLACKHOLE`), is never redistributed and never resolves a BGP next hop.
 - `interface` is a kernel link name: `LinuxRibDriver::resolve_pinned` turns it into the hops' ifindex before install; a missing link defers the route and fails the apply, so it is retried on the next tick.
+- `next-hops` (#1556): `build_from_config` makes one `Static` entry per prefix with the primary gateway and every extra one as hops, sorted by gateway so config order never changes the entry; a hop with `bfd` is dropped while its session is not Up, and a route with no hop left is not inserted (never an empty list, which would read as a discard). `bfd_target` lists every hop. `ponytail:` one pinned interface per entry, so a hop naming another interface than the route's is installed on the route's (logged).
 
 ## L3VPN VRF export (#580)
 

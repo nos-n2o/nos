@@ -6259,7 +6259,33 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
         let ll_gone_base = a.count(&ll_gone);
         a.provision(&["--remove-static-route", LINK_LOCAL_STATIC])
             .await?;
-        a.wait_new(&ll_gone, ll_gone_base, 30).await
+        a.wait_new(&ll_gone, ll_gone_base, 30).await?;
+
+        log("next-hops (#1556): two gateways are one RTA_MULTIPATH route, then one");
+        let two = format!("added route prefix={ECMP_STATIC} .*next_hops=2");
+        let two_base = a.count(&two);
+        a.provision(&[
+            "--static-route",
+            ECMP_STATIC,
+            "--static-gateway",
+            gw,
+            "--static-extra-gateway",
+            &format!("{ECMP_STATIC}={}", ECMP_EXTRA_GATEWAY.s()),
+        ])
+        .await?;
+        a.wait_new(&two, two_base, 30).await?;
+        let one = format!("added route prefix={ECMP_STATIC} .*next_hops=1.*replaced=true");
+        let one_base = a.count(&one);
+        a.provision(&[
+            "--remove-static-extra-gateway",
+            &format!("{ECMP_STATIC}={}", ECMP_EXTRA_GATEWAY.s()),
+        ])
+        .await?;
+        a.wait_new(&one, one_base, 30).await?;
+        let ecmp_gone = removed(ECMP_STATIC);
+        let ecmp_gone_base = a.count(&ecmp_gone);
+        a.provision(&["--remove-static-route", ECMP_STATIC]).await?;
+        a.wait_new(&ecmp_gone, ecmp_gone_base, 30).await
     }
     .await;
     // Best effort on every path, so a failure leaves no static behind.
@@ -6271,6 +6297,8 @@ pub async fn static_variants(w: &mut World) -> anyhow::Result<()> {
             BLACKHOLE_STATIC,
             "--remove-static-route",
             LINK_LOCAL_STATIC,
+            "--remove-static-route",
+            ECMP_STATIC,
         ])
         .await;
     let _ = b.provision(&["--remove-static-route", FLOAT_PREFIX]).await;
