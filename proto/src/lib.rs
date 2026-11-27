@@ -98,7 +98,7 @@ pub use ipc::{
 };
 pub use ipnet::IpNet;
 pub use lacp::{
-    LacpAgreement, LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
+    LacpAgreement, LacpEvent, LacpFallback, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
     PortAggregateLacpSummary,
 };
 pub use lldp::{LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
