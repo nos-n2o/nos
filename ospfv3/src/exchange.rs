@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use nos_ospf_common::exchange as common;
 pub use nos_ospf_common::exchange::{
-    mtu_acceptable, on_lsack_received, take_all_pending_acks, take_pending_acks, Params,
-    DEFAULT_DBD_MAX_HEADERS,
+    due_retransmissions, mtu_acceptable, on_lsack_received, take_all_pending_acks,
+    take_pending_acks, AckCtx, Params, DEFAULT_DBD_MAX_HEADERS,
 };
 
 use crate::lsa::{self, Lsa, LsaHeader};
@@ -99,6 +99,8 @@ pub fn on_lsu_received(
     now: Instant,
     stub: bool,
     nssa: bool,
+    origin: Option<nos_ospf_common::lsdb::Origin>,
+    ack: AckCtx,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut stores = common::Stores {
         area: area_lsdb,
@@ -122,8 +124,8 @@ pub fn on_lsu_received(
         // §13 step 3: reserved scope, or AS-scope in a stub area.
         |h| lsa::is_reserved_scope(h.lsa_type) || !lsa::in_area_scope(h.lsa_type, stub, nssa),
         |h| h.lsa_type == lsa::LSA_TYPE_GRACE,
-        None,
-        common::AckMode::LegacyDelayed,
+        origin,
+        ack,
     );
     (r.actions, r.installed)
 }
@@ -178,6 +180,22 @@ mod tests {
             matches!(&actions[0], Action::SendDbd(reply) if reply.options == 0x0413),
             "{actions:?}"
         );
+    }
+
+    /// Point-to-point, not from a DR: a newer LSA is acked delayed.
+    fn test_ack() -> AckCtx {
+        AckCtx {
+            link: nos_ospf_common::flood::LinkFlood {
+                broadcast: false,
+                we_are_dr: false,
+                we_are_bdr: false,
+            },
+            rx: nos_ospf_common::flood::Receipt {
+                from: Ipv4Addr::UNSPECIFIED,
+                from_dr_or_bdr: false,
+            },
+            other_adjacent: false,
+        }
     }
 
     fn router_id(s: &str) -> Ipv4Addr {
@@ -273,6 +291,8 @@ mod tests {
             Instant::now(),
             false,
             false,
+            None,
+            test_ack(),
         );
         assert_eq!(newly_installed.len(), 3);
         assert!(as_scope.get(&external.header.key()).is_some());
@@ -319,6 +339,8 @@ mod tests {
             Instant::now(),
             false,
             false,
+            None,
+            test_ack(),
         );
         assert_eq!(installed.len(), 4);
         assert!(area.get(&u_area.header.key()).is_some());
@@ -352,7 +374,7 @@ mod tests {
             lsas: vec![grace.clone(), router],
         };
         let mut adj = AdjacencyData::default();
-        let (_, installed) = on_lsu_received(
+        let (actions, installed) = on_lsu_received(
             &mut adj,
             &mut Lsdb::new(),
             &mut Lsdb::new(),
@@ -361,9 +383,15 @@ mod tests {
             Instant::now(),
             false,
             false,
+            None,
+            test_ack(),
         );
         assert_eq!(installed, vec![grace.header]);
-        assert_eq!(adj.pending_acks.len(), 2);
+        // The Grace-LSA is acked delayed; the discarded one at once (Table 19).
+        assert_eq!(adj.pending_acks.len(), 1);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::SendLsAck(h) if h.len() == 1)));
     }
 
     /// RFC 5340 §4.4.3: a stub area's link drops an AS-scope LSU entry
@@ -391,6 +419,8 @@ mod tests {
             Instant::now(),
             true,
             false,
+            None,
+            test_ack(),
         );
         assert_eq!(installed, vec![router.header]);
         assert_eq!(as_scope.all().len(), 0);

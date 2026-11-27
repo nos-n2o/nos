@@ -10,7 +10,7 @@ use std::time::Instant;
 use nos_ospf_common::exchange as common;
 pub use nos_ospf_common::exchange::{
     due_retransmissions, mtu_acceptable, on_lsack_received, take_all_pending_acks,
-    take_pending_acks, AckCtx, AckMode, Params, DEFAULT_DBD_MAX_HEADERS,
+    take_pending_acks, AckCtx, Params, DEFAULT_DBD_MAX_HEADERS,
 };
 
 use crate::lsa::{self, Lsa, LsaHeader};
@@ -93,7 +93,7 @@ pub fn on_lsu_received(
     lsu: &LsuPacket,
     now: Instant,
     origin: Option<nos_ospf_common::lsdb::Origin>,
-    ack: AckMode,
+    ack: AckCtx,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let (stub, nssa) = (adj.stub, adj.nssa);
     let mut stores = common::Stores {
@@ -179,6 +179,22 @@ mod tests {
         on_dbd_received(adj, state, &p, dbd, local)
     }
 
+    /// Point-to-point, not from a DR: a newer LSA is acked delayed.
+    fn test_ack() -> AckCtx {
+        AckCtx {
+            link: nos_ospf_common::flood::LinkFlood {
+                broadcast: false,
+                we_are_dr: false,
+                we_are_bdr: false,
+            },
+            rx: nos_ospf_common::flood::Receipt {
+                from: Ipv4Addr::UNSPECIFIED,
+                from_dr_or_bdr: false,
+            },
+            other_adjacent: false,
+        }
+    }
+
     #[test]
     fn mtu_budget_uses_the_ipv4_overhead() {
         assert_eq!(mtu_based_max_headers(1500), 72);
@@ -219,7 +235,7 @@ mod tests {
             &lsu,
             Instant::now(),
             None,
-            AckMode::LegacyDelayed,
+            test_ack(),
         );
         assert!(link.get(&l9.header.key()).is_some());
         assert!(area.get(&l9.header.key()).is_none());
@@ -306,7 +322,7 @@ mod tests {
             &lsu,
             Instant::now(),
             None,
-            AckMode::LegacyDelayed,
+            test_ack(),
         );
         assert!(area.get(&as_scope.header.key()).is_none());
         assert_eq!(adj.pending_acks, vec![]);
@@ -361,7 +377,7 @@ mod tests {
                 &lsu,
                 Instant::now(),
                 None,
-                AckMode::LegacyDelayed,
+                test_ack(),
             );
             for (l, want) in [&type5, &type7].into_iter().zip(installed) {
                 assert_eq!(area.get(&l.header.key()).is_some(), want, "nssa={nssa}");

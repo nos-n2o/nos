@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 
 ## Layout
 
-`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`ospf/src/link_client.rs` by `#[path]`, log prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). Acks are delayed and batched like v2 (`pending_acks`, `flush_pending_acks` on the 5s sweep). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s.
+`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`ospf/src/link_client.rs` by `#[path]`, log prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s.
 
 ## Rules
 
@@ -36,5 +36,5 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 - **IPv4 AF** (#1162): IPv4 values are `lsa::v4_*_to_shadow` (leading 32 bits of an `Ipv6Net`); convert only at the edges (internals page).
 - **Hybrid** (#1180): `hybrid_router_links`. Not built: `ospfv3.md`.
 - `reconcile_tests.rs` (#343) drives `resync`/`run` against `nos-test-support`'s fakes and a real `LinkManager`; attach points use `nostst0`, a device no host has. The `cfg(test)` getters on `LinkManager` are its read side.
-- **Multicast flood** (#879): as `ospf/CLAUDE.md`: `flood_full_neighbors`/`flush_pending_acks` use `flood_dest` and `LinkSocket::send_flood` (`ff02::5`/`ff02::6`, one signed packet per chunk); unicast fallback on error; retransmissions, DBD/LSR, Grace stay unicast.
+- **Flooding** (#1518, #879): flood sinks (per area, per link for Link-LSAs, one AS-wide) feed each link task's `flood_events` via a `FloodFeed`; `flood_dest`/`LinkSocket::send_flood` (`ff02::5`/`ff02::6`), unicast fallback. No periodic resend; retransmission is the 5 s sweep's `due_retransmissions`, acks per Table 19 (delayed on a 1 s tick). Grace-LSAs are never flooded on.
 - **AllDRouters** (#854): `run_election` joins/leaves `ff02::6` (DR/Backup only, never p2p) via `OspfSocket::set_all_drouters`.

@@ -1205,7 +1205,7 @@ fn lsu_full(
     lsas: &[L],
     now: Instant,
     origin: Option<Origin>,
-    ack: AckMode,
+    ack: AckCtx,
 ) -> LsuResult<L> {
     let mut stores = Stores {
         area,
@@ -1245,7 +1245,7 @@ fn lsu_at(
         lsas,
         now,
         None,
-        AckMode::LegacyDelayed,
+        rfc(NON_BCAST, false, false),
     );
     (r.actions, r.installed)
 }
@@ -1315,8 +1315,15 @@ fn lsu_with_stale_duplicate_is_acked_but_not_reported_as_newly_installed() {
     let l = lsa_id(1, SEQ1);
     area.install(l.clone());
     let (actions, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
-    assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
-    assert_eq!(adj.pending_acks, vec![l.0]);
+    // Table 19: a duplicate is acked at once, not delayed.
+    assert_eq!(
+        actions,
+        vec![
+            Action::SendLsAck(vec![l.0]),
+            Action::NeighborEvent(Event::LoadingDone)
+        ]
+    );
+    assert_eq!(adj.pending_acks, []);
     assert_eq!(newly_installed, []);
 }
 
@@ -1344,8 +1351,8 @@ fn lsu_with_unheld_max_age_lsa_is_acked_but_discarded() {
     let (actions, newly_installed) = lsu(&mut adj, &mut area, std::slice::from_ref(&l));
     assert!(area.get(&1).is_none());
     assert_eq!(newly_installed, []);
-    assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
-    assert_eq!(adj.pending_acks, vec![l.0]);
+    assert!(actions.contains(&Action::SendLsAck(vec![l.0])));
+    assert_eq!(adj.pending_acks, []);
 
     let mut adj = AdjacencyData {
         request_list: vec![1],
@@ -1540,10 +1547,12 @@ fn lsu_max_age_of_requested_key_installs_but_unknown_key_only_acks() {
         l.0.age = MAX_AGE;
         l
     };
-    let (_, installed) = lsu(&mut adj, &mut area, &[aged(1), aged(77)]);
+    let (actions, installed) = lsu(&mut adj, &mut area, &[aged(1), aged(77)]);
     assert_eq!(installed.len(), 1);
     assert!(area.get(&1).is_some() && area.get(&77).is_none());
-    assert_eq!(adj.pending_acks.len(), 2);
+    // The installed one is acked delayed, the unheld MaxAge one at once.
+    assert_eq!(adj.pending_acks.len(), 1);
+    assert!(actions.contains(&Action::SendLsAck(vec![aged(77).0])));
     assert_eq!(adj.request_list, vec![2]);
 }
 
@@ -1626,16 +1635,22 @@ fn take_all_pending_acks_dedupes_drains_and_keeps_oldest_since() {
 
 use crate::flood::{LinkFlood, Receipt, RxVerdict};
 
-fn rfc(link: LinkFlood, from_dr: bool, other_adjacent: bool) -> AckMode {
-    AckMode::Rfc(AckCtx {
+fn rfc(link: LinkFlood, from_dr: bool, other_adjacent: bool) -> AckCtx {
+    AckCtx {
         link,
         rx: Receipt {
             from: router_id("1.1.1.1"),
             from_dr_or_bdr: from_dr,
         },
         other_adjacent,
-    })
+    }
 }
+
+const NON_BCAST: LinkFlood = LinkFlood {
+    broadcast: false,
+    we_are_dr: false,
+    we_are_bdr: false,
+};
 
 const BCAST: LinkFlood = LinkFlood {
     broadcast: true,
@@ -1643,7 +1658,7 @@ const BCAST: LinkFlood = LinkFlood {
     we_are_bdr: false,
 };
 
-fn lsu_rfc(adj: &mut AdjacencyData, area: &mut Lsdb<L>, l: L, ack: AckMode) -> LsuResult<L> {
+fn lsu_rfc(adj: &mut AdjacencyData, area: &mut Lsdb<L>, l: L, ack: AckCtx) -> LsuResult<L> {
     lsu_full(
         adj,
         area,
@@ -1744,7 +1759,7 @@ fn origin_reaches_the_flood_sink() {
         |_| false,
         |_| false,
         Some(o),
-        AckMode::LegacyDelayed,
+        rfc(NON_BCAST, false, false),
     );
     assert_eq!(rx.try_recv().unwrap().origin, Some(o));
 }
