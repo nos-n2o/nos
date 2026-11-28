@@ -153,8 +153,27 @@ pub fn check(args: &Args) -> anyhow::Result<()> {
     fixture(args).map(drop)
 }
 
+/// The interface the profile and location attach to: `--link-interface`, else `--interface`.
+fn target(args: &Args) -> &str {
+    args.link_interface.as_ref().unwrap_or(&args.interface)
+}
+
 /// The path edits (applied after the ops, which `Ensure` the profile).
 pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    if args.no_lldp_med_profile {
+        let path = |leaf: &str| {
+            vec![
+                "interface".to_string(),
+                target(args).to_string(),
+                leaf.to_string(),
+            ]
+        };
+        // The location first: a location without a profile is refused.
+        return vec![
+            (path("lldp-location"), None),
+            (path("lldp-med-profile"), None),
+        ];
+    }
     let Some(f) = fixture(args).ok().flatten() else {
         return Vec::new();
     };
@@ -166,7 +185,7 @@ pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         (
             vec![
                 "interface".to_string(),
-                args.interface.clone(),
+                target(args).to_string(),
                 "lldp-med-profile".to_string(),
             ],
             Some(format!("\"{}\"", f.profile.name)),
@@ -176,7 +195,7 @@ pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
         v.push((
             vec![
                 "interface".to_string(),
-                args.interface.clone(),
+                target(args).to_string(),
                 "lldp-location".to_string(),
             ],
             Some(json(l)),
@@ -187,6 +206,17 @@ pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
 
 /// The same edits applied straight to a local `Config`.
 pub fn apply(args: &Args, config: &mut Config) {
+    if args.no_lldp_med_profile {
+        for i in config
+            .interfaces
+            .iter_mut()
+            .filter(|i| i.name == target(args))
+        {
+            i.lldp_med_profile = None;
+            i.lldp_location = LldpLocation::default();
+        }
+        return;
+    }
     let Some(f) = fixture(args).ok().flatten() else {
         return;
     };
@@ -198,7 +228,7 @@ pub fn apply(args: &Args, config: &mut Config) {
     for i in config
         .interfaces
         .iter_mut()
-        .filter(|i| i.name == args.interface)
+        .filter(|i| i.name == target(args))
     {
         i.lldp_med_profile = Some(name.clone());
         if let Some(l) = &f.location {

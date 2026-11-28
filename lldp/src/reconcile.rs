@@ -9,14 +9,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
+use nos_proto::schema::{PoePriority, PoeSource};
 use nos_proto::{Config, DiffScope, Event, Interface, VlanTag};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::link::{self, LinkConfig, SharedPorts};
+use crate::link::{self, LinkConfig, MedAdvert, SharedPorts};
 use crate::link_client::LinkTable;
+use crate::med::{MedPolicy, MedPower};
 use crate::packet;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -124,8 +126,47 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
             vlan_names: vlan_names(cfg, i),
             aggregated: i.port_aggregate.is_some(),
             max_frame_size: max_frame_size(cfg, i),
+            med: med_advert(cfg, i),
         })
         .collect()
+}
+
+/// The MED advertisement of an interface: its `lldp-med-profile` plus its own
+/// location. `None` without a profile (a location alone is refused at commit).
+fn med_advert(cfg: &Config, i: &Interface) -> Option<MedAdvert> {
+    let p = i
+        .lldp_med_profile
+        .as_ref()
+        .and_then(|n| cfg.lldp_med_profiles.iter().find(|p| &p.name == n))?;
+    Some(MedAdvert {
+        policies: p
+            .network_policies
+            .iter()
+            .map(|n| MedPolicy {
+                app_type: n.app_type.wire(),
+                unknown: n.unknown,
+                tagged: n.tagged,
+                vlan: n.vlan.unwrap_or(0),
+                priority: n.priority,
+                dscp: n.dscp,
+            })
+            .collect(),
+        poe: p.poe.as_ref().map(|poe| MedPower {
+            kind: 0,
+            source: match poe.source {
+                PoeSource::Primary => 1,
+                PoeSource::Backup => 2,
+            },
+            priority: match poe.priority {
+                PoePriority::Critical => 1,
+                PoePriority::High => 2,
+                PoePriority::Low => 3,
+            },
+            deci_watts: poe.power,
+        }),
+        locations: crate::med::locations_from_config(&i.lldp_location),
+        advertise_always: p.advertise_always,
+    })
 }
 
 /// One (tag, broadcast domain) per `Dot1q` member of the interface's switching
@@ -184,6 +225,7 @@ pub async fn run(
         DiffScope::Lldp,
         DiffScope::SwitchingProfiles,
         DiffScope::PortAggregates,
+        DiffScope::LldpMedProfiles,
     ];
     let chassis_mac = local_system_id();
     let mut links = Links {
@@ -431,6 +473,50 @@ mod tests {
             desired_links(&cfg, [2, 0, 0, 0, 0, 1])[1].max_frame_size,
             2018
         );
+    }
+
+    #[test]
+    fn med_profile_and_own_location_flow_into_each_link() {
+        use nos_proto::schema::{LldpLocation, LldpMedNetworkPolicy, LldpMedPoe, LldpMedProfile};
+        let mut a = iface("eth1", true, true);
+        a.lldp_med_profile = Some("voice".into());
+        a.lldp_location = LldpLocation {
+            elin: Some("4155550100".into()),
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.name = "eth2".into();
+        b.lldp_location.elin = Some("4155550199".into());
+        let mut cfg = Config {
+            interfaces: vec![a, b, iface("eth3", true, true)],
+            lldp_med_profiles: vec![LldpMedProfile {
+                name: "voice".into(),
+                network_policies: vec![LldpMedNetworkPolicy {
+                    vlan: Some(100),
+                    tagged: true,
+                    priority: 5,
+                    dscp: 46,
+                    ..Default::default()
+                }],
+                poe: Some(LldpMedPoe {
+                    power: 154,
+                    ..Default::default()
+                }),
+                advertise_always: true,
+            }],
+            ..Default::default()
+        };
+        let before = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
+        let m = before[0].med.clone().unwrap();
+        assert_eq!((m.policies.len(), m.advertise_always), (1, true));
+        assert_eq!((m.policies[0].app_type, m.policies[0].vlan), (1, 100));
+        let p = m.poe.unwrap();
+        assert_eq!((p.kind, p.source, p.priority, p.deci_watts), (0, 1, 3, 154));
+        // Same profile, own location each; no profile, no MED.
+        assert_ne!(before[0].med, before[1].med);
+        assert_eq!(before[2].med, None);
+        cfg.lldp_med_profiles[0].poe = None;
+        assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
     }
 
     #[test]

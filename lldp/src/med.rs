@@ -208,6 +208,62 @@ impl MedLocation {
     }
 }
 
+/// Decimal degrees/meters to a fixed-point field: `frac` fractional bits,
+/// rounded. The schema validated the string; a bad one yields 0.
+#[allow(clippy::cast_possible_truncation, reason = "validated range")]
+fn fixed(s: &str, frac: u32) -> i64 {
+    (s.parse::<f64>().unwrap_or(0.0) * f64::from(1u32 << frac)).round() as i64
+}
+
+/// The Location TLVs a port's configured location describes: coordinate,
+/// civic and ELIN, in that order, each only when set.
+pub fn locations_from_config(l: &nos_proto::schema::LldpLocation) -> Vec<MedLocation> {
+    let mut out = Vec::new();
+    let c = &l.coordinate;
+    if *c != nos_proto::schema::LldpCoordinate::default() {
+        let (alt_type, alt) = match &c.altitude {
+            None => (0, 0),
+            Some(a) => (
+                match c.altitude_unit {
+                    nos_proto::schema::LldpAltitudeUnit::Meters => 1,
+                    nos_proto::schema::LldpAltitudeUnit::Floors => 2,
+                },
+                i32::try_from(fixed(a, 8)).unwrap_or(0),
+            ),
+        };
+        out.push(MedLocation::Coordinate(Coordinate {
+            lat_res: c.latitude_resolution,
+            lat: fixed(&c.latitude, 25),
+            lng_res: c.longitude_resolution,
+            lng: fixed(&c.longitude, 25),
+            alt_type,
+            alt_res: c.altitude_resolution,
+            alt,
+            datum: match c.datum {
+                nos_proto::schema::LldpDatum::Wgs84 => 1,
+                nos_proto::schema::LldpDatum::Nad83Navd88 => 2,
+                nos_proto::schema::LldpDatum::Nad83Mllw => 3,
+            },
+        }));
+    }
+    let a = &l.civic;
+    if *a != nos_proto::schema::LldpCivicAddress::default() {
+        let mut d = vec![0, a.what];
+        d.extend_from_slice(a.country.as_bytes());
+        for e in &a.elements {
+            d.push(e.ca_type);
+            d.push(u8::try_from(e.value.len()).unwrap_or(u8::MAX));
+            d.extend_from_slice(e.value.as_bytes());
+        }
+        d[0] = u8::try_from(d.len() - 1).unwrap_or(u8::MAX);
+        out.push(MedLocation::Civic(d));
+    }
+    if let Some(e) = &l.elin {
+        out.push(MedLocation::Elin(e.as_bytes().to_vec()));
+    }
+    out
+}
+
 /// Appends one TIA TLV unless the LLDPDU would outgrow `max` (End TLV
 /// included); the caller keeps whole TLVs only. Returns whether it fit.
 fn push(out: &mut Vec<u8>, max: usize, subtype: u8, info: &[u8]) -> bool {
@@ -802,5 +858,43 @@ mod tests {
         let mut out = vec![0u8; 1490];
         encode_med(&mut out, &full(), 1500);
         assert!(out.len() <= 1498);
+    }
+
+    #[test]
+    fn configured_location_encodes_and_round_trips() {
+        use nos_proto::schema::{LldpCivicAddress, LldpCivicElement, LldpCoordinate, LldpLocation};
+        assert_eq!(locations_from_config(&LldpLocation::default()), []);
+        let l = LldpLocation {
+            elin: Some("4155550100".into()),
+            civic: LldpCivicAddress {
+                what: 2,
+                country: "US".into(),
+                elements: vec![LldpCivicElement {
+                    ca_type: 3,
+                    value: "Paris".into(),
+                }],
+            },
+            coordinate: LldpCoordinate {
+                latitude: "34.0".into(),
+                longitude: "-118.0".into(),
+                altitude: Some("2.5".into()),
+                altitude_resolution: 16,
+                ..Default::default()
+            },
+        };
+        let locs = locations_from_config(&l);
+        assert_eq!(locs.len(), 3);
+        let MedLocation::Coordinate(c) = &locs[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (c.lat, c.lng, c.alt, c.alt_type),
+            (34 << 25, -(118 << 25), 640, 1)
+        );
+        let p = pdu(OrgTlvs {
+            med_locations: locs,
+            ..OrgTlvs::default()
+        });
+        assert_eq!(decode(&encode(&p)).unwrap(), p);
     }
 }

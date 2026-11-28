@@ -18,12 +18,16 @@ use tracing::{debug, info, trace, warn};
 use nos_proto::LldpLinkStats;
 
 use crate::link_client::{gate, Gate, LinkTable};
+use crate::med::{MedCaps, MedLocation, MedPolicy, MedPower};
 use crate::neighbor::{NeighborTable, Update, MAX_NEIGHBORS_PER_LINK};
 use crate::packet::{
     self, Capabilities, Id, LinkAggregation, Lldpdu, ManagementAddress, OrgTlvs, CAP_BRIDGE,
     CAP_ROUTER, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME,
 };
 use crate::socket::{self, LldpSocket};
+
+/// TIA-1057 device type of a network connectivity device.
+const MED_DEVICE_NETWORK_CONNECTIVITY: u8 = 4;
 
 /// How soon to retry a periodic transmit that found the link down.
 const LINK_DOWN_RETRY: Duration = Duration::from_secs(1);
@@ -37,6 +41,10 @@ const MSG_FAST_TX: Duration = Duration::from_secs(1);
 /// 802.1AB `txCreditMax`: at most this many frames back to back; one credit
 /// comes back per second.
 const TX_CREDIT_MAX: u8 = 5;
+/// TIA-1057 `medFastStartRepeatCount`: frames sent at `MSG_FAST_TX` spacing
+/// when a MED neighbor is first heard (default 4). From memory of the
+/// standard, not checked against lldpd's source (no network in the build).
+const MED_FAST_START: u8 = 4;
 
 /// Neighbor learned/removed events logged at `info` back to back per link;
 /// beyond that they go to `debug` (a hostile or flapping peer must not flood
@@ -80,6 +88,43 @@ pub struct LinkConfig {
     /// 802.3 Maximum Frame Size: the effective MTU plus the Ethernet header
     /// and FCS.
     pub max_frame_size: u16,
+    /// The resolved LLDP-MED advertisement; `None`: MED is off for this link.
+    pub med: Option<MedAdvert>,
+}
+
+/// What an interface's `lldp-med-profile` and own location make it advertise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MedAdvert {
+    pub policies: Vec<MedPolicy>,
+    /// Extended Power via MDI, PSE side, as configured (never measured).
+    pub poe: Option<MedPower>,
+    pub locations: Vec<MedLocation>,
+    /// Skip the gate: advertise without hearing a MED neighbor first.
+    pub advertise_always: bool,
+}
+
+impl MedAdvert {
+    /// The MED TLVs: capabilities (device type 4, network connectivity) with
+    /// a bit only for configured content, then the content itself.
+    fn org(&self, org: &mut OrgTlvs) {
+        let caps = 1
+            | u16::from(!self.policies.is_empty()) << 1
+            | u16::from(!self.locations.is_empty()) << 2
+            | u16::from(self.poe.is_some()) << 3;
+        org.med_caps = Some(MedCaps {
+            caps,
+            device_type: MED_DEVICE_NETWORK_CONNECTIVITY,
+        });
+        org.med_policies.clone_from(&self.policies);
+        org.med_locations.clone_from(&self.locations);
+        org.med_power = self.poe;
+    }
+}
+
+/// Closed to open edge of the MED gate: `heard` is whether a neighbor with a
+/// MED Capabilities TLV is in the table. True when the burst must start.
+fn med_gate(open: &mut bool, heard: bool) -> bool {
+    std::mem::replace(open, heard) != heard && heard
 }
 
 /// One LLDP-enabled interface's live state: its neighbors and its 802.1AB
@@ -161,7 +206,17 @@ pub fn local_pdu(
     cfg: &LinkConfig,
     resolve: impl Fn(IpAddr) -> Option<u32>,
     aggregation: Option<LinkAggregation>,
+    med_open: bool,
 ) -> Lldpdu {
+    let mut org = OrgTlvs {
+        vlan_names: cfg.vlan_names.clone(),
+        link_aggregation: aggregation,
+        max_frame_size: Some(cfg.max_frame_size),
+        ..OrgTlvs::default()
+    };
+    if let Some(med) = cfg.med.as_ref().filter(|m| m.advertise_always || med_open) {
+        med.org(&mut org);
+    }
     Lldpdu {
         chassis_id: chassis_id(cfg),
         port_id: Id {
@@ -184,12 +239,7 @@ pub fn local_pdu(
                 if_index: resolve(address),
             })
             .collect(),
-        org: OrgTlvs {
-            vlan_names: cfg.vlan_names.clone(),
-            link_aggregation: aggregation,
-            max_frame_size: Some(cfg.max_frame_size),
-            ..OrgTlvs::default()
-        },
+        org,
     }
 }
 
@@ -204,7 +254,7 @@ fn shutdown_pdu(cfg: &LinkConfig) -> Lldpdu {
         capabilities: None,
         management_addresses: Vec::new(),
         org: OrgTlvs::default(),
-        ..local_pdu(cfg, |_| None, None)
+        ..local_pdu(cfg, |_| None, None, false)
     }
 }
 
@@ -532,8 +582,22 @@ pub async fn run(
     let mut tx_fast = TX_FAST_INIT;
     let (mut tx_credit, mut last_refill) = (TX_CREDIT_MAX, Instant::now());
     let mut log_bucket = LogBucket::new(Instant::now());
+    let mut med_open = false;
 
     let result = loop {
+        // MED gate (TIA-1057): open while a neighbor sends MED Capabilities.
+        // The closed to open edge starts a MED fast-start burst at once.
+        if cfg.med.is_some() {
+            let heard = ports
+                .lock()
+                .unwrap()
+                .get(&cfg.interface)
+                .is_some_and(|p| p.neighbors.has_med_caps());
+            if med_gate(&mut med_open, heard) {
+                tx_fast = tx_fast.max(MED_FAST_START);
+                next_tx = Instant::now();
+            }
+        }
         // Never leave an elapsed deadline armed: `expire` moves it forward by
         // removing the entry it belonged to, and with no entries the branch is
         // disabled by its guard.
@@ -564,7 +628,7 @@ pub async fn run(
                 // the master link if anyone needs it faster.
                 let aggregation = cfg.aggregated.then(|| read_aggregation(Path::new(SYS_CLASS_NET), &cfg.interface));
                 if let (true, Some(socket)) = (tx_credit > 0, &socket)
-                    && send(socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address, aggregation))
+                    && send(socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address, aggregation, med_open))
                 {
                     if tx_fast > 0 {
                         debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
@@ -628,6 +692,7 @@ mod tests {
             vlan_names: Vec::new(),
             aggregated: false,
             max_frame_size: 1518,
+            med: None,
         }
     }
 
@@ -817,7 +882,7 @@ mod tests {
     fn system_description_defaults_to_nos_and_reaches_the_wire() {
         let mut c = cfg(1);
         let wire = |c: &LinkConfig| {
-            packet::decode(&packet::encode(&local_pdu(c, |_| None, None)))
+            packet::decode(&packet::encode(&local_pdu(c, |_| None, None, false)))
                 .unwrap()
                 .system_description
         };
@@ -831,7 +896,7 @@ mod tests {
     }
 
     fn frame_from(peer: &LinkConfig, ttl: u16) -> Vec<u8> {
-        let mut pdu = local_pdu(peer, |_| None, None);
+        let mut pdu = local_pdu(peer, |_| None, None, false);
         pdu.ttl = ttl;
         packet::encode(&pdu)
     }
@@ -839,7 +904,7 @@ mod tests {
     #[test]
     fn local_pdu_round_trips_and_carries_our_identity() {
         let c = cfg(1);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None, false))).unwrap();
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
         assert_eq!(pdu.port_display(), "eth1");
         assert_eq!(pdu.system_name.as_deref(), Some("router-1"));
@@ -855,7 +920,7 @@ mod tests {
         c.management_addresses = vec![on_if, nowhere];
         // Only the first is on an interface (ifIndex 7).
         let resolve = |a| (a == on_if).then_some(7);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None, false))).unwrap();
         assert_eq!(pdu.ttl, 15);
         assert_eq!(
             pdu.management_addresses,
@@ -874,14 +939,14 @@ mod tests {
         assert_eq!(pdu.enabled_capability_names(), ["router"]);
         assert_eq!(pdu.capabilities.unwrap().supported, CAP_ROUTER | CAP_BRIDGE);
         c.bridge = true;
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None, false))).unwrap();
         assert_eq!(pdu.enabled_capability_names(), ["bridge", "router"]);
     }
 
     #[test]
     fn org_tlvs_reach_the_wire() {
         let mut c = cfg(1);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None, false))).unwrap();
         assert_eq!(
             pdu.org,
             OrgTlvs {
@@ -896,7 +961,8 @@ mod tests {
             enabled: true,
             port_id: 12,
         };
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, Some(agg)))).unwrap();
+        let pdu =
+            packet::decode(&packet::encode(&local_pdu(&c, |_| None, Some(agg), false))).unwrap();
         assert_eq!(pdu.org.vlan_names, c.vlan_names);
         assert_eq!(pdu.org.max_frame_size, Some(9018));
         assert_eq!(pdu.org.link_aggregation, Some(agg));
@@ -1070,6 +1136,152 @@ mod tests {
                 too_many_neighbors: 1,
                 ..LldpLinkStats::default()
             }
+        );
+    }
+
+    fn med_cfg(always: bool) -> LinkConfig {
+        let mut c = cfg(1);
+        c.med = Some(MedAdvert {
+            policies: vec![MedPolicy {
+                app_type: 1,
+                unknown: false,
+                tagged: true,
+                vlan: 100,
+                priority: 5,
+                dscp: 46,
+            }],
+            poe: Some(MedPower {
+                kind: 0,
+                source: 1,
+                priority: 3,
+                deci_watts: 154,
+            }),
+            locations: vec![MedLocation::Elin(b"4155550100".to_vec())],
+            advertise_always: always,
+        });
+        c
+    }
+
+    fn wire_org(c: &LinkConfig, open: bool) -> OrgTlvs {
+        packet::decode(&packet::encode(&local_pdu(c, |_| None, None, open)))
+            .unwrap()
+            .org
+    }
+
+    #[test]
+    fn med_tlvs_follow_the_gate_and_the_configured_content() {
+        // No profile: never MED.
+        assert_eq!(wire_org(&cfg(1), true).med_caps, None);
+        // Gated: closed sends nothing, open sends all three kinds.
+        let c = med_cfg(false);
+        assert_eq!(wire_org(&c, false).med_caps, None);
+        let org = wire_org(&c, true);
+        let caps = org.med_caps.unwrap();
+        assert_eq!((caps.caps, caps.device_type), (0b1111, 4));
+        assert_eq!(org.med_policies.len(), 1);
+        assert_eq!(org.med_locations.len(), 1);
+        assert_eq!(org.med_power.unwrap().deci_watts, 154);
+        // advertise-always ignores the gate.
+        assert_eq!(wire_org(&med_cfg(true), false).med_caps, Some(caps));
+        // Capability bits only for configured content.
+        let mut c = med_cfg(true);
+        let m = c.med.as_mut().unwrap();
+        m.poe = None;
+        m.locations.clear();
+        assert_eq!(wire_org(&c, false).med_caps.unwrap().caps, 0b11);
+        c.med.as_mut().unwrap().policies.clear();
+        assert_eq!(wire_org(&c, false).med_caps.unwrap().caps, 0b1);
+    }
+
+    #[test]
+    fn shutdown_pdu_never_carries_med() {
+        let c = med_cfg(true);
+        let pdu = packet::decode(&packet::encode(&shutdown_pdu(&c))).unwrap();
+        assert_eq!(pdu.org, OrgTlvs::default());
+    }
+
+    #[test]
+    fn med_gate_opens_on_a_med_neighbor_and_closes_when_it_goes() {
+        let (me, mut peer) = (med_cfg(false), cfg(2));
+        let n = shared();
+        let now = Instant::now();
+        let heard = || n.lock().unwrap()["eth1"].neighbors.has_med_caps();
+        let mut open = false;
+        // A plain neighbor does not open it.
+        rx(&me, &n, &frame_from(&peer, 120), now);
+        assert!(!heard());
+        assert!(!med_gate(&mut open, heard()));
+        // The same neighbor now speaks MED: one edge, then steady.
+        peer.med = med_cfg(true).med;
+        rx(&me, &n, &frame_from(&peer, 120), now);
+        assert!(heard());
+        assert!(med_gate(&mut open, heard()));
+        assert!(!med_gate(&mut open, heard()));
+        // Its shutdown closes the gate.
+        rx(&me, &n, &frame_from(&peer, 0), now);
+        assert!(!med_gate(&mut open, heard()));
+        assert!(!open);
+        // Expiry closes it too.
+        let mut short = peer.clone();
+        short.ttl_secs = 10;
+        let mut pdu = local_pdu(&short, |_| None, None, true);
+        pdu.ttl = 10;
+        n.lock()
+            .unwrap()
+            .get_mut("eth1")
+            .unwrap()
+            .neighbors
+            .apply(pdu, now);
+        assert!(med_gate(&mut open, heard()));
+        expire(&me, &n, now + Duration::from_secs(10));
+        assert!(!med_gate(&mut open, heard()));
+        assert!(!open);
+    }
+
+    #[test]
+    fn med_fast_start_spaces_frames_one_second_apart() {
+        let (mut credit, mut fast) = (TX_CREDIT_MAX, 0);
+        fast = fast.max(MED_FAST_START);
+        let (now, interval) = (Instant::now(), Duration::from_secs(30));
+        for _ in 1..MED_FAST_START {
+            assert_eq!(
+                spend_tx(&mut credit, &mut fast, interval, now),
+                now + MSG_FAST_TX
+            );
+        }
+        assert_eq!(
+            spend_tx(&mut credit, &mut fast, interval, now),
+            now + interval
+        );
+    }
+
+    #[test]
+    fn link_config_differs_when_med_content_differs() {
+        let a = med_cfg(false);
+        let mut b = a.clone();
+        b.med.as_mut().unwrap().locations = vec![MedLocation::Elin(b"4155550199".to_vec())];
+        assert_ne!(a, b);
+        b = a.clone();
+        b.med.as_mut().unwrap().poe = None;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn oversize_med_is_dropped_but_the_base_pdu_is_still_sent() {
+        let mut c = med_cfg(true);
+        c.vlan_names = (1..=100).map(|i| (i, "v".repeat(32))).collect();
+        c.med.as_mut().unwrap().locations = vec![MedLocation::Civic({
+            let mut d = vec![0, 2, b'U', b'S', 3, 200];
+            d.extend_from_slice(&[b'a'; 200]);
+            d[0] = u8::try_from(d.len() - 1).unwrap();
+            d
+        })];
+        c.system_description = "d".repeat(255);
+        let wire = packet::encode(&local_pdu(&c, |_| None, None, true));
+        assert!(wire.len() <= 1500);
+        assert_eq!(
+            packet::decode(&wire).unwrap().system_name.as_deref(),
+            Some("router-1")
         );
     }
 }

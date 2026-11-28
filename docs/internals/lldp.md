@@ -13,6 +13,14 @@ How `nos-lldp` is built, moved from `lldp/CLAUDE.md` (#264) so the always-loaded
     - Not sent: Port VLAN ID (an `Untagged` member has no VLAN number to give) and 802.3 MAC/PHY (needs ethtool link settings and a MAU-type table). Both are decoded and shown.
     - Reconcile also subscribes to `SwitchingProfiles`/`PortAggregates`, since they feed these.
 
+- **LLDP-MED TLVs** (`00-12-BB`, #1572), only on an interface with an `lldp_med_profile` (`LinkConfig.med`, resolved by `reconcile::med_advert` from the profile and the interface's own `lldp_location`):
+    - Capabilities (device type 4, network connectivity), then one Network Policy TLV per policy, one Location TLV per configured format (coordinate, civic, ELIN) and Extended Power via MDI (PSE, as configured, never measured; value in 0.1 W).
+    - Capability bits are set only for configured content: policy, location, extended power PSE. Inventory is never sent.
+    - Gate (TIA-1057): MED TLVs go out only after the link heard a neighbor whose LLDPDU had a MED Capabilities TLV (`NeighborTable::has_med_caps`). The gate closes when no such neighbor remains (shutdown, ageout, link flush), so a gone endpoint is not advertised to.
+    - On the closed-to-open edge `run` raises `tx_fast` to `MED_FAST_START` (4, `medFastStartRepeatCount` default) and sends at once, at the 1 s `MSG_FAST_TX` spacing.
+    - `advertise_always` on the profile skips the gate (NOS to NOS: two gated NOS would never wake each other).
+    - The shutdown LLDPDU never carries MED. A changed policy, PoE or location restarts the link (`LinkConfig` equality).
+    - `encode` drops whole MED TLVs that would pass 1500 bytes and keeps the rest (`debug!`).
 - **Capabilities**: *supported* is always Router|Bridge; *enabled* is Router, plus Bridge when the interface has a `switching_profile` (`LinkConfig.bridge`) — i.e. when it is actually a bridge port.
 - **Management Address TLV**: address subtype 1/2 (IPv4/IPv6). If a kernel interface in the netns carries the address, the TLV uses interface numbering subtype 2 (ifIndex) with that interface's ifIndex. Otherwise it uses subtype 1 ("unknown", number 0).
     - The ifIndex comes from `nos_l2_socket::ifindex_of_address` (`getifaddrs`; the lowest ifindex if several interfaces carry it). It is resolved at every transmit (`local_pdu`'s `resolve` argument), not at reconcile, so an address `nos-interfaced` applies later is picked up without a link restart. It is a kernel fact: asking `nos-interfaced` would need a new IPC call and a config-name-to-device mapping.
@@ -42,7 +50,7 @@ How `nos-lldp` is built, moved from `lldp/CLAUDE.md` (#264) so the always-loaded
 
 ## LLDP-MED configuration
 
-Config only (#1570, step 1 of #1564): `nos-lldpd` reads none of it until #1572, so attaching a profile changes nothing on the wire.
+Schema from #1570; `nos-lldpd` sends it since #1572 (see "What is sent").
 
 - `Config.lldp_med_profiles` (`LldpMedProfile`, `schema/lldp_med_profile.rs`) is a keyed section like `stp_port_profiles`. `Interface.lldp_med_profile` names one (`validators::lldp_med_profile_reference_valid`).
 - A profile holds up to 8 `network_policies` (key `app_type`, TIA-1057 values 1-8 via `LldpMedAppType::wire`), an optional `poe`, and `advertise_always`.
@@ -50,7 +58,7 @@ Config only (#1570, step 1 of #1564): `nos-lldpd` reads none of it until #1572, 
 - `poe.power` is in 0.1 W units, 0..=1023 (the 10-bit wire field). It is advertised as configured, never measured.
 - `Interface.lldp_location` (`LldpLocation`, in `schema/lldp.rs`) is per interface, since a profile is shared by many ports. `civic` and `coordinate` are plain structs, not `Option`s (the CLI grammar only addresses fields of a plain struct); equal to `Default` means "not set" (`LldpLocation::is_empty`). It needs an `lldp_med_profile` on the same interface (an empty profile is enough). Loopbacks refuse both fields.
 - Location rules: ELIN is 10-25 ASCII digits. Civic follows RFC 4776: `what` 0..=2, a 2-letter uppercase country, at most 16 elements with unique `ca_type`, 250 bytes encoded at most. Coordinates follow RFC 3825: latitude and longitude are decimal strings (keeps `Eq`, exact over REST) within -90..=90 and -180..=180, resolution bits 0..=34, altitude resolution 0..=30. The 25.9 fixed-point conversion belongs to the TLV encoder (#1571).
-- Ops: `LldpMedProfileOp::{Ensure, Delete}` only; every field is a path edit. `ConfigDiff.lldp_med_profiles` has its own `DiffScope`; the interface fields ride the `interfaces` diff. `nos-lldpd`'s reconcile does not subscribe yet.
+- Ops: `LldpMedProfileOp::{Ensure, Delete}` only; every field is a path edit. `ConfigDiff.lldp_med_profiles` has its own `DiffScope`; the interface fields ride the `interfaces` diff. `nos-lldpd`'s reconcile subscribes to `LldpMedProfiles`.
 - `nos-provision --lldp-med-*` (`tools/nos-provision/src/lldp_med.rs`) builds one typed fixture and derives the op, the path edits and the local `Config` edit from it.
 
 ## Modules

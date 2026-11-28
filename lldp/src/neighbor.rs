@@ -49,6 +49,11 @@ impl NeighborTable {
         self.entries.is_empty()
     }
 
+    /// Whether any neighbor sent an LLDP-MED Capabilities TLV (the MED gate).
+    pub fn has_med_caps(&self) -> bool {
+        self.entries.values().any(|e| e.pdu.org.med_caps.is_some())
+    }
+
     pub fn apply(&mut self, pdu: Lldpdu, now: Instant) -> Update {
         let key = (pdu.chassis_id.clone(), pdu.port_id.clone());
         if pdu.ttl == 0 {
