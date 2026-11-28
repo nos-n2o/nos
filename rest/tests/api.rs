@@ -1044,6 +1044,8 @@ async fn show_bfd_sessions_filters_by_peer_and_rejects_a_bad_one() {
                     remote_desired_min_tx_us: None,
                     remote_detect_mult: None,
                     clients: vec![],
+                    demand: false,
+                    remote_demand: false,
                 })
                 .collect(),
         ),

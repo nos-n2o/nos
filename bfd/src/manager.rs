@@ -853,6 +853,8 @@ impl Manager {
                     remote_desired_min_tx_us: s.remote.map(|r| r.desired_min_tx),
                     remote_detect_mult: s.remote.map(|r| r.detect_mult),
                     clients,
+                    demand: false,
+                    remote_demand: false,
                 }
             })
             .collect();

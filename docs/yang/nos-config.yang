@@ -2237,6 +2237,10 @@ module nos-config {
       type inet:ipv4-address;
       description "Set the S-BFD discriminator to probe.";
     }
+    leaf demand {
+      type boolean;
+      description "Ask the peer for BFD Demand mode.";
+    }
   }
   container sbfd_reflector {
     description "Answer Seamless BFD probes.";

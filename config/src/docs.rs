@@ -1968,6 +1968,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the S-BFD discriminator to probe.",
             "For `mode sbfd`: the reflector's S-BFD discriminator, written as an IPv4 address (its 32 bits). Unset uses the session peer's own IPv4 address, so a reflector configured with its own address needs nothing here. An IPv6 peer needs it.",
         ),
+        Topic::BfdProfileDemand => (
+            "Ask the peer for BFD Demand mode.",
+            "RFC 5880 section 6.6: once the session is Up, this system asks the peer to stop sending periodic Control packets; the peer polls only when it needs to verify the path. Not combinable with `mode sbfd` or `echo-mode`. The peer's own Demand request is always honoured, whatever this says. Off (default) keeps Asynchronous mode. Not valid on a profile used by a port aggregate (RFC 7130 uses Asynchronous mode only).",
+        ),
         Topic::Aaa => (
             "Configure login backends.",
             "Where `nos-watchdogd` checks a password: the local users, RADIUS servers (RFC 2865, over UDP), or both in `login-order`. A RADIUS user with no local entry is logged in as a transient user whose role comes from the reply (`role-attribute`); a local user keeps its configured role. RADIUS secrets are shared secrets: MD5 is the protocol's own primitive, so use RADIUS only over networks you trust.",

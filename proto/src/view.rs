@@ -222,6 +222,8 @@ mod tests {
             remote_desired_min_tx_us: Some(300_000),
             remote_detect_mult: Some(3),
             clients: vec!["bgp".into()],
+            demand: false,
+            remote_demand: false,
         }
     }
 

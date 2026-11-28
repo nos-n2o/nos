@@ -457,6 +457,14 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
         valid_lacp_conversations(agg, ctx)?;
     }
     for agg in aggregates {
+        if let Some(name) = &agg.bfd
+            && ctx.bfd_profiles.iter().any(|p| &p.name == name && p.demand)
+        {
+            return Err(garde::Error::new(format!(
+                "port aggregate {} bfd profile {name} sets demand: micro-BFD (RFC 7130) is Asynchronous only",
+                agg.name
+            )));
+        }
         if agg.bfd.is_some() {
             let Some(peer) = agg.bfd_peer else {
                 return Err(garde::Error::new(format!(
@@ -825,6 +833,14 @@ mod tests {
             ..Default::default()
         }];
         cfg
+    }
+
+    #[test]
+    fn bfd_profile_with_demand_is_refused_on_an_aggregate() {
+        let mut cfg = bfd_aggregate(Some("10.0.0.1/31"), Some("10.0.0.2"));
+        assert!(cfg.validate_with(&cfg).is_ok());
+        cfg.bfd_profiles[0].demand = true;
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
