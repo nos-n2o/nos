@@ -143,6 +143,7 @@ impl NeighborTable {
                     advertised: m.advertised,
                     mau_type: m.mau_type,
                 }),
+                med: crate::med::to_proto(&e.pdu.org),
             })
             .collect()
     }

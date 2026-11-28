@@ -4078,7 +4078,7 @@
             "type": "integer"
           },
           "tlvs_unrecognized": {
-            "description": "`statsTLVsUnrecognizedTotal`: reserved TLV types and every\norganizationally-specific TLV nos doesn't decode (LLDP-MED, DCBX, …).",
+            "description": "`statsTLVsUnrecognizedTotal`: reserved TLV types and every\norganizationally-specific TLV nos doesn't decode (DCBX, an unknown LLDP-MED\nsubtype, …).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4156,6 +4156,62 @@
         ],
         "type": "object"
       },
+      "LldpMed": {
+        "description": "A neighbor's LLDP-MED (ANSI/TIA-1057) TLVs. Every string is rendered by\n`nos-lldpd`, like `LldpNeighbor::chassis_id`: nothing downstream parses it.",
+        "properties": {
+          "capabilities": {
+            "description": "Capabilities the neighbor advertised (`capabilities`, `network-policy`,\n`location`, `power-pse`, `power-pd`, `inventory`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "device_type": {
+            "description": "Device type: `endpoint-class-1|2|3`, `network-connectivity` or `unknown(n)`.",
+            "type": "string"
+          },
+          "inventory": {
+            "description": "Inventory TLVs, one per field.",
+            "items": {
+              "$ref": "#/components/schemas/LldpMedInventory"
+            },
+            "type": "array"
+          },
+          "locations": {
+            "description": "Location Identification TLVs, one per format.",
+            "items": {
+              "$ref": "#/components/schemas/LldpMedLocation"
+            },
+            "type": "array"
+          },
+          "policies": {
+            "description": "Network Policy TLVs, one per application type.",
+            "items": {
+              "$ref": "#/components/schemas/LldpMedPolicy"
+            },
+            "type": "array"
+          },
+          "power": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LldpMedPower",
+                "description": "Extended Power via MDI TLV."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "device_type",
+          "capabilities",
+          "policies",
+          "locations",
+          "inventory"
+        ],
+        "type": "object"
+      },
       "LldpMedAppType": {
         "description": "Application type of a network policy (TIA-1057 Table 12). Types 0 and 9+\nare reserved.",
         "enum": [
@@ -4169,6 +4225,42 @@
           "VideoSignaling"
         ],
         "type": "string"
+      },
+      "LldpMedInventory": {
+        "description": "An LLDP-MED inventory TLV (decode only).",
+        "properties": {
+          "field": {
+            "description": "Field name (`serial-number`, `manufacturer`, `model-name`, ...).",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value, control characters replaced.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "value"
+        ],
+        "type": "object"
+      },
+      "LldpMedLocation": {
+        "description": "One LLDP-MED Location Identification TLV.",
+        "properties": {
+          "format": {
+            "description": "`coordinate`, `civic` or `elin`.",
+            "type": "string"
+          },
+          "text": {
+            "description": "The location, rendered as text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "text"
+        ],
+        "type": "object"
       },
       "LldpMedNetworkPolicy": {
         "description": "What a port tells its neighbor to do for one application type.",
@@ -4230,6 +4322,82 @@
             "description": "Power source."
           }
         },
+        "type": "object"
+      },
+      "LldpMedPolicy": {
+        "description": "One LLDP-MED Network Policy TLV.",
+        "properties": {
+          "app_type": {
+            "description": "Application type name (`voice`, `video-conferencing`, `unknown(n)`, ...).",
+            "type": "string"
+          },
+          "dscp": {
+            "description": "DSCP value, 0-63.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "priority": {
+            "description": "IEEE 802.1p priority, 0-7.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tagged": {
+            "description": "The VLAN is tagged.",
+            "type": "boolean"
+          },
+          "unknown": {
+            "description": "The sender has no policy for this application (the U bit).",
+            "type": "boolean"
+          },
+          "vlan": {
+            "description": "VLAN ID, `None` when the policy names none (0).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "app_type",
+          "tagged",
+          "unknown",
+          "priority",
+          "dscp"
+        ],
+        "type": "object"
+      },
+      "LldpMedPower": {
+        "description": "An LLDP-MED Extended Power via MDI TLV.",
+        "properties": {
+          "kind": {
+            "description": "`pse` or `pd`.",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Power priority name (`critical`, `high`, `low`, `unknown`).",
+            "type": "string"
+          },
+          "source": {
+            "description": "Power source name (for example `primary`, `local`).",
+            "type": "string"
+          },
+          "watts_deci": {
+            "description": "Power value in tenths of a watt.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "source",
+          "priority",
+          "watts_deci"
+        ],
         "type": "object"
       },
       "LldpMedProfile": {
@@ -4321,6 +4489,17 @@
             "type": [
               "integer",
               "null"
+            ]
+          },
+          "med": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LldpMed",
+                "description": "TIA-1057 LLDP-MED TLVs, `None` when the neighbor sent none we keep."
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "port_description": {

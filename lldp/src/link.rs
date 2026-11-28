@@ -293,6 +293,7 @@ fn handle_rx(
         .collect::<Vec<_>>()
         .join(",");
     let aggregation = aggregation_display(pdu.org.link_aggregation);
+    let med = crate::med::display(crate::med::to_proto(&pdu.org).as_ref());
     let update = entry.neighbors.apply(pdu, now);
     if let Update::TableFull { .. } = update {
         entry.stats.too_many_neighbors += 1;
@@ -309,7 +310,8 @@ fn handle_rx(
                         system_name = %system_name, system_description = %system_description,
                         ttl, management_addresses = %management_addresses,
                         capabilities = %capabilities, max_frame_size = %max_frame_size,
-                        vlans = %vlans, aggregation = %aggregation, "lldp neighbor learned"
+                        vlans = %vlans, aggregation = %aggregation, med = %med,
+                        "lldp neighbor learned"
                     )
                 };
             }
