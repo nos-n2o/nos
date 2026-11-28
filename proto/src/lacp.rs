@@ -210,3 +210,29 @@ pub enum LacpEvent {
     /// Reply with one entry per LACP aggregate.
     Summary(Vec<PortAggregateLacpSummary>),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A status written before `fallback` existed (#1573) still decodes, as
+    /// `Disabled`; the counters appended earlier default too.
+    #[test]
+    fn port_status_decodes_without_fallback() {
+        let old = serde_json::json!({
+            "interface": "eth1", "actor_port_number": 1,
+            "receive_state": "Current", "mux_state": "Detached",
+            "partner_system_id": null, "partner_key": null,
+            "partner_port_number": null, "actor_port_priority": 32768,
+            "mode": "Active", "partner_system_priority": null,
+            "partner_port_priority": null, "selected": false,
+            "synchronized": false, "actor_churn": false,
+            "partner_churn": false, "individual": false,
+            "unsupported_version_pdus": 0, "partner_version": null,
+            "partner_port_algorithm": null,
+        });
+        let s: LacpPortStatus = serde_json::from_value(old).unwrap();
+        assert_eq!(s.fallback, LacpFallback::Disabled);
+        assert_eq!(s.lacpdus_rx, 0);
+    }
+}

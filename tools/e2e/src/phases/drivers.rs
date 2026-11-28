@@ -848,6 +848,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
 
     lacp_system_id_change(a, b, &both).await?;
     lacp_passive(a, b, &both).await?;
+    lacp_fallback(a, b, &both).await?;
     lacp_min_links(w, &both).await?;
     lacp_v2(w, &both).await?;
     lacp_steering(w, &both).await?;
@@ -981,6 +982,79 @@ async fn lacp_system_id_change(a: &Router, b: &Router, both: &[&str]) -> anyhow:
         }
     }
     Ok(())
+}
+
+/// #1575: router-b withdraws both members; with fallback off nothing happens,
+/// with `lacp-fallback` on router-a eth1 carries traffic alone after the
+/// timeout, and router-b coming back ends it with `reason="partner"`. The
+/// bond is briefly empty between the end and `Distributing` (accepted).
+async fn lacp_fallback(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+    log("lacp fallback: off by default, active after the timeout, ended by a partner");
+    let active = "lacp fallback active interface=eth[12] timeout=5";
+    let active_base = a.count(active);
+    let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
+    withdraw.extend(strings(&[
+        "--clear-port-aggregate-member",
+        "eth1",
+        "--clear-port-aggregate-member",
+        "eth2",
+    ]));
+    b.provision(&withdraw).await?;
+    wait_lacp_ports(a, "no port Distributing", |p| {
+        p["mux_state"] != "Distributing"
+    })
+    .await?;
+    // Defaulted is 3 s after the last LACPDU at the fast rate.
+    a.assert_quiet("lacp fallback active", active_base, 10)
+        .await?;
+
+    let single =
+        "lacp reconciled aggregate members aggregate=".to_string() + LACP_AGGREGATE + " members=1";
+    let single_base = a.count(&single);
+    let mut on = lacp_flags(&[
+        "--lacp-rate",
+        "fast",
+        "--lacp-fallback",
+        "--lacp-fallback-timeout",
+        "5",
+    ]);
+    on.extend(strings(both));
+    a.provision(&on).await?;
+    a.wait_new(active, active_base, 40).await?;
+    a.wait_new(&single, single_base, 15).await?;
+    let (e1, e2) = (lacp_port(a, "eth1").await?, lacp_port(a, "eth2").await?);
+    // Which of the two carries it can move (enslaving flaps the link and
+    // restarts the dwell), but there is exactly one.
+    anyhow::ensure!(
+        [&e1, &e2]
+            .iter()
+            .filter(|p| p["fallback"] == "Active")
+            .count()
+            == 1
+            && [&e1, &e2]
+                .iter()
+                .filter(|p| p["fallback"] == "Armed")
+                .count()
+                == 1,
+        "expected one Active and one Armed port: {e1} {e2}"
+    );
+
+    let ended = "lacp fallback ended interface=eth[12] reason=\"partner\"";
+    let ended_base = a.count(ended);
+    let mut restore = lacp_flags(&["--lacp-rate", "fast"]);
+    restore.extend(strings(both));
+    b.provision(&restore).await?;
+    a.wait_new(ended, ended_base, 60).await?;
+    wait_lacp_ports(a, "all ports Distributing", |p| {
+        p["mux_state"] == "Distributing"
+    })
+    .await?;
+
+    let mut off = lacp_flags(&["--lacp-rate", "fast", "--no-lacp-fallback"]);
+    off.extend(strings(both));
+    a.provision(&off).await?;
+    lacp_settled(a, 0).await?;
+    lacp_settled(b, 0).await
 }
 
 /// Polls `GET /v1/lacp` on `r` until every port of the aggregate satisfies
@@ -6061,6 +6135,172 @@ pub async fn mpls_ilm(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("installed mpls ilm route", reinstalled, 60)
         .await?;
     Ok(())
+}
+
+/// Nexthop groups for multipath routes (#1587). Self-contained. Router-a runs
+/// `nos-ribd --inline-multipath` (test-only), so its multipath statics are
+/// `RTA_MULTIPATH` routes; `SIGUSR1` (also test-only) turns groups on and the
+/// next re-apply migrates each route by one replace. Then: one group serves
+/// two prefixes with the same hops and another hop set gets its own; a shrink
+/// to one hop and a removal collect the groups only after their last route
+/// (`removed nexthop group`, never a `removed route` on the replace). A fresh
+/// lab then proves a killed `nos-ribd` adopts its groups: no new group, no
+/// route churn.
+pub async fn ecmp_nexthop_groups(w: &mut World) -> anyhow::Result<()> {
+    let (g1, g2, g3) = (
+        REDISTRIBUTE_GATEWAY.s(),
+        NHG_GATEWAY_2.s(),
+        NHG_GATEWAY_3.s(),
+    );
+    let group_of = |line: &str| -> Option<u64> {
+        let rest = line.split("nexthop_group=").nth(1)?;
+        rest.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let added = |p: &str| format!("added route prefix={p} .*next_hops=2");
+    let in_group = |p: &str| format!("added route prefix={p} .*next_hops=2.*nexthop_group=");
+    let installed = "installed nexthop group";
+
+    w.up(&["--ribd-arg=--inline-multipath"]).await?;
+    let a = w.a()?;
+    log("inline: two prefixes over the same two gateways, no group (--inline-multipath)");
+    let (b1, b2) = (a.count(&added(NHG_P1)), a.count(&added(NHG_P2)));
+    a.provision(&[
+        "--static-route",
+        NHG_P1,
+        "--static-route",
+        NHG_P2,
+        "--static-gateway",
+        g1,
+        "--static-extra-gateway",
+        &format!("{NHG_P1}={g2}"),
+        "--static-extra-gateway",
+        &format!("{NHG_P2}={g2}"),
+    ])
+    .await?;
+    a.wait_new(&added(NHG_P1), b1, 60).await?;
+    a.wait_new(&added(NHG_P2), b2, 60).await?;
+    let leaked =
+        a.count_fresh(&in_group(NHG_P1)).await + a.count(&in_group(NHG_P2)) + a.count(installed);
+    if leaked != 0 {
+        bail!("router-a: a nexthop group was installed under --inline-multipath");
+    }
+
+    log("migration: groups on, each inline route is replaced by one over a shared group");
+    let (g_base, m1, m2) = (
+        a.count_fresh(installed).await,
+        a.count(&in_group(NHG_P1)),
+        a.count(&in_group(NHG_P2)),
+    );
+    w.dock
+        .signal_process("router-a", "nos-ribd", "-USR1")
+        .await?;
+    a.wait_new(&in_group(NHG_P1), m1, 60).await?;
+    a.wait_new(&in_group(NHG_P2), m2, 60).await?;
+    let replaced = |p: &str| format!("added route prefix={p} .*replaced=true.*nexthop_group=");
+    let id1 = a
+        .tail(&replaced(NHG_P1), 1)
+        .first()
+        .and_then(|l| group_of(l));
+    let id2 = a
+        .tail(&replaced(NHG_P2), 1)
+        .first()
+        .and_then(|l| group_of(l));
+    if id1.is_none() || id1 != id2 {
+        bail!("router-a: the two prefixes should share one group, got {id1:?} and {id2:?}");
+    }
+    let made = a.count_fresh(installed).await - g_base;
+    if made != 1 {
+        bail!("router-a: {made} groups installed for one hop set, expected 1");
+    }
+
+    log("a prefix with another hop set gets its own group");
+    let b3 = a.count(&in_group(NHG_P3));
+    a.provision(&[
+        "--static-route",
+        NHG_P3,
+        "--static-gateway",
+        g1,
+        "--static-extra-gateway",
+        &format!("{NHG_P3}={g3}"),
+    ])
+    .await?;
+    a.wait_new(&in_group(NHG_P3), b3, 60).await?;
+    let id3 = a
+        .tail(&in_group(NHG_P3), 1)
+        .first()
+        .and_then(|l| group_of(l));
+    if id3.is_none() || id3 == id1 {
+        bail!("router-a: {NHG_P3} should have its own group, got {id3:?} (shared: {id1:?})");
+    }
+
+    log("shrink to one hop: replaced in place, its group is collected, the other stays");
+    let one = format!("added route prefix={NHG_P3} .*next_hops=1.*replaced=true");
+    let removed_route = format!("removed route prefix={NHG_P3} ");
+    let removed_group = "removed nexthop group";
+    let (b_one, b_rr, b_rg) = (
+        a.count(&one),
+        a.count_fresh(&removed_route).await,
+        a.count(removed_group),
+    );
+    a.provision(&["--remove-static-extra-gateway", &format!("{NHG_P3}={g3}")])
+        .await?;
+    a.wait_new(&one, b_one, 60).await?;
+    a.wait_new(removed_group, b_rg, 60).await?;
+    a.assert_quiet(&removed_route, b_rr, 5).await?;
+    a.assert_quiet(
+        &format!("removed nexthop group id={}", id1.unwrap_or(0)),
+        0,
+        3,
+    )
+    .await?;
+
+    log("removals: the shared group goes with its last route");
+    a.provision(&["--remove-static-route", NHG_P3]).await?;
+    a.provision(&["--remove-static-route", NHG_P1]).await?;
+    a.assert_quiet(
+        &format!("removed nexthop group id={}", id1.unwrap_or(0)),
+        0,
+        15,
+    )
+    .await?;
+    a.provision(&["--remove-static-route", NHG_P2]).await?;
+    a.wait_new(
+        &format!("removed nexthop group id={}", id1.unwrap_or(0)),
+        0,
+        60,
+    )
+    .await?;
+
+    log("adoption: a fresh lab, groups on; a killed nos-ribd finds its groups again");
+    w.up(&[]).await?;
+    let a = w.a()?;
+    let b1 = a.count(&in_group(NHG_P1));
+    a.provision(&[
+        "--static-route",
+        NHG_P1,
+        "--static-gateway",
+        g1,
+        "--static-extra-gateway",
+        &format!("{NHG_P1}={g2}"),
+    ])
+    .await?;
+    a.wait_new(&in_group(NHG_P1), b1, 60).await?;
+    let (made, starts, adds) = (
+        a.count_fresh(installed).await,
+        a.count("nos-ribd starting"),
+        a.count_fresh(&format!("added route prefix={NHG_P1} "))
+            .await,
+    );
+    w.dock
+        .signal_process("router-a", "nos-ribd", "-KILL")
+        .await?;
+    a.wait_new("nos-ribd starting", starts, 60).await?;
+    a.assert_quiet(installed, made, 25).await?;
+    a.assert_quiet(&format!("added route prefix={NHG_P1} "), adds, 5)
+        .await
 }
 
 /// The operator's write of `net.mpls.conf.eth0.input` on router-a.

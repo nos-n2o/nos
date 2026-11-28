@@ -120,6 +120,8 @@ pub struct ConfigDiff {
     pub spanning_tree: Vec<FieldDiff>,
     /// STP port profile changes.
     pub stp_port_profiles: Vec<SectionDiff>,
+    /// LLDP-MED profile changes.
+    pub lldp_med_profiles: Vec<SectionDiff>,
     /// Access list changes, including a rule reorder.
     pub acls: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.admin` is one singleton section (secret values are masked).
@@ -155,6 +157,7 @@ impl ConfigDiff {
             && self.sbfd_reflector.is_empty()
             && self.spanning_tree.is_empty()
             && self.stp_port_profiles.is_empty()
+            && self.lldp_med_profiles.is_empty()
             && self.acls.is_empty()
             && self.admin.is_empty()
             && self.ra_profiles.is_empty()
@@ -286,6 +289,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            lldp_med_profiles: if scopes.contains(&DiffScope::LldpMedProfiles) {
+                self.lldp_med_profiles.clone()
+            } else {
+                Vec::new()
+            },
             acls: if scopes.contains(&DiffScope::Acls) {
                 self.acls.clone()
             } else {
@@ -359,6 +367,8 @@ pub enum DiffScope {
     SpanningTree,
     /// STP port profiles.
     StpPortProfiles,
+    /// LLDP-MED profiles.
+    LldpMedProfiles,
     /// Access lists.
     Acls,
     /// The admin keystore section.
@@ -454,7 +464,7 @@ mod tests {
             subsections: Vec::new(),
         };
         assert!(ConfigDiff::default().is_empty());
-        let setters: [Set; 27] = [
+        let setters: [Set; 28] = [
             |d, f, _| d.hostname = Some(f),
             |d, _, s| d.bgp_instances.push(s),
             |d, _, s| d.routing_tables.push(s),
@@ -479,6 +489,7 @@ mod tests {
             |d, f, _| d.sbfd_reflector.push(f),
             |d, f, _| d.spanning_tree.push(f),
             |d, _, s| d.stp_port_profiles.push(s),
+            |d, _, s| d.lldp_med_profiles.push(s),
             |d, _, s| d.acls.push(s),
             |d, f, _| d.admin.push(f),
             |d, _, s| d.ra_profiles.push(s),

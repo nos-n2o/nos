@@ -182,6 +182,17 @@ async fn resync(
                 .collect(),
             members: members.iter().map(|m| m.0.clone()).collect(),
         };
+        let fallback: HashMap<String, (bool, u16)> = cfg
+            .interfaces
+            .iter()
+            .filter(|i| i.port_aggregate.as_deref() == Some(name))
+            .map(|i| {
+                (
+                    i.name.clone(),
+                    (i.lacp_fallback, i.lacp_fallback_timeout.unwrap_or(30)),
+                )
+            })
+            .collect();
         manager.reconcile_v2(
             members,
             agg_cfg.lacp_rate,
@@ -189,6 +200,7 @@ async fn resync(
             agg_cfg.lacp_system_priority.unwrap_or(DEFAULT_PRIORITY),
             agg_cfg.min_links,
             &v2,
+            &fallback,
         );
         if usize::from(agg_cfg.min_links) > member_count {
             warn!(

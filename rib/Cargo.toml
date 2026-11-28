@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 libc = { workspace = true }
 nos-pki            = { workspace = true }
+nos-nexthop        = { workspace = true }
 nos-daemon         = { workspace = true }
 tokio              = { workspace = true, features = ["signal"] }
 serde              = { workspace = true }

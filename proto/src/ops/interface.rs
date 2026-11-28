@@ -418,6 +418,8 @@ mod tests {
     fn interface(name: &str) -> Interface {
         Interface {
             ra_profile: None,
+            lldp_med_profile: None,
+            lldp_location: crate::schema::LldpLocation::default(),
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -472,6 +474,8 @@ mod tests {
         let mut cfg = Config {
             interfaces: vec![Interface {
                 ra_profile: None,
+                lldp_med_profile: None,
+                lldp_location: crate::schema::LldpLocation::default(),
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,

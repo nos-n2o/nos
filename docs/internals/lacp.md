@@ -31,6 +31,16 @@ Our own *transmit* rate is deliberately **not** driven by our own `lacp-rate` �
 
 Re-run by `aggregate::AggregateManager`'s background `selection_loop` task every time any port's observation changes (edge-triggered via a `tokio::sync::Notify`, not polled) — its outcome both feeds each port's own `mux_machine::Event::SelectionChanged` (via a per-port `tokio::sync::watch` channel) and, together with each port's live `MuxState`, recomputes the `Distributing`-state subset pushed to `nos-interfaced`.
 
+## Fallback to an individual link (#1575)
+
+- `fallback.rs` (pure) picks one port; `selection_loop` injects it into the pushed member set after the negotiated set is computed. `selection::select`, Mux, Receive and the wire are untouched: the port stays `Detached`, keeps sending LACPDUs, and a partner that starts LACP later negotiates normally.
+- Eligible: `lacp fallback` on, link up, not `selectable()`, and `timeout` elapsed since the later of the last accepted LACPDU (`Counters.last_pdu`) and the link-up. An `Expired` port with a learned partner is selectable, so the dwell never ends before Defaulted (3 s fast, 180 s slow).
+- Only while the negotiated (`Distributing`) set is empty. One port: the lowest `(port priority, port number)`; it keeps the role (no preemption by a better port).
+- It bypasses `min-links`, pushes no conversations and no `discard_wrong`.
+- A heard LACPDU makes the port selectable, so the next pass drops it at once (`lacp fallback ended ... reason="partner"`); the bond is briefly empty until it is `Distributing` again. Other reasons: `negotiated`, `link-down`, `disabled`, `timeout`.
+- `selection_loop` also wakes on link changes and on a `sleep_until` of the next dwell end; the recompute moves it forward, so it fires once.
+- `show lacp` `Fallback`: `-` (off), `armed`, `active`.
+
 ## Actor identity — no new persisted registry
 
 Unlike `interface::driver::port_aggregate_registry`'s YAML-backed bond-id allocator, LACP's Actor identity needs no persisted file:

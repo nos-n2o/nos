@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// FNV-1a 64 of the generated module. After a schema or help-text change:
 /// bump `nos_proto::yang::YANG_REVISION`, run `make docs-fix`, then paste the
 /// hash this test prints here.
-const RECORDED_HASH: u64 = 0x586f_a94e_6fcf_65e8;
+const RECORDED_HASH: u64 = 0x949d_353d_5b67_1ba2;
 
 fn render() -> String {
     nos_proto::yang::render(&|t| nos_config::docs::command_doc(t).summary)

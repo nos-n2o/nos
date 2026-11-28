@@ -36,6 +36,23 @@ How `nos-lldp` is built, moved from `lldp/CLAUDE.md` (#264) so the always-loaded
 - **A down link is not fatal, and a down send is retried in 1s.** `ENETDOWN` on read/send is retried/skipped (`socket::is_link_down`); a periodic transmit that finds the link down is retried after `LINK_DOWN_RETRY` (1s) rather than waiting out the 30s interval — found by the e2e phase: `nos-interfaced` admin-ups a newly-configured interface on its own schedule, so the link task's first (immediate) transmit can lose that race; a task that ends on its own (socket can't open because the interface isn't in the netns yet, or a hard read error) is respawned by `reconcile` on its next resync.
 - **Never leave an elapsed deadline armed** — the same rule as `nos-lacp/CLAUDE.md`. The expiry branch of `link::run`'s `select!` is guarded by `deadline.is_some()`, and handling it removes the entry the deadline belonged to.
 
+## Decode robustness
+
+`packet::decode` is the one place untrusted bytes are parsed. It bounds-checks every TLV length, requires the first three TLVs to be Chassis ID, Port ID and TTL in order (and rejects a repeat of them), skips unknown TLVs, ignores anything after the End TLV (Ethernet padding), and never panics. System Capabilities follows lldpd (`lldp.c` `LLDP_TLV_SYSTEM_CAP`): under 4 bytes rejects the LLDPDU, extra bytes are ignored, a repeat overwrites (last wins). The Management Address TLV is optional and untrusted, so a truncated, internally inconsistent, or non-IP one is *skipped* rather than rejecting the whole LLDPDU (which would hide the neighbor), and at most `MAX_MANAGEMENT_ADDRESSES` (4) are kept per LLDPDU since every one is stored and printed. Free-text TLVs (Port Description, System Name/Description) have control characters replaced at decode time (`packet::lossy`), since they are printed into `nos-cli` output and logs and a neighbor is untrusted — an ANSI escape sequence or carriage return must not reach an operator's terminal; Chassis/Port IDs go through the same check in `text_or_hex`. Org-specific TLVs (`packet::decode_org`) follow the Management Address rule: a known one (802.1 PVID/VLAN Name/Link Aggregation, 802.3 MAC/PHY/Max Frame Size, and the deprecated 802.3 Link Aggregation, `00-12-0F`/3, decoded into the same field) that is the wrong length or a repeat of a single-instance TLV is skipped and counted as `tlvs_discarded` (the first copy wins), VLAN Names are capped at `MAX_VLAN_NAMES` (32) and go through `lossy`; an unknown OUI/subtype is `tlvs_unrecognized`. Each rejection path has a unit test.
+
+## LLDP-MED configuration
+
+Config only (#1570, step 1 of #1564): `nos-lldpd` reads none of it until #1572, so attaching a profile changes nothing on the wire.
+
+- `Config.lldp_med_profiles` (`LldpMedProfile`, `schema/lldp_med_profile.rs`) is a keyed section like `stp_port_profiles`. `Interface.lldp_med_profile` names one (`validators::lldp_med_profile_reference_valid`).
+- A profile holds up to 8 `network_policies` (key `app_type`, TIA-1057 values 1-8 via `LldpMedAppType::wire`), an optional `poe`, and `advertise_always`.
+- Policy rules: `vlan` 0..=4094 (unset = untagged), `priority` 0..=7, `dscp` 0..=63, `tagged` needs a `vlan`.
+- `poe.power` is in 0.1 W units, 0..=1023 (the 10-bit wire field). It is advertised as configured, never measured.
+- `Interface.lldp_location` (`LldpLocation`, in `schema/lldp.rs`) is per interface, since a profile is shared by many ports. `civic` and `coordinate` are plain structs, not `Option`s (the CLI grammar only addresses fields of a plain struct); equal to `Default` means "not set" (`LldpLocation::is_empty`). It needs an `lldp_med_profile` on the same interface (an empty profile is enough). Loopbacks refuse both fields.
+- Location rules: ELIN is 10-25 ASCII digits. Civic follows RFC 4776: `what` 0..=2, a 2-letter uppercase country, at most 16 elements with unique `ca_type`, 250 bytes encoded at most. Coordinates follow RFC 3825: latitude and longitude are decimal strings (keeps `Eq`, exact over REST) within -90..=90 and -180..=180, resolution bits 0..=34, altitude resolution 0..=30. The 25.9 fixed-point conversion belongs to the TLV encoder (#1571).
+- Ops: `LldpMedProfileOp::{Ensure, Delete}` only; every field is a path edit. `ConfigDiff.lldp_med_profiles` has its own `DiffScope`; the interface fields ride the `interfaces` diff. `nos-lldpd`'s reconcile does not subscribe yet.
+- `nos-provision --lldp-med-*` (`tools/nos-provision/src/lldp_med.rs`) builds one typed fixture and derives the op, the path edits and the local `Config` edit from it.
+
 ## Modules
 
 | Module | Role |

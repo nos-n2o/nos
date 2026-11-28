@@ -324,6 +324,8 @@ fn ensure_subinterface_mut<'a>(
     if !config.interfaces.iter().any(|i| i.name == interface) {
         config.interfaces.push(Interface {
             ra_profile: None,
+            lldp_med_profile: None,
+            lldp_location: crate::schema::LldpLocation::default(),
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -379,6 +381,8 @@ mod tests {
     fn interface(name: &str, subinterfaces: Vec<Subinterface>) -> Interface {
         Interface {
             ra_profile: None,
+            lldp_med_profile: None,
+            lldp_location: crate::schema::LldpLocation::default(),
             acl_in: None,
             acl_out: None,
             flowspec: false,
