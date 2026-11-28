@@ -143,7 +143,7 @@ pub use schema::{
     Ospfv3Area, Ospfv3AreaRange, Ospfv3Instance, Ospfv3Profile, Ospfv3VirtualLink,
     PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, RadiusServer,
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoleAttribute, RoutingTable,
-    RoutingTableEvpn, RoutingTableVpn, RpkiCache, SegmentRouting, SourceAddress, SpfThrottle,
+    RoutingTableEvpn, RoutingTableDistance, RoutingTableVpn, RpkiCache, SegmentRouting, SourceAddress, SpfThrottle,
     SshServer, StaticNextHop, StaticRoute, StaticRoutingInstance, StpMode, Subinterface,
     SwitchingProfile, SwitchingProfileMember, SyslogFacility, SyslogServer, SyslogTls,
     SyslogTransport, TacacsAuthentication, TacacsServer, User, UserRole, VlanTag,

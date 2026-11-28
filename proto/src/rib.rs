@@ -302,6 +302,10 @@ pub struct BgpRoute {
     /// The best path's `MULTI_EXIT_DISC`, for `show route`.
     #[serde(default)]
     pub metric: Option<u32>,
+    /// The best path was learned from an iBGP peer (confed-external counts
+    /// as eBGP); `nos-ribd` picks the administrative distance from it.
+    #[serde(default)]
+    pub ibgp: bool,
 }
 
 /// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
@@ -424,6 +428,10 @@ pub struct OspfRoute {
     /// hop (segment routing, #1165).
     #[serde(default)]
     pub next_hop_labels: Vec<Vec<u32>>,
+    /// The SPF path class, for the per-class administrative distance;
+    /// `None` is intra-area.
+    #[serde(default)]
+    pub class: Option<crate::ospf::RoutePathClass>,
 }
 
 /// One incoming-label-map (ILM) entry: what a labelled packet arriving with
@@ -830,6 +838,7 @@ mod tests {
 
     fn route(i: u32) -> BgpRoute {
         BgpRoute {
+            ibgp: false,
             prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
             next_hops: vec![IpAddr::from([10, 0, 0, 1])],
             backup_next_hop: None,
@@ -911,6 +920,7 @@ mod tests {
     fn a_chunk_of_worst_case_routes_fits_max_frame() {
         let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
         let worst = BgpRoute {
+            ibgp: false,
             prefix: IpNet::new(v6(1), 128).unwrap(),
             next_hops: (0..255).map(v6).collect(),
             backup_next_hop: Some(v6(999)),
@@ -1071,6 +1081,7 @@ mod tests {
 
     fn ospf_route(i: u32, hops: usize) -> OspfRoute {
         OspfRoute {
+            class: None,
             prefix: IpNet::new(IpAddr::from(i.to_be_bytes()), 32).unwrap(),
             next_hops: vec![(IpAddr::from([10, 0, 0, 1]), None); hops],
             backup_next_hop: None,
@@ -1160,6 +1171,7 @@ mod tests {
     fn a_chunk_of_worst_case_ospf_routes_fits_max_frame() {
         let v6 = |i: u16| IpAddr::from(Ipv6Addr::new(0x2001, 0xdb8, i, i, i, i, i, i));
         let worst = |hops: usize| OspfRoute {
+            class: None,
             prefix: IpNet::new(v6(1), 128).unwrap(),
             next_hops: vec![(v6(2), Some(u32::MAX)); hops],
             backup_next_hop: Some(v6(3)),
@@ -1232,6 +1244,13 @@ mod tests {
         assert_eq!(r.weight(), plain + 2);
         let back: OspfRoute = postcard::from_bytes(&postcard::to_allocvec(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+        r.class = Some(crate::ospf::RoutePathClass::External2);
+        let back: OspfRoute = postcard::from_bytes(&postcard::to_allocvec(&r).unwrap()).unwrap();
+        assert_eq!(back.class, Some(crate::ospf::RoutePathClass::External2));
+        let mut b = route(1);
+        b.ibgp = true;
+        let back: BgpRoute = postcard::from_bytes(&postcard::to_allocvec(&b).unwrap()).unwrap();
+        assert!(back.ibgp);
     }
 
     /// `GetSummary`/`Summary` are appended after the previous last variants

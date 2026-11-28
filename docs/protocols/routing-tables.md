@@ -304,7 +304,7 @@ Each source has a fixed preference, and the lowest wins:
 - ospf (OSPF and OSPFv3): 110
 - evpn and vpn (routes imported from the overlay): 200
 
-These are not configurable. A static route therefore beats a BGP route to the same prefix, and a BGP route beats an OSPF route. The losing candidates stay in the table and appear in `show route` below the winner; if the winner goes away, the next one takes over without any reconfiguration.
+Per table, `distance` overrides these defaults (see "Administrative distance" below). A static route therefore beats a BGP route to the same prefix, and a BGP route beats an OSPF route. The losing candidates stay in the table and appear in `show route` below the winner; if the winner goes away, the next one takes over without any reconfiguration.
 
 An IPv6 route whose next hop is IPv4 (a BGP route learned over an IPv4 session, RFC 4798) is held in the table and shown by `show route` with its IPv4 gateway, but `nos-ribd` does not install it: the kernel refuses `RTA_VIA` on an IPv6 route, and an IPv4-mapped `RTA_GATEWAY` (`::ffff:a.b.c.d`) is resolved with IPv6 neighbour discovery, which an Ethernet peer never answers (the e2e probe saw the unanswered neighbour solicitations and no TCP SYN left the router). `nos-ribd` logs `ipv6 route over an ipv4 next hop not installed` once per prefix. VPNv6 routes (MPLS-encapsulated) and EVPN routes are not affected.
 
@@ -345,6 +345,14 @@ A few things are not checked at commit time and only show up in operation: a sta
 ### Changes are live, restarts keep the table
 
 Committing a change to a routing table updates it within about a second, with no restart of the protocols attached to it: changing a table's static routes does not reset its BGP sessions. Removing a table removes its routes from forwarding immediately. A router can hold up to 153 routing tables.
+
+### Administrative distance
+
+- `set routing-table <t> distance <source> <1-255>` sets the distance of one source; `delete` restores its default.
+- Sources and defaults: `static` 1, `ebgp` 20, `ibgp` 200, `ospf-intra` 110, `ospf-inter` 110, `ospf-external` 110, `evpn` 200, `vpn` 200. Connected is always 0.
+- Over REST: `routing-table/{t}/distance/ebgp`, value `150`. `nos-provision` takes `--distance-<source> <n>`.
+- 0 is rejected at commit.
+- Wire-only for now: the fields are stored and pushed, `nos-ribd` does not use them yet (#1553).
 
 ## Configuration reference
 

@@ -273,6 +273,67 @@ pub struct RoutingTableVpn {
     pub site_of_origin: Option<String>,
 }
 
+/// Administrative distance per route source (lower wins between sources of
+/// one prefix). `None` keeps the default: static 1, ebgp 20, ibgp 200,
+/// ospf-intra/inter/external 110, evpn 200, vpn 200. Connected routes are
+/// always 0 and not configurable. Valid values are 1-255.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct RoutingTableDistance {
+    /// Static routes (default 1).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "static")]
+    pub r#static: Option<u8>,
+    /// Routes from eBGP peers (default 20).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "ebgp")]
+    pub ebgp: Option<u8>,
+    /// Routes from iBGP peers (default 200).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "ibgp")]
+    pub ibgp: Option<u8>,
+    /// OSPF intra-area routes (default 110).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "ospf-intra")]
+    pub ospf_intra: Option<u8>,
+    /// OSPF inter-area routes (default 110).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "ospf-inter")]
+    pub ospf_inter: Option<u8>,
+    /// OSPF external (type 1 and 2) routes (default 110).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "ospf-external")]
+    pub ospf_external: Option<u8>,
+    /// EVPN Type-5 routes (default 200).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "evpn")]
+    pub evpn: Option<u8>,
+    /// L3VPN routes (default 200).
+    #[serde(default)]
+    #[cli(topic = RoutingTableDistanceValue, words = "vpn")]
+    pub vpn: Option<u8>,
+}
+
+fn valid_table_distance(d: &RoutingTableDistance) -> garde::Result {
+    let all = [
+        d.r#static,
+        d.ebgp,
+        d.ibgp,
+        d.ospf_intra,
+        d.ospf_inter,
+        d.ospf_external,
+        d.evpn,
+        d.vpn,
+    ];
+    if all.contains(&Some(0)) {
+        return Err(garde::Error::new(
+            "administrative distance must be 1-255 (0 is reserved for connected routes)",
+        ));
+    }
+    Ok(())
+}
+
 /// A named routing table, optionally associated with one BGP instance and
 /// one static routing instance. The reference lives only on the table —
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
@@ -357,6 +418,13 @@ pub struct RoutingTable {
     #[garde(skip)]
     #[cli(topic = RoutingTableVpn)]
     pub vpn: RoutingTableVpn,
+
+    /// Administrative distance per route source; wire-only until `nos-ribd`
+    /// reads it (#1553).
+    #[serde(default)]
+    #[garde(custom(|d: &RoutingTableDistance, _ctx: &Config| valid_table_distance(d)))]
+    #[cli(topic = RoutingTableDistance)]
+    pub distance: RoutingTableDistance,
 }
 
 /// If set, `bgp_instance` must name an existing `BgpInstance` (cf.
@@ -722,6 +790,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
+            distance: Default::default(),
             rest_api: None,
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
@@ -797,6 +866,45 @@ mod tests {
             static_routing_instances: static_instances,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn distance_validation_and_serde() {
+        let cfg = |d: RoutingTableDistance| {
+            let mut t = table("rt1", None, None);
+            t.distance = d;
+            config_with(vec![t], vec![], vec![])
+        };
+        let one = |f: fn(&mut RoutingTableDistance, Option<u8>), v| {
+            let mut d = RoutingTableDistance::default();
+            f(&mut d, v);
+            cfg(d).validate_with(&cfg(RoutingTableDistance::default()))
+        };
+        let setters: [fn(&mut RoutingTableDistance, Option<u8>); 8] = [
+            |d, v| d.r#static = v,
+            |d, v| d.ebgp = v,
+            |d, v| d.ibgp = v,
+            |d, v| d.ospf_intra = v,
+            |d, v| d.ospf_inter = v,
+            |d, v| d.ospf_external = v,
+            |d, v| d.evpn = v,
+            |d, v| d.vpn = v,
+        ];
+        for f in setters {
+            assert!(one(f, Some(0)).is_err());
+            assert!(one(f, Some(1)).is_ok());
+            assert!(one(f, Some(255)).is_ok());
+        }
+        let t: RoutingTable = serde_json::from_str(r#"{"name":"rt1"}"#).unwrap();
+        assert_eq!(t.distance, RoutingTableDistance::default());
+        let d = RoutingTableDistance {
+            r#static: Some(5),
+            ospf_intra: Some(90),
+            ..Default::default()
+        };
+        let j = serde_json::to_value(&d).unwrap();
+        assert_eq!(j["static"], 5);
+        assert_eq!(serde_json::from_value::<RoutingTableDistance>(j).unwrap(), d);
     }
 
     #[test]

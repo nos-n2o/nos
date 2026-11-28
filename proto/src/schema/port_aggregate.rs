@@ -782,6 +782,7 @@ mod tests {
         }];
         let mut cfg = config_with(vec![agg]);
         cfg.routing_tables = vec![crate::schema::RoutingTable {
+            distance: Default::default(),
             rest_api: None,
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),

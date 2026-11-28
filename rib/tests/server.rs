@@ -392,6 +392,7 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     writer
         .send(RibRequest::PushBgpRoutes(vec![
             nos_proto::BgpRouteUpdate::Full(vec![nos_proto::BgpRoute {
+                ibgp: false,
                 prefix,
                 next_hops: vec![next_hop, sibling],
                 backup_next_hop: None,
@@ -448,6 +449,7 @@ async fn push_bgp_full_past_max_frame_is_chunked_and_applied_atomically() {
     };
     let routes: Vec<BgpRoute> = (0..N)
         .map(|i| BgpRoute {
+            ibgp: false,
             prefix: nos_proto::IpNet::new(v6(i), 112).unwrap(),
             next_hops: vec![v6(N + 1)],
             backup_next_hop: Some(v6(N + 2)),
@@ -604,6 +606,7 @@ async fn push_ospf_full_past_max_frame_is_chunked_and_applied_atomically() {
     };
     let routes: Vec<OspfRoute> = (0..N)
         .map(|i| OspfRoute {
+            class: None,
             prefix: nos_proto::IpNet::new(v6(i), 112).unwrap(),
             next_hops: vec![(v6(N + 1), Some(7))],
             backup_next_hop: Some(v6(N + 2)),
@@ -682,6 +685,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     let route = nos_proto::BgpRoute {
+        ibgp: false,
         prefix,
         next_hops: vec![next_hop],
         backup_next_hop: None,
@@ -718,6 +722,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     writer
         .send(RibRequest::PushBgpRoutes(vec![
             nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                ibgp: false,
                 prefix: other_prefix,
                 next_hops: vec![next_hop],
                 backup_next_hop: None,
@@ -762,6 +767,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
         writer
             .send(RibRequest::PushBgpRoutes(vec![
                 nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                    ibgp: false,
                     prefix: "10.9.0.0/24".parse().unwrap(),
                     next_hops: vec!["10.0.0.1".parse().unwrap()],
                     backup_next_hop: None,
@@ -930,6 +936,7 @@ async fn ospf_pushes_land_only_from_the_ospf_daemons() {
         w.send(RibRequest::PushOspfRoutes {
             instance: "x".into(),
             updates: vec![nos_proto::OspfRouteUpdate::Add(nos_proto::OspfRoute {
+                class: None,
                 prefix,
                 next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
                 backup_next_hop: None,
@@ -999,6 +1006,7 @@ async fn bgp_pushes_are_refused_to_every_other_role() {
         let (mut r, mut w) = connect_as(&path, role.as_str(), "x").await;
         w.send(RibRequest::PushBgpRoutes(vec![
             nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                ibgp: false,
                 prefix: "10.9.0.0/24".parse().unwrap(),
                 next_hops: vec!["10.0.0.1".parse().unwrap()],
                 backup_next_hop: None,
@@ -1059,6 +1067,7 @@ use nos_proto::{OspfRoute, OspfRouteUpdate};
 
 fn ospf_route(prefix: &str, metric: u32) -> OspfRoute {
     OspfRoute {
+        class: None,
         prefix: prefix.parse().unwrap(),
         next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
         backup_next_hop: None,

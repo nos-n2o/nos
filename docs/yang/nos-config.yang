@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-12 {
+  revision 2026-12-14 {
     description "Generated.";
   }
 
@@ -754,6 +754,41 @@ module nos-config {
       leaf site_of_origin {
         type string;
         description "Set the Site of Origin of the table's CE site.";
+      }
+    }
+    container distance {
+      description "Set the administrative distance of each route source in this table.";
+      leaf r#static {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf ebgp {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf ibgp {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf ospf_intra {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf ospf_inter {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf ospf_external {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf evpn {
+        type uint8;
+        description "Set the administrative distance of this route source.";
+      }
+      leaf vpn {
+        type uint8;
+        description "Set the administrative distance of this route source.";
       }
     }
   }

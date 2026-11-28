@@ -187,6 +187,10 @@ topics! {
     RoutingTableVpnLabel,
     /// `RoutingTableVpn.site_of_origin`
     RoutingTableVpnSiteOfOrigin,
+    /// `RoutingTable.distance`
+    RoutingTableDistance,
+    /// Every `RoutingTableDistance` field
+    RoutingTableDistanceValue,
     /// `Config.static_routing_instances`
     StaticRoutingInstance,
     /// `StaticRoutingInstance.routes`

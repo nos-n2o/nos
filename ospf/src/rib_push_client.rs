@@ -315,6 +315,7 @@ fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
 /// (`LinkManager::compute_routes`).
 fn to_route(prefix: IpNet, (next_hops, backup, metric, labels): &Hops) -> OspfRoute {
     OspfRoute {
+        class: None,
         prefix,
         next_hops: next_hops.iter().map(|gw| (*gw, None)).collect(),
         backup_next_hop: backup.filter(|(_, tunnel)| !tunnel).map(|(a, _)| a),
@@ -383,6 +384,7 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: "10.0.0.0/24".parse().unwrap(),
                 next_hops: vec![("10.0.0.2".parse().unwrap(), None)],
                 backup_next_hop: None,
@@ -404,6 +406,7 @@ mod tests {
         assert_eq!(
             diff_routes(&HashMap::new(), &with),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: p,
                 next_hops: Vec::new(),
                 backup_next_hop: None,
@@ -437,6 +440,7 @@ mod tests {
         updates.sort_by_key(|u| format!("{u:?}"));
         let mut expected = vec![
             OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: "10.0.2.0/24".parse().unwrap(),
                 next_hops: vec![("10.0.2.1".parse().unwrap(), None)],
                 backup_next_hop: None,
@@ -462,6 +466,7 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: p,
                 next_hops: vec![(gw, None)],
                 backup_next_hop: Some(bk),
@@ -493,6 +498,7 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: p,
                 next_hops: vec![(a, None), (b, None)],
                 backup_next_hop: None,
@@ -547,6 +553,7 @@ mod tests {
         // One next hop each: weight 2, so a chunk of 4 carries two routes.
         let all: Vec<OspfRoute> = (0..5)
             .map(|i| OspfRoute {
+                class: None,
                 prefix: format!("10.{i}.0.0/24").parse().unwrap(),
                 next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
                 backup_next_hop: None,
