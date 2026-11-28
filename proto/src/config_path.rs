@@ -45,6 +45,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "id",
     "label",
     "first",
+    "domain",
     "app_type",
     "ca_type",
 ];

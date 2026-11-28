@@ -126,6 +126,8 @@ pub struct ConfigDiff {
     pub acls: Vec<SectionDiff>,
     /// Field-level, like `lldp`: `Config.admin` is one singleton section (secret values are masked).
     pub admin: Vec<FieldDiff>,
+    /// RA profile changes.
+    pub ra_profiles: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -158,6 +160,7 @@ impl ConfigDiff {
             && self.lldp_med_profiles.is_empty()
             && self.acls.is_empty()
             && self.admin.is_empty()
+            && self.ra_profiles.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -301,6 +304,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            ra_profiles: if scopes.contains(&DiffScope::RaProfiles) {
+                self.ra_profiles.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -365,6 +373,8 @@ pub enum DiffScope {
     Acls,
     /// The admin keystore section.
     Admin,
+    /// RA profiles.
+    RaProfiles,
 }
 
 /// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing
@@ -454,7 +464,7 @@ mod tests {
             subsections: Vec::new(),
         };
         assert!(ConfigDiff::default().is_empty());
-        let setters: [Set; 27] = [
+        let setters: [Set; 28] = [
             |d, f, _| d.hostname = Some(f),
             |d, _, s| d.bgp_instances.push(s),
             |d, _, s| d.routing_tables.push(s),
@@ -482,6 +492,7 @@ mod tests {
             |d, _, s| d.lldp_med_profiles.push(s),
             |d, _, s| d.acls.push(s),
             |d, f, _| d.admin.push(f),
+            |d, _, s| d.ra_profiles.push(s),
         ];
         for (i, set) in setters.iter().enumerate() {
             let mut d = ConfigDiff::default();

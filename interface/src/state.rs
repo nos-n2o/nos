@@ -965,6 +965,7 @@ mod tests {
         };
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -989,6 +990,7 @@ mod tests {
     async fn build_from_config_maps_tagged_subinterface_untouched() {
         let mut iface = interface("eth0");
         iface.subinterfaces = vec![nos_proto::Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,

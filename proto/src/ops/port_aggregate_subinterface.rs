@@ -286,6 +286,7 @@ fn ensure_subinterface_mut<'a>(
     let agg = find_aggregate_mut(config, port_aggregate)?;
     if !agg.subinterfaces.iter().any(|s| s.tag == tag) {
         agg.subinterfaces.push(Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -474,6 +475,7 @@ mod tests {
     #[test]
     fn set_and_clear_touch_only_the_tagged_subinterface() {
         let sub = |tag| Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -549,6 +551,7 @@ mod tests {
             port_aggregates: vec![aggregate(
                 "bond1",
                 vec![Subinterface {
+                    ra_profile: None,
                     mtu: None,
                     acl_in: None,
                     acl_out: None,

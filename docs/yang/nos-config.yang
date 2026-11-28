@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-13 {
+  revision 2026-12-14 {
     description "Generated.";
   }
 
@@ -1373,6 +1373,10 @@ module nos-config {
       type string;
       description "Attach a spanning-tree port profile.";
     }
+    leaf ra_profile {
+      type string;
+      description "Attach an IPv6 Router Advertisement profile.";
+    }
     leaf acl_in {
       type string;
       description "Filter the IP packets received on this link.";
@@ -1468,6 +1472,10 @@ module nos-config {
       leaf bfd_unsolicited {
         type string;
         description "Answer unsolicited BFD on this subinterface.";
+      }
+      leaf ra_profile {
+        type string;
+        description "Attach an IPv6 Router Advertisement profile.";
       }
       leaf acl_in {
         type string;
@@ -1915,6 +1923,10 @@ module nos-config {
       leaf bfd_unsolicited {
         type string;
         description "Answer unsolicited BFD on this subinterface.";
+      }
+      leaf ra_profile {
+        type string;
+        description "Attach an IPv6 Router Advertisement profile.";
       }
       leaf acl_in {
         type string;
@@ -2390,6 +2402,102 @@ module nos-config {
       leaf priority {
         type uint8;
         description "Set the port priority in the instance.";
+      }
+    }
+  }
+  list ra_profiles {
+    key "name";
+    description "Create or delete an IPv6 Router Advertisement profile.";
+    leaf name {
+      type string;
+    }
+    leaf max_interval {
+      type uint32;
+      description "Set the longest time between unsolicited advertisements.";
+    }
+    leaf min_interval {
+      type uint32;
+      description "Set the shortest time between unsolicited advertisements.";
+    }
+    leaf router_lifetime {
+      type uint32;
+      description "Set how long hosts use this router as a default router.";
+    }
+    leaf hop_limit {
+      type uint8;
+      description "Set the hop limit hosts should use.";
+    }
+    leaf managed {
+      type boolean;
+      description "Tell hosts to use DHCPv6 for addresses.";
+    }
+    leaf other_config {
+      type boolean;
+      description "Tell hosts to use DHCPv6 for other settings.";
+    }
+    leaf preference {
+      type enumeration {
+        enum "Low";
+        enum "Medium";
+        enum "High";
+      }
+      description "Set the default router preference.";
+    }
+    leaf reachable_time {
+      type uint32;
+      description "Set the reachable time hosts use.";
+    }
+    leaf retrans_timer {
+      type uint32;
+      description "Set the retransmit timer hosts use.";
+    }
+    leaf advertise_mtu {
+      type boolean;
+      description "Advertise the link MTU.";
+    }
+    list prefixes {
+      key "prefix";
+      description "Advertise an IPv6 prefix.";
+      leaf prefix {
+        type inet:ip-prefix;
+      }
+      leaf off_link {
+        type boolean;
+        description "Clear the on-link flag of the prefix.";
+      }
+      leaf no_autonomous {
+        type boolean;
+        description "Clear the autonomous flag of the prefix.";
+      }
+      leaf valid_lifetime {
+        type uint32;
+        description "Set the valid lifetime of the prefix.";
+      }
+      leaf preferred_lifetime {
+        type uint32;
+        description "Set the preferred lifetime of the prefix.";
+      }
+    }
+    list rdnss {
+      key "address";
+      description "Advertise a recursive DNS server.";
+      leaf address {
+        type inet:ip-address;
+      }
+      leaf lifetime {
+        type uint32;
+        description "Set the lifetime of the DNS server.";
+      }
+    }
+    list dnssl {
+      key "domain";
+      description "Advertise a DNS search domain.";
+      leaf domain {
+        type string;
+      }
+      leaf lifetime {
+        type uint32;
+        description "Set the lifetime of the search domain.";
       }
     }
   }

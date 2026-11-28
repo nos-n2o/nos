@@ -46,6 +46,8 @@ pub mod port_aggregate_conversation;
 pub mod port_aggregate_subinterface;
 /// Edits to prefix lists (`PrefixListOp`).
 pub mod prefix_list;
+/// Edits to RA profiles (`RaProfileOp`).
+pub mod ra_profile;
 /// Edits to routing tables (`RoutingTableOp`).
 pub mod routing_table;
 /// Edits to static routes (`StaticRouteOp`).
@@ -85,6 +87,7 @@ pub use port_aggregate::PortAggregateOp;
 pub use port_aggregate_conversation::PortAggregateConversationOp;
 pub use port_aggregate_subinterface::PortAggregateSubinterfaceOp;
 pub use prefix_list::PrefixListOp;
+pub use ra_profile::RaProfileOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
@@ -175,6 +178,8 @@ pub enum ConfigOp {
     PortAggregateConversation(PortAggregateConversationOp),
     /// Delegates to a `LldpMedProfileOp` edit.
     LldpMedProfile(LldpMedProfileOp),
+    /// Delegates to a `RaProfileOp` edit.
+    RaProfile(RaProfileOp),
 }
 
 impl ConfigOp {
@@ -214,6 +219,7 @@ impl ConfigOp {
             ConfigOp::Admin(..) => "Admin",
             ConfigOp::PortAggregateConversation(..) => "PortAggregateConversation",
             ConfigOp::LldpMedProfile(..) => "LldpMedProfile",
+            ConfigOp::RaProfile(..) => "RaProfile",
         }
     }
 
@@ -257,6 +263,7 @@ impl ConfigOp {
             ConfigOp::Admin(op) => op.apply(config),
             ConfigOp::PortAggregateConversation(op) => op.apply(config),
             ConfigOp::LldpMedProfile(op) => op.apply(config),
+            ConfigOp::RaProfile(op) => op.apply(config),
         }
     }
 }
@@ -339,6 +346,9 @@ pub enum OpError {
     /// No LLDP-MED profile matches the given name.
     #[error("lldp-med profile '{0}' not found")]
     LldpMedProfileNotFound(String),
+    /// No RA profile matches the given name.
+    #[error("ra profile '{0}' not found")]
+    RaProfileNotFound(String),
     /// No LACP conversation range starts at `first` in the port aggregate.
     #[error("lacp conversation range starting at {first} not found in port aggregate '{name}'")]
     LacpConversationNotFound {

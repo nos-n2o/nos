@@ -2396,6 +2396,90 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              unterminated and the error goes to stderr, so a consumer never mistakes \
              truncated data for a complete result.",
         ),
+        Topic::RaProfile => (
+            "Create or delete an IPv6 Router Advertisement profile.",
+            "A named set of Router Advertisement settings (RFC 4861). An interface or subinterface attaches one with `ra-profile <name>`. `edit` creates it with defaults (max-interval 600, hop-limit 64, router lifetime three times the interval, medium preference); `delete` removes it, and the commit is refused while anything still references it. Nothing reads it yet, so attaching one has no effect on traffic.",
+        ),
+        Topic::RaProfileMaxInterval => (
+            "Set the longest time between unsolicited advertisements.",
+            "4 to 1800 seconds, default 600 (`MaxRtrAdvInterval`).",
+        ),
+        Topic::RaProfileMinInterval => (
+            "Set the shortest time between unsolicited advertisements.",
+            "3 seconds up to three quarters of `max-interval`. Unset is a third of `max-interval`, at least 3 (`MinRtrAdvInterval`).",
+        ),
+        Topic::RaProfileRouterLifetime => (
+            "Set how long hosts use this router as a default router.",
+            "0 (not a default router) or `max-interval` to 9000 seconds. Unset is three times `max-interval`.",
+        ),
+        Topic::RaProfileHopLimit => (
+            "Set the hop limit hosts should use.",
+            "0 to 255, default 64. 0 leaves it unspecified.",
+        ),
+        Topic::RaProfileManaged => (
+            "Tell hosts to use DHCPv6 for addresses.",
+            "Sets the Managed (M) flag. Off by default.",
+        ),
+        Topic::RaProfileOtherConfig => (
+            "Tell hosts to use DHCPv6 for other settings.",
+            "Sets the Other-config (O) flag. Off by default.",
+        ),
+        Topic::RaProfilePreference => (
+            "Set the default router preference.",
+            "`low`, `medium` (default) or `high` (RFC 4191).",
+        ),
+        Topic::RaProfileReachableTime => (
+            "Set the reachable time hosts use.",
+            "0 to 3600000 milliseconds. 0, the default, leaves it unspecified.",
+        ),
+        Topic::RaProfileRetransTimer => (
+            "Set the retransmit timer hosts use.",
+            "In milliseconds. 0, the default, leaves it unspecified.",
+        ),
+        Topic::RaProfileAdvertiseMtu => (
+            "Advertise the link MTU.",
+            "Adds the MTU option with the MTU of the link. Off by default.",
+        ),
+        Topic::RaProfilePrefix => (
+            "Advertise an IPv6 prefix.",
+            "`prefix <prefix> ...` adds one (at most 8). The prefix must have no host bits set and may not be link-local or multicast; it must be a /64 unless `no-autonomous` is on. `delete` removes it.",
+        ),
+        Topic::RaProfileRdnss => (
+            "Advertise a recursive DNS server.",
+            "`rdnss <address> ...` adds a unicast IPv6 address (at most 16), RFC 8106. `delete` removes it.",
+        ),
+        Topic::RaProfileDnssl => (
+            "Advertise a DNS search domain.",
+            "`dnssl <domain> ...` adds a domain name (at most 8), RFC 8106. `delete` removes it. The whole advertisement must fit 1240 bytes.",
+        ),
+        Topic::RaPrefixOffLink => (
+            "Clear the on-link flag of the prefix.",
+            "Off by default: the L flag is set and hosts treat the prefix as on-link. Turn this on to clear it.",
+        ),
+        Topic::RaPrefixNoAutonomous => (
+            "Clear the autonomous flag of the prefix.",
+            "Off by default: the A flag is set and hosts build addresses from the prefix (that needs a /64). Turn this on to clear it.",
+        ),
+        Topic::RaPrefixValidLifetime => (
+            "Set the valid lifetime of the prefix.",
+            "In seconds, default 2592000 (30 days).",
+        ),
+        Topic::RaPrefixPreferredLifetime => (
+            "Set the preferred lifetime of the prefix.",
+            "In seconds, default 604800 (7 days); at most the valid lifetime.",
+        ),
+        Topic::RaRdnssLifetime => (
+            "Set the lifetime of the DNS server.",
+            "0 or `max-interval` to twice `max-interval` seconds. Unset is twice `max-interval`.",
+        ),
+        Topic::RaDnsslLifetime => (
+            "Set the lifetime of the search domain.",
+            "0 or `max-interval` to twice `max-interval` seconds. Unset is twice `max-interval`.",
+        ),
+        Topic::InterfaceRaProfile => (
+            "Attach an IPv6 Router Advertisement profile.",
+            "The name of an `ra-profile`. The commit is refused when it does not exist, on a loopback, on a port aggregate member, and, on a subinterface, without a `routing-table` on that subinterface. Nothing reads it yet.",
+        ),
         Topic::PipeJq => (
             "Filter a show command's JSON output with a jq expression.",
             "`show <command> | jq <expression>` runs a small subset of jq over the `| json` \
