@@ -39,6 +39,8 @@ fn base(peer: &str, state: BfdState, diag: BfdDiag, interface: Option<&str>) -> 
         remote_desired_min_tx_us: None,
         remote_detect_mult: None,
         clients: vec![],
+        demand: false,
+        remote_demand: false,
     }
 }
 

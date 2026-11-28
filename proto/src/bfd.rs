@@ -169,6 +169,10 @@ impl fmt::Display for BfdDiag {
 /// One session, for `show bfd sessions`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat wire view: each bool is its own column"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct BfdSessionView {
     /// Session identity.
@@ -252,6 +256,14 @@ pub struct BfdSessionView {
     #[serde(default)]
     #[view(text)]
     pub clients: Vec<String>,
+    /// This system asks the peer for Demand mode (RFC 5880 §6.6): the profile's `demand`.
+    #[serde(default)]
+    #[view(brief, order = 50, header = "Demand", unit = bool)]
+    pub demand: bool,
+    /// The peer's Demand (D) bit in its last packet; false until one arrived.
+    #[serde(default)]
+    #[view(brief, order = 51, header = "Remote-Demand", unit = bool)]
+    pub remote_demand: bool,
 }
 
 /// What a session is: a classical RFC 5880 peer, or an RFC 7880 S-BFD
@@ -458,13 +470,15 @@ mod tests {
             remote_desired_min_tx_us: None,
             remote_detect_mult: None,
             clients: vec![],
+            demand: false,
+            remote_demand: false,
         };
-        // The nine appended fields, all empty, are nine zero bytes at the end.
+        // The eleven appended fields, all empty, are eleven zero bytes at the end.
         let mut c = IpcCodec::<BfdEvent>::default();
         let mut b = BytesMut::new();
         c.encode(BfdEvent::Sessions(vec![v.clone()]), &mut b)
             .unwrap();
-        assert_eq!(b[b.len() - 9..], [0u8; 9]);
+        assert_eq!(b[b.len() - 11..], [0u8; 11]);
         v.uptime_secs = Some(5);
         v.remote_detect_mult = Some(3);
         v.clients = vec!["bgp".into(), "static".into()];

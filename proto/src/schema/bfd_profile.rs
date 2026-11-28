@@ -128,6 +128,13 @@ pub struct BfdProfile {
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[cli(topic = BfdProfileSbfdRemoteDiscriminator)]
     pub sbfd_remote_discriminator: Option<Ipv4Addr>,
+
+    /// RFC 5880 §6.6 Demand mode: ask the peer to stop sending Control
+    /// packets while the session is Up. Excludes `mode sbfd` and `echo-mode`.
+    #[serde(default)]
+    #[garde(custom(demand_compatible(self.mode, self.echo_mode)))]
+    #[cli(topic = BfdProfileDemand, words = "demand enable", alias = "demand")]
+    pub demand: bool,
 }
 
 /// Which BFD a session runs: the classical RFC 5880 handshake, or the RFC
@@ -162,6 +169,26 @@ fn sbfd_compatible(
         if *mode == BfdMode::Sbfd && (echo != EchoMode::Disabled || padded) {
             return Err(garde::Error::new(
                 "mode sbfd does not support echo-mode or padded-pdu-size",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn demand_compatible(
+    mode: BfdMode,
+    echo: EchoMode,
+) -> impl FnOnce(&bool, &Config) -> garde::Result {
+    move |demand, _ctx| {
+        if !*demand {
+            return Ok(());
+        }
+        if mode == BfdMode::Sbfd {
+            return Err(garde::Error::new("demand does not support mode sbfd"));
+        }
+        if echo != EchoMode::Disabled {
+            return Err(garde::Error::new(
+                "demand does not support echo-mode affiliated or unaffiliated",
             ));
         }
         Ok(())
@@ -216,6 +243,7 @@ impl Default for BfdProfile {
             padded_pdu_size: None,
             mode: BfdMode::Async,
             sbfd_remote_discriminator: None,
+            demand: false,
         }
     }
 }
@@ -395,6 +423,23 @@ mod tests {
         let mut p = profile("a");
         p.padded_pdu_size = Some(100);
         assert!(ok(p));
+    }
+
+    #[test]
+    fn demand_rules() {
+        let with = |f: &dyn Fn(&mut BfdProfile)| {
+            let mut p = profile("a");
+            p.demand = true;
+            f(&mut p);
+            ok(p)
+        };
+        assert!(with(&|_| {}));
+        assert!(!with(&|p| p.mode = BfdMode::Sbfd));
+        assert!(!with(&|p| p.echo_mode = EchoMode::Affiliated));
+        assert!(!with(&|p| p.echo_mode = EchoMode::Unaffiliated));
+        // An old profile without `demand` loads as false.
+        let p: BfdProfile = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert!(!p.demand);
     }
 
     #[test]

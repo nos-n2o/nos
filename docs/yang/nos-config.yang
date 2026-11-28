@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-15 {
+  revision 2026-12-16 {
     description "Generated.";
   }
 
@@ -2236,6 +2236,10 @@ module nos-config {
     leaf sbfd_remote_discriminator {
       type inet:ipv4-address;
       description "Set the S-BFD discriminator to probe.";
+    }
+    leaf demand {
+      type boolean;
+      description "Ask the peer for BFD Demand mode.";
     }
   }
   container sbfd_reflector {

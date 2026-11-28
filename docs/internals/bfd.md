@@ -135,3 +135,5 @@ How `nos-bfd` is built. The library (#296) plus the daemon `nos-bfdd` (#297). Ru
 - `cargo run -p nos-e2e -- bfd-echo` proves Echo active on both ends with Control slowed to 1 s, `echo-function-failed` when only UDP 3785 is dropped, recovery, and an FRR `bfdd` (`echo receive-interval 50`) with Echo running.
 - `cargo run -p nos-e2e -- bfd` proves both ways Up (also read back over `GET /v1/bfd/sessions`), the route withdrawn and restored around a dropped UDP 3784, and interop with FRR `bfdd`.
 - `docker exec router-a ...` has no `ip`/`tcpdump`: use the netns helper images from `tools/e2e` to sniff.
+
+- Demand (#1542): `BfdProfile.demand` and the `demand`/`remote-demand` session columns are schema only until #1558; nothing reads them yet.

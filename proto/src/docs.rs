@@ -857,6 +857,8 @@ topics! {
     RaDnsslLifetime,
     /// `InterfaceRaProfile` (RA profile)
     InterfaceRaProfile,
+    /// `BfdProfile.demand`
+    BfdProfileDemand,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
