@@ -6244,12 +6244,12 @@
       "RaPrefix": {
         "description": "One advertised prefix (Prefix Information option, RFC 4861 s4.6.2).",
         "properties": {
-          "autonomous": {
-            "description": "Autonomous address configuration flag (A).",
+          "no_autonomous": {
+            "description": "Clears the autonomous address configuration flag (A, set by default).",
             "type": "boolean"
           },
-          "on_link": {
-            "description": "On-link flag (L).",
+          "off_link": {
+            "description": "Clears the on-link flag (L, set by default).",
             "type": "boolean"
           },
           "preferred_lifetime": {
@@ -121850,7 +121850,7 @@
         ]
       }
     },
-    "/v1/transactions/{tx}/ra-profile/{ra_profile}/prefixe/{prefixe}/autonomous": {
+    "/v1/transactions/{tx}/ra-profile/{ra_profile}/prefixe/{prefixe}/no-autonomous": {
       "delete": {
         "responses": {
           "204": {
@@ -121877,7 +121877,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `autonomous` setting.",
+        "summary": "Remove: The `no-autonomous` setting.",
         "tags": [
           "transactions"
         ]
@@ -121888,7 +121888,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Autonomous address configuration flag (A).",
+                  "description": "Clears the autonomous address configuration flag (A, set by default).",
                   "type": "boolean"
                 }
               }
@@ -121916,7 +121916,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `autonomous` setting.",
+        "summary": "Read: The `no-autonomous` setting.",
         "tags": [
           "transactions"
         ]
@@ -121967,7 +121967,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Autonomous address configuration flag (A).",
+                  "description": "Clears the autonomous address configuration flag (A, set by default).",
                   "type": "boolean"
                 }
               }
@@ -122001,7 +122001,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `autonomous` setting.",
+        "summary": "Merge-patch: The `no-autonomous` setting.",
         "tags": [
           "transactions"
         ]
@@ -122013,7 +122013,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Autonomous address configuration flag (A).",
+                "description": "Clears the autonomous address configuration flag (A, set by default).",
                 "type": "boolean"
               }
             }
@@ -122025,7 +122025,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Autonomous address configuration flag (A).",
+                  "description": "Clears the autonomous address configuration flag (A, set by default).",
                   "type": "boolean"
                 }
               }
@@ -122056,13 +122056,13 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `autonomous` setting.",
+        "summary": "Set: The `no-autonomous` setting.",
         "tags": [
           "transactions"
         ]
       }
     },
-    "/v1/transactions/{tx}/ra-profile/{ra_profile}/prefixe/{prefixe}/on-link": {
+    "/v1/transactions/{tx}/ra-profile/{ra_profile}/prefixe/{prefixe}/off-link": {
       "delete": {
         "responses": {
           "204": {
@@ -122089,7 +122089,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Remove: The `on-link` setting.",
+        "summary": "Remove: The `off-link` setting.",
         "tags": [
           "transactions"
         ]
@@ -122100,7 +122100,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "On-link flag (L).",
+                  "description": "Clears the on-link flag (L, set by default).",
                   "type": "boolean"
                 }
               }
@@ -122128,7 +122128,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Read: The `on-link` setting.",
+        "summary": "Read: The `off-link` setting.",
         "tags": [
           "transactions"
         ]
@@ -122179,7 +122179,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "On-link flag (L).",
+                  "description": "Clears the on-link flag (L, set by default).",
                   "type": "boolean"
                 }
               }
@@ -122213,7 +122213,7 @@
             "description": "Content-Type is not application/merge-patch+json"
           }
         },
-        "summary": "Merge-patch: The `on-link` setting.",
+        "summary": "Merge-patch: The `off-link` setting.",
         "tags": [
           "transactions"
         ]
@@ -122225,7 +122225,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "On-link flag (L).",
+                "description": "Clears the on-link flag (L, set by default).",
                 "type": "boolean"
               }
             }
@@ -122237,7 +122237,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "On-link flag (L).",
+                  "description": "Clears the on-link flag (L, set by default).",
                   "type": "boolean"
                 }
               }
@@ -122268,7 +122268,7 @@
             "description": "the key matches several list elements and none exactly"
           }
         },
-        "summary": "Set: The `on-link` setting.",
+        "summary": "Set: The `off-link` setting.",
         "tags": [
           "transactions"
         ]

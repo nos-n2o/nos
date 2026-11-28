@@ -837,10 +837,10 @@ topics! {
     RaProfileRdnss,
     /// `RaProfileDnssl` (RA profile)
     RaProfileDnssl,
-    /// `RaPrefixOnLink` (RA profile)
-    RaPrefixOnLink,
-    /// `RaPrefixAutonomous` (RA profile)
-    RaPrefixAutonomous,
+    /// `RaPrefixOffLink` (RA profile)
+    RaPrefixOffLink,
+    /// `RaPrefixNoAutonomous` (RA profile)
+    RaPrefixNoAutonomous,
     /// `RaPrefixValidLifetime` (RA profile)
     RaPrefixValidLifetime,
     /// `RaPrefixPreferredLifetime` (RA profile)

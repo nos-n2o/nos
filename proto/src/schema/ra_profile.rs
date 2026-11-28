@@ -63,14 +63,14 @@ pub struct RaPrefix {
     #[cli(key)]
     /// The IPv6 prefix; the key.
     pub prefix: Ipv6Net,
-    #[serde(default = "yes")]
-    #[cli(topic = RaPrefixOnLink)]
-    /// On-link flag (L).
-    pub on_link: bool,
-    #[serde(default = "yes")]
-    #[cli(topic = RaPrefixAutonomous)]
-    /// Autonomous address configuration flag (A).
-    pub autonomous: bool,
+    #[serde(default)]
+    #[cli(topic = RaPrefixOffLink)]
+    /// Clears the on-link flag (L, set by default).
+    pub off_link: bool,
+    #[serde(default)]
+    #[cli(topic = RaPrefixNoAutonomous)]
+    /// Clears the autonomous address configuration flag (A, set by default).
+    pub no_autonomous: bool,
     #[serde(default = "valid_default")]
     #[cli(topic = RaPrefixValidLifetime)]
     /// Valid lifetime in seconds.
@@ -81,9 +81,6 @@ pub struct RaPrefix {
     pub preferred_lifetime: u32,
 }
 
-fn yes() -> bool {
-    true
-}
 fn valid_default() -> u32 {
     VALID_LIFETIME_DEFAULT
 }
@@ -95,8 +92,8 @@ impl Default for RaPrefix {
     fn default() -> Self {
         Self {
             prefix: Ipv6Net::default(),
-            on_link: true,
-            autonomous: true,
+            off_link: false,
+            no_autonomous: false,
             valid_lifetime: VALID_LIFETIME_DEFAULT,
             preferred_lifetime: PREFERRED_LIFETIME_DEFAULT,
         }
@@ -288,7 +285,7 @@ impl RaProfile {
         self.router_lifetime.unwrap_or(3 * self.max_interval)
     }
 
-    /// Upper bound of the RA's ICMPv6 payload in bytes: header, source link-layer
+    /// Upper bound of the RA's `ICMPv6` payload in bytes: header, source link-layer
     /// address, MTU, then every prefix, RDNSS and DNSSL option (one option each).
     #[must_use]
     pub fn wire_len(&self) -> usize {
@@ -355,8 +352,10 @@ fn valid_profile(name: &str, ctx: &Config) -> garde::Result {
         if net != net.trunc() {
             return refuse(format!("prefix {net} has host bits set"));
         }
-        if x.autonomous && net.prefix_len() != 64 {
-            return refuse(format!("prefix {net} is autonomous and so must be a /64"));
+        if !x.no_autonomous && net.prefix_len() != 64 {
+            return refuse(format!(
+                "prefix {net} has the autonomous flag and so must be a /64"
+            ));
         }
         if x.preferred_lifetime > x.valid_lifetime {
             return refuse(format!(
@@ -503,7 +502,7 @@ mod tests {
         // /48 only without the autonomous flag.
         assert!(!ok(|p| p.prefixes = vec![pfx("2001:db8::/48")]));
         assert!(ok(|p| p.prefixes = vec![RaPrefix {
-            autonomous: false,
+            no_autonomous: true,
             ..pfx("2001:db8::/48")
         }]));
         // preferred <= valid.

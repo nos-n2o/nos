@@ -2442,7 +2442,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::RaProfilePrefix => (
             "Advertise an IPv6 prefix.",
-            "`prefix <prefix> ...` adds one (at most 8). The prefix must have no host bits set and may not be link-local or multicast; it must be a /64 while `autonomous` is on. `delete` removes it.",
+            "`prefix <prefix> ...` adds one (at most 8). The prefix must have no host bits set and may not be link-local or multicast; it must be a /64 unless `no-autonomous` is on. `delete` removes it.",
         ),
         Topic::RaProfileRdnss => (
             "Advertise a recursive DNS server.",
@@ -2452,13 +2452,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Advertise a DNS search domain.",
             "`dnssl <domain> ...` adds a domain name (at most 8), RFC 8106. `delete` removes it. The whole advertisement must fit 1240 bytes.",
         ),
-        Topic::RaPrefixOnLink => (
-            "Set the on-link flag of the prefix.",
-            "On by default: hosts treat the prefix as on-link.",
+        Topic::RaPrefixOffLink => (
+            "Clear the on-link flag of the prefix.",
+            "Off by default: the L flag is set and hosts treat the prefix as on-link. Turn this on to clear it.",
         ),
-        Topic::RaPrefixAutonomous => (
-            "Set the autonomous flag of the prefix.",
-            "On by default: hosts build addresses from the prefix (needs a /64).",
+        Topic::RaPrefixNoAutonomous => (
+            "Clear the autonomous flag of the prefix.",
+            "Off by default: the A flag is set and hosts build addresses from the prefix (that needs a /64). Turn this on to clear it.",
         ),
         Topic::RaPrefixValidLifetime => (
             "Set the valid lifetime of the prefix.",
