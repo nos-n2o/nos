@@ -30,8 +30,9 @@
 | `main.rs` | Args (`--watchdog-socket`, `--listen-socket`, `--log-socket`); links send final RAs on exit |
 | `packet.rs` | RA builder, RS/RA decoders, s6.2.7 comparison, pure |
 | `schedule.rs` | Timers of s6.2.4/s6.2.6, pure |
-| `link.rs` | Per-device `run()`, `LinkConfig`, `LogBucket` |
+| `link.rs` | `LinkConfig`, `LogBucket`, `handle_rx`, reopen rules, pure |
+| `socket.rs` | Per-device `run()` over the real socket, sends; excluded from coverage like the other `socket.rs` |
 | `link_client.rs` | `SubscribeLinks` table + per-name epochs |
 | `reconcile.rs` | Diff-triggered resync (`desired_links`), 10 s tick |
 
-`nos-e2e radv` is the real test of `radv-socket` and `link.rs`.
+`nos-e2e radv` is the real test of `radv-socket` and `socket.rs`.

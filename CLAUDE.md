@@ -49,7 +49,7 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `lldp/` | `nos-lldp` | LLDP daemon (`nos-lldpd`), one fixed process: IEEE 802.1AB over raw `AF_PACKET` per `Interface` with `lldp transmit`/`receive`; no rtnetlink — see `lldp/CLAUDE.md` |
 | `nexthop/` | `nos-nexthop` | Hand-encoded nexthop netlink (gateway, MPLS encap, groups, dump) for `nos-fdbd`, later `nos-ribd`; no NOS deps — `nexthop/CLAUDE.md` |
 | `acl/` | `nos-acl` | Access lists (`nos-acld`), one fixed process: every attached ACL compiled to tc flower filters (clsact, A/B chains, `nos-tc`) — see `acl/CLAUDE.md` |
-| `radv/` | `nos-radv` | IPv6 Router Advertisements (`nos-radvd`), one fixed process, raw ICMPv6 per `ra-profile` link — see `radv/CLAUDE.md` |
+| `radv/` | `nos-radv` | IPv6 Router Advertisements (`nos-radvd`), one fixed process, raw ICMPv6 per `ra-profile` link — `radv/CLAUDE.md` |
 | `radv-socket/` | `nos-radv-socket` | Raw ICMPv6 socket FFI for `nos-radv`; no NOS deps |
 | `bfd/` | `nos-bfd` | BFD (RFC 5880) core: packet codec, FSM, timers, authz; library only, no daemon yet — see `bfd/CLAUDE.md` |
 | `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one per `BroadcastDomain` with a `vni`, owning its VXLAN device and FDB; EVPN Type-2/3 in and out via `nos-bgpd` — `fdb/CLAUDE.md` |
@@ -149,7 +149,7 @@ make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excl
 
 **No external commands (#228).** Production code never shells out: use a crate (`rtnetlink`, `bollard`) or FFI. `clippy.toml` bans `std::process::Command`/`tokio::process::Command`, so `make clippy` fails on it. Exceptions carry `#[allow(clippy::disallowed_types, reason = "…")]`: the watchdog supervisor and tests that run built binaries or an independent oracle. `tools/e2e` needs none (it drives docker via `bollard`). A new exception needs its reason justified in the PR.
 
-`COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `radv-socket/`, `ospf{,v3}/src/socket.rs`, `bfd/src/socket.rs`, `nexthop/src/socket.rs`: a mock would only test the mock; `nos-e2e` is their real test.
+`COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `radv-socket/`, `{ospf,ospfv3,radv}/src/socket.rs`, `bfd/src/socket.rs`, `nexthop/src/socket.rs`: a mock would only test the mock; `nos-e2e` is their real test.
 
 Toolchain pins, the bump procedure, the unprivileged system test and the container workflow: [docs/architecture/development.md](docs/architecture/development.md).
 

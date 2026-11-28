@@ -15,8 +15,9 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::link::{self, LinkConfig};
+use crate::link::LinkConfig;
 use crate::link_client::LinkTable;
+use crate::socket;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// Cheap insurance against a missed diff; also retries a link whose device did
@@ -87,7 +88,7 @@ impl Links {
         let links = self.link_table.clone();
         let name = cfg.interface.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = link::run(cfg_rx, stop_rx, links).await {
+            if let Err(e) = socket::run(cfg_rx, stop_rx, links).await {
                 warn!(interface = %name, error = %e, "radv link ended");
             }
         });

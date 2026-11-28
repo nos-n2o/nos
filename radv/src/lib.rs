@@ -6,3 +6,4 @@ pub mod link_client;
 pub mod packet;
 pub mod reconcile;
 pub mod schedule;
+pub mod socket;
