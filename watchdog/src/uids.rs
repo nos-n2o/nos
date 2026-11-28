@@ -29,6 +29,7 @@ pub const fn role_uid(role: Role) -> Option<u32> {
         Role::Bfdd => Some(10012),
         Role::Stpd => Some(10013),
         Role::Acld => Some(10014),
+        Role::Radvd => Some(10015),
         // Root on purpose (#994): `nos-sshd` hands each connection to `sshd`, which
         // needs uid 0 to authenticate and setuid; it drops its capability set itself.
         Role::Sshd => Some(0),
@@ -80,8 +81,8 @@ mod tests {
     #[test]
     fn table_covers_every_daemon_role_uniquely() {
         let uids: Vec<_> = Role::ALL.into_iter().filter_map(role_uid).collect();
-        assert_eq!(uids.len(), 15);
-        assert_eq!(uids.iter().collect::<HashSet<_>>().len(), 15);
+        assert_eq!(uids.len(), 16);
+        assert_eq!(uids.iter().collect::<HashSet<_>>().len(), 16);
         assert!(uids.iter().all(|u| *u >= 10_000 || *u == 0));
         assert_eq!(role_uid(Role::Sshd), Some(0));
         assert_eq!(

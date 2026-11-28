@@ -74,7 +74,8 @@ fn visible(role: Role) -> Visible {
         | Role::Lldpd
         | Role::Fdbd
         | Role::Stpd
-        | Role::Acld => none,
+        | Role::Acld
+        | Role::Radvd => none,
         Role::Sshd => Visible {
             ssh_host_key: true,
             ..none
@@ -358,7 +359,8 @@ mod tests {
                 | Role::Lldpd
                 | Role::Fdbd
                 | Role::Stpd
-                | Role::Acld => vec![],
+                | Role::Acld
+                | Role::Radvd => vec![],
                 Role::Sshd => vec!["SECRET-ssh-host-key"],
             };
             let got = cfg.for_role(role);

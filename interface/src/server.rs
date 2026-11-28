@@ -89,7 +89,13 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         InterfaceRequest::SubscribeLinks => {
             matches!(
                 role,
-                Role::Ospfd | Role::Ospfv3d | Role::Stpd | Role::Acld | Role::Lacpd | Role::Lldpd
+                Role::Ospfd
+                    | Role::Ospfv3d
+                    | Role::Stpd
+                    | Role::Acld
+                    | Role::Lacpd
+                    | Role::Lldpd
+                    | Role::Radvd
             )
         }
         InterfaceRequest::SetStpPortStates(_)
@@ -604,6 +610,7 @@ mod authz_tests {
                         | Role::Acld
                         | Role::Lacpd
                         | Role::Lldpd
+                        | Role::Radvd
                 ),
                 "{role:?} subscribe"
             );

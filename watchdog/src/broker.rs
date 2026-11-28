@@ -77,6 +77,7 @@ pub struct Sockets {
     pub bfd: PathBuf,
     pub stp: PathBuf,
     pub acl: PathBuf,
+    pub radv: PathBuf,
 }
 
 /// Everything one broker connection needs.
@@ -346,6 +347,7 @@ async fn dispatch(
                     &s.bfd,
                     &s.stp,
                     &s.acl,
+                    &s.radv,
                 )
                 .await;
             if let Some(path) = resolved {
@@ -680,6 +682,7 @@ async fn vrf_name(ctx: &Ctx, table: &str) -> Option<String> {
             &s.bfd,
             &s.stp,
             &s.acl,
+            &s.radv,
         )
         .await?;
     let call = async {
