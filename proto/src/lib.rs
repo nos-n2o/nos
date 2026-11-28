@@ -105,10 +105,10 @@ pub use lldp::{LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     AdminOp, AsPathListOp, BfdProfileOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
-    BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp,
-    LoggingOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp,
-    Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateConversationOp, PortAggregateOp,
-    PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
+    BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpMedProfileOp,
+    LldpOp, LoggingOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp,
+    Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateConversationOp,
+    PortAggregateOp, PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
     StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
