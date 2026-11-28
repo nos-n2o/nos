@@ -67,6 +67,11 @@ pub const FLAG_FRAG_IS_FIRST: u32 = 2;
 pub struct FlowerKeys {
     /// Destination MAC and its mask (`None`: exact, no mask attribute).
     pub eth_dst: Option<([u8; 6], Option<[u8; 6]>)>,
+    /// Source MAC and its mask, same shape as `eth_dst` (#1595).
+    pub eth_src: Option<([u8; 6], Option<[u8; 6]>)>,
+    /// A raw EtherType, only with `Protocol::All` (the `Ip`/`Ipv6`/VLAN
+    /// protocols already send theirs). Host order, `>= 0x0600` (#1595).
+    pub eth_type: Option<u16>,
     pub ip_proto: Option<u8>,
     /// `(address, prefix length)`; the family picks the attribute.
     pub src_ip: Option<(IpAddr, u8)>,
@@ -311,6 +316,9 @@ fn check(f: &Filter) -> io::Result<()> {
         }
         if k.vlan_id.is_some_and(|v| v > 4094) {
             return Err(invalid("vlan id over 4094"));
+        }
+        if k.eth_type.is_some() && f.protocol != Protocol::All {
+            return Err(invalid("eth_type needs Protocol::All"));
         }
         let tagged = matches!(f.protocol, Protocol::Dot1Q | Protocol::Dot1Ad);
         if k.vlan_id.is_some() && !tagged {
@@ -592,6 +600,15 @@ fn flower(o: &mut Vec<u8>, k: &FlowerKeys, protocol: Protocol) {
         if let Some(m) = mask {
             nla(o, TCA_FLOWER_KEY_ETH_DST_MASK, &m);
         }
+    }
+    if let Some((mac, mask)) = k.eth_src {
+        nla(o, TCA_FLOWER_KEY_ETH_SRC, &mac);
+        if let Some(m) = mask {
+            nla(o, TCA_FLOWER_KEY_ETH_SRC_MASK, &m);
+        }
+    }
+    if let (Some(t), Protocol::All) = (k.eth_type, protocol) {
+        nla(o, TCA_FLOWER_KEY_ETH_TYPE, &t.to_be_bytes());
     }
     // Flower reads its L3 keys only once `n_proto` is set, which comes from
     // this key, not from the filter's protocol (iproute2 sends both too).

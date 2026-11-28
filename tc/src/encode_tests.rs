@@ -919,6 +919,39 @@ fn vlan_and_mirred_refusals_and_edges() {
 }
 
 #[test]
+fn eth_src_and_ethertype_under_all() {
+    let mac = [0xaa, 0xbb, 0xcc, 0, 0, 0];
+    let k = FlowerKeys {
+        eth_src: Some((mac, Some([0xff, 0xff, 0xff, 0, 0, 0]))),
+        eth_type: Some(0x88cc),
+        ..FlowerKeys::default()
+    };
+    assert_eq!(
+        keys(&flower(Protocol::All, k.clone())),
+        [
+            (TCA_FLOWER_KEY_ETH_SRC, mac.to_vec()),
+            (TCA_FLOWER_KEY_ETH_SRC_MASK, vec![0xff, 0xff, 0xff, 0, 0, 0]),
+            (TCA_FLOWER_KEY_ETH_TYPE, vec![0x88, 0xcc]),
+        ]
+    );
+    let exact = FlowerKeys {
+        eth_src: Some((mac, None)),
+        ..FlowerKeys::default()
+    };
+    assert_eq!(
+        keys(&flower(Protocol::All, exact)),
+        [(TCA_FLOWER_KEY_ETH_SRC, mac.to_vec())]
+    );
+    let g = ActionKind::Gact(Verdict::Ok);
+    for p in [Protocol::Ip, Protocol::Dot1Q, Protocol::Dot1Ad] {
+        assert_eq!(
+            refused(p, k.clone(), g.clone()),
+            io::ErrorKind::InvalidInput
+        );
+    }
+}
+
+#[test]
 fn dot1ad_vlan_golden_ethertype_and_edges() {
     let m = add(filter(
         Protocol::Dot1Ad,
