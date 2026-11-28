@@ -813,6 +813,48 @@ topics! {
     LldpCoordinateAltitudeResolution,
     /// `LldpCoordinate.datum`
     LldpCoordinateDatum,
+    /// `RaProfile` (RA profile)
+    RaProfile,
+    /// `RaProfileMaxInterval` (RA profile)
+    RaProfileMaxInterval,
+    /// `RaProfileMinInterval` (RA profile)
+    RaProfileMinInterval,
+    /// `RaProfileRouterLifetime` (RA profile)
+    RaProfileRouterLifetime,
+    /// `RaProfileHopLimit` (RA profile)
+    RaProfileHopLimit,
+    /// `RaProfileManaged` (RA profile)
+    RaProfileManaged,
+    /// `RaProfileOtherConfig` (RA profile)
+    RaProfileOtherConfig,
+    /// `RaProfilePreference` (RA profile)
+    RaProfilePreference,
+    /// `RaProfileReachableTime` (RA profile)
+    RaProfileReachableTime,
+    /// `RaProfileRetransTimer` (RA profile)
+    RaProfileRetransTimer,
+    /// `RaProfileAdvertiseMtu` (RA profile)
+    RaProfileAdvertiseMtu,
+    /// `RaProfilePrefix` (RA profile)
+    RaProfilePrefix,
+    /// `RaProfileRdnss` (RA profile)
+    RaProfileRdnss,
+    /// `RaProfileDnssl` (RA profile)
+    RaProfileDnssl,
+    /// `RaPrefixOffLink` (RA profile)
+    RaPrefixOffLink,
+    /// `RaPrefixNoAutonomous` (RA profile)
+    RaPrefixNoAutonomous,
+    /// `RaPrefixValidLifetime` (RA profile)
+    RaPrefixValidLifetime,
+    /// `RaPrefixPreferredLifetime` (RA profile)
+    RaPrefixPreferredLifetime,
+    /// `RaRdnssLifetime` (RA profile)
+    RaRdnssLifetime,
+    /// `RaDnsslLifetime` (RA profile)
+    RaDnsslLifetime,
+    /// `InterfaceRaProfile` (RA profile)
+    InterfaceRaProfile,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
