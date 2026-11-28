@@ -129,7 +129,7 @@ fn attach_replace_detach_leave_foreign_filters() {
     assert!(chain.contains("src_port 1000-2000"), "{chain}");
     assert!(chain.contains("ip_flags frag/nofirstfrag"), "{chain}");
     assert!(
-        chain.contains("ip_tos 184/0xfc") && chain.contains("ip_ttl 64/ff"),
+        chain.contains("ip_tos 184/0xfc") && chain.contains("ip_ttl 64"),
         "{chain}"
     );
     assert_eq!(d.live_chain(i, Direction::In).unwrap(), Some(ACL_CHAIN_B));

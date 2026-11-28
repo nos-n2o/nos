@@ -126,6 +126,13 @@ pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
     parse_colon_hex(text).filter(|m: &[u8; 6]| m[0] & 1 == 0)
 }
 
+/// Any MAC address (multicast and broadcast included) in its
+/// `aa:bb:cc:dd:ee:ff` text form, for match keys such as an ACL's (#1595).
+#[must_use]
+pub fn parse_mac_any(text: &str) -> Option<[u8; 6]> {
+    parse_colon_hex(text)
+}
+
 /// Renders an ESI as ten colon-separated hex octets (RFC 7432 section 5).
 #[must_use]
 pub fn format_esi(esi: &Esi) -> String {

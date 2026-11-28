@@ -21,7 +21,8 @@ pub const IMPLICIT_ND_COOKIE: u32 = u32::MAX - 1;
 /// One flower filter of a level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
-    /// `Ip` or `Ipv6`: the filter's family (its tc `protocol`).
+    /// `Ip` or `Ipv6`: the filter's family (its tc `protocol`); `All` for a
+    /// rule with only MAC and/or non-IP `EtherType` keys (#1595).
     pub protocol: Protocol,
     pub keys: FlowerKeys,
     pub action: AclAction,
@@ -71,21 +72,21 @@ impl Compiled {
     }
 }
 
-/// The tc priority of `level`'s `protocol` filters: two per level, because
-/// the kernel refuses two protocols at one priority. The defaults sit at
-/// `level == levels.len()`.
+/// The tc priority of `level`'s `protocol` filters: three per level (`ip`,
+/// `ipv6`, `all`), because the kernel refuses two protocols at one priority.
+/// The defaults (IP only) sit at `level == levels.len()`.
 pub fn prio(level: usize, protocol: Protocol) -> u16 {
-    let base = 2 * level + 1;
-    let p = if protocol == Protocol::Ipv6 {
-        base + 1
-    } else {
-        base
-    };
+    let p = 3 * level
+        + match protocol {
+            Protocol::Ipv6 => 2,
+            Protocol::All => 3,
+            _ => 1,
+        };
     u16::try_from(p).expect("compile bounds the level count")
 }
 
 /// Most levels a chain holds: their priorities and the defaults' fit `u16`.
-pub const MAX_LEVELS: usize = (u16::MAX as usize - 2) / 2;
+pub const MAX_LEVELS: usize = (u16::MAX as usize - 3) / 3;
 
 /// Compiles `acl`. Fails only when it would not fit tc's priority space.
 pub fn compile(acl: &Acl) -> Result<Compiled, String> {
@@ -258,7 +259,8 @@ mod tests {
     fn priorities_split_families_and_stay_ordered() {
         assert_eq!(prio(0, Protocol::Ip), 1);
         assert_eq!(prio(0, Protocol::Ipv6), 2);
-        assert_eq!(prio(1, Protocol::Ip), 3);
+        assert_eq!(prio(0, Protocol::All), 3);
+        assert_eq!(prio(1, Protocol::Ip), 4);
         assert_eq!(prio(MAX_LEVELS, Protocol::Ipv6), u16::MAX - 1);
     }
 

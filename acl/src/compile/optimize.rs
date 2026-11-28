@@ -15,6 +15,7 @@
 //! rule and counters stay exact.
 
 use nos_proto::schema::{Acl, AclAction};
+use nos_tc::Protocol;
 
 use super::keys::{contains, overlap};
 use super::{rule, Filter, Level};
@@ -63,7 +64,15 @@ pub(super) fn pack(acl: &Acl) -> Packed {
         let r = &acl.rules[last];
         // A trailing deny that meets ND must stay: the implicit permit
         // follows it, and it would otherwise equal the default.
-        if r.action != acl.default_action || r.log || (deny && overlaps(&all[last], &nd)) {
+        // The default is IP only: a deny of non-IP frames (an `All` filter)
+        // is not the default's twin, those frames pass without it (#1595).
+        let non_ip_deny =
+            r.action == AclAction::Deny && all[last].iter().any(|f| f.protocol == Protocol::All);
+        if r.action != acl.default_action
+            || r.log
+            || non_ip_deny
+            || (deny && overlaps(&all[last], &nd))
+        {
             break;
         }
         trailing.push(u32::try_from(last).expect("rule count fits u32"));
@@ -261,5 +270,42 @@ mod tests {
         let p = pack(&a);
         assert_eq!((p.shadowed, p.trailing), (vec![1], vec![0]));
         assert_eq!(p.levels.len(), 0);
+    }
+
+    #[test]
+    fn a_non_ip_deny_is_not_the_default_twin() {
+        // The deny default covers IP only: without this rule ARP passes.
+        let arp = r("arp", Deny, |r| {
+            r.ethertype = Some(nos_proto::schema::AclEthertype::Arp);
+        });
+        let p = pack(&acl(Deny, vec![arp.clone()]));
+        assert_eq!((p.trailing.len(), p.levels.len()), (0, 1));
+        // A permit default already lets it through: popped as before.
+        let p = pack(&acl(
+            Permit,
+            vec![r("arp", Permit, |r| r.ethertype = arp.ethertype)],
+        ));
+        assert_eq!(p.trailing, [0]);
+    }
+
+    #[test]
+    fn mac_and_ip_rules_pack_apart_only_when_they_overlap() {
+        let mac = |r: &mut AclRule| r.source_mac = Some("aa:bb:cc:dd:ee:ff".parse().unwrap());
+        let lldp = |r: &mut AclRule| r.ethertype = Some(nos_proto::schema::AclEthertype::Lldp);
+        let a = acl(
+            Permit,
+            vec![
+                r("mac", Deny, mac),
+                r("lldp", Deny, lldp),
+                r("ip", Deny, dst("10.0.0.0/8")),
+            ],
+        );
+        // `mac` has no EtherType: it meets both others, which are disjoint.
+        assert_eq!(rules_at(&pack(&a)), [vec![0], vec![1, 2]]);
+        let b = acl(
+            Permit,
+            vec![r("lldp", Deny, lldp), r("ip", Deny, dst("10.0.0.0/8"))],
+        );
+        assert_eq!(rules_at(&pack(&b)), [[0, 1]]);
     }
 }

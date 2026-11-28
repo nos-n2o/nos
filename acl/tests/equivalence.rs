@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 use nos_acl::compile::{compile, Compiled};
-use nos_proto::schema::{Acl, AclAction, AclProtocol, AclRule, PortRange};
+use nos_proto::schema::{Acl, AclAction, AclEthertype, AclProtocol, AclRule, MacMatch, PortRange};
 use nos_tc::{FlowerKeys, Protocol};
 use proptest::prelude::*;
 
@@ -16,6 +16,7 @@ const ACK: u16 = 0x10;
 const RST: u16 = 0x04;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools, reason = "independent packet traits")]
 struct Packet {
     v6: bool,
     proto: u8,
@@ -31,6 +32,41 @@ struct Packet {
     first_fragment: bool,
     dscp: u8,
     ttl: u8,
+    /// An IP packet (`EtherType` 0x0800/0x86dd by `v6`); else `ether` is it.
+    is_ip: bool,
+    ether: u16,
+    smac: [u8; 6],
+    dmac: [u8; 6],
+}
+
+const MACS: [&str; 5] = [
+    "aa:bb:cc:00:00:01",
+    "aa:bb:cc:00:00:02",
+    "aa:bb:dd:00:00:01",
+    "ff:ff:ff:ff:ff:ff",
+    "02:00:00:00:00:09",
+];
+const MAC_RULES: [&str; 7] = [
+    "aa:bb:cc:00:00:01",
+    "aa:bb:cc:00:00:02",
+    "aa:bb:cc:00:00:00/24",
+    "aa:bb:cc:00:00:00/40",
+    "aa:bb:00:00:00:00/16",
+    "ff:ff:ff:ff:ff:ff",
+    "00:00:00:00:00:00/1",
+];
+const ETHERS: [u16; 3] = [0x0806, 0x88cc, 0x88b5];
+
+fn mac_bytes(s: &str) -> [u8; 6] {
+    s.parse::<MacMatch>().unwrap().bytes()
+}
+
+fn mac_hit(m: Option<MacMatch>, v: [u8; 6]) -> bool {
+    m.is_none_or(|m| {
+        v.iter()
+            .zip(m.bytes().iter().zip(m.mask()))
+            .all(|(v, (a, k))| v & k == *a)
+    })
 }
 
 const DSCPS: [u8; 3] = [0, 46, 48];
@@ -38,6 +74,30 @@ const TTLS: [u8; 3] = [1, 64, 255];
 
 /// Oracle A: the schema's meaning of a rule, written from its doc comments.
 fn rule_matches(r: &AclRule, p: &Packet) -> bool {
+    let ip_keys = r.protocol.is_some()
+        || r.source.is_some()
+        || r.destination.is_some()
+        || r.source_port.is_some()
+        || r.destination_port.is_some()
+        || r.established
+        || r.icmp_type.is_some()
+        || r.icmp_code.is_some()
+        || r.fragments
+        || r.dscp.is_some()
+        || r.ttl.is_some();
+    let l2 = mac_hit(r.source_mac, p.smac)
+        && mac_hit(r.destination_mac, p.dmac)
+        && match r.ethertype {
+            None => true,
+            Some(AclEthertype::Ipv4) => p.is_ip && !p.v6,
+            Some(AclEthertype::Ipv6) => p.is_ip && p.v6,
+            Some(e) => !p.is_ip && p.ether == e.value(),
+        };
+    // A rule with no L2/L3 key at all is an IP "any" rule (never ARP).
+    let any = r.source_mac.is_none() && r.destination_mac.is_none() && r.ethertype.is_none();
+    if !l2 || (!p.is_ip && (ip_keys || any)) {
+        return false;
+    }
     let family6 = match (r.source.or(r.destination), r.protocol) {
         (Some(n), _) => Some(n.addr().is_ipv6()),
         (None, Some(AclProtocol::Icmp)) => Some(false),
@@ -77,13 +137,15 @@ fn l4_conds(r: &AclRule, p: &Packet, l4: bool, tcp_udp: bool) -> bool {
 
 fn first_match(acl: &Acl, p: &Packet) -> AclAction {
     // A deny default permits ICMPv6 133..=136 after the rules (#1530).
-    let nd = p.v6
+    let nd = p.is_ip
+        && p.v6
         && p.proto == 58
         && !p.non_first_fragment
         && !p.first_fragment
         && (133..=136).contains(&p.icmp.0);
     acl.rules.iter().find(|r| rule_matches(r, p)).map_or(
-        if acl.default_action == AclAction::Deny && nd {
+        if !p.is_ip || (acl.default_action == AclAction::Deny && nd) {
+            // The default applies to IP only (D2-A): other frames pass.
             AclAction::Permit
         } else {
             acl.default_action
@@ -99,7 +161,28 @@ fn flower_matches(protocol: Protocol, k: &FlowerKeys, p: &Packet) -> bool {
     // ip_flags bits: 1 = is fragment, 2 = first fragment.
     let bits =
         u32::from(p.non_first_fragment || p.first_fragment) | (u32::from(p.first_fragment) << 1);
-    (protocol == Protocol::Ipv6) == p.v6
+    let ether = if !p.is_ip {
+        p.ether
+    } else if p.v6 {
+        0x86dd
+    } else {
+        0x0800
+    };
+    let mac = |m: Option<([u8; 6], Option<[u8; 6]>)>, v: [u8; 6]| {
+        m.is_none_or(|(a, k)| {
+            let k = k.unwrap_or([0xff; 6]);
+            (0..6).all(|i| v[i] & k[i] == a[i] & k[i])
+        })
+    };
+    let family = match protocol {
+        Protocol::Ip => ether == 0x0800,
+        Protocol::Ipv6 => ether == 0x86dd,
+        _ => true,
+    };
+    family
+        && k.eth_type.is_none_or(|t| t == ether)
+        && mac(k.eth_src, p.smac)
+        && mac(k.eth_dst, p.dmac)
         && k.ip_proto.is_none_or(|x| x == p.proto)
         && k.src_ip.is_none_or(|n| net(n, p.src))
         && k.dst_ip.is_none_or(|n| net(n, p.dst))
@@ -138,7 +221,12 @@ fn compiled_verdict(c: &Compiled, p: &Packet) -> AclAction {
             return first;
         }
     }
-    c.default_action
+    // The default filters are IP only.
+    if p.is_ip {
+        c.default_action
+    } else {
+        AclAction::Permit
+    }
 }
 
 const V4_NETS: [&str; 6] = [
@@ -207,9 +295,45 @@ fn rule() -> impl Strategy<Value = AclRule> {
         (any::<bool>(), any::<bool>()),
         any::<bool>(),
         (prop::option::of(0usize..3), prop::option::of(0usize..3)),
+        (
+            prop::option::of(0usize..MAC_RULES.len()),
+            prop::option::of(0usize..MAC_RULES.len()),
+            prop::option::of(0usize..5),
+        ),
     )
         .prop_map(
-            |(proto, (v6, s, d), (sp, dp), (est, ity, ico), (deny, log), frag, (dscp, ttl))| {
+            |(
+                proto,
+                (v6, s, d),
+                (sp, dp),
+                (est, ity, ico),
+                (deny, log),
+                frag,
+                (dscp, ttl),
+                (smac, dmac, ether),
+            )| {
+                let source_mac = smac.map(|i| MAC_RULES[i].parse::<MacMatch>().unwrap());
+                let destination_mac = dmac.map(|i| MAC_RULES[i].parse::<MacMatch>().unwrap());
+                let action = if deny {
+                    AclAction::Deny
+                } else {
+                    AclAction::Permit
+                };
+                // 3 and 4 are the non-IP EtherTypes: no IP key (the validator).
+                if let Some(e @ 2..=4) = ether {
+                    return AclRule {
+                        action,
+                        log,
+                        source_mac,
+                        destination_mac,
+                        ethertype: Some(match e {
+                            2 => AclEthertype::Arp,
+                            3 => AclEthertype::Lldp,
+                            _ => AclEthertype::Number(0x88b5),
+                        }),
+                        ..Default::default()
+                    };
+                }
                 let protocol = proto.map(|i| match i {
                     0 => AclProtocol::Tcp,
                     1 => AclProtocol::Udp,
@@ -258,6 +382,14 @@ fn rule() -> impl Strategy<Value = AclRule> {
                     fragments: frag && sp.is_none() && dp.is_none() && !est && icmp_type.is_none(),
                     dscp: dscp.map(|i| DSCPS[i]),
                     ttl: ttl.map(|i| TTLS[i]),
+                    source_mac,
+                    destination_mac,
+                    // 0 / 1 ask for ipv4 / ipv6, kept when the family agrees.
+                    ethertype: match ether {
+                        Some(0) if !v6 => Some(AclEthertype::Ipv4),
+                        Some(1) if v6 => Some(AclEthertype::Ipv6),
+                        _ => None,
+                    },
                     ..Default::default()
                 }
             },
@@ -274,9 +406,22 @@ fn packet() -> impl Strategy<Value = Packet> {
         (pick(&[8u8, 0, 135, 133, 134, 136]), 0u8..2),
         (prop::bool::weighted(0.2), prop::bool::weighted(0.1)),
         (pick(&DSCPS), pick(&TTLS)),
+        (prop::bool::weighted(0.8), pick(&ETHERS)),
+        (pick(&MACS), pick(&MACS)),
     )
         .prop_map(
-            |(proto, v6, (s, d), (sport, dport), flags, icmp, (nff, first), (dscp, ttl))| {
+            |(
+                proto,
+                v6,
+                (s, d),
+                (sport, dport),
+                flags,
+                icmp,
+                (nff, first),
+                (dscp, ttl),
+                (is_ip, ether),
+                (smac, dmac),
+            )| {
                 let v6 = match proto {
                     1 => false,
                     58 => true,
@@ -302,6 +447,10 @@ fn packet() -> impl Strategy<Value = Packet> {
                     first_fragment: first && !nff,
                     dscp,
                     ttl,
+                    is_ip,
+                    ether,
+                    smac: mac_bytes(smac),
+                    dmac: mac_bytes(dmac),
                 }
             },
         )

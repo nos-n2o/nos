@@ -56,6 +56,14 @@ const ATTACHED_7: &str = "acl attached interface=eth0 direction=in acl=EDGE7";
 /// keys): 2 levels, 2 filters + 2 defaults = 4. Numbers from the first run.
 const COMPILED_8: &str = "compiled acl acl=EDGE8 rules=2 filters=4 levels=2 shadowed=0";
 const ATTACHED_8: &str = "acl attached interface=eth0 direction=in acl=EDGE8";
+/// Step 5e (#1595), `EDGE9`: default permit. `d-mac` (deny `source-mac` of
+/// router-b's `eth0`) is one `All` filter + 2 defaults = 3, one level. Then
+/// `p-ip` (permit ethertype ipv4: one `Ip` filter) before `d-mac` with a MAC
+/// that matches nobody: the two overlap (a MAC has no EtherType), 2 levels,
+/// 2 + 2 defaults = 4. Numbers from the first run.
+const COMPILED_9A: &str = "compiled acl acl=EDGE9 rules=1 filters=3 levels=1 shadowed=0";
+const COMPILED_9B: &str = "compiled acl acl=EDGE9 rules=2 filters=4 levels=2 shadowed=0";
+const ATTACHED_9: &str = "acl attached interface=eth0 direction=in acl=EDGE9";
 const ATTACHED_5: &str = "acl attached interface=eth0 direction=in acl=EDGE2";
 const ATTACHED: &str = "acl attached interface=eth0 direction=in acl=EDGE";
 /// Step 2b (#544): router-b's TCP from its address, denied and sampled on
@@ -522,6 +530,91 @@ async fn dscp_ttl(w: &World) -> anyhow::Result<()> {
     a.wait_new(DETACHED, detached, 30).await
 }
 
+/// `PUT`s `rule` (JSON) into `EDGE9` at `place` and commits.
+async fn put_edge9(
+    a: &Router,
+    name: &str,
+    place: &str,
+    rule: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let _ = a.rest(Method::DELETE, &tx, None).await;
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(
+        Method::PUT,
+        &format!("{tx}/acl/EDGE9/rule/{name}{place}"),
+        Some(&rule.to_string()),
+        200,
+    )
+    .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await
+        .map(drop)
+}
+
+/// Step 5e (#1595): a `source-mac` deny of router-b's own `eth0` MAC drops
+/// every frame of it (the session ends, `d-mac` counts); a MAC that matches
+/// nobody plus `permit ethertype ipv4` leaves IP (the session) and ARP alone.
+async fn l2_keys(w: &World) -> anyhow::Result<()> {
+    log("step 5e (#1595): EDGE9, source-mac deny drops router-b, ethertype ipv4 permit keeps IP");
+    let a = w.a()?;
+    let (code, out) = w
+        .dock
+        .exec_root("router-b", &["cat", "/sys/class/net/eth0/address"])
+        .await?;
+    anyhow::ensure!(code == 0, "router-b eth0 MAC unreadable ({code}): {out}");
+    let mac = out.trim().to_string();
+    let (compiled, attached, ended) = (a.count(COMPILED_9A), a.count(ATTACHED_9), a.count(ENDED));
+    a.provision(&["--acl-default", "EDGE9=permit", "--acl-in", "eth0=EDGE9"])
+        .await?;
+    a.wait_new(ATTACHED_9, attached, 30).await?;
+    put_edge9(
+        a,
+        "d-mac",
+        "",
+        &serde_json::json!({"name": "d-mac", "action": "Deny", "source_mac": mac}),
+    )
+    .await?;
+    a.wait_new(COMPILED_9A, compiled, 30).await?;
+    a.wait_new(ENDED, ended, 60).await?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = a
+            .rest_expect(Method::GET, "/v1/acl/EDGE9", None, 200)
+            .await?;
+        let acl: serde_json::Value = serde_json::from_str(&body)?;
+        if rule_of(&acl, "d-mac").is_some_and(|r| r["packets"].as_u64() > Some(0)) {
+            break;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "d-mac never counted: {body}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let (est, compiled) = (a.count(ESTABLISHED), a.count(COMPILED_9B));
+    put_edge9(
+        a,
+        "d-mac",
+        "",
+        &serde_json::json!({"name": "d-mac", "action": "Deny", "source_mac": "02:00:00:00:00:99"}),
+    )
+    .await?;
+    put_edge9(
+        a,
+        "p-ip",
+        "?before=d-mac",
+        &serde_json::json!({"name": "p-ip", "action": "Permit", "ethertype": "ipv4"}),
+    )
+    .await?;
+    a.wait_new(COMPILED_9B, compiled, 30).await?;
+    a.wait_new(ESTABLISHED, est, 60).await?;
+    let ended = a.count(ENDED);
+    a.assert_quiet(ENDED, ended, 12).await?;
+    let detached = a.count(DETACHED);
+    a.provision(&["--acl-in", "eth0="]).await?;
+    a.wait_new(DETACHED, detached, 30).await
+}
+
 pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     // A hold-time change restarts the session (`diff_peers`).
@@ -650,6 +743,8 @@ pub async fn acl(w: &mut World) -> anyhow::Result<()> {
     fragments(w).await?;
 
     dscp_ttl(w).await?;
+
+    l2_keys(w).await?;
 
     nd_permit(w).await?;
 

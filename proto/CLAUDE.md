@@ -37,7 +37,7 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 - `OspfProfile.name` is unique across every instance's every area, since attach points reference it by bare name; each `ospf_profile` attach point also needs a `routing_table`.
 - A new keyed list needs its key in `config_path::ELEMENT_KEYS` and `#[cli(key)]`.
 - Secrets (#507): `Config.admin` keystore; a secret field is `#[cli(secret)]` plus a `Debug` that hides it, and `Config::redacted()` then masks it for REST. Ops are logged by `ConfigOp::kind()`, never `?op`.
-- ACL (#540): `schema/acl.rs`; `AclProtocol`/`PortRange` are text scalars (`Kind::Str`). Compiled by `nos-acld` (#541).
+- ACL (#540): `schema/acl.rs`; `AclProtocol`/`PortRange`/`MacMatch`/`AclEthertype` (#1595) are text scalars (`Kind::Str`). Compiled by `nos-acld` (#541).
 - STP (#316): `Config.spanning_tree` is a singleton (field-level diff, no op), `stp_port_profiles` a keyed section; checks in `schema/spanning_tree.rs`.
 - LLDP-MED (#1570), RA (#1583): `lldp_med_profiles`, `ra_profiles` (`schema/`).
 - Wire semantics worth remembering: `Interfaces`/`Log`/`Lacp`/`Lldp` `ServiceRef`s carry no name (one instance each); `PushBgpRoutes`/`PushLacpMembers` are fire-and-forget; `GetVrfName` was the first daemon-to-daemon link; EVPN routes cross the wire structured (proto can't depend on `nos-bgp`); `BgpSessionState::Idle` is reporting-only.

@@ -216,7 +216,13 @@ An access list (`acl`) is an ordered list of permit/deny rules; the first rule t
 - **Build one:**
   - `set acl EDGE default-action permit` (the default is `deny`)
   - `set acl EDGE rule p-bgp action permit`, then `set acl EDGE rule p-bgp protocol tcp` and `set acl EDGE rule p-bgp destination-port 179`
-- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `fragments`, `dscp` (0-63, the TOS/traffic-class high six bits; ECN is ignored), `ttl` (exact IPv4 TTL or IPv6 hop limit; no ranges), `log`. An unset field matches anything.
+- **Match fields:** `protocol` (`tcp`, `udp`, `icmp`, `icmpv6` or a number such as `89`), `source`/`destination` prefixes, `source-port`/`destination-port` (`80` or `1024-65535`), `established`, `icmp-type`/`icmp-code`, `fragments`, `dscp` (0-63, the TOS/traffic-class high six bits; ECN is ignored), `ttl` (exact IPv4 TTL or IPv6 hop limit; no ranges), `source-mac`/`destination-mac` (`aa:bb:cc:dd:ee:ff` or a prefix `aa:bb:cc:00:00:00/24`), `ethertype` (`ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or `0x0600`-`0xffff`), `log`. An unset field matches anything.
+- **MAC and EtherType rules:**
+  - A rule with only `source-mac`, `destination-mac` and/or a non-IP `ethertype` matches every untagged frame, ARP and LLDP included.
+  - `default-action` applies to IP only. A MAC rule never turns a `deny` default into a block of ARP, LACP or LLDP: those frames pass unless a rule names them.
+  - IP keys (`protocol`, prefixes, ports, `dscp`, `ttl`, `fragments`) need `ethertype ipv4` or `ipv6`, or none.
+  - Tagged frames (0x8100, 0x88a8) are not matched by `ethertype`.
+  - On a bridge port the STP traps run before the ACL, so a MAC deny cannot drop BPDUs.
 - **Order:** a new rule is appended. `set acl EDGE rule d-bgp before p-bgp` inserts it, `move acl EDGE rule d-bgp after p-bgp` reorders it (see [Ordering list elements](#ordering-list-elements-first-last-before-after-move)). Rule names are required and unique within the ACL.
 - **Attach:** `set interface eth0 acl in EDGE` and `acl out EDGE`; the same on a subinterface (`eth0.100`) and on a port aggregate. The commit is refused for an unknown ACL, on a `loopback-*`, on a port aggregate member (attach it to the aggregate), on a switching-profile port, and when an interface and its untagged subinterface (one kernel device) both set one for the same direction.
 - **Directions:** `acl in` filters what the link receives, `acl out` what it sends, the router's own packets included.
