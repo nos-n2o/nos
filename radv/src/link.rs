@@ -244,9 +244,7 @@ fn handle_rx(
                     } else {
                         debug!(interface = %cfg.interface, source = %rx.src, lifetime, managed, other, "foreign router advertisement");
                     }
-                    let conflicts = own
-                        .map(|o| packet::inconsistencies(o, &ra))
-                        .unwrap_or_default();
+                    let conflicts = own.map_or_else(Vec::new, |o| packet::inconsistencies(o, &ra));
                     if !conflicts.is_empty() {
                         let what = conflicts.join(",");
                         if warn_bucket.take(now) {
