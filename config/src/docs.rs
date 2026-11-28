@@ -689,6 +689,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              its peer-groups. It must also be the instance every EVPN broadcast domain whose \
              SVI is in this table names on `redistribute from mac` (checked at commit).",
         ),
+        Topic::RoutingTableDistance => (
+            "Set the administrative distance of each route source in this table.",
+            "Lower wins when several sources offer the same prefix. Unset keeps the default: \
+             static 1, ebgp 20, ibgp 200, ospf-intra/inter/external 110, evpn 200, vpn 200. \
+             Connected routes are always 0. Configuration only for now: no daemon reads it yet.",
+        ),
+        Topic::RoutingTableDistanceValue => (
+            "Set the administrative distance of this route source.",
+            "1-255; lower is preferred. Unset keeps the source's default.",
+        ),
         Topic::RoutingTableVpn => (
             "Give this routing table an L3VPN identity (RFC 4364 VPNv4/VPNv6).",
             "Names the RD, route-targets and underlay bgp-instance of the VRF's VPN routes. \

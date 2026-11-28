@@ -25,6 +25,7 @@ Developer reference for the config tree types in `proto/src/schema/`, organised 
 
 ## EVPN IP-VRF on a routing table
 
+- `RoutingTable.distance: RoutingTableDistance` (`static`/`ebgp`/`ibgp`/`ospf_intra`/`ospf_inter`/`ospf_external`/`evpn`/`vpn`, each `Option<u8>`, `None` = the source default; `#[serde(default)]`) is a plain struct like `evpn`; `valid_table_distance` rejects 0. Paired wire fields `BgpRoute.ibgp` and `OspfRoute.class` (appended, `serde(default)`) let `nos-ribd` pick the distance (#1528).
 - `RoutingTable.evpn: RoutingTableEvpn` (`l3_vni`/`rd`/`route_targets_import`/`route_targets_export`/`vtep_source`/`bgp_instance`, every one optional; `#[serde(default)]`) makes the table an EVPN IP-VRF acted on by its `nos-ribd`: a plain struct rather than an `Option<…>` so the CLI reaches each field on its own (an optional struct is set in one line, which can't hold its lists), validated by `routing_table::valid_table_evpn` (wired on `Config.routing_tables`): nothing but an `l3_vni` turns it on, which then needs an RD, an export RT, a `vtep_source` and an existing `bgp_instance` that isn't the table's own, and an L3 VNI no other table or `BroadcastDomain.vni` uses.
 
 ## L3VPN on a routing table

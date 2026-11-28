@@ -187,6 +187,7 @@ struct Pushed {
 impl Pushed {
     fn route(&self, prefix: IpNet) -> OspfRoute {
         OspfRoute {
+            class: None,
             prefix,
             next_hops: self.next_hops.clone(),
             backup_next_hop: self.backup_next_hop,
@@ -393,6 +394,7 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: "2001:db8::/64".parse().unwrap(),
                 next_hops: vec![("fe80::2".parse().unwrap(), Some(1))],
                 backup_next_hop: None,
@@ -428,6 +430,7 @@ mod tests {
         updates.sort_by_key(|u| format!("{u:?}"));
         let mut expected = vec![
             OspfRouteUpdate::Add(OspfRoute {
+                class: None,
                 prefix: "2001:db8:3::/64".parse().unwrap(),
                 next_hops: vec![("fe80::1".parse().unwrap(), Some(1))],
                 backup_next_hop: None,
@@ -482,6 +485,7 @@ mod tests {
         // One next hop each: weight 2, so a chunk of 4 carries two routes.
         let all: Vec<OspfRoute> = (0..5)
             .map(|i| OspfRoute {
+                class: None,
                 prefix: format!("2001:db8:{i}::/64").parse().unwrap(),
                 next_hops: vec![("fe80::1".parse().unwrap(), None)],
                 backup_next_hop: None,

@@ -144,6 +144,13 @@ pub enum RoutingTableOp {
         /// Name of the routing table this op targets.
         name: String,
     },
+    /// Sets (replaces) the table's whole administrative-distance section.
+    SetDistance {
+        /// Name of the routing table this op targets.
+        name: String,
+        /// Distances of the table; `None` fields keep the defaults.
+        distance: crate::schema::RoutingTableDistance,
+    },
 }
 
 impl RoutingTableOp {
@@ -153,16 +160,8 @@ impl RoutingTableOp {
             RoutingTableOp::Ensure { name } => {
                 if !config.routing_tables.iter().any(|t| &t.name == name) {
                     config.routing_tables.push(RoutingTable {
-                        rest_api: None,
-                        ssh_server: None,
-                        evpn: crate::schema::RoutingTableEvpn::default(),
-                        vpn: crate::schema::RoutingTableVpn::default(),
                         name: name.clone(),
-                        bgp_instance: None,
-                        ospf_instance: None,
-                        ospfv3_instances: Vec::new(),
-                        static_routing_instance: None,
-                        redistribute: Vec::new(),
+                        ..RoutingTable::default()
                     });
                 }
                 Ok(())
@@ -290,6 +289,10 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.vpn = vpn.clone();
                 Ok(())
             }
+            RoutingTableOp::SetDistance { name, distance } => {
+                find_table_mut(config, name)?.distance = distance.clone();
+                Ok(())
+            }
             RoutingTableOp::ClearVpn { name } => {
                 find_table_mut(config, name)?.vpn = crate::schema::RoutingTableVpn::default();
                 Ok(())
@@ -319,6 +322,7 @@ mod tests {
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
             vpn: crate::schema::RoutingTableVpn::default(),
+            distance: crate::schema::RoutingTableDistance::default(),
             ospfv3_instances: Vec::new(),
             name: name.to_string(),
             bgp_instance: None,
@@ -349,6 +353,7 @@ mod tests {
                 ssh_server: None,
                 evpn: crate::schema::RoutingTableEvpn::default(),
                 vpn: crate::schema::RoutingTableVpn::default(),
+                distance: crate::schema::RoutingTableDistance::default(),
                 ospfv3_instances: Vec::new(),
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),

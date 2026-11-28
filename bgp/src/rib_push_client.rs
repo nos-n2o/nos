@@ -211,6 +211,7 @@ fn to_route(
     (next_hops, backup_next_hop, discard, metric): &crate::rib::Hops,
 ) -> BgpRoute {
     BgpRoute {
+        ibgp: false,
         prefix,
         next_hops: next_hops.clone(),
         backup_next_hop: *backup_next_hop,
@@ -270,6 +271,7 @@ mod tests {
 
     fn route(prefix: &str, gws: &[&str], backup: Option<&str>) -> BgpRoute {
         BgpRoute {
+            ibgp: false,
             prefix: prefix.parse().unwrap(),
             next_hops: gws.iter().map(|g| g.parse().unwrap()).collect(),
             discard: false,
@@ -388,6 +390,7 @@ mod tests {
         let last_sent = HashMap::from([(p, (vec![gw], None, false, None))]);
         let new_routes = HashMap::from([(p, (vec![], None, true, None))]);
         let want = BgpRoute {
+            ibgp: false,
             prefix: p,
             next_hops: vec![],
             backup_next_hop: None,

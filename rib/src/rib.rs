@@ -1900,6 +1900,7 @@ mod tests {
     #[test]
     fn build_from_config_table_without_static_instance_is_empty() {
         let tables = vec![RoutingTable {
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -2268,6 +2269,7 @@ mod tests {
     #[test]
     fn build_from_config_resolves_static_routes() {
         let tables = vec![RoutingTable {
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),

@@ -1052,6 +1052,46 @@ pub struct Args {
     #[arg(long)]
     pub l3vni_clear: bool,
 
+    /// Administrative distance of `static` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-static")]
+    pub distance_static: Option<u8>,
+
+    /// Administrative distance of `ebgp` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-ebgp")]
+    pub distance_ebgp: Option<u8>,
+
+    /// Administrative distance of `ibgp` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-ibgp")]
+    pub distance_ibgp: Option<u8>,
+
+    /// Administrative distance of `ospf-intra` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-ospf-intra")]
+    pub distance_ospf_intra: Option<u8>,
+
+    /// Administrative distance of `ospf-inter` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-ospf-inter")]
+    pub distance_ospf_inter: Option<u8>,
+
+    /// Administrative distance of `ospf-external` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-ospf-external")]
+    pub distance_ospf_external: Option<u8>,
+
+    /// Administrative distance of `evpn` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-evpn")]
+    pub distance_evpn: Option<u8>,
+
+    /// Administrative distance of `vpn` routes in `--routing-table`
+    /// (`RoutingTableOp::SetDistance`).
+    #[arg(long = "distance-vpn")]
+    pub distance_vpn: Option<u8>,
+
     /// L3VPN: the routing table (ensured) `--vpn-*` apply to.
     #[arg(long, default_value = "vrf-red")]
     pub vpn_table: String,
@@ -2213,6 +2253,27 @@ fn vpn_loopback_ops(args: &Args) -> Vec<ConfigOp> {
         }));
     }
     ops
+}
+
+/// `--distance-*`: one `SetDistance` on `--routing-table` when any is given.
+fn distance_ops(args: &Args) -> Vec<ConfigOp> {
+    let distance = nos_proto::RoutingTableDistance {
+        r#static: args.distance_static,
+        ebgp: args.distance_ebgp,
+        ibgp: args.distance_ibgp,
+        ospf_intra: args.distance_ospf_intra,
+        ospf_inter: args.distance_ospf_inter,
+        ospf_external: args.distance_ospf_external,
+        evpn: args.distance_evpn,
+        vpn: args.distance_vpn,
+    };
+    if distance == nos_proto::RoutingTableDistance::default() {
+        return Vec::new();
+    }
+    vec![ConfigOp::RoutingTable(RoutingTableOp::SetDistance {
+        name: args.routing_table.clone(),
+        distance,
+    })]
 }
 
 fn vpn_table_ops(args: &Args) -> Vec<ConfigOp> {
@@ -4071,6 +4132,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     ops.extend(evpn_ops(args)?);
     ops.extend(l3vni_ops(args)?);
     ops.extend(vpn_ops(args));
+    ops.extend(distance_ops(args));
     // After `--l3vni*`, which ensures the table.
     if let (Some(_), Some(table)) = (
         args.broadcast_domain_svi_address,
@@ -8536,6 +8598,34 @@ mod tests {
         }
         let via_iface = ops(&["--evpn-rd", "1:1", "--evpn-vtep-source-interface", "lo1"]).unwrap();
         shows(&via_iface, "lo1");
+    }
+
+    #[test]
+    fn distance_flags() {
+        let o = ops(&[
+            "--distance-static",
+            "2",
+            "--distance-ebgp",
+            "150",
+            "--distance-ibgp",
+            "3",
+            "--distance-ospf-intra",
+            "4",
+            "--distance-ospf-inter",
+            "5",
+            "--distance-ospf-external",
+            "6",
+            "--distance-evpn",
+            "7",
+            "--distance-vpn",
+            "8",
+        ])
+        .unwrap();
+        shows(&o, "SetDistance");
+        shows(&o, "static: Some(2)");
+        shows(&o, "ebgp: Some(150)");
+        shows(&o, "vpn: Some(8)");
+        assert!(!format!("{:?}", ops(&[]).unwrap()).contains("SetDistance"));
     }
 
     #[test]

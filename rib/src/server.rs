@@ -901,6 +901,7 @@ mod authz_tests {
     #[test]
     fn a_discard_ospf_route_has_no_next_hop() {
         let route = OspfRoute {
+            class: None,
             prefix: "10.9.0.0/16".parse().unwrap(),
             next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             backup_next_hop: Some("10.0.0.2".parse().unwrap()),
@@ -926,6 +927,7 @@ mod authz_tests {
     #[test]
     fn an_ospf_route_carries_its_labels_per_next_hop() {
         let entry = ospf_entry(OspfRoute {
+            class: None,
             prefix: "10.9.0.0/16".parse().unwrap(),
             next_hops: vec![
                 ("10.0.0.1".parse().unwrap(), None),
@@ -1013,6 +1015,7 @@ mod authz_tests {
     fn a_remote_lfa_becomes_a_tunnel_backup() {
         let pq: std::net::IpAddr = "10.255.0.4".parse().unwrap();
         let entry = ospf_entry(OspfRoute {
+            class: None,
             prefix: "10.255.0.2/32".parse().unwrap(),
             next_hops: vec![("10.1.2.2".parse().unwrap(), None)],
             backup_next_hop: None,
@@ -1032,6 +1035,7 @@ mod authz_tests {
     #[test]
     fn a_tunnel_backup_needs_all_three_conditions() {
         let route = |backup_next_hop, backup_tunnel, discard| OspfRoute {
+            class: None,
             prefix: "10.255.0.2/32".parse().unwrap(),
             next_hops: vec![("10.1.2.2".parse().unwrap(), None)],
             backup_next_hop,
@@ -1054,6 +1058,7 @@ mod authz_tests {
     #[test]
     fn a_bgp_discard_is_a_blackhole_and_an_ospf_one_is_not() {
         let b = bgp_entry(BgpRoute {
+            ibgp: false,
             prefix: "198.51.100.7/32".parse().unwrap(),
             next_hops: vec![],
             backup_next_hop: Some("10.0.0.9".parse().unwrap()),
@@ -1062,6 +1067,7 @@ mod authz_tests {
         });
         assert!(b.is_discard() && b.backup.is_none());
         let normal = bgp_entry(BgpRoute {
+            ibgp: false,
             prefix: "198.51.100.8/32".parse().unwrap(),
             next_hops: vec!["10.0.0.2".parse().unwrap()],
             backup_next_hop: None,
@@ -1070,6 +1076,7 @@ mod authz_tests {
         });
         assert!(!normal.is_discard());
         let o = ospf_entry(OspfRoute {
+            class: None,
             prefix: "10.2.0.0/24".parse().unwrap(),
             next_hops: vec![],
             metric: 1,
@@ -1209,6 +1216,7 @@ mod authz_tests {
         assert!(d.teardown("t").await.is_ok());
         assert_eq!((d.vrf_name("t").await, d.table_id("t").await), (None, None));
         let r = |p: &str| BgpRoute {
+            ibgp: false,
             prefix: p.parse().unwrap(),
             next_hops: vec!["10.0.0.2".parse().unwrap()],
             backup_next_hop: None,
@@ -1220,6 +1228,7 @@ mod authz_tests {
         apply_bgp_route_update(&ctx, vec![BgpRouteUpdate::Full(vec![])]).await;
         assert!(dirty(&ctx));
         let o = OspfRoute {
+            class: None,
             prefix: "10.2.0.0/24".parse().unwrap(),
             next_hops: vec![],
             metric: 1,
