@@ -1085,7 +1085,7 @@ impl LinuxRibDriver {
         type Slots = HashMap<Slot, Hops>;
         type Olds = HashMap<Slot, (Hops, Option<u32>)>;
         self.ensure_nh_table(table_id).await;
-        let items: Vec<(IpNet, Olds, Slots, Option<RouteSource>, bool)> = {
+        let mut items: Vec<(IpNet, Olds, Slots, Option<RouteSource>, bool)> = {
             let installed = self.installed.lock().unwrap();
             let nexthops = self.nexthops.lock().unwrap();
             let table_installed = installed.get(&table_id);
@@ -1126,6 +1126,7 @@ impl LinuxRibDriver {
                 t.set_slot(slot, gid);
             }
         };
+        self.repoint_groups(table_id, &mut items, &set).await;
         let errors = drain(items.into_iter().map(
             |(prefix, old, new, source, tunnel)| async move {
                 // A changed slot is replaced in place (make-before-break), a
@@ -1165,6 +1166,133 @@ impl LinuxRibDriver {
         .await;
         self.collect_garbage(table_id).await;
         errors.into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Replaces in place every group the whole batch moves to one new hop set
+    /// (`NexthopTable::plan_repoints`, #1588): one nexthop replace instead of
+    /// a route replace per prefix, make-before-break. The slots it covers
+    /// leave `items`; a failed replace leaves them to the per-slot path.
+    // ponytail: only the delta path; `reconcile_routes` (the 10 s backstop)
+    // still moves slots one by one. Plain (unlabelled, non-EVPN) primaries only.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the batch tuple of apply_delta_impl"
+    )]
+    async fn repoint_groups(
+        &self,
+        table_id: u32,
+        items: &mut [(
+            IpNet,
+            HashMap<Slot, (Hops, Option<u32>)>,
+            HashMap<Slot, Hops>,
+            Option<RouteSource>,
+            bool,
+        )],
+        set: &(impl Fn(Slot, Option<Hops>, Option<u32>) + Sync),
+    ) {
+        let mut want: HashMap<Slot, Option<GroupKey>> = HashMap::new();
+        for (prefix, old, new, source, _) in items.iter() {
+            for (slot, (_, gid)) in old {
+                if gid.is_none() || slot.1 {
+                    continue;
+                }
+                let key = match new.get(slot) {
+                    Some(h)
+                        if self.form_for(h, false) == Form::Group
+                            && *source != Some(RouteSource::Evpn)
+                            && h.iter().all(|x| {
+                                x.labels.is_empty()
+                                    && x.gateway.is_ipv4() == prefix.addr().is_ipv4()
+                            }) =>
+                    {
+                        self.member_key(table_id, *prefix, h, false).await
+                    }
+                    _ => None,
+                };
+                want.insert(*slot, key);
+            }
+        }
+        if want.is_empty() {
+            return;
+        }
+        let repoints = {
+            let tables = self.nexthops.lock().unwrap();
+            tables
+                .get(&table_id)
+                .map_or_default(|t| t.plan_repoints(&want))
+        };
+        for (gid, key) in repoints {
+            let _create = self.create_lock.lock().await;
+            let plan = {
+                let mut tables = self.nexthops.lock().unwrap();
+                tables.get_mut(&table_id).and_then(|t| t.reserve_hops(&key))
+            };
+            let Some(plan) = plan else { continue };
+            let mut created = Vec::new();
+            let mut result = Ok(());
+            for (id, (gateway, oif, onlink, labels)) in &plan.new_hops {
+                let nh = Nexthop::Gateway(Gateway {
+                    id: *id,
+                    gateway: *gateway,
+                    oif: *oif,
+                    onlink: *onlink,
+                    labels: labels.clone(),
+                    fdb: false,
+                    replace: true,
+                });
+                result = nh_send(nh, 0).await;
+                if result.is_err() {
+                    break;
+                }
+                created.push(*id);
+            }
+            if result.is_ok() {
+                result = nh_send(
+                    Nexthop::Group(Group {
+                        id: gid,
+                        members: plan.members.iter().map(|m| (*m, 1)).collect(),
+                        fdb: false,
+                    }),
+                    0,
+                )
+                .await;
+            }
+            if let Err(e) = result {
+                warn!(id = gid, table_id, error = %e, "cannot replace nexthop group, moving its routes one by one");
+                if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+                    t.forget(&plan);
+                }
+                for id in created {
+                    let _ = nh_send(Nexthop::Delete { id }, ENOENT).await;
+                }
+                continue;
+            }
+            if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+                t.repoint(gid, key.clone(), plan.members.clone());
+            }
+            let mut moved = 0;
+            for (_, old, new, _, _) in items.iter_mut() {
+                let slots: Vec<Slot> = old
+                    .iter()
+                    .filter(|(s, (_, g))| *g == Some(gid) && want.contains_key(*s))
+                    .map(|(s, _)| *s)
+                    .collect();
+                for slot in slots {
+                    old.remove(&slot);
+                    if let Some(hops) = new.remove(&slot) {
+                        set(slot, Some(hops), Some(gid));
+                        moved += 1;
+                    }
+                }
+            }
+            info!(
+                id = gid,
+                members = key.len(),
+                slots = moved,
+                table_id,
+                "replaced nexthop group"
+            );
+        }
     }
 
     /// Diffs `best_routes` against what's actually installed in
@@ -1815,16 +1943,16 @@ impl LinuxRibDriver {
         });
     }
 
-    /// The group of `hops` for a route to `prefix`, created with its hop
-    /// nexthops when missing. `None` means install inline: no resolvable
-    /// egress, out of ids, or a kernel answer that refuses groups (recorded).
-    async fn ensure_group(
+    /// The sorted group key of `hops` for a route to `prefix`: each member's
+    /// egress is looked up now. `None`: a member has no egress (recorded as
+    /// not groupable).
+    async fn member_key(
         &self,
         table_id: u32,
         prefix: IpNet,
         hops: &[NextHop],
         onlink: bool,
-    ) -> Result<Option<u32>, DriverError> {
+    ) -> Option<GroupKey> {
         let mapped = map_hops(prefix.addr().is_ipv4(), hops);
         let mut members: GroupKey = Vec::with_capacity(hops.len());
         for (h, m) in hops.iter().zip(&mapped) {
@@ -1836,11 +1964,27 @@ impl LinuxRibDriver {
             };
             let Some(oif) = oif else {
                 self.reject(hops, &std::io::Error::other("no egress for a member"));
-                return Ok(None);
+                return None;
             };
             members.push((m.gateway, Some(oif), onlink, m.labels.clone()));
         }
         members.sort();
+        Some(members)
+    }
+
+    /// The group of `hops` for a route to `prefix`, created with its hop
+    /// nexthops when missing. `None` means install inline: no resolvable
+    /// egress, out of ids, or a kernel answer that refuses groups (recorded).
+    async fn ensure_group(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+        hops: &[NextHop],
+        onlink: bool,
+    ) -> Result<Option<u32>, DriverError> {
+        let Some(members) = self.member_key(table_id, prefix, hops, onlink).await else {
+            return Ok(None);
+        };
         let _create = self.create_lock.lock().await;
         self.ensure_nh_table(table_id).await;
         let plan = {

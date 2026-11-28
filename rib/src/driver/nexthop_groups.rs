@@ -100,6 +100,25 @@ impl NexthopTable {
     /// `None`: out of ids, the caller installs inline. The reservation stays
     /// until `forget` (creation failed) or until the garbage collection.
     pub fn ensure(&mut self, key: &GroupKey) -> Option<Plan> {
+        let mut plan = self.reserve_hops(key)?;
+        if let Some(id) = self.groups.get(key) {
+            plan.group = *id;
+        } else {
+            let Some(id) = self.alloc() else {
+                self.forget(&plan);
+                return None;
+            };
+            self.groups.insert(key.clone(), id);
+            self.members.insert(id, plan.members.clone());
+            plan.group = id;
+            plan.new_group = true;
+        }
+        Some(plan)
+    }
+
+    /// Reserves the hop ids of `key` only (no group): `Plan.group` is 0.
+    /// `None`: out of ids, nothing is left reserved.
+    pub fn reserve_hops(&mut self, key: &GroupKey) -> Option<Plan> {
         let mut plan = Plan::default();
         for hop in key {
             let id = if let Some(id) = self.hops.get(hop) {
@@ -114,19 +133,52 @@ impl NexthopTable {
             };
             plan.members.push(id);
         }
-        if let Some(id) = self.groups.get(key) {
-            plan.group = *id;
-        } else {
-            let Some(id) = self.alloc() else {
-                self.forget(&plan);
-                return None;
-            };
-            self.groups.insert(key.clone(), id);
-            self.members.insert(id, plan.members.clone());
-            plan.group = id;
-            plan.new_group = true;
-        }
         Some(plan)
+    }
+
+    /// Group `gid` now has the members of `key` (the kernel replaced it in
+    /// place, #1588): the key map follows, the slots keep their group.
+    pub fn repoint(&mut self, gid: u32, key: GroupKey, members: Vec<u32>) {
+        self.groups.retain(|_, id| *id != gid);
+        self.groups.insert(key, gid);
+        self.members.insert(gid, members);
+    }
+
+    /// The groups a batch may replace in place instead of moving each of
+    /// their slots (#1588). `want` holds every touched slot that now uses a
+    /// group, with the group key it wants (`None`: leaves group form or
+    /// cannot say). A group is repointed to `K'` when every slot using it is
+    /// in `want` (an untouched user would be moved too), all want the same
+    /// `K'` (2+ hops, not the current key), and no other live or already
+    /// chosen group has `K'` (the key map stays injective).
+    pub fn plan_repoints(&self, want: &HashMap<Slot, Option<GroupKey>>) -> Vec<(u32, GroupKey)> {
+        let mut by_group: HashMap<u32, (usize, Option<&Option<GroupKey>>, bool)> = HashMap::new();
+        for (slot, k) in want {
+            let Some(g) = self.slots.get(slot) else {
+                continue;
+            };
+            let e = by_group.entry(*g).or_insert((0, None, true));
+            e.0 += 1;
+            match e.1 {
+                None => e.1 = Some(k),
+                Some(first) => e.2 &= first == k,
+            }
+        }
+        let mut claimed: HashSet<GroupKey> = HashSet::new();
+        let mut out: Vec<(u32, GroupKey)> = by_group
+            .into_iter()
+            .filter_map(|(g, (n, k, same))| {
+                let k = k?.as_ref()?;
+                (same && n == self.refs.get(&g).copied().unwrap_or(0)).then_some((g, k))
+            })
+            .filter(|(g, k)| {
+                k.len() >= 2 && !self.groups.contains_key(*k) && self.members.contains_key(g)
+            })
+            .map(|(g, k)| (g, k.clone()))
+            .collect();
+        out.sort_by_key(|(g, _)| *g);
+        out.retain(|(_, k)| claimed.insert(k.clone()));
+        out
     }
 
     /// Undoes `ensure`'s reservations (the kernel refused the creation).
@@ -436,6 +488,75 @@ mod tests {
         assert_eq!(t.take_unreferenced(), (vec![], vec![]));
         t.reset_slots(HashMap::new(), []);
         assert_eq!(t.take_unreferenced().0, vec![p.group]);
+    }
+
+    #[test]
+    #[allow(
+        clippy::many_single_char_names,
+        clippy::similar_names,
+        reason = "hops a..d and their keys"
+    )]
+    fn repoint_planning() {
+        let mut t = table();
+        let (a, b, c) = (hop("10.0.0.1", 2), hop("10.0.0.2", 3), hop("10.0.0.3", 4));
+        let k_ab = key(&[a.clone(), b.clone()]);
+        let k_ac = key(&[a.clone(), c.clone()]);
+        let p = t.ensure(&k_ab).unwrap();
+        let n = 1000;
+        let slots: Vec<Slot> = (0..n)
+            .map(|i| slot(&format!("10.{}.{}.0/24", i / 256, i % 256)))
+            .collect();
+        for s in &slots {
+            t.set_slot(*s, Some(p.group));
+        }
+        let all = |k: Option<GroupKey>| -> HashMap<Slot, Option<GroupKey>> {
+            slots.iter().map(|s| (*s, k.clone())).collect()
+        };
+        // 1000 slots, one group: one request instead of 1000 route replaces.
+        assert_eq!(
+            t.plan_repoints(&all(Some(k_ac.clone()))),
+            vec![(p.group, k_ac.clone())]
+        );
+        // An untouched user, a single hop, no key, the current key: no.
+        let mut part = all(Some(k_ac.clone()));
+        part.remove(&slots[0]);
+        assert_eq!(t.plan_repoints(&part), vec![]);
+        assert_eq!(t.plan_repoints(&all(Some(key(std::slice::from_ref(&a))))), vec![]);
+        assert_eq!(t.plan_repoints(&all(None)), vec![]);
+        assert_eq!(t.plan_repoints(&all(Some(k_ab.clone()))), vec![]);
+        // Users disagree.
+        let mut mixed = all(Some(k_ac.clone()));
+        mixed.insert(slots[0], Some(key(&[b.clone(), c.clone()])));
+        assert_eq!(t.plan_repoints(&mixed), vec![]);
+        // K' is another live group.
+        let q = t.ensure(&k_ac).unwrap();
+        assert_eq!(t.plan_repoints(&all(Some(k_ac.clone()))), vec![]);
+        t.set_slot(slot("11.0.0.0/8"), Some(q.group));
+        // Commit: the key map follows, the old key is free again.
+        t.repoint(p.group, k_ac.clone(), vec![p.members[0], q.members[1]]);
+        assert_eq!(t.ensure(&k_ac).unwrap().group, p.group);
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names, reason = "hops a..d")]
+    fn two_groups_never_repoint_to_one_key() {
+        let mut t = table();
+        let (a, b, c, d) = (
+            hop("10.0.0.1", 2),
+            hop("10.0.0.2", 3),
+            hop("10.0.0.3", 4),
+            hop("10.0.0.4", 5),
+        );
+        let g1 = t.ensure(&key(&[a.clone(), b.clone()])).unwrap().group;
+        let g2 = t.ensure(&key(&[a.clone(), d.clone()])).unwrap().group;
+        t.set_slot(slot("10.1.0.0/16"), Some(g1));
+        t.set_slot(slot("10.2.0.0/16"), Some(g2));
+        let k = key(&[a, c]);
+        let want = HashMap::from([
+            (slot("10.1.0.0/16"), Some(k.clone())),
+            (slot("10.2.0.0/16"), Some(k)),
+        ]);
+        assert_eq!(t.plan_repoints(&want).len(), 1);
     }
 
     #[test]
