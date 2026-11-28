@@ -233,7 +233,7 @@ mod tests {
         let keys: Vec<_> = n.fields.iter().map(|f| f.key).collect();
         assert_eq!(keys[0], "key");
         assert_eq!(keys[1], "state");
-        assert_eq!(keys.len(), 24);
+        assert_eq!(keys.len(), 26);
         let key = &n.fields[0];
         assert!(key.brief);
         let sk = key.nested_node().expect("key is nested");
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!((tx.unit, tx.header), (Unit::Micros, "Tx-Interval"));
         let col_keys: Vec<_> = n.columns().iter().map(|f| f.key).collect();
         assert_eq!(col_keys[..3], ["key", "state", "diag"]);
-        assert_eq!(*col_keys.last().unwrap(), "uptime_secs");
+        assert_eq!(*col_keys.last().unwrap(), "remote_demand");
     }
 
     #[test]
@@ -392,6 +392,6 @@ mod tests {
     const GOLDEN: &[u8] = &[
         3, 114, 116, 49, 0, 192, 0, 2, 1, 1, 0, 192, 0, 2, 2, 1, 4, 101, 116, 104, 48, 0, 1, 3, 97,
         101, 48, 3, 0, 1, 2, 224, 167, 18, 160, 247, 54, 1, 1, 1, 7, 3, 1, 208, 134, 3, 0, 0, 0, 1,
-        60, 61, 2, 100, 99, 1, 224, 167, 18, 1, 224, 167, 18, 1, 3, 1, 3, 98, 103, 112,
+        60, 61, 2, 100, 99, 1, 224, 167, 18, 1, 224, 167, 18, 1, 3, 1, 3, 98, 103, 112, 0, 0,
     ];
 }
