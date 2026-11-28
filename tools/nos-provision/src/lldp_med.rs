@@ -169,7 +169,10 @@ pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
             ]
         };
         // The location first: a location without a profile is refused.
-        return vec![(path("lldp-location"), None), (path("lldp-med-profile"), None)];
+        return vec![
+            (path("lldp-location"), None),
+            (path("lldp-med-profile"), None),
+        ];
     }
     let Some(f) = fixture(args).ok().flatten() else {
         return Vec::new();
@@ -204,7 +207,11 @@ pub fn paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
 /// The same edits applied straight to a local `Config`.
 pub fn apply(args: &Args, config: &mut Config) {
     if args.no_lldp_med_profile {
-        for i in config.interfaces.iter_mut().filter(|i| i.name == target(args)) {
+        for i in config
+            .interfaces
+            .iter_mut()
+            .filter(|i| i.name == target(args))
+        {
             i.lldp_med_profile = None;
             i.lldp_location = LldpLocation::default();
         }

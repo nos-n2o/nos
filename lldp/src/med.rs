@@ -887,7 +887,10 @@ mod tests {
         let MedLocation::Coordinate(c) = &locs[0] else {
             panic!()
         };
-        assert_eq!((c.lat, c.lng, c.alt, c.alt_type), (34 << 25, -(118 << 25), 640, 1));
+        assert_eq!(
+            (c.lat, c.lng, c.alt, c.alt_type),
+            (34 << 25, -(118 << 25), 640, 1)
+        );
         let p = pdu(OrgTlvs {
             med_locations: locs,
             ..OrgTlvs::default()

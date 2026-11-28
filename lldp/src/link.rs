@@ -961,7 +961,8 @@ mod tests {
             enabled: true,
             port_id: 12,
         };
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, Some(agg), false))).unwrap();
+        let pdu =
+            packet::decode(&packet::encode(&local_pdu(&c, |_| None, Some(agg), false))).unwrap();
         assert_eq!(pdu.org.vlan_names, c.vlan_names);
         assert_eq!(pdu.org.max_frame_size, Some(9018));
         assert_eq!(pdu.org.link_aggregation, Some(agg));
@@ -1278,6 +1279,9 @@ mod tests {
         c.system_description = "d".repeat(255);
         let wire = packet::encode(&local_pdu(&c, |_| None, None, true));
         assert!(wire.len() <= 1500);
-        assert_eq!(packet::decode(&wire).unwrap().system_name.as_deref(), Some("router-1"));
+        assert_eq!(
+            packet::decode(&wire).unwrap().system_name.as_deref(),
+            Some("router-1")
+        );
     }
 }

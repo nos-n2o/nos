@@ -17,8 +17,8 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::link::{self, LinkConfig, MedAdvert, SharedPorts};
-use crate::med::{MedPolicy, MedPower};
 use crate::link_client::LinkTable;
+use crate::med::{MedPolicy, MedPower};
 use crate::packet;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
