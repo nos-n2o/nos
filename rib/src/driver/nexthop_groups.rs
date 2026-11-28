@@ -521,7 +521,10 @@ mod tests {
         let mut part = all(Some(k_ac.clone()));
         part.remove(&slots[0]);
         assert_eq!(t.plan_repoints(&part), vec![]);
-        assert_eq!(t.plan_repoints(&all(Some(key(std::slice::from_ref(&a))))), vec![]);
+        assert_eq!(
+            t.plan_repoints(&all(Some(key(std::slice::from_ref(&a))))),
+            vec![]
+        );
         assert_eq!(t.plan_repoints(&all(None)), vec![]);
         assert_eq!(t.plan_repoints(&all(Some(k_ab.clone()))), vec![]);
         // Users disagree.

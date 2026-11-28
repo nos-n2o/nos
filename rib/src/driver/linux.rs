@@ -1126,7 +1126,34 @@ impl LinuxRibDriver {
                 t.set_slot(slot, gid);
             }
         };
-        self.repoint_groups(table_id, &mut items, &set).await;
+        let mut want: HashMap<Slot, Option<GroupKey>> = HashMap::new();
+        for (_, old, new, source, _) in &items {
+            for (slot, (_, gid)) in old {
+                if gid.is_some() && !slot.1 {
+                    let key = self
+                        .repoint_key(table_id, *slot, new.get(slot), *source)
+                        .await;
+                    want.insert(*slot, key);
+                }
+            }
+        }
+        let replaced = self.replace_groups(table_id, &want).await;
+        for (_, old, new, _, _) in &mut items {
+            let moved: Vec<Slot> = old
+                .iter()
+                .filter(|(s, (_, g))| {
+                    g.is_some_and(|g| replaced.iter().any(|(r, _)| *r == g))
+                        && want.contains_key(*s)
+                })
+                .map(|(s, _)| *s)
+                .collect();
+            for slot in moved {
+                let gid = old.remove(&slot).and_then(|(_, g)| g);
+                if let Some(hops) = new.remove(&slot) {
+                    set(slot, Some(hops), gid);
+                }
+            }
+        }
         let errors = drain(items.into_iter().map(
             |(prefix, old, new, source, tunnel)| async move {
                 // A changed slot is replaced in place (make-before-break), a
@@ -1168,59 +1195,43 @@ impl LinuxRibDriver {
         errors.into_iter().next().map_or(Ok(()), Err)
     }
 
-    /// Replaces in place every group the whole batch moves to one new hop set
-    /// (`NexthopTable::plan_repoints`, #1588): one nexthop replace instead of
-    /// a route replace per prefix, make-before-break. The slots it covers
-    /// leave `items`; a failed replace leaves them to the per-slot path.
-    // ponytail: only the delta path; `reconcile_routes` (the 10 s backstop)
-    // still moves slots one by one. Plain (unlabelled, non-EVPN) primaries only.
-    #[allow(
-        clippy::type_complexity,
-        reason = "the batch tuple of apply_delta_impl"
-    )]
-    async fn repoint_groups(
+    /// The group key slot `slot` wants when it can follow a group replace
+    /// (#1588): a plain (unlabelled, non-EVPN) primary multipath route.
+    async fn repoint_key(
         &self,
         table_id: u32,
-        items: &mut [(
-            IpNet,
-            HashMap<Slot, (Hops, Option<u32>)>,
-            HashMap<Slot, Hops>,
-            Option<RouteSource>,
-            bool,
-        )],
-        set: &(impl Fn(Slot, Option<Hops>, Option<u32>) + Sync),
-    ) {
-        let mut want: HashMap<Slot, Option<GroupKey>> = HashMap::new();
-        for (prefix, old, new, source, _) in items.iter() {
-            for (slot, (_, gid)) in old {
-                if gid.is_none() || slot.1 {
-                    continue;
-                }
-                let key = match new.get(slot) {
-                    Some(h)
-                        if self.form_for(h, false) == Form::Group
-                            && *source != Some(RouteSource::Evpn)
-                            && h.iter().all(|x| {
-                                x.labels.is_empty()
-                                    && x.gateway.is_ipv4() == prefix.addr().is_ipv4()
-                            }) =>
-                    {
-                        self.member_key(table_id, *prefix, h, false).await
-                    }
-                    _ => None,
-                };
-                want.insert(*slot, key);
-            }
+        slot: Slot,
+        hops: Option<&Hops>,
+        source: Option<RouteSource>,
+    ) -> Option<GroupKey> {
+        let h = hops?;
+        let plain = self.form_for(h, slot.1) == Form::Group
+            && source != Some(RouteSource::Evpn)
+            && h.iter()
+                .all(|x| x.labels.is_empty() && x.gateway.is_ipv4() == slot.0.addr().is_ipv4());
+        if !plain {
+            return None;
         }
-        if want.is_empty() {
-            return;
-        }
+        self.member_key(table_id, slot.0, h, false).await
+    }
+
+    /// Replaces in place every group `want` moves as a whole to one new hop
+    /// set (`NexthopTable::plan_repoints`, #1588): one nexthop replace
+    /// instead of a route replace per prefix, make-before-break. Returns each
+    /// replaced group; a failed replace leaves its routes to the per-slot path.
+    // ponytail: plain (unlabelled, non-EVPN) primaries only.
+    async fn replace_groups(
+        &self,
+        table_id: u32,
+        want: &HashMap<Slot, Option<GroupKey>>,
+    ) -> Vec<(u32, usize)> {
         let repoints = {
             let tables = self.nexthops.lock().unwrap();
             tables
                 .get(&table_id)
-                .map_or_default(|t| t.plan_repoints(&want))
+                .map_or_default(|t| t.plan_repoints(want))
         };
+        let mut done = Vec::new();
         for (gid, key) in repoints {
             let _create = self.create_lock.lock().await;
             let plan = {
@@ -1270,29 +1281,27 @@ impl LinuxRibDriver {
             if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
                 t.repoint(gid, key.clone(), plan.members.clone());
             }
-            let mut moved = 0;
-            for (_, old, new, _, _) in items.iter_mut() {
-                let slots: Vec<Slot> = old
-                    .iter()
-                    .filter(|(s, (_, g))| *g == Some(gid) && want.contains_key(*s))
-                    .map(|(s, _)| *s)
-                    .collect();
-                for slot in slots {
-                    old.remove(&slot);
-                    if let Some(hops) = new.remove(&slot) {
-                        set(slot, Some(hops), Some(gid));
-                        moved += 1;
-                    }
-                }
-            }
+            let slots = want
+                .keys()
+                .filter(|s| {
+                    self.nexthops
+                        .lock()
+                        .unwrap()
+                        .get(&table_id)
+                        .and_then(|t| t.slot_gid(s))
+                        == Some(gid)
+                })
+                .count();
             info!(
                 id = gid,
                 members = key.len(),
-                slots = moved,
+                slots,
                 table_id,
                 "replaced nexthop group"
             );
+            done.push((gid, slots));
         }
+        done
     }
 
     /// Diffs `best_routes` against what's actually installed in
@@ -1340,6 +1349,40 @@ impl LinuxRibDriver {
 
         // The kernel refuses a delete naming both `RTA_NH_ID` and a gateway
         // (what a dump of a group route carries): delete those by id alone.
+        let observed_map = {
+            let mut m = observed_map;
+            if observed_gid.is_empty() {
+                m
+            } else {
+                // The kernel's groups are the truth for the planner.
+                if let Some(t) = self.nexthops.lock().unwrap().get_mut(&table_id) {
+                    t.reset_slots(observed_gid.clone(), []);
+                }
+                let mut want: HashMap<Slot, Option<GroupKey>> = HashMap::new();
+                for slot in observed_gid.keys().filter(|s| !s.1) {
+                    let source = best_routes.get(&slot.0).map(|e| e.source);
+                    let key = self
+                        .repoint_key(table_id, *slot, desired_full.get(slot), source)
+                        .await;
+                    want.insert(*slot, key);
+                }
+                let replaced = self.replace_groups(table_id, &want).await;
+                for slot in observed_gid.keys().filter(|s| want.contains_key(*s)) {
+                    let hit = self
+                        .nexthops
+                        .lock()
+                        .unwrap()
+                        .get(&table_id)
+                        .and_then(|t| t.slot_gid(slot));
+                    if hit.is_some_and(|g| replaced.iter().any(|(r, _)| *r == g))
+                        && let Some(d) = desired.get(slot)
+                    {
+                        m.insert(*slot, d.clone());
+                    }
+                }
+                m
+            }
+        };
         let observed_by_slot: HashMap<Slot, RouteMessage> = observed
             .iter()
             .map(|(slot, _, gid, message)| {
