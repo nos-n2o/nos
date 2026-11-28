@@ -2327,6 +2327,68 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 /// #690: an LLDPDU behind an 802.1Q tag is not a neighbor of the physical port.
 /// The untagged copy sent right after it must be learned, so the check is not
 /// vacuous.
+/// `nos-radvd` (RFC 4861) over the direct `eth1` veth: both routers advertise
+/// a /64 + RDNSS, each hears (and validates, hop limit 255) the other's, an M
+/// flag change re-advertises in place, and removing the attach point sends
+/// the final lifetime-0 RAs and then goes quiet. `eth1`'s IPv6 link-local
+/// address is the kernel's; a tentative one only delays the first RA by the
+/// daemon's one-second retry.
+pub async fn radv(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let sent = "router advertisement sent interface=eth1";
+    let foreign = "foreign router advertisement interface=eth1";
+    let sent_managed = format!("{sent} managed=true");
+    let foreign_managed = format!("{foreign} .* managed=true");
+    let final_ra = "router advertisement final interface=eth1";
+    let foreign_final = format!("{foreign} .* lifetime=0 ");
+    let profile = |extra: &[&str]| {
+        let mut f = vec![
+            "--ra-profile",
+            "lan",
+            "--ra-interface",
+            "eth1",
+            "--ra-prefix",
+            "2001:db8:1::/64",
+            "--ra-rdnss",
+            "2001:db8::53",
+        ];
+        f.extend_from_slice(extra);
+        strings(&f)
+    };
+    let (sent_a, sent_b) = (a.count(sent), b.count(sent));
+    let (foreign_a, foreign_b) = (a.count(foreign), b.count(foreign));
+
+    w.link_veths().await?;
+    a.provision(&profile(&[])).await?;
+    b.provision(&profile(&[])).await?;
+
+    log("waiting for both routers to send and to hear a Router Advertisement over the veth");
+    a.wait_new(sent, sent_a, 60).await?;
+    b.wait_new(sent, sent_b, 60).await?;
+    a.wait_new(foreign, foreign_a, 60).await?;
+    b.wait_new(foreign, foreign_b, 60).await?;
+
+    // A profile edit re-advertises at once, without final RAs.
+    let (managed_a, managed_b) = (a.count(&sent_managed), b.count(&foreign_managed));
+    let finals = a.count(final_ra);
+    a.provision(&profile(&["--ra-managed"])).await?;
+    a.wait_new(&sent_managed, managed_a, 20).await?;
+    b.wait_new(&foreign_managed, managed_b, 20).await?;
+    if a.count(final_ra) != finals {
+        bail!("router-a sent final RAs for a mere M-flag change");
+    }
+
+    // Detaching the profile: three final RAs, router-b sees lifetime 0, then silence.
+    let heard_final = b.count(&foreign_final);
+    a.provision(&strings(&["--clear-ra-profile", "--ra-interface", "eth1"]))
+        .await?;
+    a.wait_new(final_ra, finals + 2, 20).await?;
+    b.wait_new(&foreign_final, heard_final, 20).await?;
+    let quiet = a.count(sent);
+    a.assert_quiet(sent, quiet, 8).await?;
+    Ok(())
+}
+
 async fn lldp_tagged(w: &World) -> anyhow::Result<()> {
     let a = w.a()?;
     w.dock

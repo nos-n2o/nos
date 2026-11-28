@@ -19,7 +19,7 @@ Audit of every flag and environment variable of every binary the `Dockerfile` sh
 |---|---|---|---|
 | `--watchdog-socket <path>` | every daemon except `nos-watchdogd` | supervisor | watchdog passes it; system test relocates it |
 | `--log-socket <path>` | every daemon except `nos-logd` | supervisor | watchdog passes it |
-| `--listen-socket <path>` | acl, bfd, interface, lacp, lldp, log, stp, bgp, ospf, ospfv3, rib, fdb | supervisor | watchdog passes it; system test |
+| `--listen-socket <path>` | acl, bfd, interface, lacp, lldp, log, radv, stp, bgp, ospf, ospfv3, rib, fdb | supervisor | watchdog passes it; system test |
 | `--table`, `--instance`, `--domain <name>` | rib/rest/ssh, bgp/ospf/ospfv3, fdb | supervisor | watchdog passes the one it spawns for |
 | `--profile-memory-out` | bgp, config, log, rest | dev | exists only in a `dhat-heap` build (its own feature); `bench-bgp.sh` |
 
@@ -46,7 +46,7 @@ Deleted: `nos-ribd --startup-hold` (no user).
 
 | Binary | Flag / env | Class | Used by |
 |---|---|---|---|
-| `nos-watchdogd` | `--<daemon>-bin`, `--<daemon>-arg` (configd, bgpd, ribd, fdbd, ospfd, ospfv3d, restd, sshd, interfaced, logd, lacpd, lldpd, bfdd, stpd, acld) | operator | e2e (every `--*-arg` above), `bench-bgp.sh`; root-only opaque passthrough, the carrier of every child dev flag |
+| `nos-watchdogd` | `--<daemon>-bin`, `--<daemon>-arg` (configd, bgpd, ribd, fdbd, ospfd, ospfv3d, restd, sshd, interfaced, logd, lacpd, lldpd, bfdd, stpd, acld, radvd) | operator | e2e (every `--*-arg` above), `bench-bgp.sh`; root-only opaque passthrough, the carrier of every child dev flag |
 | | `--<daemon>-listen-socket`, `--config-socket`, `--listen-socket`, `--log-socket`, `--run-dir`, `--state-dir`, `--users-dir`, `--pki-dir` | operator | system test relocates them; `--pki-dir` in `protocols/system.md` |
 | | `--child-gid` | operator | `Dockerfile` ENTRYPOINT (991) |
 | | `--pki-leaf-lifetime`, `--pki-rotate-every`, `--pki-ipc-session-max`, `--pki-user-lifetime`, `--pki-rest-session-max` | operator (tunables) | e2e `pki-rotation` (leaf, rotate, ipc-session-max) |
@@ -58,9 +58,9 @@ Deleted: `nos-ribd --startup-hold` (no user).
 | `nos-logd` | `--log-store-path`, `--capacity` | operator | e2e `--logd-arg=--capacity=200000` on every router |
 | `nos-ospfd`, `nos-ospfv3d` | `--dbd-max-headers`, `--state-dir` | operator | e2e `ospf-dbd-pagination` (headers) |
 | `nos-sshd` | `--sshd-bin`, `--run-dir`, `--max-connections` | operator | defaults only in e2e (`ssh-login-shell`) |
-| `nos-bgpd`, `nos-restd`, `nos-lldpd`, `nos-bfdd`, `nos-stpd` | only the common flags | | |
+| `nos-bgpd`, `nos-restd`, `nos-lldpd`, `nos-radvd`, `nos-bfdd`, `nos-stpd` | only the common flags | | |
 | `nos-provision` (in both images) | `--login-user`, `--login-password`, env `NOS_LOGIN_PASSWORD`, `--watchdog-socket`, `--pki-ca`, `--login-burst`, `--config-socket`, ~300 config-building flags | operator/dev | `bench-bgp.sh`, system test, e2e `pki`/`pki-crl` (`run_provision`); e2e config seeding reuses `build_ops` |
 | `nos-rtr-stub` (lab image only) | positional `<listen> <prefix> <max-len> <asn> ...` | e2e/dev | `rpki` phase |
 | `libpam_nos.so`, `libnss_nos.so.2` | none | operator | `pam`, `ssh-login-shell` |
 
-e2e uses no flag of `nos-bgpd`, `nos-restd`, `nos-lldpd`, `nos-bfdd`, `nos-stpd`, `nos-sshd` beyond the supervisor ones.
+e2e uses no flag of `nos-bgpd`, `nos-restd`, `nos-lldpd`, `nos-radvd`, `nos-bfdd`, `nos-stpd`, `nos-sshd` beyond the supervisor ones.

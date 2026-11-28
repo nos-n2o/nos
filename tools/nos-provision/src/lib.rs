@@ -1260,6 +1260,11 @@ pub struct Args {
     /// `min-interval` (seconds) of `--ra-profile`.
     #[arg(long, requires = "ra_profile")]
     pub ra_min_interval: Option<u32>,
+
+    /// Attach (or, with `--clear-ra-profile`, detach) the RA profile on this
+    /// physical interface instead of `--interface`'s subinterface (#1584).
+    #[arg(long)]
+    pub ra_interface: Option<String>,
     /// Creates this `lldp-med-profile` and attaches it to `--interface` (#1570).
     /// Any other `--lldp-med-*` flag implies one (named `e2e-med` if unset).
     #[arg(long)]
@@ -3208,16 +3213,30 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::RaProfile(RaProfileOp::Ensure {
             name: profile.clone(),
         }));
-        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetRaProfile {
-            interface: args.interface.clone(),
-            tag: args.subinterface_tag,
-            ra_profile: profile,
-        }));
+        if let Some(name) = args.ra_interface.clone() {
+            ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+                name: name.clone(),
+            }));
+            ops.push(ConfigOp::Interface(InterfaceOp::SetRaProfile {
+                name,
+                ra_profile: profile,
+            }));
+        } else {
+            ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetRaProfile {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+                ra_profile: profile,
+            }));
+        }
     } else if args.clear_ra_profile {
-        ops.push(ConfigOp::Subinterface(SubinterfaceOp::ClearRaProfile {
-            interface: args.interface.clone(),
-            tag: args.subinterface_tag,
-        }));
+        if let Some(name) = args.ra_interface.clone() {
+            ops.push(ConfigOp::Interface(InterfaceOp::ClearRaProfile { name }));
+        } else {
+            ops.push(ConfigOp::Subinterface(SubinterfaceOp::ClearRaProfile {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+            }));
+        }
     }
     if args.stp_profile_interface.is_some() {
         ops.push(ConfigOp::StpPortProfile(StpPortProfileOp::Ensure {
@@ -9053,6 +9072,12 @@ mod tests {
         }
         let via_path: nos_proto::Config = serde_json::from_value(tree).unwrap();
         assert_eq!(via_path.ra_profiles, local.ra_profiles);
+        let phys =
+            dump(&build_ops(&parse(&["--ra-profile", "lan", "--ra-interface", "eth1"])).unwrap());
+        assert!(phys.contains("Interface(SetRaProfile"), "{phys}");
+        let clear =
+            dump(&build_ops(&parse(&["--clear-ra-profile", "--ra-interface", "eth1"])).unwrap());
+        assert!(clear.contains("Interface(ClearRaProfile"), "{clear}");
         assert!(build_ops(&parse(&["--clear-ra-profile"]))
             .map(|o| dump(&o).contains("ClearRaProfile"))
             .unwrap());

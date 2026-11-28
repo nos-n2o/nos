@@ -13,6 +13,8 @@ Each `nos-ribd` instance also gains a real IPC listener for route queries (`nos_
 
 `nos-lldpd` similarly gains a real IPC listener (`--listen-socket`, default `/run/nos/lldp.sock`) for neighbor queries (`nos_proto::lldp`: `LldpRequest::GetNeighbors` → `LldpEvent::Neighbors(Vec<LldpNeighbor>)`), backing `nos-cli`'s `show lldp neighbors` — every neighbor heard on any interface (local interface, chassis id, port id, system name, enabled capabilities, management addresses, seconds until it ages out) — and for per-interface 802.1AB counters (`GetStatistics` → `Statistics(Vec<LldpLinkStats>)`), backing `show lldp statistics`. Resolved via `ServiceRef::Lldp` (a single fixed instance).
 
+`nos-radvd` takes `--listen-socket` (default `/run/nos/radv.sock`) and `ServiceRef::Radv` resolves it directly like `Lldp`, but nothing listens until the show/REST surface (#1585).
+
 `ServiceRef::Acl` (role `acld`) is the same shape: resolved directly from the watchdog's `--acld-listen-socket` (default `/run/nos/acl.sock`), which is also passed to `nos-acld` as its `--listen-socket`. It serves `AclRequest::Show`/`ShowFlowspec` (`nos_proto::acl`), backing `show acl`, `GET /v1/acl` and `GET /v1/flowspec`, and takes `PushFlowspec` from `nos-bgpd`.
 
 `ServiceRef::Bfd` (role `bfdd`) is the same shape: resolved directly from the watchdog's `--bfdd-listen-socket` (default `/run/nos/bfd.sock`). The daemon does not exist yet (#297); only the broker arm and the `nos_proto::bfd` schema do.
