@@ -2295,6 +2295,7 @@ dependencies = [
  "nos-pki",
  "nos-proto",
  "nos-radv-socket",
+ "nos-test-support",
  "tempfile",
  "thiserror",
  "tokio",

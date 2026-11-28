@@ -28,3 +28,4 @@ path = "src/main.rs"
 [dev-dependencies]
 nos-pki  = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
+nos-test-support = { workspace = true, features = ["fakes"] }

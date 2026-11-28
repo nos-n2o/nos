@@ -364,6 +364,26 @@ mod tests {
     use super::*;
     use nos_proto::{InterfaceEvent as E, LinkState};
 
+    #[tokio::test]
+    async fn run_fails_when_the_device_is_missing() {
+        let cfg = LinkConfig {
+            interface: "nos-no-such0".into(),
+            profile: RaProfile {
+                max_interval: 30,
+                ..RaProfile::default()
+            },
+        };
+        assert_eq!(
+            cfg.intervals(),
+            (Duration::from_secs(10), Duration::from_secs(30))
+        );
+        let (_c, cfg_rx) = watch::channel(cfg);
+        let (_s, stop_rx) = watch::channel(false);
+        let (_l, links_rx) = watch::channel(LinkTable::default());
+        let e = run(cfg_rx, stop_rx, links_rx).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+    }
+
     #[test]
     fn mac_parsing() {
         assert_eq!(

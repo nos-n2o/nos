@@ -17,6 +17,7 @@ tools/e2e/
 # files.
 l2-socket/src/lib.rs
 bfd-socket/src/lib.rs
+radv-socket/src/lib.rs
 tcp-auth/src/lib.rs
 
 # The e2e lab's scripted RADIUS server (src/bin only, `lab` image stage, never
