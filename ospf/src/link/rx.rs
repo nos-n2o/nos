@@ -994,24 +994,39 @@ pub(super) async fn handle_lsu(
     ))
 }
 
-/// Handles one received `LSAck` packet — no neighbor-state transition
-/// possible from an ack alone, just retransmission-list bookkeeping.
-pub(super) fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
-    let Some(mut adj) = status
+/// Handles one received `LSAck` packet: retransmission-list bookkeeping, plus
+/// `exchange::lsack_hint` (#1626) for an ack of a newer instance of our own LSA.
+pub(super) async fn handle_lsack(
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    lsdb: &Mutex<Lsdb>,
+    link_local_lsdb: &Mutex<Lsdb>,
+    ack: &LsAckPacket,
+) -> Option<Vec<exchange::Action>> {
+    let mut adj = status
         .borrow()
         .neighbors
         .get(&ack.router_id)
         .filter(|n| neighbor::exchange_or_later(n.state))
-        .and_then(|n| n.adjacency.clone())
-    else {
-        return;
-    };
+        .and_then(|n| n.adjacency.clone())?;
     exchange::on_lsack_received(&mut adj, &ack.lsa_headers);
+    let actions = {
+        let lsdb = lsdb.lock().await;
+        let link_local = link_local_lsdb.lock().await;
+        nos_ospf_common::exchange::lsack_hint(
+            &mut adj,
+            &[&*lsdb, &*link_local],
+            local_router_id,
+            &ack.lsa_headers,
+            tokio::time::Instant::now().into_std(),
+        )
+    };
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&ack.router_id) {
-            info.adjacency = Some(adj.clone());
+            info.adjacency = Some(adj);
         }
     });
+    Some(actions)
 }
 
 /// Applies any `NeighborEvent`s in `actions` to `old_state` via

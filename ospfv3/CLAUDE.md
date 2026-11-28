@@ -6,7 +6,7 @@ Details: behaviour and config in `docs/protocols/ospfv3.md`; how it is built (LS
 
 ## Layout
 
-`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`ospf/src/link_client.rs` by `#[path]`, log prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s.
+`socket`, `packet`, `lsa`/`lsdb`, `exchange` (pure), `link` (driver task + `LinkManager`), `reconcile`, `server`, `rib_push_client`, `link_client` (`#[path]` from `ospf/`, prefix `crate::DAEMON`). DR/BDR election, the neighbor FSM, the LSDB and the whole DBD/LSR/LSU/LSAck exchange come from `nos-ospf-common` (`exchange` keeps only v3's closures and three stores). The in-memory wire test seam (`link::LinkSocket`/`with_opener`) is `nos-ospfd`'s.
 
 ## Rules
 
