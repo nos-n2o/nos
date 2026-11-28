@@ -3,7 +3,7 @@
 # Base images are digest-pinned (manifest-list, multi-arch); Dependabot bumps
 # the digests weekly. apt packages stay unpinned (DL3008 ignored): pinning
 # versions in the slim images breaks on every security update.
-FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS builder
+FROM rust:1.100.0-slim-trixie@sha256:3b199fd6db7d709274df56565b8f4003f9e30d7bfcff9d53148c86053b7855e2 AS builder
 WORKDIR /app
 
 # hadolint ignore=DL3008
