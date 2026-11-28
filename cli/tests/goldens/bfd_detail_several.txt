@@ -28,6 +28,8 @@ Echo-Interval             0us
 Echo-Only                 no
 Pdu                       0 B
 Uptime                    -
+Demand                    no
+Remote-Demand             no
 
 Key
   Table      rt1
@@ -59,6 +61,8 @@ Echo-Interval             0us
 Echo-Only                 no
 Pdu                       0 B
 Uptime                    -
+Demand                    no
+Remote-Demand             no
 
 Key
   Table      rt1
@@ -90,3 +94,5 @@ Echo-Interval             0us
 Echo-Only                 no
 Pdu                       0 B
 Uptime                    -
+Demand                    no
+Remote-Demand             no

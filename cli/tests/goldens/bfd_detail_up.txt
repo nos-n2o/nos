@@ -28,3 +28,5 @@ Echo-Interval             0us
 Echo-Only                 no
 Pdu                       0 B
 Uptime                    1h02m
+Demand                    no
+Remote-Demand             no
