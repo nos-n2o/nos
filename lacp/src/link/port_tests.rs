@@ -262,6 +262,20 @@ fn unsupported_versions_are_counted_and_v1_v2_are_not() {
     assert!(r.observed().partner.is_some());
 }
 
+/// #1575: the fallback dwell starts at the last accepted LACPDU; a
+/// version-dropped one does not count.
+#[tokio::test(start_paused = true)]
+async fn last_pdu_is_stamped_on_accepted_lacpdus_only() {
+    let mut r = rig(true, LacpRate::Slow);
+    assert!(r.observed().counters.last_pdu.is_none());
+    let mut v3 = partner_frame(ACTIVE_PARTNER);
+    v3[1] = 3;
+    r.port.on_frame(&v3, &r.sink);
+    assert!(r.observed().counters.last_pdu.is_none());
+    r.port.on_frame(&partner_frame(ACTIVE_PARTNER), &r.sink);
+    assert_eq!(r.observed().counters.last_pdu, Some(Instant::now()));
+}
+
 #[test]
 fn the_mux_walks_to_distributing_with_the_partner() {
     let mut r = rig(true, LacpRate::Slow);

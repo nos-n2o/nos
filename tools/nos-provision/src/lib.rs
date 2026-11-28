@@ -1331,6 +1331,11 @@ pub struct Args {
     #[arg(long)]
     pub lacp_fallback: bool,
 
+    /// If set (requires `--port-aggregate`), disables LACP fallback on every
+    /// member (`InterfaceOp::SetLacpFallback`, `enabled: false`).
+    #[arg(long)]
+    pub no_lacp_fallback: bool,
+
     /// If set (requires `--port-aggregate`), the LACP fallback timeout in
     /// seconds of every member (`InterfaceOp::SetLacpFallbackTimeout`).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..=3600))]
@@ -4232,6 +4237,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled: true,
                 }));
             }
+            if args.no_lacp_fallback {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallback {
+                    name: member.clone(),
+                    enabled: false,
+                }));
+            }
             if let Some(seconds) = args.lacp_fallback_timeout {
                 ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallbackTimeout {
                     name: member.clone(),
@@ -4267,6 +4278,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_bfd_peer.is_some()
         || args.lacp_port_priority.is_some()
         || args.lacp_fallback
+        || args.no_lacp_fallback
         || args.lacp_fallback_timeout.is_some()
         || args.lacp_v2.lacp_version.is_some()
         || args.lacp_v2.lacp_port_algorithm.is_some()
@@ -7015,6 +7027,7 @@ mod tests {
             (&["--min-links", "2"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
             (&["--lacp-fallback"], "require --port-aggregate"),
+            (&["--no-lacp-fallback"], "require --port-aggregate"),
             (
                 &["--lacp-fallback-timeout", "5"],
                 "require --port-aggregate",
