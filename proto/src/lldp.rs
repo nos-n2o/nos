@@ -44,6 +44,86 @@ pub struct LldpNeighbor {
     pub max_frame_size: Option<u16>,
     /// IEEE 802.3 MAC/PHY Configuration/Status TLV.
     pub mac_phy: Option<LldpMacPhy>,
+    /// TIA-1057 LLDP-MED TLVs, `None` when the neighbor sent none we keep.
+    #[serde(default)]
+    pub med: Option<LldpMed>,
+}
+
+/// A neighbor's LLDP-MED (ANSI/TIA-1057) TLVs. Every string is rendered by
+/// `nos-lldpd`, like `LldpNeighbor::chassis_id`: nothing downstream parses it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpMed {
+    /// Device type: `endpoint-class-1|2|3`, `network-connectivity` or `unknown(n)`.
+    pub device_type: String,
+    /// Capabilities the neighbor advertised (`capabilities`, `network-policy`,
+    /// `location`, `power-pse`, `power-pd`, `inventory`).
+    pub capabilities: Vec<String>,
+    /// Network Policy TLVs, one per application type.
+    pub policies: Vec<LldpMedPolicy>,
+    /// Location Identification TLVs, one per format.
+    pub locations: Vec<LldpMedLocation>,
+    /// Extended Power via MDI TLV.
+    pub power: Option<LldpMedPower>,
+    /// Inventory TLVs, one per field.
+    pub inventory: Vec<LldpMedInventory>,
+}
+
+/// One LLDP-MED Network Policy TLV.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpMedPolicy {
+    /// Application type name (`voice`, `video-conferencing`, `unknown(n)`, ...).
+    pub app_type: String,
+    /// VLAN ID, `None` when the policy names none (0).
+    pub vlan: Option<u16>,
+    /// The VLAN is tagged.
+    pub tagged: bool,
+    /// The sender has no policy for this application (the U bit).
+    pub unknown: bool,
+    /// IEEE 802.1p priority, 0-7.
+    pub priority: u8,
+    /// DSCP value, 0-63.
+    pub dscp: u8,
+}
+
+/// One LLDP-MED Location Identification TLV.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpMedLocation {
+    /// `coordinate`, `civic` or `elin`.
+    pub format: String,
+    /// The location, rendered as text.
+    pub text: String,
+}
+
+/// An LLDP-MED Extended Power via MDI TLV.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpMedPower {
+    /// `pse` or `pd`.
+    pub kind: String,
+    /// Power source name (for example `primary`, `local`).
+    pub source: String,
+    /// Power priority name (`critical`, `high`, `low`, `unknown`).
+    pub priority: String,
+    /// Power value in tenths of a watt.
+    pub watts_deci: u16,
+}
+
+/// An LLDP-MED inventory TLV (decode only).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpMedInventory {
+    /// Field name (`serial-number`, `manufacturer`, `model-name`, ...).
+    pub field: String,
+    /// The value, control characters replaced.
+    pub value: String,
 }
 
 /// One VLAN a neighbor's port carries, with its name.
@@ -118,7 +198,8 @@ pub struct LldpLinkStats {
     #[view(brief, unit = count)]
     pub tlvs_discarded: u64,
     /// `statsTLVsUnrecognizedTotal`: reserved TLV types and every
-    /// organizationally-specific TLV nos doesn't decode (LLDP-MED, DCBX, …).
+    /// organizationally-specific TLV nos doesn't decode (DCBX, an unknown LLDP-MED
+    /// subtype, …).
     #[view(brief, unit = count)]
     pub tlvs_unrecognized: u64,
     /// `statsAgeoutsTotal`: neighbors dropped because their TTL lapsed.
