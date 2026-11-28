@@ -10,7 +10,7 @@ module nos-config {
   description
     "NOS configuration tree, generated from the nos-proto schema.";
 
-  revision 2026-12-15 {
+  revision 2026-12-16 {
     description "Generated.";
   }
 
@@ -2609,6 +2609,18 @@ module nos-config {
       leaf ttl {
         type uint8;
         description "Match the exact TTL or hop limit.";
+      }
+      leaf source_mac {
+        type string;
+        description "Match the source MAC address.";
+      }
+      leaf destination_mac {
+        type string;
+        description "Match the destination MAC address.";
+      }
+      leaf ethertype {
+        type string;
+        description "Match the EtherType of the frame.";
       }
     }
   }

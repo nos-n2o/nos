@@ -100,6 +100,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "static-variants" => drivers::static_variants(w).await,
         "mpls-ilm" => drivers::mpls_ilm(w).await,
         "ecmp-nexthop-groups" => drivers::ecmp_nexthop_groups(w).await,
+        "ecmp-nexthop-convergence" => drivers::ecmp_nexthop_convergence(w).await,
         "mpls-input" => drivers::mpls_input(w).await,
         "sandbox-nnp" => drivers::sandbox_nnp(w).await,
         "routes-paging" => drivers::routes_paging(w).await,
@@ -271,6 +272,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "mpls-ilm",
             "mpls-input",
             "ecmp-nexthop-groups",
+            "ecmp-nexthop-convergence",
         ],
         "rpl" => &[
             "up",
@@ -473,6 +475,7 @@ pub const ALL: &[&str] = &[
     "mpls-ilm",
     "mpls-input",
     "ecmp-nexthop-groups",
+    "ecmp-nexthop-convergence",
     "policy",
     "redistribute-policy",
     "communities",

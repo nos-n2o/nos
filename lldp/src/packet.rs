@@ -131,6 +131,16 @@ pub struct OrgTlvs {
     pub max_frame_size: Option<u16>,
     /// 802.3 MAC/PHY Configuration/Status (decode only).
     pub mac_phy: Option<MacPhy>,
+    /// LLDP-MED Capabilities (TIA-1057, `crate::med`).
+    pub med_caps: Option<crate::med::MedCaps>,
+    /// LLDP-MED Network Policy, one per application type, at most 8.
+    pub med_policies: Vec<crate::med::MedPolicy>,
+    /// LLDP-MED Location Identification, one per format.
+    pub med_locations: Vec<crate::med::MedLocation>,
+    /// LLDP-MED Extended Power via MDI.
+    pub med_power: Option<crate::med::MedPower>,
+    /// LLDP-MED inventory, decode only, one per field.
+    pub med_inventory: Vec<crate::med::MedInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,14 +288,14 @@ pub fn encode(pdu: &Lldpdu) -> Vec<u8> {
     out
 }
 
-fn push_org(out: &mut Vec<u8>, oui: [u8; 3], subtype: u8, info: &[u8]) {
+pub(crate) fn push_org(out: &mut Vec<u8>, oui: [u8; 3], subtype: u8, info: &[u8]) {
     let mut value = oui.to_vec();
     value.push(subtype);
     value.extend_from_slice(info);
     push_tlv(out, TLV_ORG_SPECIFIC, &value);
 }
 
-/// The org TLVs, VLAN names last: they are the only ones that can be many,
+/// The org TLVs (MED before VLAN names), VLAN names last: they are the only ones that can be many,
 /// so they are what gets cut when the LLDPDU would outgrow `MAX_LLDPDU` (an
 /// 802.1Q trunk can carry 4094 VLANs, 41 bytes each).
 fn encode_org(out: &mut Vec<u8>, org: &OrgTlvs) {
@@ -308,6 +318,7 @@ fn encode_org(out: &mut Vec<u8>, org: &OrgTlvs) {
     if let Some(size) = org.max_frame_size {
         push_org(out, OUI_8023, DOT3_MAX_FRAME_SIZE, &size.to_be_bytes());
     }
+    crate::med::encode_med(out, org, MAX_LLDPDU);
     for (i, (vid, name)) in org.vlan_names.iter().enumerate() {
         let name = truncate_at_char(name, MAX_VLAN_NAME);
         // Header (2) + OUI/subtype (4) + VID (2) + length (1) + name, with
@@ -399,6 +410,11 @@ fn decode_org(value: &[u8], org: &mut OrgTlvs) -> OrgOutcome {
             &mut org.max_frame_size,
             (info.len() == 2).then(|| u16_at(0)),
         ),
+        (crate::med::OUI_TIA, subtype) => match crate::med::decode_med(subtype, info, org) {
+            Some(true) => OrgOutcome::Kept,
+            Some(false) => OrgOutcome::Discarded,
+            None => OrgOutcome::Unrecognized,
+        },
         _ => OrgOutcome::Unrecognized,
     }
 }
@@ -411,7 +427,7 @@ pub struct TlvCounts {
     /// org-specific TLV that is malformed, repeated, or past the cap.
     pub discarded: u64,
     /// A reserved TLV type (9–126), or an organizationally-specific one (127)
-    /// whose OUI/subtype nos doesn't decode.
+    /// whose OUI/subtype nos doesn't decode (an unknown LLDP-MED subtype too).
     pub unrecognized: u64,
 }
 
@@ -586,7 +602,7 @@ fn decode_id(value: &[u8], what: &'static str) -> Result<Id, DecodeError> {
 /// output and in logs, and a neighbor is untrusted: control characters (an
 /// ANSI escape sequence, a carriage return that overwrites a line) are
 /// replaced rather than passed through.
-fn lossy(value: &[u8]) -> String {
+pub(crate) fn lossy(value: &[u8]) -> String {
     String::from_utf8_lossy(value)
         .chars()
         .map(|c| if c.is_control() { '\u{fffd}' } else { c })
@@ -813,6 +829,7 @@ mod tests {
                 advertised: 0x6c01,
                 mau_type: 30,
             }),
+            ..OrgTlvs::default()
         }
     }
 

@@ -680,6 +680,8 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Not supported:** redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own strict LSA checking against a persisted LSDB (see the restart-mode bullet), BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
+**Deviation from RFC 2328 §13.7 (#1626):** an `LSAck` header is normally dropped when the LSA is not on the retransmission list. Here an ack of an LSA this router advertises, in a newer instance than the held copy, is also a hint that the neighbor holds an instance of ours that we lost (forged, or from before a restart): the router sends one LSR for it (at most one per neighbor and LSA per second), installs the answer and re-originates above it (§13.4). An older instance flooded to us is answered with the database copy (§13 step 8).
+
 ## Configuration reference
 
 All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relative only* exist only inside the object (after `edit`), not as an absolute command. The REST equivalent of a `delete` is `DELETE` on the same path, and of `set` a `PUT` on it.

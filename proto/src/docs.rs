@@ -693,6 +693,12 @@ topics! {
     AclRuleDscp,
     /// `AclRule.ttl`
     AclRuleTtl,
+    /// `AclRule.source_mac`
+    AclRuleSourceMac,
+    /// `AclRule.destination_mac`
+    AclRuleDestinationMac,
+    /// `AclRule.ethertype`
+    AclRuleEthertype,
     /// `Interface.acl_in`
     InterfaceAclIn,
     /// `Interface.acl_out`

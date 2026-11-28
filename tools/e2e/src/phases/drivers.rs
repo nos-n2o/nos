@@ -6303,6 +6303,63 @@ pub async fn ecmp_nexthop_groups(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// Prefixes the `ecmp-nexthop-convergence` phase shares one hop set over.
+const NHG_CONVERGE_N: usize = 1000;
+
+/// Group-level nexthop replace (#1588): 1000 static routes over the same
+/// three gateways share ONE group; dropping one gateway from all of them moves
+/// the group to its new two members in one `replaced nexthop group`, with no
+/// per-prefix route replace. The elapsed time is logged, not asserted.
+pub async fn ecmp_nexthop_convergence(w: &mut World) -> anyhow::Result<()> {
+    let (g1, g2, g3) = (
+        REDISTRIBUTE_GATEWAY.s(),
+        NHG_GATEWAY_2.s(),
+        NHG_GATEWAY_3.s(),
+    );
+    let prefix = |i: usize| format!("198.19.{}.{}/32", i >> 8, i & 255);
+    w.up(&[]).await?;
+    let a = w.a()?;
+    let mut add = vec!["--static-gateway".to_string(), g1.to_string()];
+    let mut drop3 = Vec::new();
+    for i in 0..NHG_CONVERGE_N {
+        let p = prefix(i);
+        add.extend(["--static-route".to_string(), p.clone()]);
+        add.extend([
+            "--static-extra-gateway".to_string(),
+            format!("{p}={g2},{g3}"),
+        ]);
+        drop3.extend([
+            "--remove-static-extra-gateway".to_string(),
+            format!("{p}={g3}"),
+        ]);
+    }
+    let last = format!(
+        "added route prefix={} .*next_hops=3.*nexthop_group=",
+        prefix(NHG_CONVERGE_N - 1)
+    );
+    let b_last = a.count(&last);
+    a.provision(&add).await?;
+    a.wait_new(&last, b_last, 120).await?;
+
+    log("drop one sibling from every prefix: the shared group is replaced once");
+    let replaced = "replaced nexthop group id=";
+    let per_prefix = "added route prefix=198.19.* .*replaced=true";
+    let (b_group, b_prefix) = (a.count_fresh(replaced).await, a.count(per_prefix));
+    let t0 = std::time::Instant::now();
+    a.provision(&drop3).await?;
+    a.wait_new(replaced, b_group, 120).await?;
+    log(format!(
+        "nexthop group replaced {} ms after the commit",
+        t0.elapsed().as_millis()
+    ));
+    a.assert_quiet(per_prefix, b_prefix, 10).await?;
+    let n = a.count_fresh(replaced).await - b_group;
+    if n != 1 {
+        bail!("router-a: {n} groups replaced for one shared hop set, expected 1");
+    }
+    Ok(())
+}
+
 /// The operator's write of `net.mpls.conf.eth0.input` on router-a.
 async fn set_mpls_kernel(w: &World, v: &str) -> anyhow::Result<()> {
     w.dock

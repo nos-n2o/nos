@@ -2258,6 +2258,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Match the exact TTL or hop limit.",
             "0 to 255: the IPv4 TTL or the IPv6 hop limit, one exact value (no ranges). Neighbor Discovery has hop limit 255, so a rule with another `ttl` never matches it. `delete ttl` turns it off.",
         ),
+        Topic::AclRuleSourceMac => (
+            "Match the source MAC address.",
+            "`aa:bb:cc:dd:ee:ff`, or a prefix of 1 to 48 bits such as `aa:bb:cc:00:00:00/24` (an OUI). Host bits past the prefix are cleared. A rule with only MAC and non-IP keys matches every frame, ARP and LLDP included; the `default-action` still applies to IP only, so a MAC rule never turns a default `deny` into a block of ARP or LACP. `delete source-mac` turns it off.",
+        ),
+        Topic::AclRuleDestinationMac => (
+            "Match the destination MAC address.",
+            "The same forms as `source-mac`; `ff:ff:ff:ff:ff:ff` matches broadcast. `delete destination-mac` turns it off.",
+        ),
+        Topic::AclRuleEthertype => (
+            "Match the EtherType of the frame.",
+            "`ipv4`, `ipv6`, `arp`, `lldp`, `mpls`, or a number `0x0600` to `0xffff` (below is an 802.3 length). The VLAN tag types 0x8100 and 0x88a8 are refused. IP keys (`protocol`, prefixes, ports, `dscp` and so on) need `ethertype ipv4` or `ipv6`, or none. Untagged frames only. `delete ethertype` turns it off.",
+        ),
         Topic::InterfaceAclIn => (
             "Filter the IP packets received on this link.",
             "The name of an `acl`. The commit is refused when it does not exist, on a loopback, a port aggregate member (attach it to the aggregate) or a switching-profile port, and when the interface and its untagged subinterface (one device) both set one. The ACL also filters BGP, OSPF, BFD and REST traffic to the router: permit your control plane first, and `icmpv6` on IPv6 (the default deny drops Neighbor Discovery). A physical interface sees untagged frames only; attach to the subinterface for tagged traffic.",

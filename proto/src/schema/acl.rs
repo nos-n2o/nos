@@ -141,7 +141,157 @@ macro_rules! text_scalar {
         }
     )*};
 }
-text_scalar!(AclProtocol, PortRange);
+text_scalar!(AclProtocol, PortRange, MacMatch, AclEthertype);
+
+/// A MAC address match: `aa:bb:cc:dd:ee:ff` or a prefix
+/// `aa:bb:cc:00:00:00/24` (1 to 48 bits). Host bits past the prefix are
+/// cleared on parse, so equal matches compare equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct MacMatch {
+    /// The 48-bit address, host bits cleared.
+    value: u64,
+    /// Prefix length, 1 to 48.
+    len: u8,
+}
+
+impl MacMatch {
+    /// The address bytes (host bits cleared).
+    #[must_use]
+    pub fn bytes(&self) -> [u8; 6] {
+        let b = self.value.to_be_bytes();
+        [b[2], b[3], b[4], b[5], b[6], b[7]]
+    }
+
+    /// The mask bytes; all `0xff` for an exact address.
+    #[must_use]
+    pub fn mask(&self) -> [u8; 6] {
+        let m = (u64::MAX << (48 - u32::from(self.len))) & 0xffff_ffff_ffff;
+        let b = m.to_be_bytes();
+        [b[2], b[3], b[4], b[5], b[6], b[7]]
+    }
+
+    /// The prefix length in bits.
+    #[must_use]
+    pub fn prefix_len(&self) -> u8 {
+        self.len
+    }
+}
+
+impl fmt::Display for MacMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let b = self.bytes();
+        write!(
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            b[0], b[1], b[2], b[3], b[4], b[5]
+        )?;
+        if self.len < 48 {
+            write!(f, "/{}", self.len)?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for MacMatch {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad = || format!("mac must be aa:bb:cc:dd:ee:ff or aa:bb:cc:00:00:00/24, not '{s}'");
+        let (a, l) = s.split_once('/').unwrap_or((s, "48"));
+        let b = crate::evpn_id::parse_mac_any(a).ok_or_else(bad)?;
+        let len: u8 = l.parse().map_err(|_| bad())?;
+        if !(1..=48).contains(&len) {
+            return Err(format!("mac prefix length is 1 to 48, not {len}"));
+        }
+        let raw = u64::from_be_bytes([0, 0, b[0], b[1], b[2], b[3], b[4], b[5]]);
+        let mask = (u64::MAX << (48 - u32::from(len))) & 0xffff_ffff_ffff;
+        Ok(Self {
+            value: raw & mask,
+            len,
+        })
+    }
+}
+
+/// The `EtherType` a rule matches: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or a
+/// number `0x0600` to `0xffff` (below that is an 802.3 length). Text form is
+/// the name, or `0x` plus four hex digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum AclEthertype {
+    /// IPv4 (0x0800).
+    Ipv4,
+    /// IPv6 (0x86dd).
+    Ipv6,
+    /// ARP (0x0806).
+    Arp,
+    /// LLDP (0x88cc).
+    Lldp,
+    /// MPLS unicast (0x8847).
+    Mpls,
+    /// Any other `EtherType`.
+    Number(u16),
+}
+
+impl AclEthertype {
+    /// The `EtherType` value.
+    #[must_use]
+    pub fn value(self) -> u16 {
+        match self {
+            Self::Ipv4 => 0x0800,
+            Self::Ipv6 => 0x86dd,
+            Self::Arp => 0x0806,
+            Self::Lldp => 0x88cc,
+            Self::Mpls => 0x8847,
+            Self::Number(n) => n,
+        }
+    }
+}
+
+impl fmt::Display for AclEthertype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ipv4 => f.write_str("ipv4"),
+            Self::Ipv6 => f.write_str("ipv6"),
+            Self::Arp => f.write_str("arp"),
+            Self::Lldp => f.write_str("lldp"),
+            Self::Mpls => f.write_str("mpls"),
+            Self::Number(n) => write!(f, "0x{n:04x}"),
+        }
+    }
+}
+
+impl FromStr for AclEthertype {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let n = match s {
+            "ipv4" => return Ok(Self::Ipv4),
+            "ipv6" => return Ok(Self::Ipv6),
+            "arp" => return Ok(Self::Arp),
+            "lldp" => return Ok(Self::Lldp),
+            "mpls" => return Ok(Self::Mpls),
+            _ => match s.strip_prefix("0x") {
+                Some(h) => u16::from_str_radix(h, 16),
+                None => s.parse(),
+            }
+            .map_err(|_| {
+                format!("ethertype must be ipv4, ipv6, arp, lldp, mpls or a number 0x0600-0xffff, not '{s}'")
+            })?,
+        };
+        if n < 0x0600 {
+            return Err("ethertype below 0x0600 is an 802.3 length".into());
+        }
+        if matches!(n, 0x8100 | 0x88a8) {
+            return Err("VLAN tag ethertypes (0x8100, 0x88a8) are not matchable".into());
+        }
+        let named = [Self::Ipv4, Self::Ipv6, Self::Arp, Self::Lldp, Self::Mpls];
+        if let Some(name) = named.iter().find(|e| e.value() == n) {
+            return Err(format!("use the name '{name}' for ethertype {s}"));
+        }
+        Ok(Self::Number(n))
+    }
+}
 
 /// One match-and-act line of an `Acl`. A field left unset matches anything;
 /// all set fields must match.
@@ -246,6 +396,27 @@ pub struct AclRule {
     #[cli(topic = AclRuleTtl)]
     /// Exact IPv4 TTL or IPv6 hop limit (0 to 255).
     pub ttl: Option<u8>,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = AclRuleSourceMac, words = "source-mac")]
+    /// Source MAC, exact or `aa:bb:cc:00:00:00/24`.
+    pub source_mac: Option<MacMatch>,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = AclRuleDestinationMac, words = "destination-mac")]
+    /// Destination MAC, exact or a prefix.
+    pub destination_mac: Option<MacMatch>,
+
+    #[serde(default)]
+    #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = AclRuleEthertype)]
+    /// `EtherType`: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or `0x0600`-`0xffff`.
+    pub ethertype: Option<AclEthertype>,
 }
 
 /// A named list of rules evaluated in order; the first match wins.
@@ -329,6 +500,30 @@ fn valid_rule(r: &AclRule) -> Result<(), &'static str> {
         return Err(
             "fragments cannot be combined with ports, established or icmp-type/icmp-code: L4 headers are only in the first fragment",
         );
+    }
+    let ip_match = r.protocol.is_some()
+        || r.source.is_some()
+        || r.destination.is_some()
+        || r.source_port.is_some()
+        || r.destination_port.is_some()
+        || r.established
+        || r.icmp_type.is_some()
+        || r.icmp_code.is_some()
+        || r.fragments
+        || r.dscp.is_some()
+        || r.ttl.is_some();
+    match r.ethertype {
+        Some(AclEthertype::Ipv4) if v4 == Some(false) || r.protocol == Some(Icmpv6) => {
+            return Err("ethertype ipv4 conflicts with an IPv6 prefix or icmpv6");
+        }
+        Some(AclEthertype::Ipv6) if v4 == Some(true) || r.protocol == Some(Icmp) => {
+            return Err("ethertype ipv6 conflicts with an IPv4 prefix or icmp");
+        }
+        Some(AclEthertype::Ipv4 | AclEthertype::Ipv6) | None => {}
+        Some(_) if ip_match => {
+            return Err("IP match keys need ethertype ipv4 or ipv6, or none");
+        }
+        Some(_) => {}
     }
     if r.dscp.is_some_and(|d| d > 63) {
         return Err("dscp is 0 to 63");
@@ -685,6 +880,116 @@ mod tests {
         }));
         let r: AclRule = serde_json::from_str(r#"{"name":"r"}"#).unwrap();
         assert_eq!((r.dscp, r.ttl), (None, None));
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "assigned straight to Option fields"
+    )]
+    fn mac(s: &str) -> Option<MacMatch> {
+        Some(s.parse().unwrap())
+    }
+
+    #[test]
+    fn mac_match_normalises_and_round_trips() {
+        let m: MacMatch = "AA:BB:CC:DD:EE:FF/24".parse().unwrap();
+        assert_eq!(m.to_string(), "aa:bb:cc:00:00:00/24");
+        assert_eq!(m, "aa:bb:cc:00:00:00/24".parse().unwrap());
+        assert_eq!(m.bytes(), [0xaa, 0xbb, 0xcc, 0, 0, 0]);
+        assert_eq!(m.mask(), [0xff, 0xff, 0xff, 0, 0, 0]);
+        let e: MacMatch = "ff:ff:ff:ff:ff:ff".parse().unwrap();
+        assert_eq!(
+            (e.to_string().as_str(), e.mask()),
+            ("ff:ff:ff:ff:ff:ff", [0xff; 6])
+        );
+        assert_eq!(e.prefix_len(), 48);
+        let odd: MacMatch = "aa:bb:cc:dd:ee:ff/13".parse().unwrap();
+        assert_eq!(odd.mask(), [0xff, 0xf8, 0, 0, 0, 0]);
+        for bad in [
+            "",
+            "aa:bb",
+            "aa:bb:cc:dd:ee:ff/0",
+            "aa:bb:cc:dd:ee:ff/49",
+            "aa:bb:cc:dd:ee:gg",
+            "a:b:c:d:e:f",
+            "aa:bb:cc:dd:ee:ff/x",
+        ] {
+            assert!(bad.parse::<MacMatch>().is_err(), "{bad}");
+        }
+        let r = rule(|r| r.source_mac = mac("aa:bb:cc:dd:ee:ff/24"));
+        let b = serde_json::to_string(&r).unwrap();
+        assert!(b.contains("aa:bb:cc:00:00:00/24"), "{b}");
+        assert_eq!(serde_json::from_str::<AclRule>(&b).unwrap(), r);
+    }
+
+    #[test]
+    fn ethertype_names_numbers_and_refusals() {
+        for (t, v) in [
+            ("ipv4", 0x0800),
+            ("lldp", 0x88cc),
+            ("0x88b5", 0x88b5),
+            ("34997", 0x88b5),
+        ] {
+            assert_eq!(t.parse::<AclEthertype>().unwrap().value(), v, "{t}");
+        }
+        assert_eq!(
+            "0x88B5".parse::<AclEthertype>().unwrap().to_string(),
+            "0x88b5"
+        );
+        for bad in [
+            "0x05ff", "0x8100", "0x88a8", "0x0800", "0x88cc", "ip", "0x10000", "",
+        ] {
+            assert!(bad.parse::<AclEthertype>().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn l2_keys_and_their_conflicts() {
+        use AclEthertype::{Arp, Ipv4, Ipv6};
+        assert!(ok(|r| r.source_mac = mac("aa:bb:cc:dd:ee:ff")));
+        assert!(ok(|r| r.ethertype = Some(Arp)));
+        assert!(ok(|r| {
+            r.ethertype = Some(Arp);
+            r.log = true;
+        }));
+        assert!(ok(|r| {
+            r.ethertype = Some(Ipv4);
+            r.source = net("10.0.0.0/8");
+        }));
+        assert!(!ok(|r| {
+            r.ethertype = Some(Ipv4);
+            r.source = net("2001:db8::/32");
+        }));
+        assert!(!ok(|r| {
+            r.ethertype = Some(Ipv4);
+            r.protocol = Some(AclProtocol::Icmpv6);
+        }));
+        assert!(!ok(|r| {
+            r.ethertype = Some(Ipv6);
+            r.destination = net("10.0.0.0/8");
+        }));
+        assert!(!ok(|r| {
+            r.ethertype = Some(Ipv6);
+            r.protocol = Some(AclProtocol::Icmp);
+        }));
+        for set in [
+            (|r: &mut AclRule| r.protocol = Some(AclProtocol::Tcp)) as fn(&mut AclRule),
+            |r| r.source = net("10.0.0.0/8"),
+            |r| r.fragments = true,
+            |r| r.dscp = Some(1),
+            |r| r.ttl = Some(1),
+            |r| r.icmp_type = Some(1),
+        ] {
+            assert!(!ok(|r| {
+                r.ethertype = Some(Arp);
+                set(r);
+            }));
+        }
+        let r: AclRule = serde_json::from_str(r#"{"name":"r"}"#).unwrap();
+        assert_eq!(
+            (r.source_mac, r.destination_mac, r.ethertype),
+            (None, None, None)
+        );
     }
 
     #[test]

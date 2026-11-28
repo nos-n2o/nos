@@ -39,3 +39,5 @@ Pure, address-family-agnostic code used by `nos-ospf` and `nos-ospfv3`. No NOS d
 
 - `lsa::test_lsa` is a ~20-line `Lsa`/`LsaHeader` (a `u32` key) so store, ordering and exchange tests need no daemon types (`exchange/tests.rs` keeps the pre-#430 positional call through a shim). Daemon-side tests cover their trait impls, aliases and closures (stub/NSSA, opaque/type-9 routing, v3 DBD options, v3 S2/S1 routing and Grace exemption).
 - Behaviour that needs a kernel or two processes belongs in a `nos-ospf*` test or a `nos-e2e` phase (`docs/e2e-phases.md`), not here.
+- **Step 8**: `on_lsu_received` answers a `DbNewer` LSA with `Action::SendLsu` of the held copy, rate-limited per neighbor and LSA by `AdjacencyData.db_resent` (#1626).
+- **Ack hint** (#1626): `lsack_hint` answers an `LSAck` of our own LSA in a newer instance with `Action::SendLsr` (`AdjacencyData.ack_requested`).

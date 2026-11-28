@@ -1775,3 +1775,119 @@ fn exchange_done_with_an_empty_request_list_has_no_lsr() {
         })]
     );
 }
+
+fn older_at(adj: &mut AdjacencyData, area: &mut Lsdb<L>, ls: &[L], now: Instant) -> LsuResult<L> {
+    lsu_full(
+        adj,
+        area,
+        &mut Lsdb::new(),
+        None,
+        ls,
+        now,
+        None,
+        rfc(BCAST, false, true),
+    )
+}
+
+fn db_copies(r: &LsuResult<L>) -> Vec<usize> {
+    r.actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::SendLsu(v) => Some(v.len()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn older_lsa_is_answered_with_the_database_copy_once_per_second() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    area.install(lsa_id(2, SEQ1));
+    let mut adj = AdjacencyData::default();
+    let t0 = Instant::now();
+    // Two refuted LSAs in one LSU: one SendLsu, no ack, nothing on the rxmt list.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1), lsa_id(2, SEQ1 - 1)],
+        t0,
+    );
+    assert_eq!(db_copies(&r), vec![2]);
+    assert!(!r.actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+    assert!(adj.retransmission_list.is_empty() && adj.pending_acks.is_empty());
+    // Within MinLSArrival: nothing.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1)],
+        t0 + Duration::from_millis(500),
+    );
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+    // After it: again.
+    let r = older_at(
+        &mut adj,
+        &mut area,
+        &[lsa_id(1, SEQ1 - 1)],
+        t0 + Duration::from_millis(1500),
+    );
+    assert_eq!(db_copies(&r), vec![1]);
+}
+
+#[test]
+fn max_age_max_sequence_database_copy_is_not_resent() {
+    let mut area = Lsdb::new();
+    let mut held = lsa_id(1, i32::MAX);
+    held.0.age = MAX_AGE;
+    area.install(held);
+    let mut adj = AdjacencyData::default();
+    let r = older_at(&mut adj, &mut area, &[lsa_id(1, SEQ1)], Instant::now());
+    assert_eq!(r.verdicts[0].1, RxVerdict::DbNewer);
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+}
+
+#[test]
+fn same_instance_with_a_far_age_is_not_refuted() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    let mut old = lsa_id(1, SEQ1);
+    old.0.age = 2000;
+    let mut adj = AdjacencyData::default();
+    let r = older_at(&mut adj, &mut area, &[old], Instant::now());
+    assert_eq!(r.verdicts[0].1, RxVerdict::DbNewer);
+    assert_eq!(db_copies(&r), Vec::<usize>::new());
+}
+
+fn hint(adj: &mut AdjacencyData, area: &Lsdb<L>, acked: &L, now: Instant) -> Vec<Action> {
+    lsack_hint(adj, &[area], Ipv4Addr::from(1u32), &[acked.0], now)
+}
+
+#[test]
+fn newer_ack_of_our_own_lsa_requests_it_once_per_second() {
+    let mut area = Lsdb::new();
+    area.install(lsa_id(1, SEQ1));
+    let mut adj = AdjacencyData::default();
+    let t0 = Instant::now();
+    // Equal and older acks (and one of another router's LSA, id 2) do nothing.
+    assert_eq!(hint(&mut adj, &area, &lsa_id(1, SEQ1), t0), []);
+    assert_eq!(hint(&mut adj, &area, &lsa_id(1, SEQ1 - 1), t0), []);
+    area.install(lsa_id(2, SEQ1));
+    assert_eq!(hint(&mut adj, &area, &lsa_id(2, SEQ1 + 5), t0), []);
+    // A newer one: one LSR, then rate-limited, then again after a second.
+    assert_eq!(
+        hint(&mut adj, &area, &lsa_id(1, SEQ1 + 5), t0),
+        [Action::SendLsr(vec![1])]
+    );
+    let soon = t0 + Duration::from_millis(500);
+    assert_eq!(hint(&mut adj, &area, &lsa_id(1, SEQ1 + 5), soon), []);
+    let later = t0 + Duration::from_millis(1500);
+    assert_eq!(
+        hint(&mut adj, &area, &lsa_id(1, SEQ1 + 5), later),
+        [Action::SendLsr(vec![1])]
+    );
+    // No held copy: nothing to compare with.
+    assert_eq!(
+        hint(&mut adj, &Lsdb::new(), &lsa_id(1, SEQ1 + 5), later),
+        []
+    );
+}

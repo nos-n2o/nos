@@ -92,6 +92,7 @@ fn pdu(chassis: u8, port: &str, name: &str) -> Lldpdu {
                 advertised: 1,
                 mau_type: 30,
             }),
+            ..OrgTlvs::default()
         },
     }
 }

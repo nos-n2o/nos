@@ -431,8 +431,8 @@ async fn retransmit_pending_resends_a_dbd_only_in_exstart_or_as_exchange_master(
 }
 
 /// RFC 2328 §13.7: an `LSAck` from a neighbor below Exchange is ignored.
-#[test]
-fn lsack_ignored_below_exchange() {
+#[tokio::test]
+async fn lsack_ignored_below_exchange() {
     let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
     let header = LsaHeader {
         age: 0,
@@ -466,14 +466,19 @@ fn lsack_ignored_below_exchange() {
             info.adjacency = Some(adj);
             s.neighbors.insert(neighbor_id, info);
         });
+        let (lsdb, link_local) = (Mutex::new(Lsdb::new()), Mutex::new(Lsdb::new()));
         rx::handle_lsack(
+            id(1),
             &status,
+            &lsdb,
+            &link_local,
             &LsAckPacket {
                 router_id: neighbor_id,
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsa_headers: vec![header],
             },
-        );
+        )
+        .await;
         let left = status.borrow().neighbors[&neighbor_id]
             .adjacency
             .as_ref()

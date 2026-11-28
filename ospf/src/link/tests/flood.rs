@@ -47,8 +47,11 @@ async fn drother_uses_all_drouters_and_dr_bdr_use_all_spf() {
             .await
             .install(l);
         settle(1).await;
+        // Unicast LSUs may interleave: an older Router-LSA retransmission is
+        // answered with the database copy (§13 step 8, #1626).
         let s = sent(&wire, n, LSU);
-        assert!(s.last() == Some(&want), "{n}: {s:?}");
+        let last_group = s.iter().rev().find(|t| !matches!(t, To::Unicast(_)));
+        assert!(last_group == Some(&want), "{n}: {s:?}");
     }
     assert!(sent(&wire, 3, LSACK).iter().all(|t| *t == To::AllD));
     // The DR heard the DROther's LSA, and so did the BDR.
@@ -458,4 +461,70 @@ fn destination_is_reported_only_on_change() {
     status.send_modify(|s| s.interface_state = InterfaceState::DrOther);
     note_flood_dest(&cfg, &status, &mut last);
     assert_eq!(last, Some(Dest::AllDRouters));
+}
+
+/// #1626: a neighbor acks a newer instance of an LSA we advertise: we send
+/// one LSR for it, and not a second within `MIN_LS_ARRIVAL`.
+#[tokio::test]
+async fn ack_of_a_newer_own_lsa_is_requested_once() {
+    let held = foreign_type5(0); // advertised by 9.9.9.9
+    let mut theirs = held.header;
+    theirs.sequence_number += 5;
+    let (lsdb, link_local) = (Mutex::new(Lsdb::new()), Mutex::new(Lsdb::new()));
+    lsdb.lock().await.install(held);
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(AdjacencyData::default());
+        s.neighbors.insert(id(2), info);
+    });
+    let ack = LsAckPacket {
+        router_id: id(2),
+        area_id: Ipv4Addr::UNSPECIFIED,
+        lsa_headers: vec![theirs],
+    };
+    let me = Ipv4Addr::new(9, 9, 9, 9);
+    let first = rx::handle_lsack(me, &status, &lsdb, &link_local, &ack)
+        .await
+        .unwrap();
+    assert!(matches!(&first[..], [exchange::Action::SendLsr(k)] if k.len() == 1));
+    let again = rx::handle_lsack(me, &status, &lsdb, &link_local, &ack)
+        .await
+        .unwrap();
+    assert_eq!(again, []);
+}
+
+/// RFC 2328 §13 step 8: an older instance is answered with the database copy
+/// (a unicast LSU action), never acked.
+#[tokio::test]
+async fn older_lsa_is_answered_with_the_database_copy() {
+    let cfg = link("eth0", 10);
+    let mut held = foreign_type5(0);
+    held.header.sequence_number += 1;
+    lsa::fill_checksum(&mut held);
+    let mut db = Lsdb::new();
+    db.install(held);
+    let (lsdb, link_local) = (Mutex::new(db), Mutex::new(Lsdb::new()));
+    let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+    status.send_modify(|s| {
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(AdjacencyData::default());
+        s.neighbors.insert(id(2), info);
+    });
+    let lsu = LsuPacket {
+        discarded: 0,
+        last_error: None,
+        router_id: id(2),
+        area_id: Ipv4Addr::UNSPECIFIED,
+        lsas: vec![foreign_type5(0)],
+    };
+    let acts = rx::handle_lsu(&cfg, id(1), &status, &lsdb, &link_local, &lsu, 7)
+        .await
+        .unwrap();
+    assert!(acts
+        .iter()
+        .any(|a| matches!(a, exchange::Action::SendLsu(v) if v.len() == 1)));
+    assert!(!acts
+        .iter()
+        .any(|a| matches!(a, exchange::Action::SendLsAck(_))));
 }

@@ -760,7 +760,11 @@ pub async fn run(
                                         }
                                     }
                                     OspfPacket::LsAck(ack) => {
-                                        handle_lsack(&status, &ack);
+                                        if let Some(actions) =
+                                            handle_lsack(local_router_id, &status, &stores, &ack).await
+                                        {
+                                            execute_actions(&socket, &cfg, local_router_id, &status, ack.router_id, actions);
+                                        }
                                     }
                                 }
                             }
@@ -1342,22 +1346,38 @@ async fn handle_lsu(
     ))
 }
 
-fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
-    let Some(mut adj) = status
+/// `LSAck` bookkeeping plus `exchange::lsack_hint` (#1626, as v2).
+async fn handle_lsack(
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    stores: &Stores<'_>,
+    ack: &LsAckPacket,
+) -> Option<Vec<exchange::Action>> {
+    let mut adj = status
         .borrow()
         .neighbors
         .get(&ack.router_id)
         .filter(|n| neighbor::exchange_or_later(n.state))
-        .and_then(|n| n.adjacency.clone())
-    else {
-        return;
-    };
+        .and_then(|n| n.adjacency.clone())?;
     exchange::on_lsack_received(&mut adj, &ack.lsa_headers);
+    let actions = {
+        let area = stores.area.lock().await;
+        let link = stores.link.lock().await;
+        let as_scope = stores.as_scope.lock().await;
+        nos_ospf_common::exchange::lsack_hint(
+            &mut adj,
+            &[&*area, &*link, &*as_scope],
+            local_router_id,
+            &ack.lsa_headers,
+            tokio::time::Instant::now().into_std(),
+        )
+    };
     status.send_modify(|s| {
         if let Some(info) = s.neighbors.get_mut(&ack.router_id) {
-            info.adjacency = Some(adj.clone());
+            info.adjacency = Some(adj);
         }
     });
+    Some(actions)
 }
 
 fn finish_neighbor_event(
@@ -8982,6 +9002,54 @@ pub(crate) mod tests {
         }
     }
 
+    /// #1626: a neighbor acks a newer instance of an LSA we advertise: one LSR,
+    /// none again within `MIN_LS_ARRIVAL`.
+    #[tokio::test]
+    async fn ack_of_a_newer_own_lsa_is_requested_once() {
+        let (neighbor_id, me) = (Ipv4Addr::new(9, 9, 9, 10), Ipv4Addr::new(1, 1, 1, 1));
+        let (area, link_store, as_scope) = (
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+            Mutex::new(Lsdb::new()),
+        );
+        let stores = Stores {
+            area: &area,
+            link: &link_store,
+            as_scope: &as_scope,
+            stub: false,
+        };
+        let header = LsaHeader {
+            age: 0,
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: me,
+            sequence_number: 0x8000_0001u32.cast_signed(),
+            checksum: 1,
+            length: 20,
+        };
+        area.lock().await.install(Lsa {
+            header,
+            body: LsaBody::Opaque(vec![]),
+        });
+        let mut theirs = header;
+        theirs.sequence_number += 5;
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            let mut info = neighbor_info(NeighborState::Full, "fe80::2".parse().unwrap(), 7);
+            info.adjacency = Some(AdjacencyData::default());
+            s.neighbors.insert(neighbor_id, info);
+        });
+        let ack = LsAckPacket {
+            router_id: neighbor_id,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsa_headers: vec![theirs],
+        };
+        let first = handle_lsack(me, &status, &stores, &ack).await.unwrap();
+        assert!(matches!(&first[..], [exchange::Action::SendLsr(k)] if k.len() == 1));
+        let again = handle_lsack(me, &status, &stores, &ack).await.unwrap();
+        assert_eq!(again, []);
+    }
+
     /// RFC 2328 §10.7/§13/§13.7 (kept by RFC 5340): `LSR`, `LSU` and `LSAck` from
     /// a neighbor below Exchange are ignored; from Exchange they are handled.
     #[tokio::test]
@@ -9046,13 +9114,16 @@ pub(crate) mod tests {
             let got = handle_lsu(&cfg, Ipv4Addr::new(1, 1, 1, 1), &status, &stores, &lsu, 0).await;
             assert_eq!(got.is_some(), handled, "lsu {state:?}");
             handle_lsack(
+                Ipv4Addr::new(1, 1, 1, 1),
                 &status,
+                &stores,
                 &LsAckPacket {
                     router_id: neighbor_id,
                     area_id: Ipv4Addr::UNSPECIFIED,
                     lsa_headers: vec![header],
                 },
-            );
+            )
+            .await;
             let left = status.borrow().neighbors[&neighbor_id]
                 .adjacency
                 .as_ref()

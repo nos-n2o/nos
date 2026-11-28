@@ -1033,6 +1033,32 @@ fn dot1q_vlan_id_mirred_redirect_reads_back_and_counts() {
     }
 }
 
+/// `eth_src` (masked) and a raw `eth_type` under `protocol all` (#1595).
+#[test]
+#[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]
+fn eth_src_and_ethertype_under_protocol_all_read_back() {
+    let (_, b) = pair("n0", "n1", 27);
+    let keys = FlowerKeys {
+        eth_src: Some((
+            [0xaa, 0xbb, 0xcc, 0, 0, 0],
+            Some([0xff, 0xff, 0xff, 0, 0, 0]),
+        )),
+        eth_type: Some(0x88cc),
+        ..FlowerKeys::default()
+    };
+    add(
+        b,
+        0,
+        3,
+        Protocol::All,
+        keys,
+        vec![Action::new(ActionKind::Gact(Verdict::Shot))],
+    );
+    let shown = show("n1", "ingress");
+    assert!(shown.contains("src_mac aa:bb:cc:00:00:00/24"), "{shown}");
+    assert!(shown.contains("eth_type 88cc"), "{shown}");
+}
+
 /// `Dot1Ad` + `vlan_id` (#895): the kernel accepts the S-tag ethertype with a vlan key.
 #[test]
 #[ignore = "talks to the kernel; needs CAP_NET_ADMIN"]

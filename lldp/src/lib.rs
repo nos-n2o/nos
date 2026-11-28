@@ -5,6 +5,7 @@
 
 pub mod link;
 pub mod link_client;
+pub mod med;
 pub mod neighbor;
 pub mod packet;
 pub mod reconcile;
