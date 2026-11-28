@@ -22,7 +22,7 @@ pub const IMPLICIT_ND_COOKIE: u32 = u32::MAX - 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filter {
     /// `Ip` or `Ipv6`: the filter's family (its tc `protocol`); `All` for a
-    /// rule with only MAC and/or non-IP EtherType keys (#1595).
+    /// rule with only MAC and/or non-IP `EtherType` keys (#1595).
     pub protocol: Protocol,
     pub keys: FlowerKeys,
     pub action: AclAction,

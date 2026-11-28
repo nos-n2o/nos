@@ -276,7 +276,7 @@ mod tests {
     fn a_non_ip_deny_is_not_the_default_twin() {
         // The deny default covers IP only: without this rule ARP passes.
         let arp = r("arp", Deny, |r| {
-            r.ethertype = Some(nos_proto::schema::AclEthertype::Arp)
+            r.ethertype = Some(nos_proto::schema::AclEthertype::Arp);
         });
         let p = pack(&acl(Deny, vec![arp.clone()]));
         assert_eq!((p.trailing.len(), p.levels.len()), (0, 1));

@@ -16,6 +16,7 @@ const ACK: u16 = 0x10;
 const RST: u16 = 0x04;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools, reason = "independent packet traits")]
 struct Packet {
     v6: bool,
     proto: u8,
@@ -31,7 +32,7 @@ struct Packet {
     first_fragment: bool,
     dscp: u8,
     ttl: u8,
-    /// An IP packet (EtherType 0x0800/0x86dd by `v6`); else `ether` is it.
+    /// An IP packet (`EtherType` 0x0800/0x86dd by `v6`); else `ether` is it.
     is_ip: bool,
     ether: u16,
     smac: [u8; 6],

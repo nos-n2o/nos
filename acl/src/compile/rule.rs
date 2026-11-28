@@ -30,8 +30,8 @@ fn ip_match(r: &AclRule) -> bool {
 }
 
 /// The families a rule applies to: its prefixes' (validated to agree), else
-/// its ICMP flavour's, else its EtherType's; a rule with only MAC and/or a
-/// non-IP EtherType is one `All` filter (#1595); no L2/L3 key at all stays
+/// its ICMP flavour's, else its `EtherType`'s; a rule with only MAC and/or a
+/// non-IP `EtherType` is one `All` filter (#1595); no L2/L3 key at all stays
 /// both IP families, so an "any" rule never starts matching ARP.
 fn families(r: &AclRule) -> Vec<Protocol> {
     let family = |v4: bool| if v4 { Protocol::Ip } else { Protocol::Ipv6 };

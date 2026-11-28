@@ -213,7 +213,7 @@ impl FromStr for MacMatch {
     }
 }
 
-/// The EtherType a rule matches: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or a
+/// The `EtherType` a rule matches: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or a
 /// number `0x0600` to `0xffff` (below that is an 802.3 length). Text form is
 /// the name, or `0x` plus four hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,12 +229,12 @@ pub enum AclEthertype {
     Lldp,
     /// MPLS unicast (0x8847).
     Mpls,
-    /// Any other EtherType.
+    /// Any other `EtherType`.
     Number(u16),
 }
 
 impl AclEthertype {
-    /// The EtherType value.
+    /// The `EtherType` value.
     #[must_use]
     pub fn value(self) -> u16 {
         match self {
@@ -415,7 +415,7 @@ pub struct AclRule {
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     #[cli(topic = AclRuleEthertype)]
-    /// EtherType: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or `0x0600`-`0xffff`.
+    /// `EtherType`: `ipv4`, `ipv6`, `arp`, `lldp`, `mpls` or `0x0600`-`0xffff`.
     pub ethertype: Option<AclEthertype>,
 }
 
@@ -882,6 +882,10 @@ mod tests {
         assert_eq!((r.dscp, r.ttl), (None, None));
     }
 
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "assigned straight to Option fields"
+    )]
     fn mac(s: &str) -> Option<MacMatch> {
         Some(s.parse().unwrap())
     }

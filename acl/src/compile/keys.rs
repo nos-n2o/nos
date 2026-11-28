@@ -11,8 +11,8 @@ use nos_tc::Protocol;
 
 use super::Filter;
 
-/// The EtherType a filter matches: its family's, or its raw key under `All`;
-/// `None` is "any" (an `All` filter with no EtherType key).
+/// The `EtherType` a filter matches: its family's, or its raw key under `All`;
+/// `None` is "any" (an `All` filter with no `EtherType` key).
 fn ethertype(f: &Filter) -> Option<(u128, u128)> {
     match f.protocol {
         Protocol::Ip => Some(0x0800),

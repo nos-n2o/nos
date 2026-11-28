@@ -69,7 +69,7 @@ pub struct FlowerKeys {
     pub eth_dst: Option<([u8; 6], Option<[u8; 6]>)>,
     /// Source MAC and its mask, same shape as `eth_dst` (#1595).
     pub eth_src: Option<([u8; 6], Option<[u8; 6]>)>,
-    /// A raw EtherType, only with `Protocol::All` (the `Ip`/`Ipv6`/VLAN
+    /// A raw `EtherType`, only with `Protocol::All` (the `Ip`/`Ipv6`/VLAN
     /// protocols already send theirs). Host order, `>= 0x0600` (#1595).
     pub eth_type: Option<u16>,
     pub ip_proto: Option<u8>,
