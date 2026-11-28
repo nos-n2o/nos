@@ -925,4 +925,27 @@ mod tests {
             .unwrap();
         assert_eq!(cfg.interfaces[0].lacp_link_number, None);
     }
+
+    #[test]
+    fn set_and_clear_ra_profile() {
+        let mut cfg = Config::default();
+        InterfaceOp::Ensure {
+            name: "eth0".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        InterfaceOp::SetRaProfile {
+            name: "eth0".into(),
+            ra_profile: "r".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].ra_profile.as_deref(), Some("r"));
+        InterfaceOp::ClearRaProfile {
+            name: "eth0".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].ra_profile, None);
+    }
 }

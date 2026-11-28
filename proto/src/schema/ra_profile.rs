@@ -324,9 +324,13 @@ fn valid_profile(name: &str, ctx: &Config) -> garde::Result {
     // 0.75 * max, rounded down, in integer arithmetic.
     let min_ceiling = max * 3 / 4;
     if p.min_interval.is_some_and(|m| m < 3 || m > min_ceiling) {
-        return refuse(format!("min-interval must be 3..={min_ceiling} (0.75 * max-interval)"));
+        return refuse(format!(
+            "min-interval must be 3..={min_ceiling} (0.75 * max-interval)"
+        ));
     }
-    if p.router_lifetime.is_some_and(|l| l != 0 && !(max..=ROUTER_LIFETIME_MAX).contains(&l)) {
+    if p.router_lifetime
+        .is_some_and(|l| l != 0 && !(max..=ROUTER_LIFETIME_MAX).contains(&l))
+    {
         return refuse(format!(
             "router-lifetime must be 0 or {max}..={ROUTER_LIFETIME_MAX}"
         ));
@@ -344,7 +348,9 @@ fn valid_profile(name: &str, ctx: &Config) -> garde::Result {
         }
         let addr = net.addr();
         if addr.is_unspecified() || addr.is_multicast() || addr.is_unicast_link_local() {
-            return refuse(format!("prefix {net} must be a global or unique-local prefix"));
+            return refuse(format!(
+                "prefix {net} must be a global or unique-local prefix"
+            ));
         }
         if net != net.trunc() {
             return refuse(format!("prefix {net} has host bits set"));
@@ -353,19 +359,30 @@ fn valid_profile(name: &str, ctx: &Config) -> garde::Result {
             return refuse(format!("prefix {net} is autonomous and so must be a /64"));
         }
         if x.preferred_lifetime > x.valid_lifetime {
-            return refuse(format!("prefix {net}: preferred-lifetime exceeds valid-lifetime"));
+            return refuse(format!(
+                "prefix {net}: preferred-lifetime exceeds valid-lifetime"
+            ));
         }
     }
     for (i, r) in p.rdnss.iter().enumerate() {
         match r.address {
             IpAddr::V6(a) if !a.is_unspecified() && !a.is_multicast() => {}
-            _ => return refuse(format!("rdnss {} must be a unicast IPv6 address", r.address)),
+            _ => {
+                return refuse(format!(
+                    "rdnss {} must be a unicast IPv6 address",
+                    r.address
+                ))
+            }
         }
         if p.rdnss[..i].iter().any(|o| o.address == r.address) {
             return refuse(format!("rdnss {} is listed twice", r.address));
         }
         if !lifetime_ok(r.lifetime) {
-            return refuse(format!("rdnss {} lifetime must be 0 or {max}..={}", r.address, 2 * max));
+            return refuse(format!(
+                "rdnss {} lifetime must be 0 or {max}..={}",
+                r.address,
+                2 * max
+            ));
         }
     }
     for (i, d) in p.dnssl.iter().enumerate() {
@@ -376,7 +393,11 @@ fn valid_profile(name: &str, ctx: &Config) -> garde::Result {
             return refuse(format!("dnssl '{}' is listed twice", d.domain));
         }
         if !lifetime_ok(d.lifetime) {
-            return refuse(format!("dnssl '{}' lifetime must be 0 or {max}..={}", d.domain, 2 * max));
+            return refuse(format!(
+                "dnssl '{}' lifetime must be 0 or {max}..={}",
+                d.domain,
+                2 * max
+            ));
         }
     }
     if p.wire_len() > MAX_RA_LEN {
@@ -416,7 +437,13 @@ mod tests {
     fn defaults_commit_and_round_trip() {
         assert!(ok(|_| {}));
         let p: RaProfile = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
-        assert_eq!(p, RaProfile { name: "x".into(), ..Default::default() });
+        assert_eq!(
+            p,
+            RaProfile {
+                name: "x".into(),
+                ..Default::default()
+            }
+        );
         let q: RaPrefix = serde_json::from_str(r#"{"prefix":"2001:db8::/64"}"#).unwrap();
         assert_eq!(q, pfx("2001:db8::/64"));
     }
@@ -436,7 +463,14 @@ mod tests {
         assert!(!ok(|p| p.min_interval = Some(2)));
         assert!(!ok(|p| p.min_interval = Some(451)));
         assert!(ok(|p| p.max_interval = 4)); // default min = 3 = 0.75 * 4
-        assert_eq!(RaProfile { max_interval: 4, ..Default::default() }.effective_min_interval(), 3);
+        assert_eq!(
+            RaProfile {
+                max_interval: 4,
+                ..Default::default()
+            }
+            .effective_min_interval(),
+            3
+        );
         assert_eq!(RaProfile::default().effective_min_interval(), 200);
     }
 
@@ -459,37 +493,63 @@ mod tests {
     #[test]
     fn prefix_rules() {
         assert!(ok(|p| p.prefixes = vec![pfx("2001:db8::/64")]));
-        assert!(!ok(|p| p.prefixes = vec![pfx("2001:db8::/64"), pfx("2001:db8::/64")]));
+        assert!(!ok(
+            |p| p.prefixes = vec![pfx("2001:db8::/64"), pfx("2001:db8::/64")]
+        ));
         assert!(!ok(|p| p.prefixes = vec![pfx("fe80::/64")]));
         assert!(!ok(|p| p.prefixes = vec![pfx("ff02::/64")]));
         assert!(!ok(|p| p.prefixes = vec![pfx("::/64")]));
         assert!(!ok(|p| p.prefixes = vec![pfx("2001:db8::1/64")]));
         // /48 only without the autonomous flag.
         assert!(!ok(|p| p.prefixes = vec![pfx("2001:db8::/48")]));
-        assert!(ok(|p| p.prefixes = vec![RaPrefix { autonomous: false, ..pfx("2001:db8::/48") }]));
+        assert!(ok(|p| p.prefixes = vec![RaPrefix {
+            autonomous: false,
+            ..pfx("2001:db8::/48")
+        }]));
         // preferred <= valid.
-        assert!(ok(|p| p.prefixes = vec![RaPrefix { valid_lifetime: 10, preferred_lifetime: 10, ..pfx("2001:db8::/64") }]));
-        assert!(!ok(|p| p.prefixes = vec![RaPrefix { valid_lifetime: 10, preferred_lifetime: 11, ..pfx("2001:db8::/64") }]));
+        assert!(ok(|p| p.prefixes = vec![RaPrefix {
+            valid_lifetime: 10,
+            preferred_lifetime: 10,
+            ..pfx("2001:db8::/64")
+        }]));
+        assert!(!ok(|p| p.prefixes = vec![RaPrefix {
+            valid_lifetime: 10,
+            preferred_lifetime: 11,
+            ..pfx("2001:db8::/64")
+        }]));
     }
 
     #[test]
     fn rdnss_rules() {
-        let r = |a: &str, l| RaRdnss { address: a.parse().unwrap(), lifetime: l };
+        let r = |a: &str, l| RaRdnss {
+            address: a.parse().unwrap(),
+            lifetime: l,
+        };
         assert!(ok(|p| p.rdnss = vec![r("2001:db8::53", None)]));
         assert!(ok(|p| p.rdnss = vec![r("fe80::1", Some(0))]));
-        assert!(ok(|p| p.rdnss = vec![r("2001:db8::53", Some(600)), r("2001:db8::54", Some(1200))]));
+        assert!(ok(|p| p.rdnss = vec![
+            r("2001:db8::53", Some(600)),
+            r("2001:db8::54", Some(1200))
+        ]));
         assert!(!ok(|p| p.rdnss = vec![r("2001:db8::53", Some(599))]));
         assert!(!ok(|p| p.rdnss = vec![r("2001:db8::53", Some(1201))]));
         assert!(!ok(|p| p.rdnss = vec![r("::", None)]));
         assert!(!ok(|p| p.rdnss = vec![r("ff02::1", None)]));
         assert!(!ok(|p| p.rdnss = vec![r("192.0.2.1", None)]));
-        assert!(!ok(|p| p.rdnss = vec![r("2001:db8::53", None), r("2001:db8::53", None)]));
+        assert!(!ok(
+            |p| p.rdnss = vec![r("2001:db8::53", None), r("2001:db8::53", None)]
+        ));
     }
 
     #[test]
     fn dnssl_rules() {
-        let d = |s: &str, l| RaDnssl { domain: s.into(), lifetime: l };
-        assert!(ok(|p| p.dnssl = vec![d("example.com", None), d("lab.example.com.", Some(0))]));
+        let d = |s: &str, l| RaDnssl {
+            domain: s.into(),
+            lifetime: l,
+        };
+        assert!(ok(
+            |p| p.dnssl = vec![d("example.com", None), d("lab.example.com.", Some(0))]
+        ));
         assert!(!ok(|p| p.dnssl = vec![d("", None)]));
         assert!(!ok(|p| p.dnssl = vec![d("a..b", None)]));
         assert!(!ok(|p| p.dnssl = vec![d("-a.b", None)]));
@@ -501,24 +561,49 @@ mod tests {
     #[test]
     fn list_caps_and_size() {
         let nets = |n: usize| -> Vec<RaPrefix> {
-            (0..n).map(|i| RaPrefix { prefix: format!("2001:db8:{i:x}::/64").parse().unwrap(), ..Default::default() }).collect()
+            (0..n)
+                .map(|i| RaPrefix {
+                    prefix: format!("2001:db8:{i:x}::/64").parse().unwrap(),
+                    ..Default::default()
+                })
+                .collect()
         };
         assert!(ok(|p| p.prefixes = nets(8)));
         assert!(!ok(|p| p.prefixes = nets(9)));
         let dns = |n: usize| -> Vec<RaRdnss> {
-            (0..n).map(|i| RaRdnss { address: format!("2001:db8::{:x}", i + 1).parse().unwrap(), lifetime: None }).collect()
+            (0..n)
+                .map(|i| RaRdnss {
+                    address: format!("2001:db8::{:x}", i + 1).parse().unwrap(),
+                    lifetime: None,
+                })
+                .collect()
         };
         assert!(ok(|p| p.rdnss = dns(16)));
         assert!(!ok(|p| p.rdnss = dns(17)));
         // Eight long domains overflow the 1240 byte budget.
-        let long = |i: usize| RaDnssl { domain: format!("{}.{}.{}.{}{i}", "a".repeat(60), "b".repeat(60), "c".repeat(60), "d".repeat(60)), lifetime: None };
+        let long = |i: usize| RaDnssl {
+            domain: format!(
+                "{}.{}.{}.{}{i}",
+                "a".repeat(60),
+                "b".repeat(60),
+                "c".repeat(60),
+                "d".repeat(60)
+            ),
+            lifetime: None,
+        };
         assert!(!ok(|p| p.dnssl = (0..8).map(long).collect()));
     }
 
     #[test]
     fn duplicate_names_are_refused() {
-        let p = RaProfile { name: "p".into(), ..Default::default() };
-        let c = Config { ra_profiles: vec![p.clone(), p], ..Default::default() };
+        let p = RaProfile {
+            name: "p".into(),
+            ..Default::default()
+        };
+        let c = Config {
+            ra_profiles: vec![p.clone(), p],
+            ..Default::default()
+        };
         assert!(c.validate_with(&c).is_err());
     }
 }

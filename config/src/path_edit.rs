@@ -338,7 +338,7 @@ sections! {
     lists: bgp_instances, routing_tables, ospf_instances, ospfv3_instances,
         static_routing_instances, interfaces, policy_definitions, community_aliases,
         community_groups, prefix_lists, as_path_lists, broadcast_domains,
-        switching_profiles, port_aggregates, bfd_profiles, stp_port_profiles, acls, users;
+        switching_profiles, port_aggregates, bfd_profiles, stp_port_profiles, acls, users, ra_profiles;
     fields: hostname, lldp, logging, login_policy, aaa, sbfd_reflector, spanning_tree, admin;
     special:
 }

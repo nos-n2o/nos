@@ -26,9 +26,9 @@ use nos_proto::{
     LldpOp, LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm,
     OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
-    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
-    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp,
-    SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp, VlanTag,
+    RaProfileOp, Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn,
+    RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp,
+    SubinterfaceOp, SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of the `spanning-tree mode` values the e2e lab uses.
@@ -1226,6 +1226,39 @@ pub struct Args {
     #[arg(long)]
     pub stp_profile_detach: bool,
 
+    /// Creates the `ra-profile` of this name (from the `--ra-*` flags) and
+    /// attaches it to `--interface`'s `--subinterface-tag` subinterface (#1583).
+    #[arg(long)]
+    pub ra_profile: Option<String>,
+
+    /// Detaches the RA profile from `--interface`'s `--subinterface-tag` subinterface.
+    #[arg(long, conflicts_with = "ra_profile")]
+    pub clear_ra_profile: bool,
+
+    /// A prefix of `--ra-profile`. Repeatable.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_prefix: Vec<ipnet::Ipv6Net>,
+
+    /// An RDNSS address of `--ra-profile`. Repeatable.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_rdnss: Vec<std::net::IpAddr>,
+
+    /// Sets the M flag of `--ra-profile`.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_managed: bool,
+
+    /// Sets the O flag of `--ra-profile`.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_other_config: bool,
+
+    /// `max-interval` (seconds) of `--ra-profile`.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_max_interval: Option<u32>,
+
+    /// `min-interval` (seconds) of `--ra-profile`.
+    #[arg(long, requires = "ra_profile")]
+    pub ra_min_interval: Option<u32>,
+
     /// `--peer-group`'s hold time in seconds (`BgpPeerGroupOp::SetHoldTime`).
     #[arg(long)]
     pub hold_time: Option<u16>,
@@ -2360,6 +2393,57 @@ fn stp_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     v
 }
 
+/// The `RaProfile` the `--ra-*` flags describe, `None` without `--ra-profile`.
+fn ra_profile_from_args(args: &Args) -> Option<nos_proto::schema::RaProfile> {
+    let name = args.ra_profile.clone()?;
+    let mut p = nos_proto::schema::RaProfile {
+        name,
+        managed: args.ra_managed,
+        other_config: args.ra_other_config,
+        min_interval: args.ra_min_interval,
+        ..Default::default()
+    };
+    if let Some(m) = args.ra_max_interval {
+        p.max_interval = m;
+    }
+    p.prefixes = args
+        .ra_prefix
+        .iter()
+        .map(|&prefix| nos_proto::schema::RaPrefix {
+            prefix,
+            ..Default::default()
+        })
+        .collect();
+    p.rdnss = args
+        .ra_rdnss
+        .iter()
+        .map(|&address| nos_proto::schema::RaRdnss {
+            address,
+            lifetime: None,
+        })
+        .collect();
+    Some(p)
+}
+
+/// The whole `--ra-profile` as one path edit (replaces it when it exists).
+fn ra_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
+    ra_profile_from_args(args)
+        .map(|p| {
+            let json = serde_json::to_string(&p).expect("profile serializes");
+            (vec!["ra-profile".to_string(), p.name], Some(json))
+        })
+        .into_iter()
+        .collect()
+}
+
+/// [`ra_paths`] applied straight to a local `Config`.
+fn apply_ra(args: &Args, config: &mut nos_proto::Config) {
+    if let Some(p) = ra_profile_from_args(args) {
+        config.ra_profiles.retain(|o| o.name != p.name);
+        config.ra_profiles.push(p);
+    }
+}
+
 /// The S-BFD initiator profile and its static-route references, split out of
 /// `bfd_paths` for length (#425).
 fn sbfd_static_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
@@ -2500,6 +2584,7 @@ fn static_route_field_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
 /// through the generic path edit after the ops.
 pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = stp_paths(args);
+    v.extend(ra_paths(args));
     if args.bfd_bgp || args.no_bfd_bgp {
         v.push((
             vec![
@@ -2929,6 +3014,7 @@ fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     apply_stp(args, config);
+    apply_ra(args, config);
     apply_acl(args, config);
     for i in config
         .bgp_instances
@@ -3077,6 +3163,21 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if link != &args.interface {
         ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
             name: link.clone(),
+        }));
+    }
+    if let Some(profile) = args.ra_profile.clone() {
+        ops.push(ConfigOp::RaProfile(RaProfileOp::Ensure {
+            name: profile.clone(),
+        }));
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetRaProfile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            ra_profile: profile,
+        }));
+    } else if args.clear_ra_profile {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::ClearRaProfile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
         }));
     }
     if args.stp_profile_interface.is_some() {
@@ -8797,6 +8898,40 @@ mod tests {
         assert!(edits
             .iter()
             .any(|(p, v)| p == &["sbfd-reflector", "discriminator"] && v.as_deref() == Some("[]")));
+    }
+
+    #[test]
+    fn ra_flags_become_ops_and_the_same_profile_by_path_and_locally() {
+        let args = parse(&[
+            "--ra-profile",
+            "lan",
+            "--ra-prefix",
+            "2001:db8:1::/64",
+            "--ra-rdnss",
+            "2001:db8::53",
+            "--ra-managed",
+            "--ra-max-interval",
+            "30",
+        ]);
+        let ops = build_ops(&args).unwrap();
+        let d = dump(&ops);
+        assert!(d.contains("RaProfile(Ensure"), "{d}");
+        assert!(d.contains("SetRaProfile"), "{d}");
+        let mut local = nos_proto::Config::default();
+        apply_bfd(&args, &mut local);
+        let p = &local.ra_profiles[0];
+        assert!(p.managed && p.max_interval == 30 && p.prefixes.len() == 1 && p.rdnss.len() == 1);
+        // The path edit carries the same profile.
+        let mut tree = serde_json::to_value(nos_proto::Config::default()).unwrap();
+        for (path, value) in ra_paths(&args) {
+            let v: serde_json::Value = serde_json::from_str(&value.unwrap()).unwrap();
+            nos_proto::config_path::set(&mut tree, &path, v).unwrap();
+        }
+        let via_path: nos_proto::Config = serde_json::from_value(tree).unwrap();
+        assert_eq!(via_path.ra_profiles, local.ra_profiles);
+        assert!(build_ops(&parse(&["--clear-ra-profile"]))
+            .map(|o| dump(&o).contains("ClearRaProfile"))
+            .unwrap());
     }
 
     #[test]

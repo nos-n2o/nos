@@ -760,4 +760,27 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, OpError::InterfaceNotFound(n) if n == "eth0"));
     }
+
+    #[test]
+    fn set_and_clear_ra_profile() {
+        let mut cfg = Config::default();
+        SubinterfaceOp::SetRaProfile {
+            interface: "eth0".into(),
+            tag: 0,
+            ra_profile: "r".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].subinterfaces[0].ra_profile.as_deref(),
+            Some("r")
+        );
+        SubinterfaceOp::ClearRaProfile {
+            interface: "eth0".into(),
+            tag: 0,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].subinterfaces[0].ra_profile, None);
+    }
 }

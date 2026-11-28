@@ -112,6 +112,7 @@ pub use port_aggregate::{
     LacpVersion, PortAggregate, PortAggregateMode,
 };
 pub use prefix_list::{PrefixList, PrefixListEntry};
+pub use ra_profile::{RaDnssl, RaPreference, RaPrefix, RaProfile, RaRdnss};
 pub use routing_table::{
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
     RoutingTableVpn, SshServer, REST_API_PORT_DEFAULT, SSH_SERVER_PORT_DEFAULT,
@@ -120,7 +121,6 @@ pub use sbfd::{SbfdReflector, SbfdReflectorKey};
 pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};
 pub use static_route::{StaticNextHop, StaticRoute};
 pub use static_routing_instance::StaticRoutingInstance;
-pub use ra_profile::{RaDnssl, RaPrefix, RaPreference, RaProfile, RaRdnss};
 pub use stp_port_profile::{EdgePort, LinkType, StpPortMstInstance, StpPortProfile};
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
 pub use user::{User, UserRole, PASSWORD_HASH_PREFIX};

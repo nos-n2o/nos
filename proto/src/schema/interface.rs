@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{
     bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_point_to_point_valid,
-    ra_profile_reference_valid, routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
-    unique_key_in,
+    ra_profile_reference_valid, routing_table_reference_valid, stp_port_profile_reference_valid,
+    unique_addresses, unique_key_in,
 };
 
 use super::{Config, LldpDestination, VlanTag};
@@ -1361,6 +1361,60 @@ mod tests {
         cfg.stp_port_profiles.clear();
         let err = cfg.validate_with(&cfg).unwrap_err().to_string();
         assert!(err.contains("interfaces[0].stp_port_profile"), "{err}");
+    }
+
+    fn ra(name: &str) -> crate::schema::RaProfile {
+        crate::schema::RaProfile {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ra_profile_reference_must_exist() {
+        let mut cfg = config_with(vec![interface("eth0", &[], None)], vec![table("rt1")]);
+        cfg.interfaces[0].subinterfaces = vec![Subinterface {
+            tag: 0,
+            routing_table: Some("rt1".into()),
+            ra_profile: Some("r".into()),
+            ..Default::default()
+        }];
+        assert!(cfg.validate_with(&cfg).is_err(), "unknown profile");
+        cfg.ra_profiles = vec![ra("r")];
+        cfg.validate_with(&cfg).unwrap();
+        cfg.ra_profiles.clear();
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("ra_profile"), "{err}");
+    }
+
+    #[test]
+    fn subinterface_ra_profile_needs_routing_table() {
+        let mut cfg = config_with(vec![interface("eth0", &[], None)], vec![]);
+        cfg.ra_profiles = vec![ra("r")];
+        cfg.interfaces[0].subinterfaces = vec![Subinterface {
+            tag: 0,
+            ra_profile: Some("r".into()),
+            ..Default::default()
+        }];
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ra_profile_refused_on_loopback_and_bond_member() {
+        let mut lo = interface("loopback-rt1", &[], Some("rt1"));
+        lo.ra_profile = Some("r".into());
+        let mut cfg = config_with(vec![lo], vec![table("rt1")]);
+        cfg.ra_profiles = vec![ra("r")];
+        assert!(cfg.validate_with(&cfg).is_err());
+
+        let mut m = interface("eth0", &[], None);
+        m.port_aggregate = Some("bond1".into());
+        let mut cfg = config_with(vec![m], vec![]);
+        cfg.port_aggregates = vec![aggregate("bond1")];
+        cfg.ra_profiles = vec![ra("r")];
+        cfg.validate_with(&cfg).unwrap();
+        cfg.interfaces[0].ra_profile = Some("r".into());
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
