@@ -856,6 +856,12 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
         "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*next_hops=2.*source=Some(Ospf)"
     ))
     .await?;
+    // #1587: the two hops are one kernel nexthop group.
+    a.wait(&format!(
+        "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*next_hops=2.*source=Some(Ospf).*nexthop_group="
+    ))
+    .await?;
+    a.wait("installed nexthop group").await?;
     // #1453: `show ospf route` reports the same route.
     expect_route(
         a,
@@ -6992,6 +6998,8 @@ pub async fn ospfv3_spf_ecmp(w: &mut World) -> anyhow::Result<()> {
     ])
     .await?;
     a.wait_new(&added, a0, 60).await?;
+    // #1587: link-local hops, each with its own oif, as one nexthop group.
+    a.wait(&format!("{added}.*nexthop_group=")).await?;
 
     let removed = format!("removed route prefix={prefix}");
     let r0 = a.count(&removed);

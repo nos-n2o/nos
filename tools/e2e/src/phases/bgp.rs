@@ -1276,6 +1276,9 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B},{IP_C} next_hops=2 ");
     log("waiting for router-a to install one kernel route over both next hops");
     a.wait(&both).await?;
+    // #1587: the two hops are one kernel nexthop group.
+    a.wait(&format!("{both}.*nexthop_group=")).await?;
+    a.wait("installed nexthop group").await?;
     let table = a.routes_walk("rt1", None).await?;
     let gateways = table
         .iter()
@@ -6388,6 +6391,9 @@ pub async fn vpn_multipath(w: &mut World) -> anyhow::Result<()> {
         "installed labelled route prefix={L3_SUBNET_B} labels=\\[\\[{LABEL_B}\\], \\[{LABEL_C}\\]\\] gateway={IP_B},{IP_C} interfaces="
     );
     a.wait(&both).await?;
+    // #1587: labelled hops are one nexthop group, each member with its encap.
+    a.wait(&format!("{both}.*nexthop_group=")).await?;
+    a.wait("installed nexthop group").await?;
     ping_until(w, CE_HOST, L3_HOST_IP_B.s(), 30).await?;
     ping_until(w, H_HOST, L3_HOST_IP_A.s(), 30).await?;
 

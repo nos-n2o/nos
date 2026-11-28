@@ -61,6 +61,13 @@ struct DevArgs {
     /// `mpls-ilm` (#1165), via `--ribd-arg`; never a config field.
     #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
     test_ilm: Vec<String>,
+
+    /// Install multipath routes inline (`RTA_MULTIPATH`) instead of as nexthop
+    /// groups (#1587): e2e `ecmp-nexthop-groups` creates inline routes with it
+    /// to see them migrated by the next start. Via `--ribd-arg`; never a
+    /// config field.
+    #[cfg_attr(feature = "dev-args", arg(long, hide = true))]
+    inline_multipath: bool,
 }
 
 #[derive(Parser)]
@@ -98,6 +105,20 @@ struct Args {
     dev: DevArgs,
 }
 
+/// Test-only: each SIGUSR1 turns the nexthop groups on.
+#[cfg(feature = "dev-args")]
+fn usr1_enables_groups(driver: Arc<LinuxRibDriver>) {
+    tokio::spawn(async move {
+        let Ok(mut usr1) = signal(SignalKind::user_defined1()) else {
+            return;
+        };
+        while usr1.recv().await.is_some() {
+            driver.enable_nexthop_groups();
+            info!("nexthop groups on (SIGUSR1)");
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -130,13 +151,21 @@ async fn main() -> anyhow::Result<()> {
 
     let driver: Arc<dyn RibDriver> = match args.dev.driver {
         DriverKind::Noop => Arc::new(NoopRibDriver::default()),
-        DriverKind::Linux => Arc::new(
-            LinuxRibDriver::new(args.table_registry_path.clone())
+        DriverKind::Linux => {
+            let driver = LinuxRibDriver::new(args.table_registry_path.clone())
                 .inspect_err(|e| {
                     tracing::error!(table = %args.table, error = %e, "failed to initialize linux rib driver");
                 })
-                .context("initializing linux rib driver")?,
-        ),
+                .context("initializing linux rib driver")?;
+            if args.dev.inline_multipath {
+                driver.disable_nexthop_groups();
+            }
+            let driver = Arc::new(driver);
+            // e2e `ecmp-nexthop-groups`: SIGUSR1 turns groups on again.
+            #[cfg(feature = "dev-args")]
+            usr1_enables_groups(driver.clone());
+            driver
+        }
     };
 
     let chunk = args
