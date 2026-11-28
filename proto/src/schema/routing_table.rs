@@ -790,7 +790,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
-            distance: Default::default(),
+            distance: crate::schema::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),
@@ -904,7 +904,10 @@ mod tests {
         };
         let j = serde_json::to_value(&d).unwrap();
         assert_eq!(j["static"], 5);
-        assert_eq!(serde_json::from_value::<RoutingTableDistance>(j).unwrap(), d);
+        assert_eq!(
+            serde_json::from_value::<RoutingTableDistance>(j).unwrap(),
+            d
+        );
     }
 
     #[test]

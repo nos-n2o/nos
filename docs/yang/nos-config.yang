@@ -758,7 +758,7 @@ module nos-config {
     }
     container distance {
       description "Set the administrative distance of each route source in this table.";
-      leaf r#static {
+      leaf static {
         type uint8;
         description "Set the administrative distance of this route source.";
       }

@@ -1106,7 +1106,7 @@ mod tests {
     #[test]
     fn no_redistribute_rule_publishes_bgp_instance_with_empty_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1131,7 +1131,7 @@ mod tests {
     #[test]
     fn active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1168,7 +1168,7 @@ mod tests {
     #[test]
     fn active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1212,7 +1212,7 @@ mod tests {
     #[test]
     fn active_rule_redistributes_static_ipv6_routes_too() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1296,7 +1296,7 @@ mod tests {
     #[test]
     fn ospf_no_redistribute_rule_publishes_ospf_instance_with_empty_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn ospf_active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1364,7 +1364,7 @@ mod tests {
             metric_type: None,
         };
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1404,7 +1404,7 @@ mod tests {
     #[test]
     fn ospf_active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1449,7 +1449,7 @@ mod tests {
     #[test]
     fn ospfv3_rule_redistributes_static_ipv6_routes_only() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),
@@ -1490,7 +1490,7 @@ mod tests {
     #[test]
     fn ospf_rule_does_not_redistribute_when_target_is_bgp() {
         let table = RoutingTable {
-            distance: Default::default(),
+            distance: nos_proto::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: nos_proto::RoutingTableEvpn::default(),

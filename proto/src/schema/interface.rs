@@ -720,7 +720,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
-            distance: Default::default(),
+            distance: crate::schema::RoutingTableDistance::default(),
             rest_api: None,
             ssh_server: None,
             evpn: crate::schema::RoutingTableEvpn::default(),

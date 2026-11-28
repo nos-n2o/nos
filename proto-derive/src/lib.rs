@@ -153,7 +153,13 @@ fn opt_str(s: Option<&LitStr>) -> Tokens {
 
 /// One `Field` literal; `required` is true on a struct's own fields.
 fn field(f: &syn::Field, required: bool) -> syn::Result<Tokens> {
-    let name = f.ident.as_ref().expect("named field").to_string();
+    let name = f
+        .ident
+        .as_ref()
+        .expect("named field")
+        .to_string()
+        .trim_start_matches("r#")
+        .to_string();
     let a = attrs(&f.attrs)?;
     if required && !(a.topic.is_some() || a.key || a.hidden) {
         return Err(syn::Error::new_spanned(

@@ -2189,14 +2189,14 @@ fn vpn_loopback_ops(args: &Args) -> Vec<ConfigOp> {
 /// `--distance-*`: one `SetDistance` on `--routing-table` when any is given.
 fn distance_ops(args: &Args) -> Vec<ConfigOp> {
     let distance = nos_proto::RoutingTableDistance {
-            r#static: args.distance_static,
-            ebgp: args.distance_ebgp,
-            ibgp: args.distance_ibgp,
-            ospf_intra: args.distance_ospf_intra,
-            ospf_inter: args.distance_ospf_inter,
-            ospf_external: args.distance_ospf_external,
-            evpn: args.distance_evpn,
-            vpn: args.distance_vpn,
+        r#static: args.distance_static,
+        ebgp: args.distance_ebgp,
+        ibgp: args.distance_ibgp,
+        ospf_intra: args.distance_ospf_intra,
+        ospf_inter: args.distance_ospf_inter,
+        ospf_external: args.distance_ospf_external,
+        evpn: args.distance_evpn,
+        vpn: args.distance_vpn,
     };
     if distance == nos_proto::RoutingTableDistance::default() {
         return Vec::new();
