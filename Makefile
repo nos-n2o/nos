@@ -91,7 +91,7 @@ miri: toolchain-check ## Run miri UB checks on the pure-logic crates on ci.yml's
 	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" $(RUN) cargo +$(MIRI_TOOLCHAIN) miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
 coverage: toolchain-check ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
-	$(RUN) cargo llvm-cov --workspace --features $(DEV_FEATURES) --ignore-filename-regex '/tools/e2e/|/tools/route-stub/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$|/bfd/src/socket\.rs$$|/nexthop/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
+	$(RUN) cargo llvm-cov --workspace --features $(DEV_FEATURES) --ignore-filename-regex '/tools/e2e/|/tools/route-stub/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/radv-socket/|/(ospf(v3)?|radv)/src/socket\.rs$$|/bfd/src/socket\.rs$$|/nexthop/src/socket\.rs$$|/ssh/src/caps\.rs$$' \
 		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
 MUTANTS_JOBS ?= 2
@@ -112,7 +112,7 @@ mutants: ## Run mutation testing, memory-capped (needs nightly; MUTANTS_JOBS/MUT
 FUZZ_SECS ?= 60
 FUZZ_RSS_MB ?= 2048
 FUZZ_CARGO ?= cargo +nightly
-FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet lacp_packet cli_parser cli_format
+FUZZ_TARGETS ?= bgp_codec ospfv3_lsa ospfv3_packet ospf_packet evpn_nlris rtr_codec lldp_packet radv_packet lacp_packet cli_parser cli_format
 
 fuzz-smoke: ## Fuzz every wire decoder FUZZ_SECS (default 60) each (needs nightly + cargo-fuzz; nightly CI job, not part of check)
 	@command -v cargo-fuzz >/dev/null 2>&1 || { echo "cargo-fuzz not found — run 'make tools'"; exit 1; }

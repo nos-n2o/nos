@@ -17,7 +17,7 @@ Read these in order the first time:
 
 - The OpenAPI 3 document for the REST API is checked in as [`openapi.json`](openapi.json). A running router serves the same document at `https://<address>:<port>/openapi.json`, and a browsable explorer at `https://<address>:<port>/swagger-ui/` (see [The REST API](api.md#the-openapi-document)).
 - Developer-facing: [architecture pages](architecture/README.md) (how NOS is built); [`schema-reference.md`](schema-reference.md) (config tree design patterns) and [`ipc-protocols.md`](ipc-protocols.md) (wire types per daemon); [`e2e-phases.md`](e2e-phases.md) lists every `nos-e2e` end-to-end phase, what it requires and what it proves.
-- Per-crate implementation internals (moved out of the always-loaded `CLAUDE.md` files): [lacp](internals/lacp.md), [interface](internals/interface.md), [rib](internals/rib.md), [lldp](internals/lldp.md), [bfd](internals/bfd.md), [rest](internals/rest.md), [pki](internals/pki.md), [config](internals/config.md).
+- Per-crate implementation internals (moved out of the always-loaded `CLAUDE.md` files): [lacp](internals/lacp.md), [interface](internals/interface.md), [rib](internals/rib.md), [lldp](internals/lldp.md), [radv](internals/radv.md), [bfd](internals/bfd.md), [rest](internals/rest.md), [pki](internals/pki.md), [config](internals/config.md).
 - Every shell command has built-in help: type `help`, or press `?` while typing (see [The CLI](cli.md#getting-help-help--and-tab)).
 
 `openapi.json` is regenerated from the code and checked by a test, so it always matches what `nos-restd` serves. After changing the API, run `make docs-fix` to update it.
@@ -37,6 +37,7 @@ Per-protocol guides:
 - [L2 switching: broadcast domains, switching profiles and SVIs](protocols/l2-switching.md)
 - [Port aggregation and LACP](protocols/port-aggregation-lacp.md)
 - [LLDP](protocols/lldp.md)
+- [IPv6 Router Advertisements](protocols/radv.md)
 - [Spanning tree](protocols/stp.md): bridge settings, port profiles, enabling RSTP, choosing the root, `show spanning-tree`, MSTP and Rapid-PVST+
 - [BFD profiles](protocols/bfd.md): the `bfd-profile` section and the `bfd` reference on peer-groups, OSPF/OSPFv3 profiles and static routes (declaration only, no daemon yet)
 - [EVPN/VXLAN, including multi-homing](protocols/evpn-vxlan.md)

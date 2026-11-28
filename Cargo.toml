@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "sandbox", "tc", "nexthop", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "tools/route-stub", "pam", "nss", "ssh", "radius", "tacacs"]
+members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "daemon", "l2-socket", "bfd-socket", "radv-socket", "radv", "sandbox", "tc", "nexthop", "acl", "lacp", "stp", "lldp", "bfd", "fdb", "rest", "password", "pki", "test-support", "tools/rtr-stub", "tools/route-stub", "pam", "nss", "ssh", "radius", "tacacs"]
 resolver = "3"
 
 [workspace.package]
@@ -35,6 +35,7 @@ nos-pki            = { path = "pki", version = "0.1.0" }
 nos-test-support   = { path = "test-support", version = "0.1.0" }
 nos-l2-socket      = { path = "l2-socket", version = "0.1.0" }
 nos-bfd-socket     = { path = "bfd-socket", version = "0.1.0" }
+nos-radv-socket    = { path = "radv-socket", version = "0.1.0" }
 nos-tc             = { path = "tc", version = "0.1.0" }
 nos-nexthop        = { path = "nexthop", version = "0.1.0" }
 nos-rpl            = { path = "rpl", version = "0.1.0" }

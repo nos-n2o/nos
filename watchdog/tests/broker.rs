@@ -88,6 +88,7 @@ async fn env_with_limits(users: Vec<User>, limits: Limits) -> Env {
             bfd: PathBuf::from("/run/nos/bfd.sock"),
             stp: PathBuf::from("/run/nos/stp.sock"),
             acl: PathBuf::from("/run/nos/acl.sock"),
+            radv: PathBuf::from("/run/nos/radv.sock"),
         },
         pki.clone(),
         limits,

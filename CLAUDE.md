@@ -29,7 +29,7 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `sandbox/` | `nos-sandbox` | `nos-sandbox-exec`, the exec trampoline the watchdog runs daemons through: `NO_NEW_PRIVS`, file capabilities kept; libc only — see `sandbox/CLAUDE.md` |
 | `tc/` | `nos-tc` | Hand-encoded tc netlink (clsact, flower/fw, gact/skbedit, chains, stats) for `nos-fdbd`, `nos-interfaced`, `nos-acld`; no NOS deps — `tc/CLAUDE.md` |
 | `password/` | `nos-password` | argon2id password hashing/verification for local users — no NOS dependencies; used by `nos-config` (hashing) and `nos-watchdog` (login verification) |
-| `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, `nos-watchdogd` as CA — identities are `nos://<role>/<name>` URI SANs, hot-rotated; also `nos-restd`'s TLS (`nos_pki::rest`, a second CA); no NOS deps — `pki/CLAUDE.md` |
+| `pki/` | `nos-pki` | Post-quantum mutual TLS (hybrid ML-KEM key exchange only, ML-DSA-65 certificates) over Unix sockets for every IPC connection, `nos-watchdogd` as CA, `nos://<role>/<name>` URI SANs, hot-rotated; also `nos-restd`'s TLS; no NOS deps — `pki/CLAUDE.md` |
 | `radius/` | `nos-radius` | RADIUS client (RFC 2865/2866/3579) for the login broker, plus e2e `nos-radius-stub`; no NOS dependencies — `radius/CLAUDE.md` |
 | `tacacs/` | `nos-tacacs` | TACACS+ client for the login broker - `tacacs/CLAUDE.md` |
 | `pam/` | `nos-pam` | PAM module (`pam_nos.so`): checks a password against `nos-watchdogd`'s login broker, exports a login ticket (`LoginTicket`, #996, #992) — `pam/CLAUDE.md` |
@@ -46,11 +46,13 @@ The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. 
 | `ospfv3/` | `nos-ospfv3` | OSPFv3 (RFC 5340, IPv6 OSPF) daemon — one process per `Ospfv3Instance`, mirroring `nos-ospfd` over IPv6 raw protocol-89 sockets (RFC 7166 auth, ABR, ASBR) — see `ospfv3/CLAUDE.md` |
 | `lacp/` | `nos-lacp` | LACP daemon (`nos-lacpd`) — one fixed process: IEEE 802.1AX LACPDUs over raw `AF_PACKET` for every `Lacp`-mode `PortAggregate` member, pushing the active set to `nos-interfaced` (owns the bond) — see `lacp/CLAUDE.md` |
 | `stp/` | `nos-stp` | Spanning tree: pure IEEE 802.1Q RSTP core plus `nos-stpd`, one fixed process with a raw `AF_PACKET` BPDU socket per port, pushing states to `nos-interfaced` — see `stp/CLAUDE.md` |
-| `lldp/` | `nos-lldp` | LLDP daemon (`nos-lldpd`), one fixed process: IEEE 802.1AB over raw `AF_PACKET` sockets on every `Interface` with `lldp transmit`/`receive`; `show lldp neighbors`; no rtnetlink — see `lldp/CLAUDE.md` |
+| `lldp/` | `nos-lldp` | LLDP daemon (`nos-lldpd`), one fixed process: IEEE 802.1AB over raw `AF_PACKET` per `Interface` with `lldp transmit`/`receive`; no rtnetlink — see `lldp/CLAUDE.md` |
 | `nexthop/` | `nos-nexthop` | Hand-encoded nexthop netlink (gateway, MPLS encap, groups, dump) for `nos-fdbd`, later `nos-ribd`; no NOS deps — `nexthop/CLAUDE.md` |
 | `acl/` | `nos-acl` | Access lists (`nos-acld`), one fixed process: every attached ACL compiled to tc flower filters (clsact, A/B chains, `nos-tc`) — see `acl/CLAUDE.md` |
+| `radv/` | `nos-radv` | IPv6 Router Advertisements (`nos-radvd`), one fixed process, raw ICMPv6 per `ra-profile` link — `radv/CLAUDE.md` |
+| `radv-socket/` | `nos-radv-socket` | Raw ICMPv6 socket FFI for `nos-radv`; no NOS deps |
 | `bfd/` | `nos-bfd` | BFD (RFC 5880) core: packet codec, FSM, timers, authz; library only, no daemon yet — see `bfd/CLAUDE.md` |
-| `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one per `BroadcastDomain` with a `vni`, owning its VXLAN device and FDB; installs remote MACs from `nos-bgpd`'s EVPN routes, originates local Type-2/3 — `fdb/CLAUDE.md` |
+| `fdb/` | `nos-fdb` | Forwarding-database daemon (`nos-fdbd`) — the MAC counterpart of `nos-ribd`: one per `BroadcastDomain` with a `vni`, owning its VXLAN device and FDB; EVPN Type-2/3 in and out via `nos-bgpd` — `fdb/CLAUDE.md` |
 | `rest/` | `nos-rest` | REST API daemon (`nos-restd`) — one per `RoutingTable` with `rest-api` pinned: mutual TLS + HTTP/2 inside the VRF, every `show` query and the config tree as HTTP+JSON, OpenAPI + Swagger UI — see `rest/CLAUDE.md` |
 | `ssh/` | `nos-ssh` | SSH daemon (`nos-sshd`) — VRF-bound listener handing each connection to `sshd -i`, PAM login — see `ssh/CLAUDE.md` |
 | `cli/` | `nos-cli` | Interactive shell (binary `nos`), the user-facing entry point |
@@ -147,7 +149,7 @@ make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excl
 
 **No external commands (#228).** Production code never shells out: use a crate (`rtnetlink`, `bollard`) or FFI. `clippy.toml` bans `std::process::Command`/`tokio::process::Command`, so `make clippy` fails on it. Exceptions carry `#[allow(clippy::disallowed_types, reason = "…")]`: the watchdog supervisor and tests that run built binaries or an independent oracle. `tools/e2e` needs none (it drives docker via `bollard`). A new exception needs its reason justified in the PR.
 
-`COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs`, `bfd/src/socket.rs`, `nexthop/src/socket.rs`: a mock would only test the mock; `nos-e2e` is their real test.
+`COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `radv-socket/`, `{ospf,ospfv3,radv}/src/socket.rs`, `bfd/src/socket.rs`, `nexthop/src/socket.rs`: a mock would only test the mock; `nos-e2e` is their real test.
 
 Toolchain pins, the bump procedure, the unprivileged system test and the container workflow: [docs/architecture/development.md](docs/architecture/development.md).
 
@@ -156,7 +158,7 @@ Toolchain pins, the bump procedure, the unprivileged system test and the contain
 `tools/e2e` (`nos-e2e`, run as `cargo run -p nos-e2e -- <phase|group|all>`) stands up two independent `nos-watchdogd` containers on a shared docker network (through the `bollard` crate — no `docker` CLI, no shell script), configures each as a full BGP router peering the other purely over its REST API, and checks the logs (streamed back over the same REST API) and the real kernel for what each phase proves. Every phase, its requirements and the CI groups: [docs/e2e-phases.md](docs/e2e-phases.md) (unit-test-synced with `phases::ALL`). `base`/`drivers`/`rpl`/`ospf-suite`/`multi`/`pki-suite` are self-contained groups run as parallel CI jobs by `.github/workflows/verify-e2e.yml`; `all` runs those groups in sequence on a fresh `up` each.
 
 **How the harness drives NOS** (seeded config, REST provisioning/logs, `bollard`; details and gotchas in [docs/architecture/e2e-harness.md](docs/architecture/e2e-harness.md)): it uses the REST API for everything. Run `make docker-build` first (the harness never builds the image); `make e2e-preflight` checks the host kernel modules when `up` fails with "REST API never came up".
-- BGP sessions can sit Idle for the whole connect-retry timer after a fresh start or a config change (RFC 4271 §6.8 collision resolution), and the default is 120s. `nos-e2e` sets `connect-retry-time` to 3s on every peer-group it provisions (`nos-provision --connect-retry-time`), so "session established" waits are 60s at most; phases that change config still take a baseline first and wait for a *new* session rather than a stale log line.
+- BGP sessions can sit Idle for the whole connect-retry timer (default 120s) after a start or config change (RFC 4271 §6.8). `nos-e2e` sets `connect-retry-time` 3s on every peer-group it provisions, so "established" waits are 60s at most; phases that change config take a baseline first and wait for a *new* session.
 
 ### New features require an end-to-end Docker verification phase
 

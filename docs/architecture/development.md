@@ -46,8 +46,8 @@ The release `Dockerfile` builds on `rust:<channel>-slim-trixie` (digest-pinned, 
 Containerized test environment:
 
 ```bash
-make docker-build                        # build the nos-watchdogd/nos-configd/nos-bgpd/nos-ribd/nos-interfaced/nos-logd/nos-ospfd/nos-ospfv3d/nos-lacpd/nos-lldpd/nos-fdbd/nos-restd/nos Docker image
-docker compose up -d watchdog            # run the watchdog (which starts nos-configd + nos-bgpd + nos-ribd + nos-interfaced + nos-logd + nos-ospfd + nos-ospfv3d + nos-lacpd + nos-lldpd, a nos-fdbd per broadcast domain with a vni, and a nos-restd per pinned routing table) in a container
+make docker-build                        # build the nos-watchdogd/nos-configd/nos-bgpd/nos-ribd/nos-interfaced/nos-logd/nos-ospfd/nos-ospfv3d/nos-lacpd/nos-lldpd/nos-radvd/nos-fdbd/nos-restd/nos Docker image
+docker compose up -d watchdog            # run the watchdog (which starts nos-configd + nos-bgpd + nos-ribd + nos-interfaced + nos-logd + nos-ospfd + nos-ospfv3d + nos-lacpd + nos-lldpd + nos-radvd, a nos-fdbd per broadcast domain with a vni, and a nos-restd per pinned routing table) in a container
 docker compose run --rm cli              # interactive shell, as its own container, sharing configd's socket
 ```
 
@@ -109,7 +109,7 @@ cargo fmt --all
 
 ## Fuzzing
 
-- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `lacp_packet`, `cli_parser` (`nos` command parsing, resolution and completion over text; first byte picks the mode), `cli_format` (every `nos-cli` `format::render_*` on `Arbitrary` daemon replies and a full `Config`). Property: no panic, abort or OOM.
+- `fuzz/` (`nos-fuzz`, own workspace, so `make check`/deny/coverage/mutants never see it) holds one `cargo-fuzz` target per untrusted-bytes decoder: `bgp_codec` (flags from the first input byte, multi-frame), `ospfv3_lsa`, `ospfv3_packet`, `ospf_packet` (also `ospf::lsa`), `evpn_nlris`, `rtr_codec` (version from the first byte), `lldp_packet`, `radv_packet`, `lacp_packet`, `cli_parser` (`nos` command parsing, resolution and completion over text; first byte picks the mode), `cli_format` (every `nos-cli` `format::render_*` on `Arbitrary` daemon replies and a full `Config`). Property: no panic, abort or OOM.
 - Fuzz-only feature: `nos-proto`'s `arbitrary` feature (`Arbitrary` derives, `arbitrary_support` for `ipnet`) is enabled only by `fuzz/Cargo.toml`; `make no-arbitrary` (part of `make check`) fails if the `arbitrary` crate enters the workspace build graph. A new type a renderer takes needs `#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]` (`IpNet` fields: `arbitrary(with = crate::arbitrary_support::ip_net)`).
 - Install: `make tools` (adds `cargo-fuzz`); needs a nightly toolchain.
 - Smoke run: `make fuzz-smoke` (`FUZZ_SECS` per target, default 60; `FUZZ_TARGETS` to narrow; `FUZZ_RSS_MB` caps libFuzzer memory, default 2048 — do not use `ulimit -v`, ASan cannot start under it; the target passes `--target <rustc host>` (the CI cargo-fuzz binary is musl and otherwise builds for musl, which fails) and sets `RUSTFLAGS=--cap-lints allow` because cargo-fuzz adds `-D warnings`, which trips on nightly-only deprecations). CI runs it as `fuzz-smoke` (nightly cron or `workflow_dispatch`); a crash fails the job, feeds the `ci-red` alert and uploads `fuzz-artifacts`.

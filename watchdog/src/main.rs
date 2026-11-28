@@ -229,6 +229,21 @@ struct Args {
     #[arg(long = "acld-arg", allow_hyphen_values = true)]
     acld_flags: Vec<String>,
 
+    /// Path to the nos-radvd binary to supervise. One fixed instance, like
+    /// nos-lldpd -- see `radv/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-radvd")]
+    radvd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-radvd.
+    #[arg(long = "radvd-arg", allow_hyphen_values = true)]
+    radvd_flags: Vec<String>,
+
+    /// Unix socket nos-radvd listens on. Also served out as the resolved
+    /// address for `ServiceRef::Radv` broker queries (nothing listens until
+    /// the show/REST surface of #1585).
+    #[arg(long, default_value = "/run/nos/radv.sock")]
+    radvd_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -434,6 +449,7 @@ async fn main() -> anyhow::Result<()> {
             bfd: args.bfdd_listen_socket,
             stp: args.stpd_listen_socket,
             acl: args.acld_listen_socket,
+            radv: args.radvd_listen_socket,
         },
         pki.clone(),
     )
@@ -519,6 +535,13 @@ impl FixedSupervision<'_> {
                 Role::Acld,
                 Some(&args.acld_listen_socket),
                 args.acld_flags.clone(),
+            ),
+            (
+                "nos-radvd",
+                args.radvd_bin.clone(),
+                Role::Radvd,
+                Some(&args.radvd_listen_socket),
+                args.radvd_flags.clone(),
             ),
         ];
         fixed

@@ -22,7 +22,7 @@ ARG CARGO_FEATURES=
 # Short git revision baked into `nos_proto::version::REVISION` (`make docker-build` sets it).
 ARG NOS_BUILD_REV=unknown
 ENV NOS_BUILD_REV=$NOS_BUILD_REV
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos-sandbox-exec --bin nos --bin nos-provision --bin nos-rtr-stub --bin nos-route-stub --bin nos-radius-stub --bin nos-tacacs-stub \
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-stpd --bin nos-acld --bin nos-radvd --bin nos-bfdd --bin nos-fdbd --bin nos-restd --bin nos-sshd --bin nos-watchdogd --bin nos-sandbox-exec --bin nos --bin nos-provision --bin nos-rtr-stub --bin nos-route-stub --bin nos-radius-stub --bin nos-tacacs-stub \
     && cargo build --release -p nos-pam -p nos-nss
 
 # trixie, not bookworm: bookworm's OpenSSH 9.2 has no `PAMServiceName`; trixie ships 10.0p2,
@@ -56,6 +56,7 @@ RUN groupadd --system --gid 991 nos \
     && useradd --system --uid 10012 --gid nos --no-create-home --home-dir /nonexistent nos-bfdd \
     && useradd --system --uid 10013 --gid nos --no-create-home --home-dir /nonexistent nos-stpd \
     && useradd --system --uid 10014 --gid nos --no-create-home --home-dir /nonexistent nos-acld \
+    && useradd --system --uid 10015 --gid nos --no-create-home --home-dir /nonexistent nos-radvd \
     && mkdir -p /run/nos /var/lib/nos \
     && chown nos-wd:nos /run/nos && chmod 1770 /run/nos \
     && chown nos-wd:nos /var/lib/nos
@@ -71,6 +72,7 @@ COPY --from=builder /app/target/release/nos-lacpd      /usr/local/bin/nos-lacpd
 COPY --from=builder /app/target/release/nos-lldpd      /usr/local/bin/nos-lldpd
 COPY --from=builder /app/target/release/nos-stpd       /usr/local/bin/nos-stpd
 COPY --from=builder /app/target/release/nos-acld       /usr/local/bin/nos-acld
+COPY --from=builder /app/target/release/nos-radvd      /usr/local/bin/nos-radvd
 COPY --from=builder /app/target/release/nos-bfdd       /usr/local/bin/nos-bfdd
 COPY --from=builder /app/target/release/nos-fdbd       /usr/local/bin/nos-fdbd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
@@ -98,6 +100,8 @@ COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provis
 # CAP_NET_ADMIN, since it never touches rtnetlink (see lacp/CLAUDE.md).
 # nos-lldpd needs CAP_NET_RAW for the same reason, over a raw AF_PACKET
 # socket per LLDP-enabled interface (see lldp/CLAUDE.md).
+# nos-radvd needs CAP_NET_RAW for one raw ICMPv6 socket per advertising
+# link (see radv/CLAUDE.md).
 # nos-stpd needs CAP_NET_RAW for its ETH_P_ALL AF_PACKET BPDU socket per STP
 # port (see stp/CLAUDE.md); like nos-lacpd it never touches rtnetlink.
 # nos-acld needs CAP_NET_ADMIN for its tc filters (clsact + flower, sent with
@@ -129,6 +133,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-ospfv3d \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-lacpd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-lldpd \
+    && setcap 'cap_net_raw=ep' /usr/local/bin/nos-radvd \
     && setcap 'cap_net_raw=ep' /usr/local/bin/nos-stpd \
     && setcap 'cap_net_admin=ep' /usr/local/bin/nos-acld \
     && setcap 'cap_net_raw,cap_net_bind_service=ep' /usr/local/bin/nos-bfdd \

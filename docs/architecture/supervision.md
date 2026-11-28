@@ -21,6 +21,8 @@ Interfaces are supervised differently: unlike `nos-bgpd`/`nos-ribd`, `nos-interf
 
 `nos-lldpd` is supervised the same way — one fixed process, since LLDP is per-interface with no per-instance multiplicity: one `nos-lldpd` handles every LLDP-enabled physical interface itself, internally. It resolves only `nos-configd` (via the broker) to learn which interfaces have `lldp transmit`/`lldp receive` set and what hostname to advertise; unlike `nos-lacpd` it pushes to no other daemon. It has `CAP_NET_RAW` only. See `lldp/CLAUDE.md`.
 
+`nos-radvd` is supervised the same way: one fixed process for every link that attaches an `ra-profile`, `CAP_NET_RAW` only (uid 10015), reading config and `nos-interfaced`'s link stream like `nos-lldpd`. On a profile edit it re-advertises in place; on removal or SIGINT it sends the final lifetime-0 RAs inside the 10 s stop budget. See `radv/CLAUDE.md`.
+
 `nos-bfdd` is supervised the same way — one fixed process (`--bfdd-listen-socket`, `ServiceRef::Bfd`), since BFD sessions are shared by every client daemon and keyed by `(table, peer, ...)`, not by a config object. It resolves each session's `nos-ribd` through the broker to learn the table's VRF device and binds its sockets there; it subscribes to no config (clients send the profile in `Register`). It has `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE`. See `bfd/CLAUDE.md`.
 
 `nos-stpd` is supervised the same way — one fixed process (`--stpd-listen-socket`, `ServiceRef::Stp`), since spanning tree is bridge-wide: one core handles every STP port. It resolves `nos-configd` (ports and parameters) and `nos-interfaced` (the kernel link stream, and the port states it pushes) through the broker. It has `CAP_NET_RAW` only and never touches rtnetlink. See `stp/CLAUDE.md`.

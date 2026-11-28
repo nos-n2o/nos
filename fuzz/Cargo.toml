@@ -18,6 +18,7 @@ nos-bgp       = { path = "../bgp" }
 nos-ospf      = { path = "../ospf" }
 nos-ospfv3    = { path = "../ospfv3" }
 nos-lldp      = { path = "../lldp" }
+nos-radv      = { path = "../radv" }
 nos-lacp      = { path = "../lacp" }
 nos-cli       = { path = "../cli" }
 nos-proto     = { path = "../proto", features = ["arbitrary"] }
@@ -94,6 +95,13 @@ bench = false
 [[bin]]
 name = "cli_format"
 path = "fuzz_targets/cli_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "radv_packet"
+path = "fuzz_targets/radv_packet.rs"
 test = false
 doc = false
 bench = false

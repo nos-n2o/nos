@@ -1073,6 +1073,7 @@ dependencies = [
  "nos-rpl",
  "reedline",
  "rpassword",
+ "serde",
  "serde_json",
  "thiserror",
  "time",
@@ -1112,6 +1113,7 @@ dependencies = [
  "nos-ospf",
  "nos-ospfv3",
  "nos-proto",
+ "nos-radv",
  "reedline",
  "serde_json",
  "tokio-util",
@@ -1210,6 +1212,7 @@ version = "0.1.0"
 dependencies = [
  "ipnet",
  "socket2",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1290,6 +1293,32 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nos-radv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "nos-daemon",
+ "nos-pki",
+ "nos-proto",
+ "nos-radv-socket",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "nos-radv-socket"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "socket2",
+ "tokio",
 ]
 
 [[package]]

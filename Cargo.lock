@@ -2285,6 +2285,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-radv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "nos-daemon",
+ "nos-pki",
+ "nos-proto",
+ "nos-radv-socket",
+ "nos-test-support",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "nos-radv-socket"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "socket2",
+ "tokio",
+]
+
+[[package]]
 name = "nos-rest"
 version = "0.1.0"
 dependencies = [

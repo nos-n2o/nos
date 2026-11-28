@@ -58,6 +58,8 @@ pub enum ServiceRef {
     Stp,
     /// The single `nos-acld` instance, resolved directly like `Stp`.
     Acl,
+    /// The single `nos-radvd` instance, resolved directly like `Acl`.
+    Radv,
 }
 
 impl ServiceRef {
@@ -78,6 +80,7 @@ impl ServiceRef {
             ServiceRef::Bfd => Role::Bfdd,
             ServiceRef::Stp => Role::Stpd,
             ServiceRef::Acl => Role::Acld,
+            ServiceRef::Radv => Role::Radvd,
         }
     }
 
@@ -97,7 +100,8 @@ impl ServiceRef {
             | ServiceRef::Lldp
             | ServiceRef::Bfd
             | ServiceRef::Stp
-            | ServiceRef::Acl => "",
+            | ServiceRef::Acl
+            | ServiceRef::Radv => "",
         }
     }
 }
@@ -144,6 +148,8 @@ pub enum Role {
     Stpd,
     /// `nos-acld`.
     Acld,
+    /// `nos-radvd`.
+    Radvd,
     /// `nos-sshd`.
     Sshd,
     /// A person, authenticated by login; the certificate's name is the username.
@@ -152,7 +158,7 @@ pub enum Role {
 
 impl Role {
     /// Every role, in declaration order.
-    pub const ALL: [Role; 17] = [
+    pub const ALL: [Role; 18] = [
         Role::Watchdog,
         Role::Configd,
         Role::Logd,
@@ -168,6 +174,7 @@ impl Role {
         Role::Bfdd,
         Role::Stpd,
         Role::Acld,
+        Role::Radvd,
         Role::Sshd,
         Role::User,
     ];
@@ -190,6 +197,7 @@ impl Role {
             Role::Bfdd => "bfdd",
             Role::Stpd => "stpd",
             Role::Acld => "acld",
+            Role::Radvd => "radvd",
             Role::Sshd => "sshd",
             Role::User => "user",
         }
