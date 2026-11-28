@@ -1,6 +1,6 @@
 //! One user rule to its flower filters.
 
-use nos_proto::schema::{AclProtocol, AclRule};
+use nos_proto::schema::{AclEthertype, AclProtocol, AclRule};
 use nos_tc::{FlowerKeys, Protocol, FLAG_FRAG_IS_FIRST, FLAG_IS_FRAGMENT};
 
 use super::{Filter, IMPLICIT_ND_COOKIE};
@@ -14,15 +14,41 @@ const TCP_ACK: u16 = 0x10;
 pub(crate) const LATER_FRAGMENT: (u32, u32) =
     (FLAG_IS_FRAGMENT, FLAG_IS_FRAGMENT | FLAG_FRAG_IS_FIRST);
 
+/// A rule with an L3/L4 key: it can only match IP.
+fn ip_match(r: &AclRule) -> bool {
+    r.protocol.is_some()
+        || r.source.is_some()
+        || r.destination.is_some()
+        || r.source_port.is_some()
+        || r.destination_port.is_some()
+        || r.established
+        || r.icmp_type.is_some()
+        || r.icmp_code.is_some()
+        || r.fragments
+        || r.dscp.is_some()
+        || r.ttl.is_some()
+}
+
 /// The families a rule applies to: its prefixes' (validated to agree), else
-/// its ICMP flavour's, else both.
+/// its ICMP flavour's, else its EtherType's; a rule with only MAC and/or a
+/// non-IP EtherType is one `All` filter (#1595); no L2/L3 key at all stays
+/// both IP families, so an "any" rule never starts matching ARP.
 fn families(r: &AclRule) -> Vec<Protocol> {
     let family = |v4: bool| if v4 { Protocol::Ip } else { Protocol::Ipv6 };
-    match (r.source.or(r.destination), r.protocol) {
-        (Some(net), _) => vec![family(net.addr().is_ipv4())],
-        (None, Some(AclProtocol::Icmp)) => vec![Protocol::Ip],
-        (None, Some(AclProtocol::Icmpv6)) => vec![Protocol::Ipv6],
-        (None, _) => vec![Protocol::Ip, Protocol::Ipv6],
+    match (r.source.or(r.destination), r.protocol, r.ethertype) {
+        (Some(net), _, _) => vec![family(net.addr().is_ipv4())],
+        (None, Some(AclProtocol::Icmp), _) | (None, _, Some(AclEthertype::Ipv4)) => {
+            vec![Protocol::Ip]
+        }
+        (None, Some(AclProtocol::Icmpv6), _) | (None, _, Some(AclEthertype::Ipv6)) => {
+            vec![Protocol::Ipv6]
+        }
+        (None, _, None)
+            if ip_match(r) || (r.source_mac.is_none() && r.destination_mac.is_none()) =>
+        {
+            vec![Protocol::Ip, Protocol::Ipv6]
+        }
+        (None, _, _) => vec![Protocol::All],
     }
 }
 
@@ -49,6 +75,12 @@ pub(super) fn filters(r: &AclRule, index: u32) -> Vec<Filter> {
         flags: r.fragments.then_some(LATER_FRAGMENT),
         ip_tos: r.dscp,
         ip_ttl: r.ttl,
+        eth_src: r.source_mac.map(|m| (m.bytes(), Some(m.mask()))),
+        eth_dst: r.destination_mac.map(|m| (m.bytes(), Some(m.mask()))),
+        eth_type: r
+            .ethertype
+            .filter(|e| !matches!(e, AclEthertype::Ipv4 | AclEthertype::Ipv6))
+            .map(AclEthertype::value),
         ..Default::default()
     };
     let flags: Vec<Option<(u16, u16)>> = if r.established {
@@ -152,6 +184,43 @@ mod tests {
         assert_eq!(protocols(&icmpv6), [Protocol::Ipv6]);
         let ospf = rule(|r| r.protocol = Some(AclProtocol::Number(89)));
         assert_eq!(protocols(&ospf), [Protocol::Ip, Protocol::Ipv6]);
+    }
+
+    #[test]
+    fn mac_and_ethertype_rules_pick_their_filter_shape() {
+        use nos_proto::schema::MacMatch;
+        let mac = |s: &str| Some(s.parse::<MacMatch>().unwrap());
+        // MAC only: one `All` filter with the masked address.
+        let m = rule(|r| r.source_mac = mac("aa:bb:cc:00:00:00/24"));
+        let f = filters(&m, 0);
+        assert_eq!(protocols(&m), [Protocol::All]);
+        assert_eq!(
+            f[0].keys.eth_src,
+            Some((
+                [0xaa, 0xbb, 0xcc, 0, 0, 0],
+                Some([0xff, 0xff, 0xff, 0, 0, 0])
+            ))
+        );
+        // A non-IP EtherType: `All` plus the raw key.
+        let l = rule(|r| r.ethertype = Some(AclEthertype::Lldp));
+        assert_eq!(protocols(&l), [Protocol::All]);
+        assert_eq!(filters(&l, 0)[0].keys.eth_type, Some(0x88cc));
+        // IP EtherType: the family filter, no raw key (the protocol sends it).
+        let v4 = rule(|r| {
+            r.ethertype = Some(AclEthertype::Ipv4);
+            r.source = Some("10.0.0.0/8".parse().unwrap());
+        });
+        assert_eq!(protocols(&v4), [Protocol::Ip]);
+        assert_eq!(filters(&v4, 0)[0].keys.eth_type, None);
+        let v6 = rule(|r| r.ethertype = Some(AclEthertype::Ipv6));
+        assert_eq!(protocols(&v6), [Protocol::Ipv6]);
+        // MAC with an IP key keeps the families; an "any" rule stays IP-only.
+        let both = rule(|r| {
+            r.destination_mac = mac("ff:ff:ff:ff:ff:ff");
+            r.dscp = Some(1);
+        });
+        assert_eq!(protocols(&both), [Protocol::Ip, Protocol::Ipv6]);
+        assert_eq!(protocols(&rule(|_| {})), [Protocol::Ip, Protocol::Ipv6]);
     }
 
     #[test]

@@ -1055,10 +1055,7 @@ fn eth_src_and_ethertype_under_protocol_all_read_back() {
         vec![Action::new(ActionKind::Gact(Verdict::Shot))],
     );
     let shown = show("n1", "ingress");
-    assert!(
-        shown.contains("src_mac aa:bb:cc:00:00:00/24"),
-        "{shown}"
-    );
+    assert!(shown.contains("src_mac aa:bb:cc:00:00:00/24"), "{shown}");
     assert!(shown.contains("eth_type 88cc"), "{shown}");
 }
 

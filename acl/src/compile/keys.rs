@@ -7,7 +7,31 @@
 
 use std::net::IpAddr;
 
+use nos_tc::Protocol;
+
 use super::Filter;
+
+/// The EtherType a filter matches: its family's, or its raw key under `All`;
+/// `None` is "any" (an `All` filter with no EtherType key).
+fn ethertype(f: &Filter) -> Option<(u128, u128)> {
+    match f.protocol {
+        Protocol::Ip => Some(0x0800),
+        Protocol::Ipv6 => Some(0x86dd),
+        _ => f.keys.eth_type.map(u128::from),
+    }
+    .map(|t| (t, t))
+}
+
+/// A MAC and its optional mask (`None`: exact) as an inclusive range.
+fn mac_span((mac, mask): ([u8; 6], Option<[u8; 6]>)) -> (u128, u128) {
+    let n = |b: [u8; 6]| {
+        u128::from(u64::from_be_bytes([
+            0, 0, b[0], b[1], b[2], b[3], b[4], b[5],
+        ]))
+    };
+    let m = mask.map_or(0xffff_ffff_ffff, n);
+    (n(mac) & m, (n(mac) & m) | (!m & 0xffff_ffff_ffff))
+}
 
 /// An address prefix as an inclusive `[lo, hi]` range.
 fn span((addr, len): (IpAddr, u8)) -> (u128, u128) {
@@ -43,13 +67,16 @@ fn point<T: Copy>(x: Option<T>) -> Option<(T, T)> {
 }
 
 /// Every dimension as a range pair, `(a, b)`.
-type Dims = [(Option<(u128, u128)>, Option<(u128, u128)>); 9];
+type Dims = [(Option<(u128, u128)>, Option<(u128, u128)>); 12];
 
 fn dims(a: &Filter, b: &Filter) -> Dims {
     let (ka, kb) = (&a.keys, &b.keys);
     let wide = |p: Option<(u16, u16)>| p.map(|(lo, hi)| (u128::from(lo), u128::from(hi)));
     let byte = |p: Option<u8>| point(p.map(u128::from));
     [
+        (ethertype(a), ethertype(b)),
+        (ka.eth_src.map(mac_span), kb.eth_src.map(mac_span)),
+        (ka.eth_dst.map(mac_span), kb.eth_dst.map(mac_span)),
         (byte(ka.ip_proto), byte(kb.ip_proto)),
         (ka.src_ip.map(span), kb.src_ip.map(span)),
         (ka.dst_ip.map(span), kb.dst_ip.map(span)),
@@ -65,8 +92,7 @@ fn dims(a: &Filter, b: &Filter) -> Dims {
 /// Some packet matches both filters. Over-approximating is safe (only costs
 /// levels); under-approximating would reorder rules.
 pub(super) fn overlap(a: &Filter, b: &Filter) -> bool {
-    a.protocol == b.protocol
-        && dims(a, b).iter().all(|&(x, y)| meet(x, y))
+    dims(a, b).iter().all(|&(x, y)| meet(x, y))
         && match (a.keys.tcp_flags, b.keys.tcp_flags) {
             (Some((av, am)), Some((bv, bm))) => (av ^ bv) & am & bm == 0,
             _ => true,
@@ -80,8 +106,7 @@ pub(super) fn overlap(a: &Filter, b: &Filter) -> bool {
 /// Every packet `b` matches, `a` matches too. Under-approximating is safe
 /// (a shadowed rule is just kept).
 pub(super) fn contains(a: &Filter, b: &Filter) -> bool {
-    a.protocol == b.protocol
-        && dims(a, b).iter().all(|&(x, y)| holds(x, y))
+    dims(a, b).iter().all(|&(x, y)| holds(x, y))
         && match (a.keys.tcp_flags, b.keys.tcp_flags) {
             (None, _) => true,
             (Some(_), None) => false,
@@ -240,5 +265,41 @@ mod tests {
             (false, false, false)
         );
         assert_eq!(rel(&t(None, None), &t(Some(8), None)), (true, true, false));
+    }
+
+    #[test]
+    fn macs_and_ethertypes_nest_or_split() {
+        let src = |m: [u8; 6], mask: Option<[u8; 6]>| {
+            f(
+                Protocol::All,
+                FlowerKeys {
+                    eth_src: Some((m, mask)),
+                    ..Default::default()
+                },
+            )
+        };
+        let oui = src(
+            [0xaa, 0xbb, 0xcc, 0, 0, 0],
+            Some([0xff, 0xff, 0xff, 0, 0, 0]),
+        );
+        let host = src([0xaa, 0xbb, 0xcc, 0, 0, 1], None);
+        let other = src([0xaa, 0xbb, 0xdd, 0, 0, 1], None);
+        assert_eq!(rel(&oui, &host), (true, true, false));
+        assert_eq!(rel(&oui, &other), (false, false, false));
+        let et = |t| {
+            f(
+                Protocol::All,
+                FlowerKeys {
+                    eth_type: Some(t),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(rel(&et(0x88cc), &et(0x0806)), (false, false, false));
+        // An IP family filter and a non-IP type never meet; a MAC-only `All`
+        // filter meets the family but does not contain it the other way round.
+        assert_eq!(rel(&et(0x88cc), &v4(|_| {})), (false, false, false));
+        assert_eq!(rel(&host, &v4(|_| {})), (true, false, false));
+        assert_eq!(rel(&et(0x0806), &host), (true, false, false));
     }
 }

@@ -522,8 +522,8 @@ mod tests {
             [
                 (1, Protocol::Ip, act(Verdict::Ok, 0)),
                 (2, Protocol::Ipv6, act(Verdict::Ok, 0)),
-                (3, Protocol::Ip, act(Verdict::Shot, DEFAULT_COOKIE)),
-                (4, Protocol::Ipv6, act(Verdict::Shot, DEFAULT_COOKIE)),
+                (4, Protocol::Ip, act(Verdict::Shot, DEFAULT_COOKIE)),
+                (5, Protocol::Ipv6, act(Verdict::Shot, DEFAULT_COOKIE)),
             ]
         );
     }
