@@ -169,6 +169,10 @@ impl fmt::Display for BfdDiag {
 /// One session, for `show bfd sessions`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat wire view: each bool is its own column"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, View)]
 pub struct BfdSessionView {
     /// Session identity.
