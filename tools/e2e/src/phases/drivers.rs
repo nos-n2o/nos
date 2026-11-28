@@ -2166,6 +2166,7 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&custom, base_custom, 60).await?;
 
     lldp_org_tlvs(w).await?;
+    lldp_med(w).await?;
 
     // 802.1AB counters over REST: both sides sent and received real frames,
     // none of them bad, and nos sends only TLVs nos recognizes.
@@ -2364,7 +2365,7 @@ async fn lldp_org_tlvs(w: &World) -> anyhow::Result<()> {
     };
     let (a, b) = (w.a()?, w.b()?);
     let learned = |iface: &str, extra: &str| {
-        format!("lldp neighbor learned interface={iface} .* system_name=router-a .*{extra}$")
+        format!("lldp neighbor learned interface={iface} .* system_name=router-a .*{extra} med=-$")
     };
     // A switching-profile port with a jumbo MTU: the Bridge bit, Maximum
     // Frame Size (MTU + 18) and one VLAN Name per dot1q member. The link
@@ -2434,6 +2435,61 @@ async fn lldp_org_tlvs(w: &World) -> anyhow::Result<()> {
     b.provision(&host("router-b", &["--no-lldp-receive-interface", "eth2"]))
         .await?;
     b.wait_new(&plain, base, 60).await
+}
+
+/// LLDP-MED transmit (#1572): router-a's `eth1` advertises a profile with
+/// `advertise-always` and router-b renders it; without `advertise-always` the
+/// gate stays closed, because router-b has no MED profile and so never sends
+/// MED Capabilities. Every change restarts router-a's link, so router-b
+/// relearns (a `New` neighbor is the only one logged as `learned`).
+async fn lldp_med(w: &World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let learned = "lldp neighbor learned interface=eth1 .* system_name=router-a ";
+    let med = format!(
+        "{learned}.*med=.*network-connectivity.*voice:vlan=100t/p5/dscp46.*elin:4155550100.*power:pse/primary/low/15.4W"
+    );
+    let none = format!("{learned}.* med=-$");
+    let host = |extra: &[&str]| {
+        let mut f = vec!["--hostname", "router-a", "--link-interface", "eth1"];
+        f.extend_from_slice(extra);
+        strings(&f)
+    };
+    let policy = [
+        "--lldp-med-policy",
+        "voice:100:5:46:tagged",
+        "--lldp-med-poe",
+        "primary:low:154",
+        "--lldp-med-elin",
+        "4155550100",
+    ];
+    let with = |name: &'static str, always: bool| {
+        let mut f = vec!["--lldp-med-profile", name];
+        f.extend_from_slice(&policy);
+        if always {
+            f.push("--lldp-med-advertise-always");
+        }
+        f
+    };
+
+    log("lldp-med: advertise-always profile on router-a's eth1");
+    let base = b.count(&med);
+    a.provision(&host(&with("e2e-always", true))).await?;
+    b.wait_new(&med, base, 60).await?;
+
+    log("lldp-med: detaching the profile, router-b relearns without MED");
+    let base = b.count(&none);
+    a.provision(&host(&["--no-lldp-med-profile"])).await?;
+    b.wait_new(&none, base, 60).await?;
+
+    log("lldp-med: gated profile, router-b is not MED so nothing is sent");
+    let (base_med, base_none) = (b.count(&med), b.count(&none));
+    a.provision(&host(&with("e2e-gated", false))).await?;
+    b.wait_new(&none, base_none, 60).await?;
+    b.assert_quiet(&med, base_med, 10).await?;
+
+    let base = b.count(&none);
+    a.provision(&host(&["--no-lldp-med-profile"])).await?;
+    b.wait_new(&none, base, 60).await
 }
 
 /// `eth1`'s row of `GET /v1/lldp/statistics`.

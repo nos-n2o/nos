@@ -1265,6 +1265,10 @@ pub struct Args {
     #[arg(long)]
     pub lldp_med_profile: Option<String>,
 
+    /// Detach the LLDP-MED profile and the location from the interface.
+    #[arg(long)]
+    pub no_lldp_med_profile: bool,
+
     /// A network policy of the profile: `<app>:<vlan>:<priority>:<dscp>[:tagged]`,
     /// `app` in kebab case (`voice`), an empty `vlan` for none. Repeatable.
     #[arg(long)]
@@ -7612,6 +7616,26 @@ mod tests {
         )));
         args.lldp_med_policy = vec!["voice:1".into()];
         assert!(build_ops(&args).is_err());
+    }
+
+    #[test]
+    fn no_lldp_med_profile_deletes_location_then_profile_reference() {
+        let args = parse(&["--no-lldp-med-profile", "--link-interface", "eth1"]);
+        let paths = bfd_paths(&args);
+        let leaves: Vec<_> = paths
+            .iter()
+            .filter(|(p, v)| p.get(1).is_some_and(|n| n == "eth1") && v.is_none())
+            .map(|(p, _)| p[2].as_str())
+            .collect();
+        assert_eq!(leaves, ["lldp-location", "lldp-med-profile"]);
+        let mut cfg = nos_proto::Config::default();
+        cfg.interfaces.push(nos_proto::Interface {
+            name: "eth1".into(),
+            lldp_med_profile: Some("p".into()),
+            ..Default::default()
+        });
+        lldp_med::apply(&args, &mut cfg);
+        assert_eq!(cfg.interfaces[0].lldp_med_profile, None);
     }
 
     #[test]
