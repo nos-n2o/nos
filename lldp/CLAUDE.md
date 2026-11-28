@@ -19,11 +19,11 @@ A change to any of these restarts the affected links (`LinkConfig` equality): a 
 
 ## Decode robustness
 
-`packet::decode` is the one place untrusted bytes are parsed. It bounds-checks every TLV length, requires the first three TLVs to be Chassis ID, Port ID and TTL in order (and rejects a repeat of them), skips unknown TLVs, ignores anything after the End TLV (Ethernet padding), and never panics. System Capabilities follows lldpd (`lldp.c` `LLDP_TLV_SYSTEM_CAP`): under 4 bytes rejects the LLDPDU, extra bytes are ignored, a repeat overwrites (last wins). The Management Address TLV is optional and untrusted, so a truncated, internally inconsistent, or non-IP one is *skipped* rather than rejecting the whole LLDPDU (which would hide the neighbor), and at most `MAX_MANAGEMENT_ADDRESSES` (4) are kept per LLDPDU since every one is stored and printed. Free-text TLVs (Port Description, System Name/Description) have control characters replaced at decode time (`packet::lossy`), since they are printed into `nos-cli` output and logs and a neighbor is untrusted — an ANSI escape sequence or carriage return must not reach an operator's terminal; Chassis/Port IDs go through the same check in `text_or_hex`. Org-specific TLVs (`packet::decode_org`) follow the Management Address rule: a known one (802.1 PVID/VLAN Name/Link Aggregation, 802.3 MAC/PHY/Max Frame Size, and the deprecated 802.3 Link Aggregation, `00-12-0F`/3, decoded into the same field) that is the wrong length or a repeat of a single-instance TLV is skipped and counted as `tlvs_discarded` (the first copy wins), VLAN Names are capped at `MAX_VLAN_NAMES` (32) and go through `lossy`; an unknown OUI/subtype is `tlvs_unrecognized`. Each rejection path has a unit test.
+`packet::decode` is the one place untrusted bytes are parsed and never panics; the rules (TLV bounds, order, skipped vs rejected, caps, `lossy`) are in [internals](../docs/internals/lldp.md#decode-robustness).
 
 ## Explicitly deferred (documented, not silently missing)
 
-- **LLDP-MED / DCBX / other organizationally-specific TLVs** (received ones are skipped, never stored). NOS has no voice VLAN, PoE, location or QoS/PFC/ETS feature for them to describe, so nothing could honestly be advertised.
+- **DCBX and other organizationally-specific TLVs** (received ones are skipped, never stored). LLDP-MED is config-only until #1572: the schema is in [internals](../docs/internals/lldp.md#lldp-med-configuration).
 - **Port VLAN ID and 802.3 MAC/PHY transmit** — decoded only, see "What is sent" in [internals](../docs/internals/lldp.md).
 - **Several destination groups per interface** — one group each, chosen in config.
 

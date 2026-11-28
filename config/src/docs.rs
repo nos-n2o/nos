@@ -2420,6 +2420,122 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              one page of memory) or be `length` (a row count); `show bgp routes` presents the \
              rows of every instance as one stream.",
         ),
+        Topic::LldpMedProfile => (
+            "Create or delete an LLDP-MED profile.",
+            "A named set of LLDP-MED (ANSI/TIA-1057) settings: network policies, PoE values and `advertise-always`. An interface attaches one with `lldp-med-profile <name>`. `edit` creates it empty; `delete` removes it, and the commit is refused while an interface still references it. Nothing reads it yet, so attaching one has no effect on traffic.",
+        ),
+        Topic::LldpMedProfileNetworkPolicy => (
+            "Add or remove a network policy.",
+            "Tells the neighbor which VLAN, 802.1p priority and DSCP to use for one application type: `voice`, `voice-signaling`, `guest-voice`, `guest-voice-signaling`, `softphone-voice`, `video-conferencing`, `streaming-video` or `video-signaling`. At most one policy per type, at most 8 per profile.",
+        ),
+        Topic::LldpMedPolicyVlan => (
+            "Set the policy's VLAN id.",
+            "From 0 to 4094. 0 means priority-tagged frames only. Unset means no VLAN (untagged).",
+        ),
+        Topic::LldpMedPolicyTagged => (
+            "Mark the policy's frames as 802.1Q tagged.",
+            "On or off, default off. Needs a `vlan`; the commit is refused otherwise.",
+        ),
+        Topic::LldpMedPolicyPriority => (
+            "Set the 802.1p priority.",
+            "From 0 to 7, default 0.",
+        ),
+        Topic::LldpMedPolicyDscp => (
+            "Set the DSCP value.",
+            "From 0 to 63, default 0.",
+        ),
+        Topic::LldpMedPolicyUnknown => (
+            "Flag the policy as required but unknown.",
+            "On or off, default off. The TIA-1057 `U` flag: the port needs this application type but has no policy for it, so the neighbor should ignore the other fields.",
+        ),
+        Topic::LldpMedProfilePoe => (
+            "Set the power-via-MDI values to advertise.",
+            "The values are advertised as configured and never measured: NOS has no PoE hardware. Unset sends no power TLV.",
+        ),
+        Topic::LldpMedPoeSource => (
+            "Set the power source.",
+            "`primary` (default) or `backup`.",
+        ),
+        Topic::LldpMedPoePriority => (
+            "Set the power priority.",
+            "`critical`, `high` or `low` (default).",
+        ),
+        Topic::LldpMedPoePower => (
+            "Set the advertised power.",
+            "In units of 0.1 W, from 0 to 1023. 154 means 15.4 W.",
+        ),
+        Topic::LldpMedProfileAdvertiseAlways => (
+            "Send the LLDP-MED TLVs without waiting for a neighbor.",
+            "On or off, default off. By default a port stays silent until a neighbor sends LLDP-MED capabilities. On makes it send first, which a NOS-to-NOS link needs.",
+        ),
+        Topic::InterfaceLldpMedProfile => (
+            "Attach an LLDP-MED profile.",
+            "The name of an `lldp-med-profile`. The commit is refused when it does not exist, and on a loopback. Nothing reads it yet.",
+        ),
+        Topic::InterfaceLldpLocation => (
+            "Set this port's location.",
+            "Where the port is, as an emergency number (`elin`), a civic address and/or coordinates. It is per port because a profile is shared by many ports. The commit is refused without an `lldp-med-profile` on the same interface, and on a loopback.",
+        ),
+        Topic::LldpLocationElin => (
+            "Set the Emergency Location Identification Number.",
+            "10 to 25 ASCII digits.",
+        ),
+        Topic::LldpLocationCivic => (
+            "Set the civic address.",
+            "An RFC 4776 civic address: `what`, `country` and a list of `element`s. It encodes to at most 250 bytes.",
+        ),
+        Topic::LldpLocationCoordinate => (
+            "Set the coordinates.",
+            "An RFC 3825 location: latitude, longitude, optional altitude and the datum. Values are decimal strings.",
+        ),
+        Topic::LldpCivicWhat => (
+            "Set which location the address describes.",
+            "0: the DHCP server, 1: the network element, 2: the client. Default 0.",
+        ),
+        Topic::LldpCivicCountry => (
+            "Set the country code.",
+            "Two uppercase letters (ISO 3166), for example `FR`.",
+        ),
+        Topic::LldpCivicElementList => (
+            "Add or remove a civic element.",
+            "Keyed by the RFC 4776 CAtype (for example 3 city, 6 street, 19 building number). At most 16 elements.",
+        ),
+        Topic::LldpCivicElementValue => (
+            "Set the element's text.",
+            "Not empty. The whole address encodes to at most 250 bytes.",
+        ),
+        Topic::LldpCoordinateLatitude => (
+            "Set the latitude.",
+            "A decimal number of degrees from -90 to 90, for example `48.8566`.",
+        ),
+        Topic::LldpCoordinateLatitudeResolution => (
+            "Set the latitude resolution.",
+            "The number of valid bits, from 0 to 34, default 34. 0 means unknown.",
+        ),
+        Topic::LldpCoordinateLongitude => (
+            "Set the longitude.",
+            "A decimal number of degrees from -180 to 180, for example `2.3522`.",
+        ),
+        Topic::LldpCoordinateLongitudeResolution => (
+            "Set the longitude resolution.",
+            "The number of valid bits, from 0 to 34, default 34. 0 means unknown.",
+        ),
+        Topic::LldpCoordinateAltitude => (
+            "Set the altitude.",
+            "A decimal number in `altitude-unit`. Unset sends no altitude.",
+        ),
+        Topic::LldpCoordinateAltitudeUnit => (
+            "Set the altitude unit.",
+            "`meters` (default) or `floors`.",
+        ),
+        Topic::LldpCoordinateAltitudeResolution => (
+            "Set the altitude resolution.",
+            "The number of valid bits, from 0 to 30, default 0 (unknown).",
+        ),
+        Topic::LldpCoordinateDatum => (
+            "Set the geodetic datum.",
+            "`wgs84` (default), `nad83-navd88` or `nad83-mllw`.",
+        ),
     };
     CommandDoc {
         topic,

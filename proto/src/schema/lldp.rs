@@ -191,6 +191,326 @@ impl LldpDestination {
     }
 }
 
+/// Most civic-address elements one location carries.
+pub const CIVIC_ELEMENTS_MAX: usize = 16;
+/// Largest encoded civic address (TIA-1057 LCI length limit, bytes).
+pub const CIVIC_BYTES_MAX: usize = 250;
+
+/// A civic-address element (RFC 4776 `CAtype` and its value).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct LldpCivicElement {
+    #[cli(key)]
+    /// RFC 4776 `CAtype` (0..=255); the key, so at most one element per type.
+    pub ca_type: u8,
+    #[serde(default)]
+    #[cli(topic = LldpCivicElementValue)]
+    /// The element's text (UTF-8), not empty.
+    pub value: String,
+}
+
+/// A civic address (RFC 4776 layout).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct LldpCivicAddress {
+    #[serde(default)]
+    #[cli(topic = LldpCivicWhat)]
+    /// Which location the address describes: 0 DHCP server, 1 network element, 2 client.
+    pub what: u8,
+    #[serde(default)]
+    #[cli(topic = LldpCivicCountry)]
+    /// Two uppercase ASCII letters (ISO 3166).
+    pub country: String,
+    #[serde(default)]
+    #[cli(topic = LldpCivicElementList, words = "element")]
+    /// Address elements, at most 16, encoded in at most 250 bytes.
+    pub elements: Vec<LldpCivicElement>,
+}
+
+/// Geodetic datum (RFC 3825).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum LldpDatum {
+    /// WGS 84.
+    #[default]
+    Wgs84,
+    /// NAD83 / NAVD88.
+    Nad83Navd88,
+    /// NAD83 / MLLW.
+    Nad83Mllw,
+}
+
+/// Unit of an altitude (RFC 3825).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum LldpAltitudeUnit {
+    #[default]
+    /// Meters.
+    Meters,
+    /// Building floors.
+    Floors,
+}
+
+fn resolution_default() -> u8 {
+    34
+}
+
+/// A coordinate location (RFC 3825 layout). Degrees are decimal strings so the
+/// schema stays `Eq` and round-trips exactly; the 25.9 fixed-point encoding is
+/// the daemon's job.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct LldpCoordinate {
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateLatitude)]
+    /// Latitude in decimal degrees, -90 to 90.
+    pub latitude: String,
+    #[serde(default = "resolution_default")]
+    #[cli(topic = LldpCoordinateLatitudeResolution)]
+    /// Valid bits of the latitude, 0..=34 (0 means unknown).
+    pub latitude_resolution: u8,
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateLongitude)]
+    /// Longitude in decimal degrees, -180 to 180.
+    pub longitude: String,
+    #[serde(default = "resolution_default")]
+    #[cli(topic = LldpCoordinateLongitudeResolution)]
+    /// Valid bits of the longitude, 0..=34 (0 means unknown).
+    pub longitude_resolution: u8,
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateAltitude)]
+    /// Altitude as a decimal number, in `altitude-unit`; `None`: not advertised.
+    pub altitude: Option<String>,
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateAltitudeUnit)]
+    /// Unit of the altitude.
+    pub altitude_unit: LldpAltitudeUnit,
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateAltitudeResolution)]
+    /// Valid bits of the altitude, 0..=30 (0 means unknown).
+    pub altitude_resolution: u8,
+    #[serde(default)]
+    #[cli(topic = LldpCoordinateDatum)]
+    /// Geodetic datum.
+    pub datum: LldpDatum,
+}
+
+impl Default for LldpCoordinate {
+    fn default() -> Self {
+        Self {
+            latitude: String::new(),
+            latitude_resolution: resolution_default(),
+            longitude: String::new(),
+            longitude_resolution: resolution_default(),
+            altitude: None,
+            altitude_unit: LldpAltitudeUnit::default(),
+            altitude_resolution: 0,
+            datum: LldpDatum::default(),
+        }
+    }
+}
+
+/// A port's location (LLDP-MED location identification): any of the three
+/// formats may be set. `civic` and `coordinate` are plain structs, not
+/// `Option`s, so the CLI can address their fields one by one; an element equal
+/// to its `Default` is "not set" (see `is_empty`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct LldpLocation {
+    #[serde(default)]
+    #[cli(topic = LldpLocationElin)]
+    /// Emergency Location Identification Number: 10 to 25 ASCII digits.
+    pub elin: Option<String>,
+    #[serde(default)]
+    #[cli(topic = LldpLocationCivic)]
+    /// Civic address; the default (no country, no elements) means none.
+    pub civic: LldpCivicAddress,
+    #[serde(default)]
+    #[cli(topic = LldpLocationCoordinate)]
+    /// Coordinates; the default (no latitude, no longitude) means none.
+    pub coordinate: LldpCoordinate,
+}
+
+fn decimal_in(s: &str, what: &str, limit: f64) -> Result<(), String> {
+    // `f64::from_str` also takes "inf", "nan" and "1e3": allow plain decimals only.
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.'))
+        && s.chars().any(|c| c.is_ascii_digit());
+    match s.parse::<f64>() {
+        Ok(v) if plain && v.is_finite() && v.abs() <= limit => Ok(()),
+        _ => Err(format!("{what} must be a decimal number within ±{limit}")),
+    }
+}
+
+impl LldpLocation {
+    /// Commit-time validation (`Interface.lldp_location`'s `garde` custom check).
+    pub fn check(&self) -> Result<(), String> {
+        if let Some(e) = &self.elin
+            && !((10..=25).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err("elin must be 10 to 25 ASCII digits".into());
+        }
+        if self.civic != LldpCivicAddress::default() {
+            self.civic.check()?;
+        }
+        if self.coordinate != LldpCoordinate::default() {
+            self.coordinate.check()?;
+        }
+        Ok(())
+    }
+
+    /// Nothing is set: no ELIN, civic address or coordinates.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl LldpCivicAddress {
+    fn check(&self) -> Result<(), String> {
+        if self.what > 2 {
+            return Err("civic what must be 0..=2".into());
+        }
+        if self.country.len() != 2 || !self.country.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err("civic country must be two uppercase ASCII letters".into());
+        }
+        if self.elements.len() > CIVIC_ELEMENTS_MAX {
+            return Err(format!("at most {CIVIC_ELEMENTS_MAX} civic elements"));
+        }
+        let mut size = 3;
+        for (i, e) in self.elements.iter().enumerate() {
+            if self.elements[..i].iter().any(|o| o.ca_type == e.ca_type) {
+                return Err(format!("civic element {} is listed twice", e.ca_type));
+            }
+            if e.value.is_empty() {
+                return Err(format!("civic element {} has an empty value", e.ca_type));
+            }
+            size += 2 + e.value.len();
+        }
+        if size > CIVIC_BYTES_MAX {
+            return Err(format!(
+                "civic address encodes to {size} bytes, at most {CIVIC_BYTES_MAX}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl LldpCoordinate {
+    fn check(&self) -> Result<(), String> {
+        decimal_in(&self.latitude, "latitude", 90.0)?;
+        decimal_in(&self.longitude, "longitude", 180.0)?;
+        if self.latitude_resolution > 34 || self.longitude_resolution > 34 {
+            return Err("latitude/longitude resolution must be 0..=34".into());
+        }
+        if let Some(a) = &self.altitude {
+            // 22 bits of integer part in RFC 3825.
+            decimal_in(a, "altitude", 2_097_151.0)?;
+        }
+        if self.altitude_resolution > 30 {
+            return Err("altitude resolution must be 0..=30".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    fn civic(elements: &[(u8, &str)]) -> LldpLocation {
+        LldpLocation {
+            civic: LldpCivicAddress {
+                country: "FR".into(),
+                elements: elements
+                    .iter()
+                    .map(|(t, v)| LldpCivicElement {
+                        ca_type: *t,
+                        value: (*v).into(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn coord(lat: &str, long: &str) -> LldpLocation {
+        LldpLocation {
+            coordinate: LldpCoordinate {
+                latitude: lat.into(),
+                longitude: long.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn elin_is_10_to_25_digits() {
+        let elin = |s: &str| LldpLocation {
+            elin: Some(s.into()),
+            ..Default::default()
+        };
+        assert!(elin("1234567890").check().is_ok());
+        assert!(elin(&"1".repeat(25)).check().is_ok());
+        assert!(elin("123456789").check().is_err());
+        assert!(elin(&"1".repeat(26)).check().is_err());
+        assert!(elin("12345abcde").check().is_err());
+        assert!(LldpLocation::default().check().is_ok());
+    }
+
+    #[test]
+    fn civic_rules() {
+        assert!(civic(&[(3, "Paris"), (6, "Rue X")]).check().is_ok());
+        let many: Vec<(u8, &str)> = (0..17).map(|i| (i, "x")).collect();
+        assert!(civic(&many).check().is_err());
+        assert!(civic(&[(3, "a"), (3, "b")]).check().is_err());
+        assert!(civic(&[(3, "")]).check().is_err());
+        // 3 + 2 + 245 = 250 fits, one more byte does not.
+        let fit = "x".repeat(245);
+        assert!(civic(&[(3, &fit)]).check().is_ok());
+        assert!(civic(&[(3, &format!("{fit}x"))]).check().is_err());
+        let mut bad = civic(&[]);
+        bad.civic.country = "fr".into();
+        assert!(bad.check().is_err());
+        bad.civic.country = "FR".into();
+        bad.civic.what = 3;
+        assert!(bad.check().is_err());
+    }
+
+    #[test]
+    fn coordinate_rules() {
+        assert!(coord("48.8566", "-2.35").check().is_ok());
+        assert!(coord("90", "180").check().is_ok());
+        assert!(coord("90.1", "0").check().is_err());
+        assert!(coord("0", "-180.5").check().is_err());
+        assert!(coord("nan", "0").check().is_err());
+        assert!(coord("inf", "0").check().is_err());
+        assert!(coord("1e1", "0").check().is_err());
+        assert!(coord("", "0").check().is_err());
+        let mut l = coord("1", "1");
+        let c = &mut l.coordinate;
+        c.latitude_resolution = 35;
+        assert!(l.check().is_err());
+        let c = &mut l.coordinate;
+        c.latitude_resolution = 34;
+        c.altitude = Some("12.5".into());
+        c.altitude_resolution = 31;
+        assert!(l.check().is_err());
+        l.coordinate.altitude_resolution = 30;
+        assert!(l.check().is_ok());
+        l.coordinate.altitude = Some("x".into());
+        assert!(l.check().is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

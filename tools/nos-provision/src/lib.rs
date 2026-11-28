@@ -14,6 +14,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 mod acl;
+mod lldp_med;
 pub use acl::{any as acl_flags, apply_acl};
 
 use anyhow::{bail, Context};
@@ -23,12 +24,13 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use nos_proto::{
     AddressFamily, AdminOp, BfdProfileOp, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp,
     BgpPeerOp, BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination,
-    LldpOp, LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm,
-    OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
-    PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
-    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
-    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp,
-    SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp, VlanTag,
+    LldpMedProfileOp, LldpOp, LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType,
+    OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp,
+    Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode, PortAggregateOp,
+    PortAggregateSubinterfaceOp, Redistribute, RedistributeSource, RedistributeTarget,
+    RoutingTableEvpn, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
+    StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, SyslogFacility, SyslogTransport, UserOp,
+    VlanTag,
 };
 
 /// Clap-facing mirror of the `spanning-tree mode` values the e2e lab uses.
@@ -1266,6 +1268,36 @@ pub struct Args {
     #[arg(long)]
     pub stp_profile_detach: bool,
 
+    /// Creates this `lldp-med-profile` and attaches it to `--interface` (#1570).
+    /// Any other `--lldp-med-*` flag implies one (named `e2e-med` if unset).
+    #[arg(long)]
+    pub lldp_med_profile: Option<String>,
+
+    /// A network policy of the profile: `<app>:<vlan>:<priority>:<dscp>[:tagged]`,
+    /// `app` in kebab case (`voice`), an empty `vlan` for none. Repeatable.
+    #[arg(long)]
+    pub lldp_med_policy: Vec<String>,
+
+    /// The profile's `PoE` values: `<primary|backup>:<critical|high|low>:<tenth-watts>`.
+    #[arg(long)]
+    pub lldp_med_poe: Option<String>,
+
+    /// Set `advertise-always` on the profile.
+    #[arg(long)]
+    pub lldp_med_advertise_always: bool,
+
+    /// `--interface`'s location ELIN (10 to 25 digits).
+    #[arg(long)]
+    pub lldp_med_elin: Option<String>,
+
+    /// `--interface`'s civic address: `<country>:<ca>=<value>,<ca>=<value>`.
+    #[arg(long)]
+    pub lldp_med_civic: Option<String>,
+
+    /// `--interface`'s coordinates: `<lat>:<long>[:<altitude-meters>]`.
+    #[arg(long)]
+    pub lldp_med_coordinate: Option<String>,
+
     /// `--peer-group`'s hold time in seconds (`BgpPeerGroupOp::SetHoldTime`).
     #[arg(long)]
     pub hold_time: Option<u16>,
@@ -1370,6 +1402,11 @@ pub struct Args {
     /// (`InterfaceOp::SetLacpFallback`).
     #[arg(long)]
     pub lacp_fallback: bool,
+
+    /// If set (requires `--port-aggregate`), disables LACP fallback on every
+    /// member (`InterfaceOp::SetLacpFallback`, `enabled: false`).
+    #[arg(long)]
+    pub no_lacp_fallback: bool,
 
     /// If set (requires `--port-aggregate`), the LACP fallback timeout in
     /// seconds of every member (`InterfaceOp::SetLacpFallbackTimeout`).
@@ -2561,6 +2598,7 @@ fn static_route_field_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
 /// through the generic path edit after the ops.
 pub fn bfd_paths(args: &Args) -> Vec<(Vec<String>, Option<String>)> {
     let mut v = stp_paths(args);
+    v.extend(lldp_med::paths(args));
     if args.bfd_bgp || args.no_bfd_bgp {
         v.push((
             vec![
@@ -2990,6 +3028,7 @@ fn apply_static_route_fields(args: &Args, config: &mut nos_proto::Config) {
 /// one in place instead of sending path edits).
 pub fn apply_bfd(args: &Args, config: &mut nos_proto::Config) {
     apply_stp(args, config);
+    lldp_med::apply(args, config);
     apply_acl(args, config);
     for i in config
         .bgp_instances
@@ -3131,6 +3170,7 @@ fn segment_routing(
 )]
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     acl::check(args)?;
+    lldp_med::check(args)?;
     let link = args.link_interface.as_ref().unwrap_or(&args.interface);
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
@@ -3143,6 +3183,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if args.stp_profile_interface.is_some() {
         ops.push(ConfigOp::StpPortProfile(StpPortProfileOp::Ensure {
             name: STP_PROT_PROFILE.to_string(),
+        }));
+    }
+    if let Some(f) = lldp_med::fixture(args)? {
+        ops.push(ConfigOp::LldpMedProfile(LldpMedProfileOp::Ensure {
+            name: f.profile.name,
         }));
     }
     if let Some(mtu) = args.mtu {
@@ -4294,6 +4339,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled: true,
                 }));
             }
+            if args.no_lacp_fallback {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallback {
+                    name: member.clone(),
+                    enabled: false,
+                }));
+            }
             if let Some(seconds) = args.lacp_fallback_timeout {
                 ops.push(ConfigOp::Interface(InterfaceOp::SetLacpFallbackTimeout {
                     name: member.clone(),
@@ -4329,6 +4380,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_bfd_peer.is_some()
         || args.lacp_port_priority.is_some()
         || args.lacp_fallback
+        || args.no_lacp_fallback
         || args.lacp_fallback_timeout.is_some()
         || args.lacp_v2.lacp_version.is_some()
         || args.lacp_v2.lacp_port_algorithm.is_some()
@@ -7077,6 +7129,7 @@ mod tests {
             (&["--min-links", "2"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
             (&["--lacp-fallback"], "require --port-aggregate"),
+            (&["--no-lacp-fallback"], "require --port-aggregate"),
             (
                 &["--lacp-fallback-timeout", "5"],
                 "require --port-aggregate",
@@ -7449,6 +7502,78 @@ mod tests {
             serde_json::from_value::<nos_proto::Config>(doc).unwrap(),
             cfg
         );
+    }
+
+    #[test]
+    fn lldp_med_flags_give_the_same_config_by_ops_paths_and_apply() {
+        let args = try_parse_big([
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "1",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "2",
+            "--peer",
+            "10.0.0.2",
+            "--lldp-med-profile",
+            "ph",
+            "--lldp-med-policy",
+            "voice:100:5:46:tagged",
+            "--lldp-med-policy",
+            "guest-voice::0:0",
+            "--lldp-med-poe",
+            "primary:high:154",
+            "--lldp-med-advertise-always",
+            "--lldp-med-elin",
+            "1234567890",
+            "--lldp-med-civic",
+            "FR:3=Paris,6=Rue X",
+            "--lldp-med-coordinate",
+            "48.85:2.35:35",
+        ])
+        .unwrap();
+        let mut applied = nos_proto::Config::default();
+        let mut replayed = nos_proto::Config::default();
+        for op in build_ops(&args).unwrap() {
+            op.apply(&mut applied).unwrap();
+            op.apply(&mut replayed).unwrap();
+        }
+        apply_bfd(&args, &mut applied);
+        let mut doc = serde_json::to_value(&replayed).unwrap();
+        for (path, value) in bfd_paths(&args) {
+            let v = value.as_deref().map(|v| serde_json::from_str(v).unwrap());
+            nos_proto::config_path::set(&mut doc, &path, v.unwrap()).unwrap();
+        }
+        let replayed: nos_proto::Config = serde_json::from_value(doc).unwrap();
+        assert_eq!(replayed, applied);
+        let p = &applied.lldp_med_profiles[0];
+        assert_eq!(p.name, "ph");
+        assert_eq!(p.network_policies.len(), 2);
+        assert!(p.network_policies[0].tagged && p.network_policies[1].vlan.is_none());
+        assert_eq!(p.poe.as_ref().unwrap().power, 154);
+        assert!(p.advertise_always);
+        let i = applied
+            .interfaces
+            .iter()
+            .find(|i| i.lldp_med_profile.is_some())
+            .unwrap();
+        let l = &i.lldp_location;
+        assert_eq!(l.civic.elements.len(), 2);
+    }
+
+    #[test]
+    fn lldp_med_location_flag_alone_implies_the_default_profile() {
+        let mut args = parse(&["--lldp-med-elin", "1234567890"]);
+        let ops = build_ops(&args).unwrap();
+        assert!(ops.iter().any(|o| matches!(
+            o,
+            ConfigOp::LldpMedProfile(LldpMedProfileOp::Ensure { name }) if name == lldp_med::DEFAULT_PROFILE
+        )));
+        args.lldp_med_policy = vec!["voice:1".into()];
+        assert!(build_ops(&args).is_err());
     }
 
     #[test]

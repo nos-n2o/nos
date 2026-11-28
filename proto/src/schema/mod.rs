@@ -23,6 +23,8 @@ pub mod community_group;
 /// Interfaces and subinterfaces (`Interface`) with their L3 attachment points.
 pub mod interface;
 pub mod lldp;
+/// Named LLDP-MED settings (`LldpMedProfile`) that interfaces attach.
+pub mod lldp_med_profile;
 pub mod logging;
 /// Login lockout settings (`LoginPolicy`).
 pub mod login_policy;
@@ -90,7 +92,13 @@ pub use community_group::CommunityGroup;
 pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
-pub use lldp::{LldpDestination, LldpSettings};
+pub use lldp::{
+    LldpAltitudeUnit, LldpCivicAddress, LldpCivicElement, LldpCoordinate, LldpDatum,
+    LldpDestination, LldpLocation, LldpSettings,
+};
+pub use lldp_med_profile::{
+    LldpMedAppType, LldpMedNetworkPolicy, LldpMedPoe, LldpMedProfile, PoePriority, PoeSource,
+};
 pub use logging::{
     parse_fingerprint, LoggingSettings, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport,
 };
@@ -316,6 +324,13 @@ pub struct Config {
     #[garde(dive)]
     #[cli(topic = Admin)]
     pub admin: Admin,
+
+    /// Named LLDP-MED settings, referenced by `lldp-med-profile` from
+    /// interfaces. Inert until `nos-lldpd` reads them.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = LldpMedProfile, words = "lldp-med-profile")]
+    pub lldp_med_profiles: Vec<LldpMedProfile>,
 }
 
 impl Config {
@@ -365,6 +380,7 @@ impl Default for Config {
             sbfd_reflector: SbfdReflector::default(),
             spanning_tree: SpanningTree::default(),
             stp_port_profiles: Vec::new(),
+            lldp_med_profiles: Vec::new(),
             acls: Vec::new(),
             admin: Admin::default(),
         }

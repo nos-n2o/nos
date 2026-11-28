@@ -2434,6 +2434,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         stp_port_profiles,
         acls,
         admin,
+        lldp_med_profiles,
     } = diff;
     let mut lines = Vec::new();
 
@@ -2471,6 +2472,7 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         bfd_profiles,
         stp_port_profiles,
         acls,
+        lldp_med_profiles,
     ] {
         for section in sections {
             render_section(&mut lines, section, 0, color);

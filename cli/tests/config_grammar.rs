@@ -614,6 +614,42 @@ fn spanning_tree_and_port_profile() {
     assert_eq!(p.mst_instances[0].cost, Some(100));
 }
 
+/// #1570: LLDP-MED profiles and the per-interface location go through the grammar.
+#[test]
+fn lldp_med_profile_and_location() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    for line in [
+        "set lldp-med-profile ph network-policy voice vlan 100",
+        "set lldp-med-profile ph network-policy voice priority 5",
+        "set lldp-med-profile ph poe power 154",
+        "set lldp-med-profile ph advertise-always",
+        "set interface eth9 lldp-med-profile ph",
+        "set interface eth9 lldp-location elin 1234567890",
+        "set interface eth9 lldp-location civic country FR",
+        "set interface eth9 lldp-location civic element 3 value Paris",
+        "set interface eth9 lldp-location coordinate latitude 48.85",
+    ] {
+        let edit = config_grammar::parse(line, &[], &doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set_at(&mut doc, &path, value, edit.position.as_ref()).unwrap();
+        }
+        // The server holds a typed `Config`: round-trip so defaults are filled in.
+        doc = serde_json::to_value(serde_json::from_value::<Config>(doc).unwrap()).unwrap();
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    let p = &cfg.lldp_med_profiles[0];
+    assert_eq!(p.network_policies[0].vlan, Some(100));
+    assert_eq!(p.network_policies[0].priority, 5);
+    assert_eq!(p.poe.as_ref().unwrap().power, 154);
+    assert!(p.advertise_always);
+    let i = cfg.interfaces.iter().find(|i| i.name == "eth9").unwrap();
+    let loc = &i.lldp_location;
+    assert_eq!(i.lldp_med_profile.as_deref(), Some("ph"));
+    assert_eq!(loc.elin.as_deref(), Some("1234567890"));
+    assert_eq!(loc.civic.elements[0].value, "Paris");
+    assert_eq!(loc.coordinate.latitude, "48.85");
+}
+
 /// #540: an ACL is built, ordered and attached through the same grammar, and
 /// `show config` prints it back in the order it evaluates.
 #[test]

@@ -80,6 +80,9 @@ pub struct Counters {
     pub marker_responses_tx: u64,
     /// Marker Responses received.
     pub marker_responses_rx: u64,
+    /// When the Receive Machine last accepted a LACPDU (not a version-dropped
+    /// one); the LACP fallback dwell (#1575) starts here.
+    pub last_pdu: Option<Instant>,
 }
 
 /// One member port's currently-observed state, as reported up to
@@ -586,6 +589,7 @@ impl Port {
             return;
         }
         self.loopback_logged = false;
+        self.counters.last_pdu = Some(Instant::now());
         let before = (self.receive_state, self.mux_state, self.partner);
         // update_Selected: a changed partner identity deselects the port at
         // once (mux leaves Collecting/Distributing); selection re-runs from
