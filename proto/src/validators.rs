@@ -113,6 +113,21 @@ pub fn stp_port_profile_reference_valid(
     Ok(())
 }
 
+/// If set, `ra_profile` must name an existing `RaProfile` (like
+/// `stp_port_profile_reference_valid`).
+pub fn ra_profile_reference_valid(
+    profile: Option<&String>,
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    let Some(name) = profile else { return Ok(()) };
+    if !ctx.ra_profiles.iter().any(|p| &p.name == name) {
+        return Err(garde::Error::new(format!(
+            "ra profile '{name}' does not exist"
+        )));
+    }
+    Ok(())
+}
+
 /// An S-BFD initiator profile (`mode sbfd`) probes the IPv4 address of its
 /// peer unless `sbfd-remote-discriminator` names one: an IPv6 `peer` with
 /// neither is refused. `peer` is where the attach point sends the session.

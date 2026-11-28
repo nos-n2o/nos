@@ -108,7 +108,7 @@ pub use ops::{
     BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp,
     LoggingOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp,
     Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateConversationOp, PortAggregateOp,
-    PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
+    PortAggregateSubinterfaceOp, PrefixListOp, RaProfileOp, RoutingTableOp, StaticRouteOp,
     StaticRoutingInstanceOp, StpPortProfileOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{

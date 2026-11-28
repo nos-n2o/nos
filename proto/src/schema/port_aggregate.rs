@@ -766,6 +766,7 @@ mod tests {
     fn valid_subinterface_with_routing_table_passes() {
         let mut agg = aggregate("bond1");
         agg.subinterfaces = vec![crate::schema::Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -802,6 +803,7 @@ mod tests {
         a.bfd_peer = peer.map(|p| p.parse().unwrap());
         if let Some(addr) = addr {
             a.subinterfaces = vec![crate::schema::Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,

@@ -47,6 +47,7 @@ pub mod port_aggregate;
 /// Named prefix match lists (`PrefixList`) for RPL scripts.
 pub mod prefix_list;
 /// Per-role visibility of secrets (`Config::for_role`, #384).
+pub mod ra_profile;
 pub mod redact;
 /// Routing tables / VRFs (`RoutingTable`) and the protocol instances bound to each.
 pub mod routing_table;
@@ -119,6 +120,7 @@ pub use sbfd::{SbfdReflector, SbfdReflectorKey};
 pub use spanning_tree::{MstInstance, SpanningTree, StpForceVersion, StpMode, StpRegion};
 pub use static_route::{StaticNextHop, StaticRoute};
 pub use static_routing_instance::StaticRoutingInstance;
+pub use ra_profile::{RaDnssl, RaPrefix, RaPreference, RaProfile, RaRdnss};
 pub use stp_port_profile::{EdgePort, LinkType, StpPortMstInstance, StpPortProfile};
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
 pub use user::{User, UserRole, PASSWORD_HASH_PREFIX};
@@ -294,6 +296,13 @@ pub struct Config {
     #[cli(topic = StpPortProfile, words = "stp-port-profile")]
     pub stp_port_profiles: Vec<StpPortProfile>,
 
+    /// Named IPv6 Router Advertisement settings, referenced by `ra-profile`
+    /// from interfaces and subinterfaces. Inert until `nos-radvd`.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = RaProfile, words = "ra-profile")]
+    pub ra_profiles: Vec<RaProfile>,
+
     /// Named, ordered access lists, attached to interfaces with `acl in` /
     /// `acl out`. `serde(default)` so on-disk config saved before this field
     /// existed still loads.
@@ -364,6 +373,7 @@ impl Default for Config {
             sbfd_reflector: SbfdReflector::default(),
             spanning_tree: SpanningTree::default(),
             stp_port_profiles: Vec::new(),
+            ra_profiles: Vec::new(),
             acls: Vec::new(),
             admin: Admin::default(),
         }

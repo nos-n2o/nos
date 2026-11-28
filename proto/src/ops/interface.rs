@@ -203,6 +203,18 @@ pub enum InterfaceOp {
         /// Name of the interface this op targets.
         name: String,
     },
+    /// Attaches the named `RaProfile` (appended: postcard indexes variants by position).
+    SetRaProfile {
+        /// Name of the interface this op targets.
+        name: String,
+        /// Name of the RA profile to attach.
+        ra_profile: String,
+    },
+    /// Detaches the RA profile.
+    ClearRaProfile {
+        /// Name of the interface this op targets.
+        name: String,
+    },
 }
 
 impl InterfaceOp {
@@ -352,6 +364,14 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.lacp_fallback_timeout = Some(*seconds);
                 Ok(())
             }
+            InterfaceOp::SetRaProfile { name, ra_profile } => {
+                find_interface_mut(config, name)?.ra_profile = Some(ra_profile.clone());
+                Ok(())
+            }
+            InterfaceOp::ClearRaProfile { name } => {
+                find_interface_mut(config, name)?.ra_profile = None;
+                Ok(())
+            }
             InterfaceOp::ClearLacpFallbackTimeout { name } => {
                 find_interface_mut(config, name)?.lacp_fallback_timeout = None;
                 Ok(())
@@ -397,6 +417,7 @@ mod tests {
 
     fn interface(name: &str) -> Interface {
         Interface {
+            ra_profile: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -450,6 +471,7 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             interfaces: vec![Interface {
+                ra_profile: None,
                 acl_in: None,
                 acl_out: None,
                 flowspec: false,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::{
     bfd_reference_valid, ospf_profile_reference_valid, ospfv3_profiles_point_to_point_valid,
-    routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
+    ra_profile_reference_valid, routing_table_reference_valid, stp_port_profile_reference_valid, unique_addresses,
     unique_key_in,
 };
 
@@ -118,6 +118,13 @@ pub struct Subinterface {
     #[cli(topic = InterfaceBfdUnsolicited, words = "bfd-unsolicited")]
     pub bfd_unsolicited: Option<String>,
 
+    /// Names a `RaProfile` for IPv6 Router Advertisements on this link. Inert
+    /// until `nos-radvd`.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ra_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceRaProfile, words = "ra-profile")]
+    pub ra_profile: Option<String>,
+
     /// Names an `Acl` filtering IP packets arriving on this subinterface; the
     /// placement rules are `acl::valid_acl_references`.
     #[serde(default)]
@@ -181,6 +188,11 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
         if !sub.ospfv3_profiles.is_empty() && sub.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospfv3 profile requires a routing-table on the same subinterface",
+            ));
+        }
+        if sub.ra_profile.is_some() && sub.routing_table.is_none() {
+            return Err(garde::Error::new(
+                "ra profile requires a routing-table on the same subinterface",
             ));
         }
         if sub.bfd_unsolicited.is_some() && sub.routing_table.is_none() {
@@ -317,6 +329,13 @@ pub struct Interface {
     #[garde(custom(|p: &Option<String>, ctx: &Config| stp_port_profile_reference_valid(p.as_ref(), ctx)))]
     #[cli(topic = InterfaceStpPortProfile, words = "stp-port-profile")]
     pub stp_port_profile: Option<String>,
+
+    /// Names a `RaProfile` for IPv6 Router Advertisements on this link. Inert
+    /// until `nos-radvd`.
+    #[serde(default)]
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ra_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceRaProfile, words = "ra-profile")]
+    pub ra_profile: Option<String>,
 
     /// Names an `Acl` filtering IP packets arriving on this link; the placement
     /// rules are `acl::valid_acl_references`.
@@ -532,6 +551,11 @@ fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
                     "ospfv3 profile requires a routing-table on the same interface",
                 ));
             }
+            if iface.ra_profile.is_some() {
+                return Err(garde::Error::new(
+                    "ra profile cannot be set on a loopback interface",
+                ));
+            }
         } else if !iface.addresses.is_empty()
             || iface.routing_table.is_some()
             || iface.ospf_profile.is_some()
@@ -601,6 +625,11 @@ fn valid_port_aggregate_membership(interfaces: &[Interface]) -> garde::Result {
                 "an interface in a port aggregate must not also have a switching-profile",
             ));
         }
+        if iface.ra_profile.is_some() {
+            return Err(garde::Error::new(
+                "an interface in a port aggregate must not have its own ra-profile: set it on the aggregate's subinterfaces",
+            ));
+        }
         if iface.stp_port_profile.is_some() {
             return Err(garde::Error::new(
                 "an interface in a port aggregate must not have its own stp-port-profile: the spanning-tree port is the aggregate",
@@ -661,6 +690,7 @@ mod tests {
 
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
+            ra_profile: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -698,6 +728,7 @@ mod tests {
     fn physical_with_l3(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         let mut iface = interface(name, &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -902,6 +933,7 @@ mod tests {
     fn duplicate_address_different_label_still_conflicts() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -930,6 +962,7 @@ mod tests {
     fn loopback_with_subinterfaces_fails() {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -965,6 +998,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,
@@ -977,6 +1011,7 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,
@@ -997,6 +1032,7 @@ mod tests {
     fn subinterface_tag_4095_fails() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -1017,6 +1053,7 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,
@@ -1029,6 +1066,7 @@ mod tests {
                 ospf_profile: None,
             },
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,

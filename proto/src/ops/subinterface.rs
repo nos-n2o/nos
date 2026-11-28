@@ -138,6 +138,22 @@ pub enum SubinterfaceOp {
         /// 802.1Q VLAN tag identifying the subinterface on its parent.
         tag: u16,
     },
+    /// Attaches the named `RaProfile` (appended: postcard indexes variants by position).
+    SetRaProfile {
+        /// Name of the parent interface.
+        interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+        /// Name of the RA profile to attach.
+        ra_profile: String,
+    },
+    /// Detaches the RA profile.
+    ClearRaProfile {
+        /// Name of the parent interface.
+        interface: String,
+        /// 802.1Q VLAN tag identifying the subinterface on its parent.
+        tag: u16,
+    },
 }
 
 impl SubinterfaceOp {
@@ -250,6 +266,19 @@ impl SubinterfaceOp {
                 ensure_subinterface_mut(config, interface, *tag)?.mtu = Some(*mtu);
                 Ok(())
             }
+            SubinterfaceOp::SetRaProfile {
+                interface,
+                tag,
+                ra_profile,
+            } => {
+                ensure_subinterface_mut(config, interface, *tag)?.ra_profile =
+                    Some(ra_profile.clone());
+                Ok(())
+            }
+            SubinterfaceOp::ClearRaProfile { interface, tag } => {
+                find_subinterface_mut(config, interface, *tag)?.ra_profile = None;
+                Ok(())
+            }
             SubinterfaceOp::ClearMtu { interface, tag } => {
                 find_subinterface_mut(config, interface, *tag)?.mtu = None;
                 Ok(())
@@ -294,6 +323,7 @@ fn ensure_subinterface_mut<'a>(
 ) -> Result<&'a mut Subinterface, OpError> {
     if !config.interfaces.iter().any(|i| i.name == interface) {
         config.interfaces.push(Interface {
+            ra_profile: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -321,6 +351,7 @@ fn ensure_subinterface_mut<'a>(
     let iface = find_interface_mut(config, interface)?;
     if !iface.subinterfaces.iter().any(|s| s.tag == tag) {
         iface.subinterfaces.push(Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -347,6 +378,7 @@ mod tests {
 
     fn interface(name: &str, subinterfaces: Vec<Subinterface>) -> Interface {
         Interface {
+            ra_profile: None,
             acl_in: None,
             acl_out: None,
             flowspec: false,
@@ -414,6 +446,7 @@ mod tests {
             interfaces: vec![interface(
                 "eth0",
                 vec![Subinterface {
+                    ra_profile: None,
                     mtu: None,
                     acl_in: None,
                     acl_out: None,
@@ -658,6 +691,7 @@ mod tests {
                 "eth0",
                 vec![
                     Subinterface {
+                        ra_profile: None,
                         mtu: None,
                         acl_in: None,
                         acl_out: None,
@@ -670,6 +704,7 @@ mod tests {
                         bfd_unsolicited: None,
                     },
                     Subinterface {
+                        ra_profile: None,
                         mtu: None,
                         acl_in: None,
                         acl_out: None,

@@ -1352,6 +1352,7 @@ mod tests {
     fn finds_subinterface_attachment() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -1409,6 +1410,7 @@ mod tests {
     fn subinterface_attach_points_finds_routing_table() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -1501,6 +1503,7 @@ mod tests {
     fn loopback_attach_points_ignores_subinterface_and_broadcast_domain() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -1541,6 +1544,7 @@ mod tests {
     fn broadcast_domain_attach_points_ignores_loopback_and_subinterface() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ra_profile: None,
             mtu: None,
             acl_in: None,
             acl_out: None,
@@ -1649,6 +1653,7 @@ mod tests {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,
@@ -1661,6 +1666,7 @@ mod tests {
                 ospf_profile: Some("p1".into()),
             },
             Subinterface {
+                ra_profile: None,
                 mtu: None,
                 acl_in: None,
                 acl_out: None,
